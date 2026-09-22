@@ -1026,7 +1026,7 @@
             "maxWidth": "none"
           },
           "target": {
-            "_box": "142x28",
+            "_box": "139x28",
             "display": "flex",
             "backgroundColor": "rgba(0, 0, 0, 0)",
             "color": "rgb(23, 23, 23)",
@@ -1080,7 +1080,7 @@
             "maxWidth": "none"
           },
           "target": {
-            "_box": "82x20",
+            "_box": "79x20",
             "display": "block",
             "backgroundColor": "rgba(0, 0, 0, 0)",
             "color": "rgb(104, 104, 104)",
