@@ -1,0 +1,64 @@
+工具流语义证据 / tool stream semantics evidence
+==============================================
+日期: 2026-09-22（第六次审计返工）
+审计复现对象: run ebf75f590601 的 bash 工具（toolCallId call_yBEpmnrOIV8QWEFCGpMloLdd）
+
+pi 文档依据（宿主 pi 0.86.1，docs/rpc.md:1055）
+----------------------------------------------
+  "Use `toolCallId` to correlate events. The `partialResult` in
+   `tool_execution_update` contains the accumulated output so far (not just the
+   delta), allowing clients to simply replace their display on each update."
+
+真实帧（~/.pi-glink/runs/ebf75f590601/events.jsonl，原样摘录）
+--------------------------------------------------------------
+  seq=86  tool=bash  len=0
+      ''
+  seq=87  tool=bash  len=53
+      '/Users/coldxiangyu/.pi-glink/workspaces/ebf75f590601\n'
+  seq=88  tool=bash  len=495
+      '/Users/coldxiangyu/.pi-glink/workspaces/ebf75f590601\n\nPI vars:\nPI_CODING_AGENT_DIR=/Users/coldxiangy…'
+
+前缀包含核验
+------------
+  0 → 53      前缀包含: True
+  53 → 495    前缀包含: True
+  若按增量拼接: 548 字符（前 53 字符重复展示一次）
+  替换语义:     495 字符（每帧整体替换显示）
+
+判定
+----
+`tool_execution_update.partialResult` 是「截至当前的累计快照」，不是增量。
+宿主投影层原样传递该字段（kernel/projection.py::_tool_execution_update），
+因此**替换显示的责任在前端**。
+
+修复与回归
+----------
+* web/modules/run-stream.mjs::updateTool —— 由 `item.output + payload.output`
+  改为 `typeof payload.output === 'string' ? payload.output : item.output`；
+  模块头与函数内注释均写明累计快照语义与出处。
+* web/modules/run-view.mjs —— 工具状态文案集中在 `TOOL_STATE_LABELS`
+  （执行中/完成/失败/已取消/已中断）；`styles.css` 为 interrupted/cancelled 补配色。
+* web/modules/run-stream.mjs::finishRun —— 失败/取消时仍未结束的工具不再标
+  `done`：finished→done、failed→interrupted、cancelled→cancelled；
+  已拿到自身 `tool_finished` 的工具保持原状态。
+* Node 回归（tests/web/run-stream.test.mjs，node --test tests/web/*.test.mjs）：
+    ✔ cumulative tool snapshots replace the display instead of duplicating prefixes
+      （复刻本 run 的 0 → 53 → 495 形状，断言等价于替换、短于拼接、前缀不重复）
+    ✔ a failed or cancelled run never leaves a running tool looking done
+      （run_failed→interrupted、run_cancelled→cancelled；已终态工具不受影响）
+    ✔ tool cards track streaming output and final status（改为累计快照形状）
+  结果: 14 项通过 / 0 失败（Python 全套 97 项另行复验）。
+
+复现命令
+--------
+  # 1) 查看真实帧（长度与前缀包含）
+  .venv/bin/python - <<'PY'
+  import json
+  for line in open("/Users/coldxiangyu/.pi-glink/runs/ebf75f590601/events.jsonl"):
+      ev = json.loads(line)
+      if ev.get("type") == "tool_updated":
+          print(ev["seq"], len(ev["payload"]["output"]))
+  PY
+
+  # 2) 前端事件模型回归
+  node --test tests/web/*.test.mjs

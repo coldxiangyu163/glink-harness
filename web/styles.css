@@ -392,6 +392,9 @@ dialog::backdrop { background: rgba(22, 31, 40, .28); }
 .pi-tool-state { color: var(--muted); }
 .pi-tool[data-status="running"] .pi-tool-state { color: var(--accent); }
 .pi-tool[data-status="error"] .pi-tool-state { color: var(--danger); }
+/* A tool that never saw its own terminal frame must not look successful. */
+.pi-tool[data-status="interrupted"] .pi-tool-state { color: var(--warning); }
+.pi-tool[data-status="cancelled"] .pi-tool-state { color: var(--muted); }
 
 .pi-tool-args {
   padding: 0 12px 8px;

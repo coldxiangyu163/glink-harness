@@ -26,8 +26,8 @@
 
 | 命令 | 结果 |
 |---|---|
-| `scripts/run-tests.sh` | **78 项通过**，exit 0（`test_host_app` 21 · `test_kernel_agent_env` 11 · `test_kernel_docker_env` 6 · `test_kernel_e2b_env` 7 · `test_kernel_rpc` 11 · `test_runner` 7 · `test_runs_api` 9 · `test_store` 6） |
-| `node --test tests/web/*.test.mjs` | 11 项通过，exit 0 |
+| `scripts/run-tests.sh` | **97 项通过**，exit 0（`test_host_app` 21 · `test_kernel_agent_env` 11 · `test_kernel_docker_env` 7 · `test_kernel_e2b_env` 7 · `test_kernel_rpc` 11 · `test_redaction` 17 · `test_runner` 8 · `test_runs_api` 9 · `test_store` 6） |
+| `node --test tests/web/*.test.mjs` | 14 项通过，exit 0 |
 | `node tests/browser/run-smoke.mjs --base-url http://127.0.0.1:7861` | 通过（真实 run；思考折叠 / 工具卡片 / 报告预览 + 截图），exit 0 |
 
 ### 三种执行面的真实 run（完整命令与 prompt）
@@ -211,3 +211,14 @@ inproc `a6f67fde8e51` / docker `03be2909302e` / e2b `db6a9e83c0b7` 均为 **0**�
 | Node 版本未固定（浮动 `node:24-bookworm-slim`；README 本机 v24.16.0 与 E2B 证据 v24.21.0 不一致） | 两个 Dockerfile 固定为 `FROM node:24.21.0-bookworm-slim`；README 明确宿主开发 v24.16.0、镜像/沙箱 v24.21.0 | 重建镜像：`docker run --rm pi-glink-worker:latest node -v` → v24.21.0、`pi --version` → 0.86.1；新镜像真实 run `4c589e0989fa`：报告首行 env 计数 = 0；E2B 沙箱 `99c3367c2a15`：node v24.21.0 / env 计数 0。E2B 模板未重建（覆盖既有 tag 需先确认）；现有模板实测 Node 已与固定版本一致 |
 
 回归：Python 97 项 + Node 11 项全绿；`scripts/check-no-secrets.py` 真实命中 0。
+
+### 第六次审计返工（工具流累计快照 / 工具终态 / 文档一致）
+
+| 审计缺口 | 返工 | 复验 |
+|---|---|---|
+| `run-stream.mjs::updateTool` 把 `tool_execution_update.partialResult` 当增量拼接，重复展示前缀（真实 run `ebf75f590601`：`0 → 53 → 495`，前缀包含） | 改为替换语义：`const output = typeof payload.output === 'string' ? payload.output : item.output`；模块头与函数内注释注明 pi `docs/rpc.md` 的累计快照原文 | 新增 Node 回归 `cumulative tool snapshots replace the display instead of duplicating prefixes`（复刻 0→53→495 形状：替换 = 495 字符，拼接会得 548 字符且前缀重复）；原 `tool cards track streaming output and final status` 改为累计快照形状；证据 `docs/evidence/tool-stream-semantics.txt` |
+| `finishRun()` 把失败/取消时仍运行的工具统一标成 `done` | 新增 `INTERRUPTED_TOOL_STATUS`：finished→done、failed→interrupted、cancelled→cancelled；已拿到自身终态帧的工具保持原状态；`run-view.mjs` 新增 `TOOL_STATE_LABELS`（执行中/完成/失败/已取消/已中断）、`styles.css` 为 interrupted/cancelled 补配色 | 新增 Node 回归 `a failed or cancelled run never leaves a running tool looking done`（两种终态 + 已终态工具不受影响的对照） |
+| 文档陈旧：`agent/README.md` 称配置目录直接指向仓库、凭据「只经环境变量传入」；`README.md` 目录表同样表述 | `agent/README.md` 改为「本目录是模板，渲染到 `<data_root>/pi-agent/`」，凭据写明经 `auth.json`（0600，仓库外）交付；`models.json/auth.json/web-search.json` 的归属一并订正；README 目录表同步 | 全仓库 grep：`指向这里`、`只经环境变量传入` 无残留 |
+| `docs/pi-integration-notes.md` §6 仍列 Docker/E2B 注入为「待补测」 | 改写为实测结论表（`PI_CODING_AGENT_DIR` / 会话目录 / 工作区 / 凭据载体 / `env` 计数），并新增 §7 工具流语义（含 `docs/rpc.md` 原文与 `ebf75f590601` 帧长） | 与 `docs/evidence/docker-run.txt`、`e2b-run.txt`、`credential-boundary.txt` 交叉核对一致 |
+
+回归：Python 97 项 + Node 14 项全绿；`scripts/check-no-secrets.py` 真实命中 0。

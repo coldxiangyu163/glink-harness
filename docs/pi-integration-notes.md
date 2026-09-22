@@ -66,6 +66,42 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
 - **插件安装**：在 `agent/settings.json` 的 `packages` 里声明 `npm:pi-web-access`，pi 启动时把它装到 `<PI_CODING_AGENT_DIR>/npm/`（实测会在运行期目录下生成 `npm/node_modules/`）。
 - **工具面**：实测一次检索 run 调用 `web_search`（1 次）+ `fetch_content`（3 次），事件流里以 `tool_started/tool_updated/tool_finished` 正常呈现，报告写入 10 个可核验 URL。见 `docs/evidence/local-web-search.txt`。
 
-## 6. 待补测
+## 6. Docker / E2B 沙箱内的配置目录与凭据注入（已实测）
 
-- Docker / E2B 沙箱内 `PI_CODING_AGENT_DIR` 与凭据注入（task-6 / task-7）。
+三面都在**沙箱内运行 pi**，宿主只提供数据通道；凭据一律走运行期 `auth.json`，不进进程环境。
+
+| 事实 | Docker | E2B |
+|---|---|---|
+| `PI_CODING_AGENT_DIR` | `/config`（宿主运行期目录的只读 bind mount） | `/home/user/config`（上传） |
+| 会话目录 | `/sessions`（bind mount；pi 上报容器路径，宿主词法映射回 `<data>/sessions/…`） | `/home/user/sessions`（随沙箱销毁） |
+| 工作区 | `/workspace` | `/home/user` |
+| 模型凭据 | `auth.json` 在挂载内（0600，仓库外） | 上传的 `auth.json` |
+| 进程环境含 key | 否（`env \| grep -c OPENAI_API_KEY` = 0） | 否（同为 0） |
+
+实测要点：
+
+- **Docker 会话文件是容器路径**：pi 报 `/sessions/<file>.jsonl`，该路径在宿主不存在；宿主必须先在
+  `kernel/docker_env.py::host_session_path` 做纯词法映射（拒绝相对路径、前缀伪装、`..`），再做收尾
+  脱敏。只映射会话挂载，`/config/auth.json` 永不映射。未映射到的新路径会显式告警而不是静默保留。
+- **E2B 没有双向 stdio**：SDK 不提供持久 stdin，所以这一面用 `pi --mode json "<prompt>"` 单向事件流；
+  事件是 run 结束后回放的，不是实时 SSE（沙箱内 `on_stdout` 回调实测不触发）。
+- **Node 与 pi 固定在两侧镜像**：`node:24.21.0-bookworm-slim` 精确 tag + pi 0.86.1，镜像自包含
+  （无挂载时 `docker run --rm pi-glink-worker:latest pi --version` = 0.86.1）。
+- 证据：`docs/evidence/docker-run.txt`、`docs/evidence/e2b-run.txt`、`docs/evidence/credential-boundary.txt`。
+
+## 7. 工具输出的流式语义（已实测）
+
+`tool_execution_update.partialResult` 是**截至当前的累计快照，不是增量**。pi `docs/rpc.md` 原文：
+
+> The `partialResult` in `tool_execution_update` contains the accumulated output so far (not just the delta), allowing clients to simply replace their display on each update.
+
+真实 run `ebf75f590601` 的 bash 工具给出 3 帧 `tool_updated`，长度 `0 → 53 → 495`，后两帧存在前缀包含：
+
+```
+seq=86  len=0
+seq=87  len=53   '/Users/coldxiangyu/.pi-glink/workspaces/ebf75f590601\n'
+seq=88  len=495  同前 53 字符 + '\nPI vars:\nPI_CODING_AGENT_DIR=…'
+```
+
+因此宿主投影层原样传递累计快照，前端**每次替换**显示；若按增量拼接会得到 548 字符的重复前缀。
+回归：`tests/web/run-stream.test.mjs` 的 `cumulative tool snapshots replace the display instead of duplicating prefixes`。

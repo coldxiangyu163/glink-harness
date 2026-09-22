@@ -57,6 +57,15 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 * 前端模型按 `seq` 水位去重（重复帧丢弃、缺口计数可见），因此**迟到/重复事件不会破坏状态**；
 * 载荷有界：工具结果与文本按上限裁剪并显式标注 `truncated`。
 
+事件语义细节（前端消费前必须知道）：
+
+* **`tool_updated.output` 是累计快照，不是增量**：pi `docs/rpc.md` 原文是
+  “the accumulated output so far (not just the delta)”，客户端每次**替换**显示；
+  投影层原样传递该快照，前端若按增量拼接会重复展示前缀（真实 run `ebf75f590601`：
+  bash 更新长度 `0 → 53 → 495`，见 `docs/evidence/tool-stream-semantics.txt`）。
+* **工具终态跟随 run**：未收到自身 `tool_finished` 的工具不会默认标 `done`——
+  run 正常收尾为 `done`，失败为 `interrupted`，取消为 `cancelled`；已拿到终态帧的工具保持原状态。
+
 前端从不解析终端文本：`tests/web/run-stream.test.mjs` 里有对应断言。
 
 ## 4. run 生命周期

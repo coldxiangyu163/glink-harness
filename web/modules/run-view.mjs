@@ -168,8 +168,7 @@ export function createRunView({ root, renderMarkdown = (text) => text, onOpenRep
       case 'tool': {
         node.dataset.status = item.status;
         node.querySelector('.pi-tool-name').textContent = item.name;
-        node.querySelector('.pi-tool-state').textContent =
-          item.status === 'running' ? '执行中' : item.isError ? '失败' : '完成';
+        node.querySelector('.pi-tool-state').textContent = toolStateLabel(item);
         const argsText = summarizeArgs(item.args);
         const argsNode = node.querySelector('.pi-tool-args');
         if (argsNode.textContent !== argsText) argsNode.textContent = argsText;
@@ -229,6 +228,22 @@ export function createRunView({ root, renderMarkdown = (text) => text, onOpenRep
       root.replaceChildren();
     },
   };
+}
+
+//: Human labels for every tool state the model can hold. A tool that never
+//: saw its own terminal frame follows the run's outcome instead of claiming
+//: success: failed runs leave it `interrupted`, cancelled runs `cancelled`.
+const TOOL_STATE_LABELS = {
+  running: '执行中',
+  done: '完成',
+  error: '失败',
+  cancelled: '已取消',
+  interrupted: '已中断',
+};
+
+function toolStateLabel(item) {
+  if (item.status === 'error' || item.isError) return TOOL_STATE_LABELS.error;
+  return TOOL_STATE_LABELS[item.status] ?? TOOL_STATE_LABELS.done;
 }
 
 export function summarizeArgs(args) {

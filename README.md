@@ -138,7 +138,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 |---|---|
 | `host/pi_glink/` | 宿主：配置解析、事件总线、HTTP/SSE 服务、静态资源 |
 | `host/pi_glink/kernel/` | pi 接入层：headless 协议客户端（RPC / JSON）、事件投影、运行期配置渲染、三执行面适配 |
-| `agent/` | pi 侧配置与扩展：`PI_CODING_AGENT_DIR` 指向这里，内核之外的定制只落在这里 |
+| `agent/` | pi 侧配置模板：由宿主渲染到 `<data_root>/pi-agent/` 后作为 `PI_CODING_AGENT_DIR`，内核之外的定制只落在这里 |
 | `web/` | 前端：沿用 Glink 布局的静态 ESM 资源 |
 | `docs/` | `architecture.md`（进程拓扑、事件契约、执行面适配）、`pi-boundary.md`（扩展点与禁止项） |
 | `tests/` | 宿主与内核的回归 |

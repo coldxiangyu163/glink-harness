@@ -53,7 +53,9 @@ test('tool cards track streaming output and final status', () => {
   model = applyEvents(model, [
     frame(1, 'tool_started', { toolCallId: 'c1', toolName: 'bash', args: { command: 'ls -la' } }),
     frame(2, 'tool_updated', { toolCallId: 'c1', toolName: 'bash', output: 'total 8\n' }),
-    frame(3, 'tool_updated', { toolCallId: 'c1', toolName: 'bash', output: 'report.md\n' }),
+    // pi sends the accumulated output so far, so the second frame repeats the
+    // first one and adds a line (docs/rpc.md: "not just the delta").
+    frame(3, 'tool_updated', { toolCallId: 'c1', toolName: 'bash', output: 'total 8\nreport.md\n' }),
   ]);
   const running = model.items.at(-1);
   assert.equal(running.status, 'running');
@@ -68,6 +70,74 @@ test('tool cards track streaming output and final status', () => {
   model = applyEvent(model, frame(6, 'tool_finished', { toolCallId: 'c2', toolName: 'read', result: 'ENOENT', isError: true }));
   assert.equal(model.items.at(-1).status, 'error');
   assert.equal(runSummary(model).failedTools, 1);
+});
+
+test('cumulative tool snapshots replace the display instead of duplicating prefixes', () => {
+  // Mirrors the real run `ebf75f590601`, whose bash tool emitted
+  // tool_updated snapshots of length 0 → 53 → 495, each containing the
+  // previous one. Appending would grow the card to 548 characters.
+  const snapshots = [
+    '',
+    '/Users/coldxiangyu/.pi-glink/workspaces/run\n',
+    '/Users/coldxiangyu/.pi-glink/workspaces/run\n\nPI vars:\nPI_CODING_AGENT_DIR=/data/pi-agent\n',
+  ];
+  let model = createRunModel({ runId: 'r1' });
+  model = applyEvent(model, frame(1, 'tool_started', { toolCallId: 'c1', toolName: 'bash', args: { command: 'env' } }));
+  snapshots.forEach((output, index) => {
+    model = applyEvent(model, frame(index + 2, 'tool_updated', { toolCallId: 'c1', toolName: 'bash', output }));
+  });
+  const tool = model.items.at(-1);
+  assert.equal(tool.output, snapshots.at(-1));
+  assert.ok(tool.output.length < snapshots.reduce((sum, s) => sum + s.length, 0), 'replacement must be shorter than concatenation');
+  assert.ok(!tool.output.includes('\n\n\n'), 'accumulated prefixes must not be concatenated');
+  assert.equal(tool.output.match(/PI vars/g)?.length, 1);
+});
+
+test('the audited run ebf75f590601 replays with replacement semantics (real fixture)', () => {
+  // `tests/fixtures/tool-update-frames.jsonl` is the verbatim frame sequence
+  // of that run's bash tool (seq 85–89) as stored in events.jsonl.
+  const fixture = readFileSync(new URL('../fixtures/tool-update-frames.jsonl', import.meta.url), 'utf8');
+  const frames = fixture.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line));
+  assert.equal(frames.length, 5);
+  const updates = frames.filter((event) => event.type === 'tool_updated');
+  assert.deepEqual(updates.map((event) => event.payload.output.length), [0, 53, 495]);
+  assert.ok(updates[1].payload.output.startsWith(updates[0].payload.output));
+  assert.ok(updates[2].payload.output.startsWith(updates[1].payload.output));
+
+  const model = applyEvents(createRunModel({ runId: 'ebf75f590601' }), frames);
+  const tool = model.items.find((item) => item.kind === 'tool');
+  assert.equal(tool.output, updates[2].payload.output, 'the last snapshot is the display');
+  assert.equal(tool.output.length, 495);
+  const concatenated = updates.map((event) => event.payload.output).join('');
+  assert.equal(concatenated.length, 548, 'appending the frames is what the old code did');
+  assert.notEqual(tool.output, concatenated);
+  assert.equal(tool.output.match(/workspaces\/ebf75f590601/g)?.length, 1, 'the prefix must appear once');
+  assert.equal(tool.status, 'done');
+});
+
+test('a failed or cancelled run never leaves a running tool looking done', () => {
+  for (const [type, expected] of [
+    ['run_failed', 'interrupted'],
+    ['run_cancelled', 'cancelled'],
+  ]) {
+    let model = createRunModel({ runId: 'r1' });
+    model = applyEvents(model, [
+      frame(1, 'tool_started', { toolCallId: 'c1', toolName: 'bash', args: {} }),
+      frame(2, type, { status: type === 'run_failed' ? 'failed' : 'cancelled' }),
+    ]);
+    const tool = model.items.find((item) => item.kind === 'tool');
+    assert.equal(tool.status, expected, `${type} must map an unfinished tool to ${expected}`);
+    assert.notEqual(tool.status, 'done');
+  }
+
+  // A tool that did see its own terminal frame keeps that state.
+  let model = createRunModel({ runId: 'r1' });
+  model = applyEvents(model, [
+    frame(1, 'tool_started', { toolCallId: 'c1', toolName: 'bash', args: {} }),
+    frame(2, 'tool_finished', { toolCallId: 'c1', toolName: 'bash', result: 'ok', isError: false }),
+    frame(3, 'run_failed', { status: 'failed' }),
+  ]);
+  assert.equal(model.items.find((item) => item.kind === 'tool').status, 'done');
 });
 
 test('replayed or duplicate frames never rewrite the model', () => {

@@ -15,6 +15,9 @@
  * * **No hidden state** — every visible thing (thinking blocks, tool cards,
  *   text, stages, notices) is an item in `model.items`, derived only from
  *   events. Re-rendering from the model cannot disagree with the stream.
+ * * **pi's streaming semantics** — a `tool_updated` payload carries the
+ *   output *accumulated so far*, not a delta (`docs/rpc.md`), so tool output
+ *   is replaced on every update; appending would duplicate the prefix.
  */
 
 export const RUNNING = 'running';
@@ -286,7 +289,10 @@ function updateTool(model, payload) {
   if (index < 0) return model;
   const item = model.items[index];
   const items = model.items.slice();
-  items[index] = { ...item, name: item.name || payload.toolName, output: item.output + (payload.output ?? '') };
+  // pi streams the accumulated output so far, not a delta (docs/rpc.md:
+  // "the accumulated output so far (not just the delta)"), so we replace.
+  const output = typeof payload.output === 'string' ? payload.output : item.output;
+  items[index] = { ...item, name: item.name || payload.toolName, output };
   return { ...model, items };
 }
 
@@ -305,6 +311,13 @@ function finishTool(model, payload) {
   return { ...model, items };
 }
 
+//: A tool still running when the run ends never saw its own terminal frame;
+//: its state must follow the run, not default to "done".
+const INTERRUPTED_TOOL_STATUS = {
+  failed: 'interrupted',
+  cancelled: 'cancelled',
+};
+
 function finishRun(model, status, payload) {
   const withStage = appendItem(model, {
     kind: 'stage',
@@ -321,9 +334,11 @@ function finishRun(model, status, payload) {
     stopReason: payload.stopReason ?? withStage.stopReason,
     error: payload.error ?? withStage.error,
     usage: payload.usage ?? withStage.usage,
-    items: withStage.items.map((item) =>
-      item.kind === 'tool' && item.status === 'running' ? { ...item, status: 'done' } : item,
-    ),
+    items: withStage.items.map((item) => {
+      if (item.kind !== 'tool' || item.status !== 'running') return item;
+      const terminal = status === 'finished' ? 'done' : INTERRUPTED_TOOL_STATUS[status];
+      return { ...item, status: terminal };
+    }),
   };
 }
 
