@@ -56,11 +56,14 @@ pi 的版本在三处被固定，升级只改这三处 + 回归：
    ```bash
    npm install --prefix /tmp/pi-upgrade @earendil-works/pi-coding-agent@<version>
    ```
-2. 用该二进制跑回归与冒烟：
+2. **用目标版本的 pi 启动宿主**（`PI_GLINK_PI_BIN` 是宿主启动配置；smoke 脚本只发 HTTP 请求，不读它），然后对新宿主跑冒烟：
    ```bash
    PI_GLINK_PI_BIN=/tmp/pi-upgrade/node_modules/.bin/pi \
-     .venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7861 --prompt "…"
+     LOCAL_WEB_PORT=7864 .venv/bin/python -m pi_glink.app &
+
+   .venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7864 --prompt "…"
    ```
+   验证证据：宿主启动横幅会打印实际使用的 pi 路径；也可用 `ps` 确认子进程来自隔离目录。
 3. 若通过 → 更新 Dockerfile 的 `ARG PI_VERSION`、重建镜像与 E2B 模板、重跑三面 smoke；
 4. 若失败 → 把差异记进 `docs/pi-integration-notes.md`（哪条假设变了），再决定适配或暂缓；
    适配也只允许落在 §1 的扩展点里。

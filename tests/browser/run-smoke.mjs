@@ -105,6 +105,42 @@ try {
   const previewTitle = (await page.textContent('#preview-body h1'))?.trim();
   console.log(`[ok] 报告预览已打开：${previewTitle}`);
 
+  // 预览抽屉必须真的占据第三列（缺失 preview-open 时列宽为 0 并横向溢出）。
+  const drawer = await page.evaluate(() => {
+    const shell = document.querySelector('#app-shell');
+    const preview = document.querySelector('#preview-drawer');
+    return {
+      previewOpen: shell.classList.contains('preview-open'),
+      previewWidth: Math.round(preview.getBoundingClientRect().width),
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    };
+  });
+  console.log('[ok] 抽屉布局', JSON.stringify(drawer));
+  if (!drawer.previewOpen) throw new Error('preview-open 未设置：第三列宽度会为 0');
+  if (drawer.previewWidth < 300) throw new Error(`预览抽屉宽度异常: ${drawer.previewWidth}px`);
+  if (drawer.scrollWidth > drawer.clientWidth + 1) {
+    throw new Error(`页面横向溢出: ${drawer.scrollWidth} > ${drawer.clientWidth}`);
+  }
+  await page.click('#preview-close');
+  await page.waitForFunction(() => document.querySelector('#app-shell')?.classList.contains('preview-open') === false, { timeout: 5000 });
+
+  // 历史 run 重放：打开一个已结束的 run，时间线必须完整回放（曾在首帧后误关 SSE）。
+  const historyIds = await page.evaluate(() => [...document.querySelectorAll('#run-list [data-run-id]')].map((n) => n.dataset.runId));
+  if (!historyIds.length) throw new Error('没有历史 run 可验证重放');
+  await page.click('#run-list [data-run-id]');
+  await page.waitForSelector('.pi-run-status[data-status="finished"]', { timeout: 30_000 });
+  await page.waitForTimeout(1500); // 等重放把剩余帧画完
+  const replay = await page.evaluate(() => ({
+    items: document.querySelectorAll('.pi-run-timeline > *').length,
+    tools: document.querySelectorAll('.pi-tool').length,
+    texts: document.querySelectorAll('.pi-text').length,
+    status: document.querySelector('.pi-run-status')?.dataset.status,
+  }));
+  console.log('[ok] 历史 run 重放', JSON.stringify(replay));
+  if (replay.items < 2) throw new Error(`历史重放时间线不完整: ${replay.items} 项`);
+  if (replay.status !== 'finished') throw new Error(`历史 run 状态异常: ${replay.status}`);
+
   const screenshot = join(evidenceDir, 'browser-run.png');
   await page.screenshot({ path: screenshot, fullPage: true });
   console.log(`[ok] 截图：${screenshot}`);
@@ -112,7 +148,7 @@ try {
   const summaryPath = join(evidenceDir, 'browser-run.json');
   writeFileSync(
     summaryPath,
-    `${JSON.stringify({ baseUrl, prompt, status, counts, previewTitle, consoleErrors }, null, 2)}\n`,
+    `${JSON.stringify({ baseUrl, prompt, status, counts, drawer, replay, previewTitle, consoleErrors }, null, 2)}\n`,
     'utf8',
   );
   console.log(`[ok] 证据：${summaryPath}`);
@@ -123,6 +159,10 @@ try {
     counts.texts > 0 &&
     counts.reportButton &&
     counts.bannerHidden === true &&
+    drawer.previewOpen &&
+    drawer.previewWidth >= 300 &&
+    drawer.scrollWidth <= drawer.clientWidth + 1 &&
+    replay.items >= 2 &&
     consoleErrors.length === 0;
   if (!ok) throw new Error(`断言未通过：${JSON.stringify(counts)} consoleErrors=${consoleErrors.length}`);
   console.log('[done] 浏览器回归通过');

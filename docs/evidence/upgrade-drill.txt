@@ -43,3 +43,16 @@
 * 未修改 pi 源码或包内容（仓库侧只有 `ARG PI_VERSION` 与 `PI_GLINK_PI_BIN` 两个开关）；
 * Docker / E2B 的 pin 保持 0.86.1（已实测的版本）；升级到 0.87.0 只需改 ARG 并重建
   镜像/模板 + 重跑对应 smoke，步骤见 docs/pi-boundary.md §3，本次演练未执行重建。
+
+宿主侧用法（命令的正确位置）
+----------------------------
+  PI_GLINK_PI_BIN=/tmp/pi-upgrade/node_modules/.bin/pi \
+    LOCAL_WEB_PORT=7864 .venv/bin/python -m pi_glink.app &
+
+  .venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7864 --prompt "…"
+
+说明：PI_GLINK_PI_BIN 由**宿主进程**读取（config.pi_bin → build_pi_argv）；smoke 脚本只发
+HTTP 请求，放在它前面不会切换宿主使用的 pi。宿主启动横幅会打印实际解析到的 pi 路径。
+
+本次演练的实际情形：全局 pi 已被外部升级到 0.87.0，因此上文 inproc run 直接用全局 0.87.0；
+隔离安装（npm --prefix）用于证明「换版本不动用户环境」的做法本身可用。

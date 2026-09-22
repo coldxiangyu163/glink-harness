@@ -64,3 +64,9 @@ tests/test_kernel_docker_env.py（6 项）：挂载边界、凭据不落 argv、
   # 3) 跑真实 run（prompt 原样记录）
   .venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7862 \
     --prompt "在本工作区创建 notes.md 写入三行关于容器化执行的事实，然后写出 report.md 总结这次运行。用中文。"
+
+命令退出码
+----------
+  docker build -t pi-glink-worker:latest …        exit 0（镜像 1.09 GB）
+  smoke-local-run.py（runId e23d3ae9b640）        exit 0（finished；报告拉回宿主）
+  容器内 pi --version                              exit 0（输出 0.86.1）

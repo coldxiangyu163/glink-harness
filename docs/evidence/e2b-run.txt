@@ -94,3 +94,33 @@ turn_finished · turn_started · usage_reported
 --------------------------------------
   uv pip install -e ".[e2b]"     # e2b SDK + httpx[socks]（代理网络需要）
   uv pip install -e ".[dev]"     # pytest
+
+.env-only 凭据链路复验（审计返工后）
+------------------------------------
+背景：审计发现配置只保存布尔值、Sandbox.create() 未收到 api_key，因此「仅按文档填 .env」时
+      E2B SDK 无法认证。
+修复：config.py 把 E2B_API_KEY 读入 e2b_api_key（repr=False）；E2BSandboxClient.start()
+      经 **opts 传给 Sandbox.create(api_key=…)。
+
+复验命令（刻意不在命令行出现 E2B_API_KEY，只保留代理；key 只能来自 .env）：
+  HTTPS_PROXY=socks5h://127.0.0.1:1080 \
+  LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 \
+    .venv/bin/python -m pi_glink.app
+
+  .venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7863 \
+    --prompt "在本工作区创建 notes.md 写入一行关于凭据链路的说明，然后写出 report.md。用中文。"
+
+结果：
+  /api/health → {"configured": {"model": true, "e2b": true}}   （key 来自 .env）
+  runId       3fc5c4734713
+  status      finished            smoke exit code 0
+  duration    26.4 s
+  events      143
+  sandboxId   ipy0uzzdsg4e
+  产出        notes.md + report.md 拉回宿主工作区
+
+各次 E2B run 的退出码
+--------------------
+  6e7b875f2627  第 1 次（事件回传修复前）smoke exit 0；仅 3 帧事件（缺陷已定位并修复）
+  0c2a4e1026f2  第 2 次（回放修复后）    smoke exit 0；203 事件 / 13 种帧
+  3fc5c4734713  .env-only 复验            smoke exit 0；143 事件

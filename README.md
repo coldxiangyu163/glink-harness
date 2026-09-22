@@ -16,7 +16,7 @@
 | 组件 | 版本 | 安装 / 说明 |
 |---|---|---|
 | Python | ≥ 3.12 | 宿主与内核接入层只用标准库，无运行时依赖 |
-| Node.js | ≥ 24 | 前端与 pi 的运行时；前端回归用 `node --test` |
+| Node.js | **v24.16.0**（本机实测） | 前端与 pi 的运行时；用 nvm 固定：`nvm install 24.16.0 && nvm use 24.16.0`（或 Homebrew `node@24`） |
 | pi | 0.86.1（已实测） | `npm install -g @earendil-works/pi-coding-agent@0.86.1`；Docker / E2B 面的版本固定在各自 Dockerfile 的 `ARG PI_VERSION` |
 | pytest | ≥ 8（仅开发） | `uv pip install -e ".[dev]"` |
 | e2b SDK | ≥ 2（仅 E2B 执行面） | `uv pip install -e ".[e2b]"`（含代理网络需要的 `httpx[socks]`） |
@@ -71,7 +71,7 @@ scripts/run-local-web.sh     # 默认 http://127.0.0.1:7860
 
 ```bash
 uv venv --python 3.12 .venv       # 首次
-uv pip install -e . . --dev       # 首次：让 pi_glink 可导入并装上 pytest
+uv pip install -e ".[dev]"        # 首次：让 pi_glink 可导入并装上 pytest
 .venv/bin/python -m pi_glink.app
 ```
 
@@ -123,7 +123,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | 路径 | 职责 |
 |---|---|
 | `host/pi_glink/` | 宿主：配置解析、事件总线、HTTP/SSE 服务、静态资源 |
-| `kernel/` | pi 接入层：headless 协议客户端与事件归一化（task-2） |
+| `host/pi_glink/kernel/` | pi 接入层：headless 协议客户端（RPC / JSON）、事件投影、运行期配置渲染、三执行面适配 |
 | `agent/` | pi 侧配置与扩展：`PI_CODING_AGENT_DIR` 指向这里，内核之外的定制只落在这里 |
 | `web/` | 前端：沿用 Glink 布局的静态 ESM 资源 |
 | `docs/` | `architecture.md`（进程拓扑、事件契约、执行面适配）、`pi-boundary.md`（扩展点与禁止项） |

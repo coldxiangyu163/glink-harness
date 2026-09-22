@@ -1,21 +1,33 @@
 {
   "baseUrl": "http://127.0.0.1:7861",
   "prompt": "先在本工作区创建 notes.md，写入三行关于 pi-glink 的事实，然后基于它写出 report.md。",
-  "status": "已完成 · 24.174s",
+  "status": "已完成 · 14.865s",
   "counts": {
-    "thinking": 2,
+    "thinking": 1,
     "thinkingOpen": 0,
-    "tools": 5,
-    "toolsDone": 5,
-    "toolsWithOutput": 2,
+    "tools": 3,
+    "toolsDone": 3,
+    "toolsWithOutput": 1,
     "texts": 1,
-    "textChars": 114,
-    "turns": 6,
+    "textChars": 115,
+    "turns": 4,
     "stages": 3,
     "reportButton": true,
     "bannerHidden": true,
-    "runListEntries": 11
+    "runListEntries": 12
   },
-  "previewTitle": "pi-glink 本地运行结构简报",
+  "drawer": {
+    "previewOpen": true,
+    "previewWidth": 563,
+    "scrollWidth": 1280,
+    "clientWidth": 1280
+  },
+  "replay": {
+    "items": 12,
+    "tools": 3,
+    "texts": 1,
+    "status": "finished"
+  },
+  "previewTitle": "pi-glink 本地环境报告",
   "consoleErrors": []
 }

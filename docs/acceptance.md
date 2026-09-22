@@ -143,3 +143,14 @@ HTTPS_PROXY=socks5h://127.0.0.1:1080 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 
 | `styles.css` 保留大量 Glink 特有规则 | 保守裁剪：删除「选择器中所有类名均已无引用」的规则（565 条 / 254 个类），93 KB → 30 KB | 裁剪后重跑浏览器回归通过（思考折叠 / 工具卡片 / 报告预览 + 截图） |
 
 返工后的全量重跑：Python **78 项通过**、Node **11 项通过**、浏览器回归通过。
+
+### 第二轮审计返工（前端与文档）
+
+| 审计缺口 | 返工 | 复验 |
+|---|---|---|
+| `styles.css` 仍含 scenario / tier / task-board / upload / review 规则 | 第三轮裁剪：含 `:has()`/`:not()` 的选择器同样逐类判定，并清理注释里的过时引用 | 残留 token 检查全为 0；93 KB → 21.6 KB；浏览器回归通过 |
+| 历史 run 重放被终态误判截断 | `workspace.mjs` 改按**终态帧类型**关闭 SSE（新增 `TERMINAL_EVENT_TYPES`），不再看模型状态 | 浏览器断言：历史 run 重放 `items=12, tools=3, status=finished` |
+| 报告抽屉缺 `preview-open`，第三列 0px | `openReport` 加类、`closeReport`/`closeCurrent` 移除 | 浏览器断言：`previewOpen=true, previewWidth=563px, scrollWidth==clientWidth`（无横向溢出） |
+| 升级文档把 `PI_GLINK_PI_BIN` 放在 smoke 命令上 | 改为放在宿主启动命令上，并说明宿主与 smoke 客户端的区别 | `docs/pi-boundary.md` §3；宿主启动横幅打印实际 pi 路径 |
+| README 无效命令、不存在的顶层 `kernel/`、Node 版本未固定 | 修正为 `uv pip install -e ".[dev]"`、`host/pi_glink/kernel/`、Node **v24.16.0** + nvm 安装方式 | README |
+| `.env-only` E2B run 无 runId / 证据 / 退出码 | 记录 runId `3fc5c4734713`（26.4s / 143 事件 / sandbox `ipy0uzzdsg4e` / finished / exit 0）与证据路径 | `docs/evidence/e2b-run.txt`、`docker-run.txt` |

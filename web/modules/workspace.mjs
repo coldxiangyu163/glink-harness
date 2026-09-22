@@ -7,7 +7,7 @@
  */
 
 import { createApi } from './api.mjs';
-import { applyEvent, createRunModel, createRunSubscription, runSummary, TERMINAL_STATUSES } from './run-stream.mjs';
+import { applyEvent, createRunModel, createRunSubscription, runSummary, TERMINAL_EVENT_TYPES, TERMINAL_STATUSES } from './run-stream.mjs';
 import { createRunView } from './run-view.mjs';
 import { renderMarkdown } from './markdown.mjs';
 
@@ -175,9 +175,11 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
         current.model = applyEvent(current.model, event);
         current.view.render(current.model);
         updateBanner(current.model);
-        if (TERMINAL_STATUSES.has(current.model.status)) {
-          // The stream replays history and then closes; without this the browser
-          // reconnects every few seconds forever on a finished run.
+        // Closing on the terminal *frame* (not on the model's status) is what
+        // makes history replay work: a finished run starts at status=finished,
+        // so a status check would abort the subscription after the first
+        // replayed frame and leave the timeline half-drawn.
+        if (TERMINAL_EVENT_TYPES.has(event.type)) {
           current.subscription?.close();
           streamStatus.textContent = '运行结束';
           refreshRuns();
@@ -195,6 +197,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     current?.subscription?.close();
     current?.view?.dispose();
     current = null;
+    closeReport();
   }
 
   function updateBanner(model) {
@@ -236,9 +239,17 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       previewDownload.setAttribute('download', `${runId}-report.md`);
       previewBody.innerHTML = renderMarkdown(text);
       previewDrawer.hidden = false;
+      // The shell grid reserves the third column only in this state; without the
+      // class the drawer renders at 0px width and overflows the layout.
+      shell.classList.add('preview-open');
     } catch (error) {
       showToast(`打开报告失败：${error.message}`, 'error');
     }
+  }
+
+  function closeReport() {
+    previewDrawer.hidden = true;
+    shell.classList.remove('preview-open');
   }
 
   // -- composer --------------------------------------------------------------
@@ -267,7 +278,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     input.focus();
   });
   previewClose?.addEventListener('click', () => {
-    previewDrawer.hidden = true;
+    closeReport();
   });
 
   return {

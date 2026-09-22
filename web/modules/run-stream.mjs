@@ -19,6 +19,12 @@
 
 export const RUNNING = 'running';
 export const TERMINAL_STATUSES = new Set(['finished', 'failed', 'cancelled']);
+/**
+ * Terminal *frames*. A finished run starts at a terminal status, so consumers
+ * must decide "stop listening" from the frame type — checking the model status
+ * would end a history replay after its first frame.
+ */
+export const TERMINAL_EVENT_TYPES = new Set(['run_finished', 'run_failed', 'run_cancelled']);
 
 const STAGE_LABELS = {
   agent_start: 'pi 开始处理',
