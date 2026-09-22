@@ -124,3 +124,10 @@ turn_finished · turn_started · usage_reported
   6e7b875f2627  第 1 次（事件回传修复前）smoke exit 0；仅 3 帧事件（缺陷已定位并修复）
   0c2a4e1026f2  第 2 次（回放修复后）    smoke exit 0；203 事件 / 13 种帧
   3fc5c4734713  .env-only 复验            smoke exit 0；143 事件
+
+结构化日志与产物路径（.env-only 复验，可直接查）
+------------------------------------------------
+  ~/.pi-glink/runs/3fc5c4734713/events.jsonl     143 行（每行一个产品事件）
+  ~/.pi-glink/runs/3fc5c4734713/meta.json        状态/session/报告路径/事件数
+  ~/.pi-glink/workspaces/3fc5c4734713/notes.md   沙箱内写入并拉回
+  ~/.pi-glink/workspaces/3fc5c4734713/report.md  同上

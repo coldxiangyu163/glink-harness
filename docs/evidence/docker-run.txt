@@ -70,3 +70,9 @@ tests/test_kernel_docker_env.py（6 项）：挂载边界、凭据不落 argv、
   docker build -t pi-glink-worker:latest …        exit 0（镜像 1.09 GB）
   smoke-local-run.py（runId e23d3ae9b640）        exit 0（finished；报告拉回宿主）
   容器内 pi --version                              exit 0（输出 0.86.1）
+
+结构化日志与产物路径（容器内 run，可直接查）
+--------------------------------------------
+  ~/.pi-glink/runs/e23d3ae9b640/events.jsonl     136 行
+  ~/.pi-glink/runs/e23d3ae9b640/meta.json
+  ~/.pi-glink/workspaces/e23d3ae9b640/{notes.md,report.md}
