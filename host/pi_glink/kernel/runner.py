@@ -20,6 +20,7 @@ keeps four promises:
 from __future__ import annotations
 
 import logging
+import subprocess
 import threading
 import time
 import uuid
@@ -31,6 +32,11 @@ from .. import events
 from ..config import ConfigError, HostConfig
 from ..store import CANCELLED, FAILED, FINISHED, RunRecord, RunStore
 from .agent_env import AgentRuntime, build_pi_argv, build_pi_env, prepare_agent_dir
+from .docker_env import (
+    build_plan as build_docker_plan,
+    is_available as docker_available,
+    stop_argv as docker_stop_argv,
+)
 from .projection import project_event
 from .rpc import PiRpcClient, PiRpcError
 
@@ -61,6 +67,7 @@ class _Execution:
     settled: threading.Event = field(default_factory=threading.Event)
     client: PiRpcClient | None = None
     cancel_requested: bool = False
+    container_name: str | None = None
 
 
 ClientFactory = Callable[..., PiRpcClient]
@@ -171,10 +178,11 @@ class RunManager:
             self._emit(run_id, events.RUN_STARTED, {"prompt": execution.record.prompt})
 
             runtime = prepare_agent_dir(self.config)
+            argv, env, cwd = self._execution_plan(runtime, run_id, execution.workspace)
             client = self._client_factory(
-                self._argv_with_research_prompt(runtime, run_id),
-                cwd=execution.workspace,
-                env=build_pi_env(self.config, runtime),
+                argv,
+                cwd=cwd,
+                env=env,
                 on_event=lambda frame: self._on_frame(execution, frame),
             )
             execution.client = client
@@ -218,6 +226,15 @@ class RunManager:
                     client.close()
                 except Exception:  # pragma: no cover - best effort
                     logger.debug("closing pi client failed", exc_info=True)
+            if execution.container_name:
+                try:
+                    subprocess.run(
+                        docker_stop_argv(execution.container_name),
+                        capture_output=True,
+                        timeout=30,
+                    )
+                except Exception:  # pragma: no cover - best effort cleanup
+                    logger.debug("removing container failed", exc_info=True)
 
             report_path = self._collect_report(execution.workspace)
             if status is FINISHED and report_path is None:
@@ -262,12 +279,43 @@ class RunManager:
 
     # -- helpers --------------------------------------------------------------
 
-    def _argv_with_research_prompt(self, runtime: AgentRuntime, run_id: str) -> list[str]:
+    def _execution_plan(
+        self, runtime: AgentRuntime, run_id: str, workspace: Path
+    ) -> tuple[list[str], dict[str, str], Path | None]:
+        """Where pi runs: in this process tree or inside a container.
+
+        Both faces speak the same RPC protocol over stdio, so only the command
+        line and the environment differ; the event projection does not.
+        """
+        extra = self._extra_argv(run_id)
+        if self.config.executor == "docker":
+            if not docker_available():
+                raise ConfigError(
+                    "LOCAL_WEB_EXECUTOR=docker requires a reachable Docker daemon"
+                )
+            plan = build_docker_plan(
+                self.config, runtime, run_id=run_id, workspace=workspace, extra=extra
+            )
+            with self._lock:
+                execution = self._executions.get(run_id)
+                if execution is not None:
+                    execution.container_name = plan.container_name
+            return plan.argv, plan.env, None
+        return (
+            build_pi_argv(self.config, runtime, extra=extra),
+            build_pi_env(self.config, runtime),
+            workspace,
+        )
+
+    def _extra_argv(self, run_id: str) -> list[str]:
         extra = ["--name", f"pi-glink-{run_id}"]
         text = self._research_prompt_text()
         if text:
             extra.extend(["--append-system-prompt", text])
-        return build_pi_argv(self.config, runtime, extra=extra)
+        return extra
+
+    def _argv_with_research_prompt(self, runtime: AgentRuntime, run_id: str) -> list[str]:
+        return build_pi_argv(self.config, runtime, extra=self._extra_argv(run_id))
 
     def _research_prompt_text(self) -> str:
         path = self.config.agent_config_dir / RESEARCH_PROMPT_FILENAME
