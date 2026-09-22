@@ -65,6 +65,9 @@ class _Execution:
 
     record: RunRecord
     workspace: Path
+    #: The instruction as the user wrote it. ``record.prompt`` is the redacted
+    #: copy that may be persisted and shown; the kernel receives this one.
+    kernel_prompt: str = ""
     settled: threading.Event = field(default_factory=threading.Event)
     client: PiRpcClient | None = None
     cancel_requested: bool = False
@@ -123,8 +126,15 @@ class RunManager:
                 raise RunBusy(self._active_run_id)
             run_id = uuid.uuid4().hex[:12]
             workspace = self.config.workspace_root / run_id
-            record = self.store.create(text, run_id=run_id, workspace=workspace)
-            execution = _Execution(record=record, workspace=workspace)
+            # A user can paste a credential into the prompt; the stored and
+            # displayed copy is masked, while the kernel still receives the
+            # original instruction.
+            record = self.store.create(
+                self.redactor.redact(text), run_id=run_id, workspace=workspace
+            )
+            execution = _Execution(
+                record=record, workspace=workspace, kernel_prompt=text
+            )
             self._executions[run_id] = execution
             self._active_run_id = run_id
 
@@ -218,7 +228,10 @@ class RunManager:
                     stop_reason = "abort"
                 else:
                     accepted = client.request(
-                        {"type": "prompt", "message": execution.record.prompt},
+                        {
+                            "type": "prompt",
+                            "message": execution.kernel_prompt or execution.record.prompt,
+                        },
                         timeout=_REQUEST_TIMEOUT_SECONDS,
                     )
                     if not accepted.success:
@@ -351,7 +364,7 @@ class RunManager:
         client.upload_config()
 
         exit_code, stderr_tail = client.run_prompt(
-            execution.record.prompt,
+            execution.kernel_prompt or execution.record.prompt,
             system_prompt=self._research_prompt_text(),
         )
         # The sandbox face replays the run's frames once it settles (the E2B SDK

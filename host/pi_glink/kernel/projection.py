@@ -21,6 +21,13 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 from .. import events
+from ..redaction import SecretRedactor
+
+#: Fail-closed default. Shape-based masking runs even when a caller forgets to
+#: pass the host redactor, so a credential-shaped value can never leave this
+#: module verbatim — the completion audit reproduced exactly that path with a
+#: ``tool_execution_end`` frame carrying ``OPENAI_API_KEY=…``.
+_FALLBACK_REDACTOR = SecretRedactor()
 
 #: Characters kept from a tool result / partial output before clipping.
 TOOL_TEXT_LIMIT = 4000
@@ -42,16 +49,21 @@ def project_event(
     ``redactor`` is applied to every payload before it leaves this module, so a
     credential echoed by a tool (``env``, a config-file read, the model quoting
     one back) is masked in the event stream, the event log and the browser.
+
+    When no redactor is supplied the module falls back to a shape-only one:
+    forgetting the host redactor degrades detection (known values are missed) but
+    never turns into a leak.
     """
     frame_type = frame.get("type")
     handler = _HANDLERS.get(frame_type)
     if handler is None:
         return []
     produced = handler(frame)
-    if redactor is None or not produced:
+    if not produced:
         return produced
+    active = redactor if redactor is not None else _FALLBACK_REDACTOR
     return [
-        (kind, redactor.redact_payload(payload) or payload) for kind, payload in produced
+        (kind, active.redact_payload(payload) or payload) for kind, payload in produced
     ]
 
 

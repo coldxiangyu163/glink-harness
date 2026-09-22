@@ -68,6 +68,25 @@ def test_audit_reproduction_tool_output_is_redacted() -> None:
     assert REPLACEMENT in rendered
 
 
+def test_projection_without_an_explicit_redactor_is_fail_closed() -> None:
+    """The auditor's exact repro must be masked even when no redactor is passed.
+
+    ``project_event(frame)`` is the narrowest call shape there is; if it leaked,
+    every caller that forgot the host redactor would leak too.
+    """
+    frame = {
+        "type": "tool_execution_end",
+        "toolCallId": "c1",
+        "toolName": "bash",
+        "result": {"content": [{"type": "text", "text": f"OPENAI_API_KEY={AUDIT_SECRET}"}]},
+        "isError": False,
+    }
+    (_kind, payload), = project_event(frame)  # no redactor argument on purpose
+    rendered = json.dumps(payload)
+    assert AUDIT_SECRET not in rendered
+    assert REPLACEMENT in rendered
+
+
 def test_shape_detection_catches_secrets_the_host_never_saw() -> None:
     """A key pasted into a prompt (unknown to the host) is still masked."""
     frame = {
@@ -230,6 +249,40 @@ def test_minimal_child_environment_does_not_inherit_host_credentials(
     assert "AWS_SECRET_ACCESS_KEY" not in env
     assert env["PATH"] == "/usr/bin:/bin"
     assert "OPENAI_API_KEY" not in env, "the model key travels via auth.json, not the environment"
+
+
+def test_pasted_credential_in_the_prompt_is_not_stored_in_metadata(tmp_path: Path) -> None:
+    """A user-pasted key must not land in meta.json (the kernel still gets it)."""
+    config = make_config(tmp_path)
+    store = RunStore(config.data_root / "runs")
+    received: list[str] = []
+
+    def factory(argv, *, cwd=None, env=None, on_event=None):
+        client = PiRpcClient(
+            [sys.executable, str(FAKE_PI), *argv[1:]],
+            cwd=cwd,
+            env={**(env or {}), "FAKE_PI_WRITE_REPORT": "1"},
+            on_event=on_event,
+        )
+        original_request = client.request
+
+        def request(command, **kwargs):
+            if command.get("type") == "prompt":
+                received.append(str(command.get("message", "")))
+            return original_request(command, **kwargs)
+
+        client.request = request  # type: ignore[method-assign]
+        return client
+
+    manager = RunManager(config, EventBus(), store, client_factory=factory)
+    record = manager.start(f"请记住这个值 {AUDIT_SECRET}，然后写出 report.md。")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final.status == "finished"
+    meta_text = (store.run_dir(record.run_id) / "meta.json").read_text(encoding="utf-8")
+    assert AUDIT_SECRET not in meta_text, "metadata must not persist a pasted credential"
+    assert REPLACEMENT in meta_text
+    assert received and AUDIT_SECRET in received[0], "the kernel still receives the user's instruction"
 
 
 def test_workspace_artifacts_are_swept_for_credentials(tmp_path: Path) -> None:
