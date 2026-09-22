@@ -1,0 +1,74 @@
+E2B 执行面证据 / e2b execution face evidence
+=============================================
+日期: 2026-09-22
+宿主: macOS (arm64)
+执行面: e2b（LOCAL_WEB_EXECUTOR=e2b，宿主监听 127.0.0.1:7863）
+模板: pi-glink-worker（buildId 2bec2f1d-ec5a-41c1-a175-62ae12ad97dc，tags=['default']，云端构建 47s）
+
+网络前提（重要）
+----------------
+本机直连 E2B 不可达：DNS 可解析（api.e2b.dev → 34.102.227.47），但 TCP 连接超时
+（`curl https://api.e2b.dev/health` → HTTP 000）。可用代理：
+socks5h://127.0.0.1:1080（HTTP 200 / 1.36s）。
+
+因此：
+* 模板构建与宿主进程都需要 HTTPS_PROXY/ALL_PROXY=socks5h://127.0.0.1:1080；
+* Node 版 E2B CLI 不认 socks5 代理（fetch failed），所以构建改用 Python SDK
+  （httpx + socksio）。
+
+模板构建（可复现）
+------------------
+  docker/e2b/Dockerfile.e2b        # node:24-bookworm-slim + pi 0.86.1（自包含）
+  scripts/build-e2b-template.py    # Template().from_dockerfile(...) + Template.build(...)
+
+  E2B_API_KEY=… HTTPS_PROXY=socks5h://127.0.0.1:1080 \
+    .venv/bin/python scripts/build-e2b-template.py --logs
+
+tag 处理：SDK 构建产出 `default` tag。需要固定生产 tag 时用 `Template.assign_tags`
+显式移动；不要依赖 CLI 的隐式行为（CLI 不接受 `name:tag`）。
+
+沙箱内环境（契约第 1 条）
+-------------------------
+  sandbox id  i9jax68nwcb076x0e69b3（探测用）
+  node        v24.21.0
+  pi          0.86.1
+  user        user（非 root）
+  cwd         /home/user/workspace
+
+凭据注入方式（契约第 3 条）
+--------------------------
+* 模型凭据：`Sandbox.create(envs={OPENAI_API_KEY, …})` 注入，只存在于沙箱进程环境，
+  **不写入任何文件**；宿主侧也不落盘（.env 已被 .gitignore 挡住）。
+* 搜索凭据：pi-web-access 只从 `web-search.json` 读凭据（无环境变量形式），因此宿主把
+  运行期渲染的 `web-search.json` 上传到沙箱 `/home/user/config/`。它的生命周期等于沙箱
+  生命周期——`kill()` 后随沙箱消失，宿主只保留自己本机那一份。
+* 运行期配置（models.json / settings.json）同样上传到 `/home/user/config/`。
+
+真实 run（契约第 2 条）
+-----------------------
+  runId       0c2a4e1026f2
+  status      finished
+  duration    68.4 s
+  events      203（13 种帧类型）
+  sandboxId   ixjz9xzn1zjaa0aruy1u9
+  template    pi-glink-worker
+  工具调用    web_search ×1 · fetch_content ×6 · bash ×2 · read ×2 · write ×1
+  thinking    393 字符（thinking_delta 与另外两面同源）
+  报告        report.md 7115 bytes，拉回宿主 workspace；含 13 个可核验 URL
+
+帧类型（与 inproc / docker 面一致）:
+assistant_delta · assistant_message · run_finished · run_stage · run_started ·
+session_ready · thinking_delta · tool_finished · tool_started · tool_updated ·
+turn_finished · turn_started · usage_reported
+
+已知差异（如实记录）
+--------------------
+1. **协议**：E2B SDK 不提供双向 stdio，这一面用 `pi --mode json "<prompt>"` 的单向事件流，
+   而不是 RPC 协议（objective 中写明的协议退回路径）。prompt 与研究约定经 base64 传递，
+   避免 shell 引号问题。
+2. **事件时序**：e2b 2.x 的 `commands.run(background=True, on_stdout=…)` 回调**实测不触发**
+   （`handle.wait()` 的返回值里只有最终 stdout）。因此沙箱把事件写成
+   `/home/user/events.jsonl`，宿主在命令结束后一次性回放。事件的顺序、内容与词汇与其他
+   两面一致，差别是**非实时**。
+3. **会话持久化**：pi 的会话文件写在沙箱内 `/home/user/sessions`，随沙箱销毁而消失，
+   因此 E2B 面的 run 元数据里 `session_id` 为空。宿主的 run 记录与报告仍然持久。

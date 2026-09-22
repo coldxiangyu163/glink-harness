@@ -17,7 +17,22 @@
 |---|---|---|
 | 本机进程 | `inproc` | pi 以子进程运行在宿主机器上，工作区在 `<数据根>/workspaces/<runId>` |
 | 容器 | `docker` | pi 与工作区都在一次性容器内，宿主只做编排与事件投影 |
-| 云沙箱 | `e2b` | pi 与工作区都在 E2B 沙箱内，模板与凭据语义与 FrontierAgent 一致 |
+| 云沙箱 | `e2b` | pi 与工作区都在 E2B 沙箱内（`--mode json` 单向事件流），凭据经 `envs` 注入 |
+
+### E2B 执行面
+
+```bash
+# 首次：构建模板（本机网络需要代理时带上 HTTPS_PROXY）
+E2B_API_KEY=… HTTPS_PROXY=socks5h://127.0.0.1:1080 \
+  .venv/bin/python scripts/build-e2b-template.py --logs
+
+LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 scripts/run-local-web.sh   # 用云沙箱跑 pi
+```
+
+模型凭据经 `Sandbox.create(envs=…)` 注入（不落盘）；pi-web-access 凭据随运行期
+`web-search.json` 上传到沙箱，随沙箱销毁而消失。事件在 run 结束后一次性回放
+（E2B SDK 的 stdout 回调实测不触发），报告会拉回宿主工作区。
+证据：[docs/evidence/e2b-run.txt](docs/evidence/e2b-run.txt)。
 
 ### Docker 执行面
 

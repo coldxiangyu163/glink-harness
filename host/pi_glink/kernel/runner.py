@@ -68,6 +68,7 @@ class _Execution:
     client: PiRpcClient | None = None
     cancel_requested: bool = False
     container_name: str | None = None
+    sandbox: Any | None = None
 
 
 ClientFactory = Callable[..., PiRpcClient]
@@ -141,6 +142,12 @@ class RunManager:
         if execution is None:
             return False
         execution.cancel_requested = True
+        if execution.sandbox is not None:
+            try:
+                execution.sandbox.close()
+            except Exception:  # noqa: BLE001 - teardown is best effort
+                logger.debug("killing sandbox failed", exc_info=True)
+            return True
         client = execution.client
         if client is None:
             return True
@@ -178,43 +185,48 @@ class RunManager:
             self._emit(run_id, events.RUN_STARTED, {"prompt": execution.record.prompt})
 
             runtime = prepare_agent_dir(self.config)
-            argv, env, cwd = self._execution_plan(runtime, run_id, execution.workspace)
-            client = self._client_factory(
-                argv,
-                cwd=cwd,
-                env=env,
-                on_event=lambda frame: self._on_frame(execution, frame),
-            )
-            execution.client = client
-            client.start()
-
-            self._publish_session_ready(run_id, client)
-            if execution.cancel_requested:
-                # Cancelled while pi was starting: never start the work.
-                status = CANCELLED
-                stop_reason = "abort"
+            if self.config.executor == "e2b":
+                self._run_in_sandbox(execution, runtime)
+                settled = True
+                accepted = None
             else:
-                accepted = client.request(
-                    {"type": "prompt", "message": execution.record.prompt},
-                    timeout=_REQUEST_TIMEOUT_SECONDS,
+                argv, env, cwd = self._execution_plan(runtime, run_id, execution.workspace)
+                client = self._client_factory(
+                    argv,
+                    cwd=cwd,
+                    env=env,
+                    on_event=lambda frame: self._on_frame(execution, frame),
                 )
-                if not accepted.success:
-                    raise PiRpcError(accepted.error or "pi rejected the prompt")
+                execution.client = client
+                client.start()
 
-                settled = execution.settled.wait(self.config.task_timeout_seconds)
+                self._publish_session_ready(run_id, client)
                 if execution.cancel_requested:
+                    # Cancelled while pi was starting: never start the work.
                     status = CANCELLED
                     stop_reason = "abort"
-                elif not settled:
-                    status = FAILED
-                    stop_reason = "timeout"
-                    error = (
-                        f"run did not settle within {self.config.task_timeout_seconds}s"
+                else:
+                    accepted = client.request(
+                        {"type": "prompt", "message": execution.record.prompt},
+                        timeout=_REQUEST_TIMEOUT_SECONDS,
                     )
-                    try:
-                        client.request({"type": "abort"}, timeout=10.0)
-                    except (PiRpcError, OSError):
-                        pass
+                    if not accepted.success:
+                        raise PiRpcError(accepted.error or "pi rejected the prompt")
+
+                    settled = execution.settled.wait(self.config.task_timeout_seconds)
+                    if execution.cancel_requested:
+                        status = CANCELLED
+                        stop_reason = "abort"
+                    elif not settled:
+                        status = FAILED
+                        stop_reason = "timeout"
+                        error = (
+                            f"run did not settle within {self.config.task_timeout_seconds}s"
+                        )
+                        try:
+                            client.request({"type": "abort"}, timeout=10.0)
+                        except (PiRpcError, OSError):
+                            pass
         except Exception as exc:  # noqa: BLE001 - every run must end with a reason
             logger.exception("run failed run=%s", run_id)
             status = FAILED
@@ -226,6 +238,11 @@ class RunManager:
                     client.close()
                 except Exception:  # pragma: no cover - best effort
                     logger.debug("closing pi client failed", exc_info=True)
+            if execution.sandbox is not None:
+                try:
+                    execution.sandbox.close()
+                except Exception:  # noqa: BLE001 - teardown is best effort
+                    logger.debug("closing sandbox failed", exc_info=True)
             if execution.container_name:
                 try:
                     subprocess.run(
@@ -278,6 +295,46 @@ class RunManager:
             )
 
     # -- helpers --------------------------------------------------------------
+
+    def _run_in_sandbox(self, execution: _Execution, runtime: AgentRuntime) -> None:
+        """Execute this run inside an E2B sandbox (single-shot JSON stream).
+
+        The sandbox face has no bidirectional pipe, so it uses ``pi --mode json``:
+        the prompt is passed once and the events stream back line by line. The
+        projection and the product vocabulary are the same as the RPC faces, so
+        nothing downstream changes.
+        """
+        from .e2b_env import E2BSandboxClient, parse_json_stream_line
+
+        run_id = execution.record.run_id
+        client = E2BSandboxClient(
+            self.config, runtime, run_id=run_id, workspace=execution.workspace
+        )
+        execution.sandbox = client
+        client.start()
+        self._emit(
+            run_id,
+            events.SESSION_READY,
+            {"sandboxId": client.sandbox_id, "template": self.config.e2b_template},
+        )
+        client.upload_config()
+
+        exit_code, stderr_tail = client.run_prompt(
+            execution.record.prompt,
+            system_prompt=self._research_prompt_text(),
+        )
+        # The sandbox face replays the run's frames once it settles (the E2B SDK
+        # provides no working stdout callback); ordering and vocabulary are the
+        # same as the RPC faces.
+        for line in client.fetch_events():
+            frame = parse_json_stream_line(line)
+            if frame is not None:
+                self._on_frame(execution, frame)
+        report = client.fetch_report()
+        if exit_code != 0 and report is None:
+            raise PiRpcError(
+                f"sandbox pi exited with {exit_code}: {stderr_tail[-300:]}"
+            )
 
     def _execution_plan(
         self, runtime: AgentRuntime, run_id: str, workspace: Path

@@ -1,0 +1,30 @@
+# E2B 沙箱模板：自包含 pi 运行时（与 docker/Dockerfile.worker 同构）。
+#
+# 与 Docker 执行面的差异在通信方式，不在镜像：
+#   * Docker 面由宿主 `docker run -i` 提供双向 stdio，用 pi 的 RPC 协议；
+#   * E2B 面的 SDK 不提供双向流，改用 `pi --mode json "<prompt>"` 的单向事件流
+#     （objective 里的“如遇协议缺口退回 --mode json”正是这条）。
+#
+# 构建（需要 E2B_API_KEY）：
+#   npx -y @e2b/cli@2.18.0 template create pi-glink-worker \
+#     --path docker/e2b --dockerfile Dockerfile.e2b \
+#     --cpu-count 2 --memory-mb 4096 \
+#     --cmd 'sleep infinity' --ready-cmd 'true'
+FROM node:24-bookworm-slim
+
+ARG PI_VERSION=0.86.1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       bash ca-certificates curl git ripgrep \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+    && npm cache clean --force
+
+# E2B 沙箱以非 root 用户运行，家目录是 /home/user。
+ENV PI_CODING_AGENT_DIR=/home/user/config \
+    PI_CODING_AGENT_SESSION_DIR=/home/user/sessions \
+    PI_SKIP_VERSION_CHECK=1 \
+    PI_TELEMETRY=0
+
+WORKDIR /home/user/workspace
