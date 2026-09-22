@@ -81,7 +81,18 @@ try {
     thinkingOpen: document.querySelectorAll('.pi-thinking[open]').length,
     tools: document.querySelectorAll('.pi-tool').length,
     toolsDone: document.querySelectorAll('.pi-tool[data-status="done"]').length,
-    toolsWithOutput: [...document.querySelectorAll('.pi-tool-output')].filter((node) => node.textContent.trim()).length,
+    toolsWithText: [...document.querySelectorAll('.pi-tool')].filter((node) => {
+      const output = node.querySelector('.pi-tool-output')?.textContent.trim() ?? '';
+      const result = node.querySelector('.pi-tool-result')?.textContent.trim() ?? '';
+      return output !== '' || result !== '';
+    }).length,
+    toolsRenderingTextTwice: [...document.querySelectorAll('.pi-tool')].filter((node) => {
+      // After the terminal frame the streamed preview is dropped when it repeats
+      // the result; a card must never show the same text in both fields.
+      const output = node.querySelector('.pi-tool-output')?.textContent.trim() ?? '';
+      const result = node.querySelector('.pi-tool-result')?.textContent.trim() ?? '';
+      return output !== '' && output === result;
+    }).length,
     texts: document.querySelectorAll('.pi-text').length,
     textChars: [...document.querySelectorAll('.pi-text')].reduce((total, node) => total + node.textContent.length, 0),
     turns: document.querySelectorAll('.pi-turn').length,
@@ -155,7 +166,8 @@ try {
 
   const ok =
     counts.tools > 0 &&
-    counts.toolsWithOutput > 0 &&
+    counts.toolsWithText > 0 &&
+    counts.toolsRenderingTextTwice === 0 &&
     counts.texts > 0 &&
     counts.reportButton &&
     counts.bannerHidden === true &&

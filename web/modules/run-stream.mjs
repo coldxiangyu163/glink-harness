@@ -301,10 +301,16 @@ function finishTool(model, payload) {
   if (index < 0) return model;
   const item = model.items[index];
   const items = model.items.slice();
+  const result = payload.result ?? '';
   items[index] = {
     ...item,
     name: item.name || payload.toolName,
-    result: payload.result ?? '',
+    result,
+    // pi's terminal frame repeats the accumulated output for streamed tools
+    // (fixture ebf75f590601: both are the same 495 characters), so keeping the
+    // preview would render the same text twice. The terminal result wins
+    // whenever it carries exactly what the stream already showed.
+    output: result !== '' && result === item.output ? '' : item.output,
     isError: Boolean(payload.isError),
     status: Boolean(payload.isError) ? 'error' : 'done',
   };

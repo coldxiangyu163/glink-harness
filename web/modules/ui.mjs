@@ -1,9 +1,11 @@
 /**
- * Small DOM/text helpers used by the report renderer.
+ * Tiny text helpers for the Markdown renderer and the workbench shell.
  *
- * The full workbench helpers were intentionally left behind with the previous
- * front-end; this module carries only what a renderer needs, so the report
- * pipeline can be imported by Node tests without a document.
+ * The workbench renders report Markdown itself; there is no locale negotiation
+ * here, so the only helpers that survive are the two the renderer needs:
+ * HTML escaping and URL allow-listing. Keeping the module this small is
+ * deliberate — nothing in the front-end may depend on a product-specific
+ * presentation stack.
  */
 
 export function escapeHtml(value) {
@@ -31,25 +33,4 @@ export function safeUrl(value) {
     return '';
   }
   return '';
-}
-
-export function formatBytes(bytes) {
-  const value = Number(bytes);
-  if (!Number.isFinite(value) || value < 0) return '';
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-export function formatDate(timestamp, locale = 'zh-CN') {
-  const value = Number(timestamp);
-  if (!Number.isFinite(value) || value <= 0) return '';
-  const date = new Date(value * 1000);
-  return date.toLocaleString(locale, {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
 }

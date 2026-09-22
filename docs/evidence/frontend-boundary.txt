@@ -1,0 +1,65 @@
+前端报告层剥离证据 / front-end report-layer strip evidence
+==========================================================
+日期: 2026-09-22（第七次审计返工）
+审计复现对象: 审计意见「前端仍保留完整的 Glink 特有报告渲染层：web/modules/markdown.mjs
+              与 FrontierAgent 对应文件逐字相同，包含 chart/flow、artifact、引用和事实
+              标签等 852 行逻辑及相关 CSS。这违反『剥离 Glink 特有依赖』和『不实现图表
+              渲染』等边界，且与验收记录『未做图表』矛盾。」
+
+修复方式：重写为项目自有的最小 Markdown 渲染器，删除 Glink 报告层
+------------------------------------------------------------------
+* `web/modules/markdown.mjs` 852 → 256 行。只保留标题、段落、强调、链接、图片、
+  代码围栏、列表、引用、分隔线与管道表格；删除 chart/flow 渲染、artifact 解析、
+  引用标注（citation）、事实标签（qualifier/fact label）、LaTeX、报告图表降级等
+  全部 Glink 报告层逻辑。
+* `web/modules/i18n.mjs` 删除（35 行）：前端不再带产品文案字典。
+* `web/modules/ui.mjs` 130 → 36 行：只留 `escapeHtml` 与 `safeUrl`。
+* `web/styles.css` 957 → 454 行：移除 `.citation`、`.citation-link`、`.qualifier-badge`、
+  `.report-table-wrap`、`.report-chart*`、`.report-source-entry`、`@keyframes source-flash`
+  等报告层样式；补充纯 prose（`.pi-text` / `.preview-body`）与 `.md-table-wrap` 表格样式。
+* 图表围栏按普通代码块渲染：```chart 输出 `<pre><code class="language-chart">`，
+  不再有任何图表降级/图元生成路径。
+
+与 FrontierAgent 的逐文件比对（同日下午实测）
+---------------------------------------------
+  modules/markdown.mjs   256 行 / FrontierAgent 852 行   byte-identical: 否
+  modules/ui.mjs          36 行 / FrontierAgent 130 行   byte-identical: 否
+  styles.css             454 行 / FrontierAgent 957 行   byte-identical: 否
+  （app.js / index.html / workspace.mjs 亦不同）
+
+禁止 token 扫描（web/ 全量，0 命中）
+------------------------------------
+  grep -rniE "citation|qualifier|renderChartFallback|report-chart|report-source|
+             source-flash|mermaid|flowchart|factlabel" web/ --include=*.mjs --include=*.css
+  → 0 命中。
+
+回归
+----
+* Node（tests/web/run-stream.test.mjs）：
+    ✔ the front-end carries no Glink-specific report layer —— 扫描 6 个模块源码确认
+      无 citation/qualifier/renderchart/report-chart/mermaid/flowchart/artifact/factlabel，
+      并断言 ```chart 围栏输出为普通 `<pre><code class="language-chart">`。
+* 结果: Node 15 项通过 / 0 失败；Python 全套 100 项通过。
+* 浏览器真实回归（`node tests/browser/run-smoke.mjs --base-url http://127.0.0.1:7861`）：
+  工具卡片 `toolsWithText=4`、`toolsRenderingTextTwice=0`；报告预览标题正常；
+  证据 `docs/evidence/browser-run.json` / `browser-run.png`。
+
+与验收记录的一致性
+------------------
+验收记录的「不在范围内」条目本就写明不做图表渲染；本轮剥离后该声明与实现一致，
+前端不再携带任何 Glink 报告层依赖。
+
+复现命令
+--------
+  # 1) 行数与逐字比对
+  wc -l web/modules/markdown.mjs web/modules/ui.mjs web/styles.css
+  cmp -s web/modules/markdown.mjs \
+      /Users/coldxiangyu/AI/git/FrontierAgent/deploy/local_web/static/modules/markdown.mjs \
+      && echo "逐字相同" || echo "不同"
+
+  # 2) 禁止 token 扫描
+  grep -rniE "citation|qualifier|renderChartFallback|report-chart|mermaid|flowchart" web/ \
+       --include=*.mjs --include=*.css ; echo "exit=$?"
+
+  # 3) Node 回归
+  node --test tests/web/*.test.mjs

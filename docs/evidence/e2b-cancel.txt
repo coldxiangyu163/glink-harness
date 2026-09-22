@@ -1,0 +1,88 @@
+E2B 取消语义证据 / E2B cancel semantics evidence
+================================================
+日期: 2026-09-22（第七次审计返工）
+执行面: e2b（LOCAL_WEB_EXECUTOR=e2b，宿主 127.0.0.1:7863，HTTPS_PROXY=socks5h://127.0.0.1:1080）
+审计复现对象: 审计意见「E2B 分支执行后从不检查 cancel_requested；停止时关闭沙箱
+              导致异常会落为 run_failed，若正常返回则仍是 run_finished，而不是
+              run_cancelled。现有测试和真实证据未覆盖此路径。」
+
+修复（host/pi_glink/kernel/runner.py）
+--------------------------------------
+* `_execute` 的 e2b 分支在 `_run_in_sandbox` 返回后检查 `cancel_requested`：
+  已请求取消 → `status = CANCELLED`、`stop_reason = "abort"`。
+* `except` 分支先判 `cancel_requested`：取消期间由关闭沙箱引发的任何异常都记为
+  `run cancelled run=%s (%s)`，不再落 `run_failed`。
+* `_run_in_sandbox` 在 4 个检查点提前返回（创建沙箱前 / start 后 / upload_config
+  后 / run_prompt 返回后），保证「沙箱正常返回但已请求停止」也不会被当成 finished。
+
+真实演练（run c62e014c772d）
+----------------------------
+1) 提交 run：
+
+   POST http://127.0.0.1:7863/api/runs
+   {"prompt": "请检索并在报告中写出一篇 1200 字的慢速研究简报；先用 web_search
+               查三个方向，再写 report.md。用中文。"}
+
+   → HTTP 201，runId=c62e014c772d，status=running
+
+2) 等到沙箱就绪（events.jsonl 原样摘录）：
+
+   {"type": "run_started",  "seq": 1, ...}
+   {"type": "session_ready","seq": 2, "payload": {"sandboxId":
+       "i65whsgdsktmech6fawor", "template": "pi-glink-worker"}}
+
+3) 在 pi 执行期间（session_ready 后 8s）请求停止：
+
+   POST http://127.0.0.1:7863/api/runs/c62e014c772d/stop
+   → HTTP 200 {"requested": true}
+
+4) 终态（meta.json 关键字段）：
+
+   status:      cancelled
+   stop_reason: abort
+   error:       None
+
+5) 事件日志末尾（events.jsonl 原样摘录）：
+
+   {"type": "run_cancelled", "seq": 3, "payload": {"status": "cancelled",
+    "stopReason": "abort", "error": null, "durationSeconds": 19.524, ...}}
+
+6) 宿主日志（/tmp/pi-glink-7863.log）：
+
+   16:45:04,889 INFO pi_glink.kernel.runner: run cancelled run=c62e014c772d (TimeoutException)
+   16:45:04,891 INFO pi_glink.kernel.runner: run finished run=c62e014c772d status=cancelled report=<none>
+
+判定
+----
+* 本次真实停止走的是审计点名的异常路径：`stop()` 关闭沙箱 → 沙箱内 pi 命令的
+  `handle.wait()` 抛 `TimeoutException` → 修复后的 `except` 将其映射为
+  `cancelled`，终帧是 `run_cancelled`。若未修复，该异常会写成 `run_failed`
+  （seq 3 会变成 `run_failed`，meta.status=failed）。
+* 没有任何一帧 `run_finished`；`stop_reason=abort`。
+
+单元回归（无云端调用）
+----------------------
+tests/test_kernel_e2b_env.py（Python 全套 100 项中的 10 项）：
+
+* `test_stop_during_a_sandbox_run_is_cancelled_not_failed[True/False]`
+  —— 参数化覆盖「kill 让 handle.wait() 抛错」与「kill 后 handle.wait() 正常返回」
+  两条路径；断言终态 cancelled、stop_reason=abort、末尾 `run_cancelled`、
+  无 `run_failed`/`run_finished`，且沙箱仍被销毁。
+* `test_stop_that_lands_before_the_sandbox_starts_is_still_cancelled`
+  —— 停止落在 `Sandbox.create` 期间（工厂尚未返回），`start()` 返回后检查点生效：
+  不执行 prompt、终态 cancelled、末尾 `run_cancelled`。
+
+复现命令
+--------
+  # 1) 启动 E2B 宿主（需代理；.env 里已有 E2B_API_KEY 与模板名）
+  HTTPS_PROXY=socks5h://127.0.0.1:1080 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 \
+      scripts/run-local-web.sh
+
+  # 2) 提交 → 等 session_ready → 停止 → 读 meta.json / events.jsonl
+  curl -s -X POST http://127.0.0.1:7863/api/runs -H 'Content-Type: application/json' \
+       -d '{"prompt": "…"}'
+  curl -s -X POST http://127.0.0.1:7863/api/runs/<runId>/stop
+  python3 -c "import json; print(json.load(open('$HOME/.pi-glink/runs/<runId>/meta.json'))['status'])"
+
+  # 3) 单元回归
+  .venv/bin/python -m pytest tests/test_kernel_e2b_env.py -q

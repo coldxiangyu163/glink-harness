@@ -211,6 +211,11 @@ class RunManager:
                 self._run_in_sandbox(execution, runtime)
                 settled = True
                 accepted = None
+                if execution.cancel_requested:
+                    # A stop closes the sandbox; the run ends cancelled even when
+                    # the sandbox command happened to return first.
+                    status = CANCELLED
+                    stop_reason = "abort"
             else:
                 argv, env, cwd = self._execution_plan(runtime, run_id, execution.workspace)
                 client = self._client_factory(
@@ -253,9 +258,16 @@ class RunManager:
                         except (PiRpcError, OSError):
                             pass
         except Exception as exc:  # noqa: BLE001 - every run must end with a reason
-            logger.exception("run failed run=%s", run_id)
-            status = FAILED
-            error = f"{type(exc).__name__}: {exc}"
+            if execution.cancel_requested:
+                # Stopping a run closes the sandbox (or aborts pi); whatever
+                # error that surfaces is the cancellation, not a failure.
+                status = CANCELLED
+                stop_reason = "abort"
+                logger.info("run cancelled run=%s (%s)", run_id, type(exc).__name__)
+            else:
+                logger.exception("run failed run=%s", run_id)
+                status = FAILED
+                error = f"{type(exc).__name__}: {exc}"
         finally:
             client = execution.client
             if client is not None:
@@ -356,18 +368,29 @@ class RunManager:
             sandbox_factory=self._sandbox_factory,
         )
         execution.sandbox = client
+        if execution.cancel_requested:
+            # Cancelled before the sandbox started: never create it.
+            return
         client.start()
+        if execution.cancel_requested:
+            return
         self._emit(
             run_id,
             events.SESSION_READY,
             {"sandboxId": client.sandbox_id, "template": self.config.e2b_template},
         )
         client.upload_config()
+        if execution.cancel_requested:
+            return
 
         exit_code, stderr_tail = client.run_prompt(
             execution.kernel_prompt or execution.record.prompt,
             system_prompt=self._research_prompt_text(),
         )
+        if execution.cancel_requested:
+            # ``stop()`` kills the sandbox; a normal return here is a race, not
+            # a finished run, and the frames are not worth replaying.
+            return
         # The sandbox face replays the run's frames once it settles (the E2B SDK
         # provides no working stdout callback); ordering and vocabulary are the
         # same as the RPC faces.

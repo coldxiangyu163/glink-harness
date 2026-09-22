@@ -154,23 +154,28 @@ kbd { font-family: inherit; font-size: 10px; font-weight: 500; color: var(--mute
 .conversation { width: 100%; min-width: 0; margin: 0; padding: 0; }
 .message[data-run-outline-anchor] { scroll-margin-top: 144px; }
 .message { margin: 0 0 34px; }
-.citation { margin-left: 2px; font-size: .72em; line-height: 0; vertical-align: super; }
-.citation-link { display: inline-grid; min-width: 18px; height: 18px; place-items: center; border-radius: 9px; background: var(--accent-quiet); text-decoration: none; font-weight: 700; }
-.citation-link[data-tip]::after { width: max-content; max-width: min(360px, 70vw); overflow-wrap: anywhere; white-space: normal; text-align: left; }
-.qualifier-badge { display: inline-grid; min-width: 1.65em; height: 1.45em; place-items: center; margin-right: .4em; padding: 0 .28em; border-radius: 3px; font-size: .68em; font-weight: 750; line-height: 1; vertical-align: .12em; }
-.report-table-wrap { max-width: 100%; margin: 18px 0 24px; overflow-x: auto; overscroll-behavior-inline: contain; box-shadow: inset 0 -1px var(--line); }
-.report-table-wrap:focus-visible { border-radius: var(--radius-xs); outline: 2px solid color-mix(in oklch, var(--accent), white 22%); outline-offset: 2px; }
-.report-chart { margin: 22px 0 28px; }
-.report-chart-zoom { display: block; cursor: zoom-in; }
-/* 默认完整可见：按自然比例缩放，只限最大宽高，不做裁剪；大图文字变小后
-   可用下方「查看原图」在同一 run / 分享权限下打开原图。 */
-.report-chart img { display: block; width: auto; max-width: 100%; max-height: min(72vh, 720px); height: auto; margin: 0 auto; background: white; }
-.report-chart-zoom-link { display: block; margin-top: 6px; color: var(--accent); text-align: center; font-size: 11px; text-decoration-thickness: 1px; text-underline-offset: 3px; }
-.report-chart figcaption { margin-top: 8px; color: var(--muted); font-size: 11px; text-align: center; }
-.report-chart-placeholder { margin: 18px 0 24px; padding: 16px; border-left: 2px solid var(--line); background: var(--surface-muted); color: var(--muted); font-size: 12px; }
-.report-chart-fallback > p { margin-bottom: 8px; color: var(--ink); font-weight: 650; }
-.report-source-entry { border-radius: var(--radius-xs); scroll-margin: 20vh; }
-@media (max-width: 480px) {}
+
+/* Prose rhythm for rendered Markdown (run text and report preview). */
+.pi-text :where(h1, h2, h3, h4, h5, h6),
+.preview-body :where(h1, h2, h3, h4, h5, h6) { margin: 1.5em 0 .6em; line-height: 1.3; font-weight: 650; }
+.pi-text :where(h1), .preview-body :where(h1) { font-size: 1.6em; }
+.pi-text :where(h2), .preview-body :where(h2) { font-size: 1.35em; }
+.pi-text :where(h3), .preview-body :where(h3) { font-size: 1.15em; }
+.pi-text :where(p, ul, ol, blockquote, pre, table, figure),
+.preview-body :where(p, ul, ol, blockquote, pre, table, figure) { margin: 0 0 1em; }
+.pi-text :where(ul, ol), .preview-body :where(ul, ol) { padding-left: 1.4em; }
+.pi-text :where(li), .preview-body :where(li) { margin: .25em 0; }
+.pi-text :where(blockquote), .preview-body :where(blockquote) { padding-left: 12px; border-left: 2px solid var(--line); color: var(--ink-soft); }
+.pi-text :where(code), .preview-body :where(code) { padding: 1px 5px; border-radius: var(--radius-xs); background: var(--surface-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+.pi-text :where(pre), .preview-body :where(pre) { overflow: auto; padding: 14px 16px; border-radius: var(--radius-sm); background: var(--surface-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.7; }
+.pi-text :where(pre code), .preview-body :where(pre code) { padding: 0; background: none; }
+.pi-text :where(img), .preview-body :where(img) { display: block; max-width: 100%; height: auto; border-radius: var(--radius-xs); }
+.pi-text :where(hr), .preview-body :where(hr) { margin: 1.6em 0; border: 0; border-top: 1px solid var(--line); }
+.pi-text :where(a), .preview-body :where(a) { color: var(--accent); text-underline-offset: 2px; }
+.md-table-wrap { max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
+.md-table-wrap table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.md-table-wrap :where(th, td) { padding: 7px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.md-table-wrap th { color: var(--ink-soft); font-weight: 650; }
 .run-banner { width: min(calc(100% - 48px), 880px); margin: 6px auto; display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: var(--radius-md); background: var(--surface); box-shadow: var(--shadow-low); }
 .run-banner p { flex: 1; margin: 0; }
 .run-banner strong, .run-banner small { display: block; }
@@ -197,7 +202,6 @@ dialog::backdrop { background: rgba(22, 31, 40, .28); }
 .toast button { min-height: 30px; padding: 0 10px; border: 0; border-radius: var(--radius-pill); background: rgba(255,255,255,.14); color: white; font-size: 11px; font-weight: 650; }
 
 @keyframes breathe { 0%,100% { opacity: .55; transform: scale(.9); } 50% { opacity: 1; transform: scale(1); } }
-@keyframes source-flash { from { box-shadow: inset 3px 0 var(--accent); } to { box-shadow: inset 3px 0 transparent; } }
 @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
 
 @media (hover: hover) {

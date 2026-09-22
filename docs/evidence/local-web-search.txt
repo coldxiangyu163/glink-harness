@@ -37,7 +37,7 @@ duration    102.2s
 ├── web-search.json     宿主渲染（从操作员本机配置复制；权限 600）
 ├── settings.json       模板（声明 packages: ["npm:pi-web-access"]）
 ├── npm/node_modules/   pi 启动时安装的插件包
-├── auth.json           pi 自身写入的运行时状态（空对象）
+├── auth.json           宿主渲染的模型凭据（pi 官方 auth.json 存储，0600）
 └── models-store.json   pi 自身写入的模型目录缓存
 
 未被使用的链路

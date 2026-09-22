@@ -104,14 +104,26 @@ test('the audited run ebf75f590601 replays with replacement semantics (real fixt
   assert.ok(updates[1].payload.output.startsWith(updates[0].payload.output));
   assert.ok(updates[2].payload.output.startsWith(updates[1].payload.output));
 
-  const model = applyEvents(createRunModel({ runId: 'ebf75f590601' }), frames);
-  const tool = model.items.find((item) => item.kind === 'tool');
+  // While the tool runs, each update replaces the card body.
+  let model = createRunModel({ runId: 'ebf75f590601' });
+  model = applyEvents(model, frames.filter((event) => event.type !== 'tool_finished'));
+  let tool = model.items.find((item) => item.kind === 'tool');
   assert.equal(tool.output, updates[2].payload.output, 'the last snapshot is the display');
   assert.equal(tool.output.length, 495);
   const concatenated = updates.map((event) => event.payload.output).join('');
   assert.equal(concatenated.length, 548, 'appending the frames is what the old code did');
   assert.notEqual(tool.output, concatenated);
   assert.equal(tool.output.match(/workspaces\/ebf75f590601/g)?.length, 1, 'the prefix must appear once');
+
+  // The terminal frame repeats that same text as ``result``: the card must
+  // render it once, not once per field.
+  model = applyEvents(model, frames);
+  tool = model.items.find((item) => item.kind === 'tool');
+  assert.equal(tool.result, updates[2].payload.output, 'the terminal result carries the full text');
+  assert.equal(tool.output, '', 'the streamed preview is dropped once the result repeats it');
+  const rendered = tool.output + tool.result;
+  assert.equal(rendered.length, 495);
+  assert.equal(rendered.match(/workspaces\/ebf75f590601/g)?.length, 1);
   assert.equal(tool.status, 'done');
 });
 
@@ -221,6 +233,23 @@ test('tool argument summaries prefer the interesting keys and stay bounded', () 
   assert.ok(summary.length < 400, 'summary must stay short');
   assert.equal(summarizeArgs({}), '');
   assert.equal(summarizeArgs(null), '');
+});
+
+test('the front-end carries no Glink-specific report layer', () => {
+  // The workbench renders the Markdown pi wrote and nothing more: no charts,
+  // citations, fact labels or other product vocabulary in its own sources.
+  const modules = ['api.mjs', 'markdown.mjs', 'run-stream.mjs', 'run-view.mjs', 'ui.mjs', 'workspace.mjs'];
+  const sources = modules
+    .map((name) => readFileSync(new URL(`../../web/modules/${name}`, import.meta.url), 'utf8'))
+    .join('\n')
+    .toLowerCase();
+  for (const forbidden of ['citation', 'qualifier', 'renderchart','report-chart', 'mermaid', 'flowchart', 'artifact', 'factlabel']) {
+    assert.ok(!sources.includes(forbidden), `front-end must not carry ${forbidden}`);
+  }
+  // A chart-like fence stays plain code — the renderer has no diagram path.
+  const html = renderMarkdown('```chart\n{"labels":["a"]}\n```');
+  assert.match(html, /<pre><code class="language-chart">/);
+  assert.ok(!html.includes('report-chart'));
 });
 
 test('the shipped front-end never parses terminal text', () => {

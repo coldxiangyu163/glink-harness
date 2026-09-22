@@ -50,7 +50,7 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
 - `PI_CODING_AGENT_DIR` 覆盖 pi 配置目录（默认 `~/.pi/agent`）；指向项目 `agent/` 后，用户个人配置（packages、models、extensions）不再加载，这正是本仓库需要的隔离语义。
 - `PI_CODING_AGENT_SESSION_DIR` 或 `--session-dir` 覆盖会话目录；宿主把它指向数据根，run 与 session 文件一一对应。
 - `--provider <id> --model <含斜杠的完整 id>` 可正常工作（实测 `--provider frontier --model openai/gpt-5.6-sol`，`get_state` 返回该 id）。
-- **pi 会往配置目录写运行时状态**：实测出现过 `auth.json` 与 `models-store.json`（当日为空对象，无凭据）。因此仓库里的 `agent/` **只能作为模板**，不能直接当成 `PI_CODING_AGENT_DIR` 使用；运行期目录必须由宿主渲染到数据根下（`<data_root>/pi-agent`），`.gitignore` 保留第二道防线。
+- **pi 会往配置目录写运行时状态**：实测 pi 会在其中生成 `models-store.json`、`npm/`（插件安装目录）等；`auth.json` 则是 pi 官方凭据存储，本仓库由**宿主在运行期渲染**（模型 key，0600），不是 pi 写出的空对象。因此仓库里的 `agent/` **只能作为模板**，不能直接当成 `PI_CODING_AGENT_DIR` 使用；运行期目录必须由宿主渲染到数据根下（`<data_root>/pi-agent`），`.gitignore` 保留第二道防线。
 
 ## 4. RPC 协议（`pi --mode rpc`）
 
@@ -72,9 +72,9 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
 
 | 事实 | Docker | E2B |
 |---|---|---|
-| `PI_CODING_AGENT_DIR` | `/config`（宿主运行期目录的只读 bind mount） | `/home/user/config`（上传） |
+| `PI_CODING_AGENT_DIR` | `/config`（宿主运行期目录的 bind mount，读写：pi 要往 `npm/` 装插件、写运行时状态） | `/home/user/config`（上传） |
 | 会话目录 | `/sessions`（bind mount；pi 上报容器路径，宿主词法映射回 `<data>/sessions/…`） | `/home/user/sessions`（随沙箱销毁） |
-| 工作区 | `/workspace` | `/home/user` |
+| 工作区 | `/workspace` | `/home/user/workspace`（`e2b_env.SANDBOX_WORKSPACE`） |
 | 模型凭据 | `auth.json` 在挂载内（0600，仓库外） | 上传的 `auth.json` |
 | 进程环境含 key | 否（`env \| grep -c OPENAI_API_KEY` = 0） | 否（同为 0） |
 
@@ -105,3 +105,11 @@ seq=88  len=495  同前 53 字符 + '\nPI vars:\nPI_CODING_AGENT_DIR=…'
 
 因此宿主投影层原样传递累计快照，前端**每次替换**显示；若按增量拼接会得到 548 字符的重复前缀。
 回归：`tests/web/run-stream.test.mjs` 的 `cumulative tool snapshots replace the display instead of duplicating prefixes`。
+
+**终帧与最后一次更新帧是同一段文本**：同一 run 的 `seq=89 tool_finished.result` 与
+`seq=88 tool_updated.output` 逐字相同（均 495 字符）。终帧去重同样属于前端责任：
+`run-stream.mjs::finishTool` 在 `result === item.output` 时清空 output，卡片只渲染
+result 一次；两者不同的工具仍保留两份内容。校验：
+`tests/web/run-stream.test.mjs` 的 `the audited run ebf75f590601 replays with replacement semantics (real fixture)`
+断言 `output + result` 只渲染 495 字符且前缀仅出现一次；浏览器回归以
+`toolsRenderingTextTwice === 0` 卡住同类回退（证据 `docs/evidence/browser-run.json`）。

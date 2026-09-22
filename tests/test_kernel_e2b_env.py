@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -229,6 +230,127 @@ def test_nonzero_exit_fails_the_run_even_with_a_report(tmp_path: Path) -> None:
     assert final.error is not None and "exit" in final.error.lower()
     kinds = [json.loads(line)["type"] for line in storage.events_path(record.run_id).read_text(encoding="utf-8").splitlines() if line.strip()]
     assert kinds[-1] == "run_failed"
+
+
+# -- cancellation -------------------------------------------------------------
+#
+# The completion audit flagged this path: stopping an E2B run closes the
+# sandbox, so the in-flight command either raises or returns normally. Both
+# must end as ``cancelled`` — never ``failed`` and never ``finished``.
+
+
+def _event_kinds(storage: RunStore, run_id: str) -> list[str]:
+    path = storage.events_path(run_id)
+    return [
+        json.loads(line)["type"]
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+class BlockingHandle:
+    """Handle whose command blocks until the sandbox is killed."""
+
+    def __init__(self, sandbox: "BlockingSandbox") -> None:
+        self._sandbox = sandbox
+
+    def wait(self) -> _Result:
+        self._sandbox.command_started.set()
+        if not self._sandbox.released.wait(timeout=10):
+            raise AssertionError("sandbox was never killed")
+        if self._sandbox.raise_on_release:
+            # The E2B SDK surfaces a killed sandbox as an error on the handle.
+            raise SandboxError("sandbox was killed")
+        return _Result(self._sandbox.exit_code)
+
+
+class BlockingCommands(FakeCommands):
+    def run(
+        self,
+        cmd: str,
+        *,
+        background: bool = False,
+        envs: dict[str, str] | None = None,
+        **_: Any,
+    ) -> BlockingHandle:
+        self._sandbox.command = cmd
+        self._sandbox.command_envs = envs or {}
+        return BlockingHandle(self._sandbox)
+
+
+class BlockingSandbox(FakeSandbox):
+    """FakeSandbox whose command blocks until ``kill()`` — a real E2B stop."""
+
+    def __init__(self, *, raise_on_release: bool = True, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.command_started = threading.Event()
+        self.released = threading.Event()
+        self.raise_on_release = raise_on_release
+        self.commands = BlockingCommands(self)
+
+    def kill(self) -> None:
+        super().kill()
+        self.released.set()
+
+
+@pytest.mark.parametrize("raise_on_release", [True, False])
+def test_stop_during_a_sandbox_run_is_cancelled_not_failed(
+    tmp_path: Path, raise_on_release: bool
+) -> None:
+    config = make_config(tmp_path)
+    sandbox = BlockingSandbox(raise_on_release=raise_on_release, events=_FAKE_EVENTS)
+    storage = RunStore(config.data_root / "runs")
+    manager = RunManager(
+        config, EventBus(), store=storage, sandbox_factory=lambda **_: sandbox
+    )
+    record = manager.start("取消正在执行的沙箱 run")
+    assert sandbox.command_started.wait(timeout=10), "the sandbox command never started"
+    assert manager.stop(record.run_id) is True
+
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None, "the run never reached a terminal state"
+    assert final.status == "cancelled", final.error
+    assert final.stop_reason == "abort"
+    kinds = _event_kinds(storage, record.run_id)
+    assert kinds[-1] == "run_cancelled"
+    assert "run_failed" not in kinds and "run_finished" not in kinds
+    assert sandbox.killed is True, "a cancelled run must still destroy its sandbox"
+
+
+def test_stop_that_lands_before_the_sandbox_starts_is_still_cancelled(
+    tmp_path: Path,
+) -> None:
+    """A stop during ``Sandbox.create`` returns the sandbox and returns normally.
+
+    ``stop()`` only closes the client once it has a sandbox; if the stop lands
+    while the factory is still running, ``_run_in_sandbox`` must notice the
+    cancellation after ``start()`` and end as cancelled without prompting.
+    """
+    config = make_config(tmp_path)
+    sandbox = FakeSandbox(events=_FAKE_EVENTS)
+    created = threading.Event()
+    release = threading.Event()
+
+    def factory(**_: Any) -> FakeSandbox:
+        created.set()
+        assert release.wait(timeout=10), "the factory was never released"
+        return sandbox
+
+    storage = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store=storage, sandbox_factory=factory)
+    record = manager.start("沙箱启动前就取消")
+    assert created.wait(timeout=10), "the sandbox factory was never called"
+    assert manager.stop(record.run_id) is True
+    release.set()
+
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None, "the run never reached a terminal state"
+    assert final.status == "cancelled", final.error
+    assert final.stop_reason == "abort"
+    kinds = _event_kinds(storage, record.run_id)
+    assert kinds[-1] == "run_cancelled"
+    assert sandbox.command == "", "a cancelled run must not run the prompt"
+    assert sandbox.killed is True, "a cancelled run must still destroy its sandbox"
 
 
 # -- stream parsing -----------------------------------------------------------

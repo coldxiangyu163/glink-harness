@@ -26,9 +26,9 @@
 
 | 命令 | 结果 |
 |---|---|
-| `scripts/run-tests.sh` | **97 项通过**，exit 0（`test_host_app` 21 · `test_kernel_agent_env` 11 · `test_kernel_docker_env` 7 · `test_kernel_e2b_env` 7 · `test_kernel_rpc` 11 · `test_redaction` 17 · `test_runner` 8 · `test_runs_api` 9 · `test_store` 6） |
-| `node --test tests/web/*.test.mjs` | 14 项通过，exit 0 |
-| `node tests/browser/run-smoke.mjs --base-url http://127.0.0.1:7861` | 通过（真实 run；思考折叠 / 工具卡片 / 报告预览 + 截图），exit 0 |
+| `scripts/run-tests.sh` | **100 项通过**，exit 0（`test_host_app` 21 · `test_kernel_agent_env` 11 · `test_kernel_docker_env` 7 · `test_kernel_e2b_env` 10 · `test_kernel_rpc` 11 · `test_redaction` 17 · `test_runner` 8 · `test_runs_api` 9 · `test_store` 6） |
+| `node --test tests/web/*.test.mjs` | 15 项通过，exit 0 |
+| `node tests/browser/run-smoke.mjs --base-url http://127.0.0.1:7861` | 通过（真实 run；思考折叠 / 工具卡片 / 报告预览 + 截图；新增 `toolsRenderingTextTwice=0` 断言），exit 0 |
 
 ### 三种执行面的真实 run（完整命令与 prompt）
 
@@ -222,3 +222,14 @@ inproc `a6f67fde8e51` / docker `03be2909302e` / e2b `db6a9e83c0b7` 均为 **0**�
 | `docs/pi-integration-notes.md` §6 仍列 Docker/E2B 注入为「待补测」 | 改写为实测结论表（`PI_CODING_AGENT_DIR` / 会话目录 / 工作区 / 凭据载体 / `env` 计数），并新增 §7 工具流语义（含 `docs/rpc.md` 原文与 `ebf75f590601` 帧长） | 与 `docs/evidence/docker-run.txt`、`e2b-run.txt`、`credential-boundary.txt` 交叉核对一致 |
 
 回归：Python 97 项 + Node 14 项全绿；`scripts/check-no-secrets.py` 真实命中 0。
+
+### 第七次审计返工（前端报告层剥离 / 工具终帧去重 / E2B 取消 / 文档订正）
+
+| 审计缺口 | 返工 | 复验 |
+|---|---|---|
+| 前端仍是 Glink 报告渲染层：`markdown.mjs` 852 行与 FrontierAgent 逐字相同（chart/flow、artifact、引用、事实标签）+ 相关 CSS | 重写为项目自有最小渲染器（标题/段落/强调/链接/图片/代码围栏/列表/引用/分隔线/管道表格）；删除 `i18n.mjs`；`ui.mjs` 130→36 行；`styles.css` 957→454 行（移除 `.citation`/`.qualifier-badge`/`.report-chart*`/`.report-source-entry`/`source-flash` 等）；```chart 围栏按普通代码块渲染 | `docs/evidence/frontend-boundary.txt`：行数与 FrontierAgent 比对（三文件均非逐字相同）、禁止 token 扫描 0 命中；新增 Node 回归 `the front-end carries no Glink-specific report layer`；浏览器回归 `toolsRenderingTextTwice=0` |
+| 工具终帧重复渲染：真实 fixture 中 `tool_updated.output` 与 `tool_finished.result` 同为 495 字符，卡片同时渲染 output 与 result | `run-stream.mjs::finishTool` 在 `result === item.output` 时清空 output（终帧权威）；两者不同时仍保留两份；fixture 测试断言 `output=''`、渲染总长 495、前缀仅出现一次 | `docs/evidence/tool-stream-semantics.txt`（新增终帧段落）；Node 回归 `the audited run ebf75f590601 replays with replacement semantics (real fixture)`；浏览器 DOM 断言 `toolsRenderingTextTwice=0`（证据 `browser-run.json`） |
+| E2B 取消语义错误：分支从不检查 `cancel_requested`；停止时关沙箱异常落 `run_failed`；正常返回仍 `run_finished` | `runner.py`：`_run_in_sandbox` 4 个检查点（创建前/start 后/upload 后/run_prompt 后）；`_execute` e2b 分支返回后复核 `cancel_requested`；`except` 先判取消并记为 `run cancelled run=… (…)`，不落 failed | 新增 3 个 E2B 取消测试（Python 现 100 项，含参数化异常/正常返回两条路径 + 沙箱创建期间停止）；真实 E2B 取消演练 run `c62e014c772d`：stop → `status=cancelled`、末尾 `run_cancelled`，宿主日志 `run cancelled run=c62e014c772d (TimeoutException)`，证据 `docs/evidence/e2b-cancel.txt` |
+| 文档事实冲突：`pi-integration-notes.md` 称 Docker `/config` 只读（代码无 `:ro`）；称 E2B 工作区 `/home/user`；`local-web-search.txt` 称 `auth.json` 为 pi 写入空对象 | 逐一订正：`/config` 为读写 bind mount（pi 需向其中 `npm/` 装插件）；E2B 工作区 `/home/user/workspace`；`auth.json` 为宿主运行期渲染的模型凭据（0600），`models-store.json`/`npm/` 才是 pi 运行时状态；§7 同步补充终帧去重语义 | 全仓库 grep `空对象`/`只读 bind` 无残留；与 `e2b_env.SANDBOX_WORKSPACE`、`docker_env.py` 挂载参数、`agent_env.prepare_agent_dir` 交叉核对一致 |
+
+回归：Python 100 项 + Node 15 项全绿；`scripts/check-no-secrets.py` 真实命中 0。

@@ -1,6 +1,6 @@
 工具流语义证据 / tool stream semantics evidence
 ==============================================
-日期: 2026-09-22（第六次审计返工）
+日期: 2026-09-22（第七次审计返工）
 审计复现对象: run ebf75f590601 的 bash 工具（toolCallId call_yBEpmnrOIV8QWEFCGpMloLdd）
 
 pi 文档依据（宿主 pi 0.86.1，docs/rpc.md:1055）
@@ -11,31 +11,47 @@ pi 文档依据（宿主 pi 0.86.1，docs/rpc.md:1055）
 
 真实帧（~/.pi-glink/runs/ebf75f590601/events.jsonl，原样摘录）
 --------------------------------------------------------------
-  seq=86  tool=bash  len=0
+  seq=86  tool_updated   output  len=0
       ''
-  seq=87  tool=bash  len=53
+  seq=87  tool_updated   output  len=53
       '/Users/coldxiangyu/.pi-glink/workspaces/ebf75f590601\n'
-  seq=88  tool=bash  len=495
+  seq=88  tool_updated   output  len=495
       '/Users/coldxiangyu/.pi-glink/workspaces/ebf75f590601\n\nPI vars:\nPI_CODING_AGENT_DIR=/Users/coldxiangy…'
+  seq=89  tool_finished  result  len=495   ← 与 seq=88 逐字相同
 
-前缀包含核验
-------------
+前缀包含核验（更新帧之间）
+--------------------------
   0 → 53      前缀包含: True
   53 → 495    前缀包含: True
   若按增量拼接: 548 字符（前 53 字符重复展示一次）
   替换语义:     495 字符（每帧整体替换显示）
 
+终帧与最后一次更新帧是同一段文本（第七次审计返工点）
+----------------------------------------------------
+  seq=88 的 output 与 seq=89 的 result 逐字相同（都是 495 字符）。
+  旧实现：updateTool 已改为替换语义，但 finishTool 仍同时保留
+  output=495 与 result=495，run-view.mjs 先渲染 `.pi-tool-output`
+  再渲染 `.pi-tool-result` → 同一个工具卡片里同一段文本显示两遍
+  （审计在真实截图中复现）。
+  修复：finishTool 在 `result === item.output` 时清空 output（终帧权威）；
+  result 与流式预览不同的工具仍两者都保留，不丢信息。
+
 判定
 ----
-`tool_execution_update.partialResult` 是「截至当前的累计快照」，不是增量。
-宿主投影层原样传递该字段（kernel/projection.py::_tool_execution_update），
-因此**替换显示的责任在前端**。
+* `tool_execution_update.partialResult` 是「截至当前的累计快照」，不是增量：
+  宿主投影层原样传递该字段（kernel/projection.py::_tool_execution_update），
+  因此**替换显示的责任在前端**。
+* `tool_execution_end.result` 对 bash 类工具会重复同一段文本：前端必须以终帧
+  为准去重，不能把 output 与 result 当作两份内容叠加渲染。
 
 修复与回归
 ----------
 * web/modules/run-stream.mjs::updateTool —— 由 `item.output + payload.output`
   改为 `typeof payload.output === 'string' ? payload.output : item.output`；
   模块头与函数内注释均写明累计快照语义与出处。
+* web/modules/run-stream.mjs::finishTool —— 终帧去重：
+  `output: result !== '' && result === item.output ? '' : item.output`；
+  run-view.mjs 对空 output 隐藏 `.pi-tool-output`，卡片只显示 result 一次。
 * web/modules/run-view.mjs —— 工具状态文案集中在 `TOOL_STATE_LABELS`
   （执行中/完成/失败/已取消/已中断）；`styles.css` 为 interrupted/cancelled 补配色。
 * web/modules/run-stream.mjs::finishRun —— 失败/取消时仍未结束的工具不再标
@@ -44,21 +60,35 @@ pi 文档依据（宿主 pi 0.86.1，docs/rpc.md:1055）
 * Node 回归（tests/web/run-stream.test.mjs，node --test tests/web/*.test.mjs）：
     ✔ cumulative tool snapshots replace the display instead of duplicating prefixes
       （复刻本 run 的 0 → 53 → 495 形状，断言等价于替换、短于拼接、前缀不重复）
+    ✔ the audited run ebf75f590601 replays with replacement semantics (real fixture)
+      （逐字复刻 seq 85–89：流式期间 output=495；终帧后 output=''、result=495，
+        `output + result` 只渲染一次 495 字符、前缀只出现一次）
     ✔ a failed or cancelled run never leaves a running tool looking done
       （run_failed→interrupted、run_cancelled→cancelled；已终态工具不受影响）
-    ✔ tool cards track streaming output and final status（改为累计快照形状）
-  结果: 14 项通过 / 0 失败（Python 全套 97 项另行复验）。
+  结果: Node 15 项通过 / 0 失败（Python 全套 100 项另行复验）。
+
+浏览器级复验（真实 UI）
+----------------------
+  node tests/browser/run-smoke.mjs --base-url http://127.0.0.1:7861
+  DOM 统计：toolsWithText=4、toolsRenderingTextTwice=0（当前断言要求为 0，
+  即没有任何卡片把同一段文本在 output 与 result 中各渲染一次）；
+  证据 docs/evidence/browser-run.json / browser-run.png。
 
 复现命令
 --------
-  # 1) 查看真实帧（长度与前缀包含）
+  # 1) 查看真实帧（更新帧长度 + 终帧 result 截断对比）
   .venv/bin/python - <<'PY'
   import json
   for line in open("/Users/coldxiangyu/.pi-glink/runs/ebf75f590601/events.jsonl"):
       ev = json.loads(line)
       if ev.get("type") == "tool_updated":
-          print(ev["seq"], len(ev["payload"]["output"]))
+          print(ev["seq"], "updated", len(ev["payload"]["output"]))
+      elif ev.get("type") == "tool_finished":
+          print(ev["seq"], "finished", len(ev["payload"]["result"]))
   PY
 
   # 2) 前端事件模型回归
   node --test tests/web/*.test.mjs
+
+  # 3) 浏览器回归（宿主需在运行）
+  node tests/browser/run-smoke.mjs --base-url http://127.0.0.1:7861
