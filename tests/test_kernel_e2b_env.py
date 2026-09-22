@@ -134,7 +134,7 @@ def make_config(tmp_path: Path, **overrides: str):
 # -- credential plumbing ------------------------------------------------------
 
 
-def test_api_key_from_env_reaches_sandbox_create(tmp_path: Path) -> None:
+def test_e2b_key_reaches_create_and_model_key_stays_out_of_env(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     runtime = agent_env.prepare_agent_dir(config)
     captured: dict[str, Any] = {}
