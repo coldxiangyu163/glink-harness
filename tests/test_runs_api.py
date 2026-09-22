@@ -182,6 +182,17 @@ def test_second_run_while_busy_is_a_conflict(server: PiGlinkServer) -> None:
     assert payload["error"] == "run_busy"
     assert payload["activeRunId"] == run_id
 
+    # Wait until the kernel is actually attached before cancelling: the point of
+    # this test is the 409 and the accepted stop, not a race with process start.
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        _status, _headers, raw = request(server, f"/api/runs/{run_id}")
+        if json.loads(raw)["run"]["eventCount"] >= 2:  # run_started + session_ready
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("run never reported its session as ready")
+
     status, _headers, raw = request(server, f"/api/runs/{run_id}/stop", method="POST")
     assert status == 200
     assert json.loads(raw)["requested"] is True

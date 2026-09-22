@@ -1,0 +1,21 @@
+{
+  "baseUrl": "http://127.0.0.1:7861",
+  "prompt": "先在本工作区创建 notes.md，写入三行关于 pi-glink 的事实，然后基于它写出 report.md。",
+  "status": "已完成 · 56.391s",
+  "counts": {
+    "thinking": 5,
+    "thinkingOpen": 0,
+    "tools": 14,
+    "toolsDone": 14,
+    "toolsWithOutput": 6,
+    "texts": 1,
+    "textChars": 141,
+    "turns": 11,
+    "stages": 3,
+    "reportButton": true,
+    "bannerHidden": true,
+    "runListEntries": 3
+  },
+  "previewTitle": "pi-glink 简报",
+  "consoleErrors": []
+}

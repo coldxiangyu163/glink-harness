@@ -135,7 +135,7 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             records = self.server.store.list(limit=100)
             self._send_json(
                 HTTPStatus.OK,
-                {"runs": [_run_view(record) for record in records]},
+                {"runs": [self._run_view_live(record) for record in records]},
                 head_only=head_only,
             )
             return
@@ -221,12 +221,22 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             )
             return
         self._send_json(
-            HTTPStatus.CREATED, {"run": _run_view(record)}, head_only=False
+            HTTPStatus.CREATED, {"run": self._run_view_live(record)}, head_only=False
         )
 
     def _stop_run(self, run_id: str) -> None:
         requested = self.server.manager.stop(run_id)
         self._send_json(HTTPStatus.OK, {"requested": requested}, head_only=False)
+
+    def _run_view_live(self, record: RunRecord) -> dict[str, Any]:
+        """Run view with the live event count while the run is still open.
+
+        ``meta.json`` is only rewritten at state transitions, so the persisted
+        count is stale during a run; the bus knows the real number and the
+        browser uses it to show progress.
+        """
+        live = self.server.bus.last_seq(record.run_id)
+        return _run_view(record, live_event_count=max(live, record.event_count))
 
     def _send_run(self, run_id: str, *, head_only: bool) -> None:
         record = self.server.store.get(run_id)
@@ -237,7 +247,9 @@ class HostRequestHandler(BaseHTTPRequestHandler):
                 head_only=head_only,
             )
             return
-        self._send_json(HTTPStatus.OK, {"run": _run_view(record)}, head_only=head_only)
+        self._send_json(
+            HTTPStatus.OK, {"run": self._run_view_live(record)}, head_only=head_only
+        )
 
     def _send_report(self, run_id: str, *, head_only: bool) -> None:
         record = self.server.store.get(run_id)
@@ -376,7 +388,7 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         logger.warning("%s - %s", self.address_string(), format % args)
 
 
-def _run_view(record: RunRecord) -> dict[str, Any]:
+def _run_view(record: RunRecord, *, live_event_count: int | None = None) -> dict[str, Any]:
     """Public projection of a run: no host paths, no credentials."""
     duration = None
     if record.finished_at is not None:
@@ -392,7 +404,7 @@ def _run_view(record: RunRecord) -> dict[str, Any]:
         "hasReport": bool(record.report_path),
         "stopReason": record.stop_reason,
         "error": record.error,
-        "eventCount": record.event_count,
+        "eventCount": record.event_count if live_event_count is None else live_event_count,
         "usage": record.usage,
     }
 

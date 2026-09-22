@@ -124,9 +124,10 @@ class RunManager:
     def stop(self, run_id: str) -> bool:
         """Request cancellation; returns False only when nothing is running.
 
-        A cancel that arrives while pi is still starting is honoured: the flag
-        is set immediately and the executor checks it before prompting, so an
-        operator does not have to race the kernel to stop their run.
+        True means "the cancellation is accepted", not "pi acknowledged it".
+        The flag is what ends the run (the executor checks it before prompting
+        and after settling); the ``abort`` command only shortens the wait, so a
+        failed abort is logged and does not turn the request into a rejection.
         """
         with self._lock:
             execution = self._executions.get(run_id)
@@ -138,9 +139,13 @@ class RunManager:
             return True
         try:
             client.request({"type": "abort"}, timeout=10.0)
-        except (PiRpcError, OSError):
-            logger.warning("abort request failed run=%s", run_id)
-            return False
+        except (PiRpcError, OSError) as exc:
+            logger.warning(
+                "abort request failed run=%s: %s: %s (cancellation still accepted)",
+                run_id,
+                type(exc).__name__,
+                exc,
+            )
         return True
 
     def wait(self, run_id: str, timeout: float = 60.0) -> RunRecord | None:

@@ -955,3 +955,195 @@ dialog::backdrop { background: rgba(22, 31, 40, .28); }
 .locale-switch button.active { border-color: var(--accent); background: var(--accent-quiet); color: var(--accent); }
 .popover .locale-switch { margin: 6px 0; }
 .popover .locale-switch button { width: auto; text-align: center; }
+
+/* ────────────────────────────────────────────────────────────────
+   pi-glink 运行事件区（事件语义按 pi 重写后的专用样式）
+   外壳、按钮、字体与配色沿用现有工作台；这里只定义 pi 事件项。
+   ──────────────────────────────────────────────────────────────── */
+
+.composer {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  margin: 0 auto;
+  max-width: 920px;
+  padding: 12px 20px 16px;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+}
+
+.pi-run {
+  display: block;
+  padding: 4px 0 24px;
+}
+
+.pi-run-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0 12px;
+  background: var(--canvas);
+  border-bottom: 1px solid var(--line);
+}
+
+.pi-run-status {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .02em;
+}
+
+.pi-run-status[data-status="running"] { color: var(--accent); }
+.pi-run-status[data-status="finished"] { color: var(--success); }
+.pi-run-status[data-status="failed"] { color: var(--danger); }
+.pi-run-status[data-status="cancelled"] { color: var(--warning); }
+
+.pi-run-meta {
+  margin: 0;
+  flex: 1 1 240px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.pi-report-button { flex: 0 0 auto; }
+
+.pi-run-timeline {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+}
+
+.pi-turn {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+}
+
+.pi-stage {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pi-notice {
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.pi-notice[data-level="warning"] { background: color-mix(in oklab, var(--warning) 12%, var(--surface)); }
+.pi-notice[data-level="error"] { background: color-mix(in oklab, var(--danger) 12%, var(--surface)); }
+
+.pi-thinking {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+}
+
+.pi-thinking > summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  color: var(--muted);
+  font-size: 13px;
+  user-select: none;
+}
+
+.pi-thinking > summary::marker { color: var(--muted); }
+
+.pi-thinking-body {
+  max-height: 340px;
+  overflow: auto;
+  padding: 0 12px 12px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.pi-tool {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.pi-tool-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.pi-tool-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+}
+
+.pi-tool-state { color: var(--muted); }
+.pi-tool[data-status="running"] .pi-tool-state { color: var(--accent); }
+.pi-tool[data-status="error"] .pi-tool-state { color: var(--danger); }
+
+.pi-tool-args {
+  padding: 0 12px 8px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.pi-tool-output {
+  margin: 0;
+  padding: 8px 12px;
+  max-height: 240px;
+  overflow: auto;
+  background: var(--surface-muted);
+  color: var(--ink-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.pi-tool-result {
+  padding: 8px 12px;
+  max-height: 240px;
+  overflow: auto;
+  color: var(--ink-soft);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.pi-text {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--ink);
+}
+
+.pi-text[data-mode="stream"] { white-space: pre-wrap; }
+
+#run-question {
+  margin: 4px 0 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-quiet);
+  color: var(--ink);
+  font-size: 14px;
+  white-space: pre-wrap;
+}
+
+#run-list .nav-chat-row em[data-status="running"] { color: var(--accent); }
+#run-list .nav-chat-row em[data-status="finished"] { color: var(--success); }
+#run-list .nav-chat-row em[data-status="failed"] { color: var(--danger); }
+#run-list .nav-chat-row em[data-status="cancelled"] { color: var(--warning); }
+
+#host-status[data-ready="false"] { color: var(--danger); }
