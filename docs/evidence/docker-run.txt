@@ -1,0 +1,54 @@
+Docker 执行面证据 / docker execution face evidence
+==================================================
+日期: 2026-09-22
+宿主: macOS (arm64) + Colima 0.10.1 / Docker 29.2.1
+执行面: docker（LOCAL_WEB_EXECUTOR=docker）
+
+镜像
+----
+名称/标签   pi-glink-worker:latest
+体积        1.09 GB
+基础镜像    node:24-bookworm-slim
+镜像内 pi   @earendil-works/pi-coding-agent@0.86.1（容器内 `pi --version` 实测输出 0.86.1）
+
+构建命令（本机网络环境，基础源覆盖为可选项；仓库默认用官方源）:
+  docker build -t pi-glink-worker:latest -f docker/Dockerfile.worker \
+    --build-arg DEBIAN_MIRROR=mirrors.aliyun.com \
+    --build-arg NPM_REGISTRY=https://registry.npmmirror.com .
+
+真机首次构建耗时约 5 分钟（apt + npm 安装 pi）。默认官方源在本机网络下会卡在
+`Ign: deb.debian.org ... InRelease`，因此 Dockerfile 暴露了 DEBIAN_MIRROR / NPM_REGISTRY
+两个 build arg；仓库默认值仍是官方源。
+
+容器内真实 run
+--------------
+宿主          http://127.0.0.1:7862 （LOCAL_WEB_EXECUTOR=docker）
+runId         e23d3ae9b640
+status        finished
+duration      11.5 s
+events        136
+session       01a0c727-… （pi 会话文件写在挂载的 /sessions，宿主可查）
+workspace     ~/.pi-glink/workspaces/e23d3ae9b640  （容器内 /workspace，挂载）
+产出          notes.md · report.md（645 bytes，宿主可直接下载）
+
+报告内出现的路径为 /workspace/notes.md 与 /workspace/report.md —— 即容器内路径，
+证明实际执行发生在容器里，而不是宿主进程内。
+
+事件流帧类型（与 inproc 面一致）
+--------------------------------
+assistant_delta · assistant_message · run_finished · run_stage · run_started ·
+session_ready · thinking_delta · tool_finished · tool_started · turn_finished ·
+turn_started · usage_reported
+
+边界证据
+--------
+* 镜像自包含：`docker run --rm pi-glink-worker:latest pi --version` 在无任何挂载的
+  情况下输出 0.86.1，说明容器不依赖宿主安装的 Node / pi。
+* 宿主只提供数据通道：工作区挂到 /workspace、运行期配置挂到 /config、会话挂到
+  /sessions；凭据用 `-e OPENAI_API_KEY` 按变量名转发（值不出现在 argv）。
+* 停止语义：run 结束或取消后宿主执行 `docker rm -f <container>`（--rm 已覆盖正常路径）。
+
+回归
+----
+tests/test_kernel_docker_env.py（6 项）：挂载边界、凭据不落 argv、daemon 缺失时明确失败、
+强制清理命令形状、运行期配置文件存在性。

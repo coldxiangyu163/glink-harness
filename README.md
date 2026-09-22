@@ -19,6 +19,18 @@
 | 容器 | `docker` | pi 与工作区都在一次性容器内，宿主只做编排与事件投影 |
 | 云沙箱 | `e2b` | pi 与工作区都在 E2B 沙箱内，模板与凭据语义与 FrontierAgent 一致 |
 
+### Docker 执行面
+
+```bash
+docker build -t pi-glink-worker:latest -f docker/Dockerfile.worker .   # 首次
+LOCAL_WEB_EXECUTOR=docker scripts/run-local-web.sh                     # 用容器跑 pi
+```
+
+镜像自包含（node:24-slim + 固定版本 pi）；宿主只挂载工作区（`/workspace`）、
+运行期配置（`/config`）与会话目录（`/sessions`），凭据按变量名转发。
+网络受限环境可用 `--build-arg DEBIAN_MIRROR=mirrors.aliyun.com --build-arg NPM_REGISTRY=https://registry.npmmirror.com`。
+证据：[docs/evidence/docker-run.txt](docs/evidence/docker-run.txt)。
+
 执行面由 `LOCAL_WEB_EXECUTOR` 选择；三者消费同一份输入契约，事件流对外表现一致。
 
 ## 快速启动（本机）

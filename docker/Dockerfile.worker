@@ -8,14 +8,25 @@
 #
 # 构建：
 #   docker build -t pi-glink-worker:latest -f docker/Dockerfile.worker .
+#
+# 网络受限环境（例如中国大陆）可覆盖基础源，仓库默认仍用官方源：
+#   docker build -t pi-glink-worker:latest -f docker/Dockerfile.worker \
+#     --build-arg DEBIAN_MIRROR=mirrors.aliyun.com \
+#     --build-arg NPM_REGISTRY=https://registry.npmmirror.com .
 FROM node:24-bookworm-slim
 
 ARG PI_VERSION=0.86.1
+ARG DEBIAN_MIRROR=deb.debian.org
+ARG NPM_REGISTRY=https://registry.npmjs.org
 
-RUN apt-get update \
+RUN if [ "${DEBIAN_MIRROR}" != "deb.debian.org" ]; then \
+      sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
        bash ca-certificates curl git ripgrep \
     && rm -rf /var/lib/apt/lists/* \
+    && npm config set registry "${NPM_REGISTRY}" \
     && npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
     && npm cache clean --force
 
