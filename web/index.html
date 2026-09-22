@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="/glink-mark.svg" type="image/svg+xml">
+  <title>Glink</title>
+  <!-- Asset version placeholders are replaced with SHA-256 content hashes at response time. -->
+  <link rel="stylesheet" href="/styles.css?v=auto">
+</head>
+<body>
+  <a class="skip-link" href="#main-content" hidden data-i18n="common:skipToContent">跳到主要内容</a>
+
+  <section id="auth-screen" class="auth-screen" hidden>
+    <div class="auth-brand" aria-hidden="true">
+      <img class="brand-mark brand-mark-large" src="/glink-mark.svg" alt="">
+      <p>GLINK</p>
+      <h1 data-i18n="auth:heroTitle">把复杂问题变成可验证的报告。</h1>
+      <div class="auth-proof">
+        <span>01</span><p data-i18n="auth:proof.one">保留任务、工具与失败重试的完整轨迹</p>
+        <span>02</span><p data-i18n="auth:proof.two">直接调用本机 ReAct 或 Agent Team</p>
+        <span>03</span><p data-i18n="auth:proof.three">资料、报告与分享均由你本地保存</p>
+      </div>
+    </div>
+    <div class="auth-panel">
+      <form id="auth-form" class="auth-form">
+        <p class="eyebrow" data-i18n="auth:eyebrow">本地研究工作台</p>
+        <h2 id="auth-title" data-i18n="auth:title.login">登录</h2>
+        <p id="auth-subtitle" class="muted" data-i18n="auth:subtitle.login">使用本机账户继续你的研究。</p>
+        <label><span data-i18n="auth:username">用户名</span><input id="auth-username" name="username" autocomplete="username" required minlength="2"></label>
+        <label><span data-i18n="auth:password">密码</span><input id="auth-password" name="password" type="password" autocomplete="current-password" required minlength="8"></label>
+        <label id="auth-invite-row" hidden><span data-i18n="auth:invite">邀请码</span><input id="auth-invite" name="invite" autocomplete="off" data-i18n-placeholder="auth:invitePlaceholder" placeholder="向服务提供方索取"></label>
+        <p id="auth-error" class="form-error" role="alert"></p>
+        <button id="auth-submit" class="button primary" type="submit" data-i18n="auth:submit.login">登录</button>
+        <button id="auth-switch" class="button text-button" type="button" data-i18n="auth:switchMode.toRegister">没有账户，创建本地账户</button>
+        <div class="locale-switch" role="group" data-i18n-aria-label="common:locale.label">
+          <button type="button" data-locale="zh-CN" data-i18n="common:locale.zh">中文</button>
+          <button type="button" data-locale="en" data-i18n="common:locale.en">English</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <div id="app-shell" class="app-shell" hidden>
+    <aside id="sidebar" class="sidebar" data-i18n-aria-label="workspace:nav.ariaLabel" aria-label="研究导航">
+      <div class="sidebar-top">
+        <a class="brand" href="#home" data-i18n-aria-label="workspace:nav.brandHome" aria-label="Glink 首页">
+          <img class="brand-mark" src="/glink-mark.svg" alt="">
+          <span><strong>Glink</strong><small data-i18n="common:brand.tagline">可核验研究</small></span>
+        </a>
+        <button id="sidebar-collapse" class="icon-button desktop-only" type="button" data-i18n-aria-label="workspace:nav.collapseSidebar" aria-label="收起侧边栏" aria-expanded="true">⇤</button>
+        <button id="sidebar-close" class="icon-button mobile-only" data-i18n-aria-label="workspace:nav.closeNav" aria-label="关闭导航">×</button>
+      </div>
+      <button id="new-research" class="button new-button"><span>＋</span> <span data-i18n="workspace:nav.newResearch">新建研究</span> <kbd>⌘⇧O</kbd></button>
+      <button id="open-search" class="nav-row search-row"><span class="nav-icon">⌕</span><span data-i18n="workspace:nav.search">搜索研究</span><kbd>⌘K</kbd></button>
+      <nav>
+        <a class="nav-row" href="#library" data-route="library"><span class="nav-icon">▧</span><span data-i18n="workspace:nav.library">资料库</span><em id="library-count">0</em></a>
+        <a id="background-run" class="nav-row background-run" href="#home" hidden><span class="nav-icon">⏳</span><span id="background-run-label" data-i18n="workspace:backgroundRun.running">研究运行中</span><em data-i18n="workspace:backgroundRun.view">查看</em></a>
+      </nav>
+      <section class="nav-section">
+        <div class="nav-section-title"><span class="project-heading"><a id="projects-link" href="#projects"><span data-i18n="workspace:nav.projects">项目</span> <span id="project-count">0</span></a><button id="projects-toggle" type="button" aria-expanded="true" aria-controls="project-nav" data-i18n-aria-label="workspace:nav.collapseProjects" aria-label="折叠项目列表">⌃</button></span><button id="project-add" data-i18n-aria-label="workspace:nav.newProject" aria-label="新建项目">＋</button></div>
+        <div id="project-nav" class="nav-list"></div>
+      </section>
+      <section class="nav-section grow">
+        <div class="nav-section-title"><span><span data-i18n="workspace:nav.active">进行中</span> <span id="active-count">0</span></span></div>
+        <div id="chat-nav" class="nav-list"></div>
+      </section>
+      <a class="nav-row" href="#archive" data-route="archive"><span class="nav-icon">⌑</span><span data-i18n="workspace:nav.archive">已归档</span><em id="archive-count">0</em></a>
+      <div class="sidebar-foot">
+        <button id="user-menu" class="user-row"><span id="user-avatar">U</span><span><strong id="user-name"></strong><small id="model-name"></small></span><i>•••</i></button>
+        <div id="user-popover" class="popover" hidden>
+          <button id="settings-button" data-i18n="workspace:nav.settings">运行配置</button>
+          <div class="locale-switch" role="group" data-i18n-aria-label="common:locale.label">
+            <button type="button" data-locale="zh-CN" data-i18n="common:locale.zh">中文</button>
+            <button type="button" data-locale="en" data-i18n="common:locale.en">English</button>
+          </div>
+          <button id="logout-button" data-i18n="workspace:nav.logout">退出登录</button>
+        </div>
+      </div>
+    </aside>
+
+    <div id="sidebar-scrim" class="scrim" hidden></div>
+
+    <main id="main-content" class="workspace" tabindex="-1">
+      <header class="topbar">
+        <button id="sidebar-open" class="icon-button mobile-only" data-i18n-aria-label="workspace:nav.openNav" aria-label="打开导航">☰</button>
+        <div class="topbar-title"><span id="page-kicker"></span><h1 id="page-title"></h1></div>
+        <div class="topbar-actions">
+          <button id="sources-button" class="topbar-icon-button source-count-badge" aria-label="" data-tip="" hidden><span id="source-count" class="topbar-source-count">0</span></button>
+          <button id="share-button" class="topbar-icon-button" data-i18n-aria-label="workspace:topbar.share" aria-label="分享" data-i18n-tip="workspace:topbar.share" data-tip="分享" hidden></button>
+        </div>
+      </header>
+
+      <section id="home-view" class="home-view view">
+        <div class="home-intro">
+          <p class="eyebrow" data-i18n="workspace:home.eyebrow">研究工作台</p>
+          <h2><span data-i18n="workspace:home.titleLead">把复杂问题，变成</span><span class="keep" data-i18n="workspace:home.titleHighlight">可核验</span><span data-i18n="workspace:home.titleRest">的决策依据。</span></h2>
+          <p data-i18n="workspace:home.subtitle">选择专业研究场景，Glink 会组织资料、证据与领域角色，交付可追溯的完整报告。</p>
+        </div>
+        <div id="home-composer-slot"></div>
+        <section class="scenario-picker" aria-labelledby="scenario-heading">
+          <div class="suggestions-head"><span id="scenario-heading" data-i18n="workspace:home.scenarioHeading">研究入口</span><span id="scenario-count"></span></div>
+          <div id="domain-tabs" class="domain-tabs" role="tablist" data-i18n-aria-label="workspace:home.domainTabsAria" aria-label="行业能力包"></div>
+          <div id="scenario-list" class="scenario-list"></div>
+        </section>
+      </section>
+
+      <section id="chat-view" class="chat-view view" hidden>
+        <div id="chat-layout" class="chat-layout">
+          <div id="conversation" class="conversation"></div>
+          <aside id="task-rail" class="task-rail" data-i18n-aria-label="run:task.boardTitle" aria-label="任务看板" hidden></aside>
+        </div>
+        <div id="run-banner" class="run-banner" hidden>
+          <span class="pulse-dot"></span>
+          <p><strong data-i18n="run:banner.title">任务正在本机后台运行</strong><small data-i18n="run:banner.detail">可以切换页面，执行轨迹和报告会持续保存。</small></p>
+          <button id="stop-run" class="button danger-quiet" data-i18n="run:banner.stop">停止</button>
+        </div>
+        <div id="chat-composer-slot"></div>
+      </section>
+
+      <section id="projects-view" class="collection-view view" hidden>
+        <div class="collection-head"><div><p class="eyebrow">PROJECTS</p><h2 data-i18n="workspace:nav.projects">项目</h2><p data-i18n="workspace:project.viewSubtitle">把相关研究和资料放在同一个长期上下文中。</p></div><button id="project-create-main" class="button primary" data-i18n="workspace:nav.newProject">新建项目</button></div>
+        <div id="project-grid" class="project-grid"></div>
+      </section>
+
+      <section id="library-view" class="collection-view view" hidden>
+        <div class="collection-head"><div><p class="eyebrow">LIBRARY</p><h2 data-i18n="workspace:nav.library">资料库</h2><p data-i18n="workspace:library.viewSubtitle">上传只读资料，并在运行前选择需要交给 Agent 的内容。</p></div><div><button id="library-upload-button" class="button primary upload-button" type="button" data-i18n="workspace:library.upload">上传资料</button><input id="library-upload" class="file-input-hidden" type="file" multiple></div></div>
+        <div id="library-filter" class="library-filter" role="tablist" data-i18n-aria-label="workspace:library.scopeAria" aria-label="资料范围"></div>
+        <div id="library-table" class="library-table"></div>
+      </section>
+
+      <section id="archive-view" class="collection-view view" hidden>
+        <div class="collection-head"><div><p class="eyebrow">ARCHIVE</p><h2 data-i18n="workspace:archive.viewTitle">已归档研究</h2><p data-i18n="workspace:archive.viewSubtitle">归档不会删除报告、来源和产物。</p></div></div>
+        <div id="archive-list" class="archive-list"></div>
+      </section>
+
+      <section id="shared-view" class="shared-view view" hidden>
+        <div class="shared-brand"><img class="brand-mark" src="/glink-mark.svg" alt=""> Glink</div>
+        <div id="shared-content"></div>
+      </section>
+    </main>
+
+    <aside id="detail-drawer" class="detail-drawer" hidden data-i18n-aria-label="run:drawer.runAria" aria-label="运行详情">
+      <div class="drawer-head"><div><p class="eyebrow" id="drawer-kicker">RUN</p><h2 id="drawer-title" data-i18n="run:task.boardTitle">任务看板</h2></div><button id="drawer-close" class="icon-button" data-i18n-aria-label="run:drawer.close" aria-label="关闭详情">×</button></div>
+      <div id="drawer-content" class="drawer-content"></div>
+    </aside>
+
+    <aside id="preview-drawer" class="preview-drawer" hidden data-i18n-aria-label="report:preview.aria" aria-label="产物预览">
+      <header class="preview-head">
+        <div class="preview-identity">
+          <div class="preview-title-row"><h2 id="preview-title" data-i18n="report:preview.title">报告预览</h2><div id="report-version-control" class="report-version-control" hidden></div></div>
+          <div class="preview-subline"><small id="preview-meta"></small><span id="report-version-status" class="report-version-status" hidden></span></div>
+        </div>
+        <div class="preview-actions">
+          <div id="report-review-actions" class="report-review-actions"></div>
+          <a id="preview-download" class="icon-button" href="#" data-i18n-aria-label="report:preview.download" aria-label="下载文件" data-i18n-tip="report:preview.download" data-tip="下载文件"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v12M7.5 10.5 12 15l4.5-4.5M4 19h16"></path></svg></a>
+          <button id="preview-close" class="icon-button" data-i18n-aria-label="report:preview.close" aria-label="关闭预览" data-i18n-tip="report:preview.close" data-tip="关闭预览"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6 6 12 12M18 6 6 18"></path></svg></button>
+        </div>
+      </header>
+      <nav id="preview-files" class="preview-files" data-i18n-aria-label="report:preview.filesAria" aria-label="本次运行产物"></nav>
+      <div class="preview-layout"><div id="preview-body" class="preview-body"><p class="empty-note" data-i18n="report:preview.loading">加载中...</p></div><aside id="review-rail" class="review-rail" data-i18n-aria-label="review:rail.title" aria-label="AI 审阅助手" hidden></aside></div>
+      <section id="review-knowledge" class="review-knowledge" data-i18n-aria-label="review:knowledge.menu" aria-label="知识候选审核" hidden></section>
+    </aside>
+  </div>
+
+  <div id="composer" class="composer" hidden>
+    <label class="composer-label" for="prompt-input" data-i18n="workspace:composer.promptLabel">提问</label>
+    <textarea id="prompt-input" rows="4" maxlength="32000" data-i18n-placeholder="workspace:composer.placeholder" placeholder="描述研究对象、范围、截止时间和交付要求…"></textarea>
+    <small id="prompt-count" class="prompt-count" hidden>0 / 32000</small>
+    <div id="attachment-chips" class="attachment-chips"></div>
+    <div class="composer-foot">
+      <div class="composer-options">
+        <span id="scenario-current" class="scenario-current" hidden><span id="scenario-current-name"></span><button id="scenario-clear" type="button" data-i18n-aria-label="workspace:composer.scenarioClearAria" aria-label="取消场景选择">×</button></span>
+        <div class="tier-picker">
+          <button id="tier-trigger" class="tier-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="tier-menu">
+            <span id="tier-current-name">深究 · Reason</span><em id="tier-current-version">vG1</em><i aria-hidden="true">⌄</i>
+          </button>
+          <div id="tier-menu" class="tier-menu" role="listbox" data-i18n-aria-label="workspace:composer.tierMenuAria" aria-label="能力档位" hidden></div>
+        </div>
+        <span id="mode-badge" class="mode-badge" data-i18n-aria-label="workspace:composer.modeAria" aria-label="运行模式"></span>
+        <button id="attach-button" class="icon-button" data-i18n-aria-label="workspace:composer.attachAria" aria-label="添加附件">📎</button>
+        <input id="composer-upload" class="file-input-hidden" type="file" multiple>
+      </div>
+      <button id="send-button" class="button primary" disabled data-i18n="workspace:composer.sendStart">开始研究</button>
+    </div>
+  </div>
+
+  <dialog id="search-dialog" class="command-dialog">
+    <form method="dialog" class="dialog-shell">
+      <div class="command-input"><span>⌕</span><input id="global-search" data-i18n-placeholder="workspace:search.placeholder" placeholder="搜索标题、对话、项目和资料…" autocomplete="off"><button value="cancel" data-i18n-aria-label="common:action.close" aria-label="关闭">Esc</button></div>
+      <div id="search-results" class="search-results"><p class="empty-note" data-i18n="workspace:search.empty">输入关键词开始全文搜索。</p></div>
+    </form>
+  </dialog>
+
+  <dialog id="form-dialog" class="form-dialog">
+    <form id="dialog-form" method="dialog">
+      <div class="dialog-head"><div><p class="eyebrow" id="dialog-kicker">CREATE</p><h2 id="dialog-title"></h2></div><button id="form-dialog-close" type="button" data-i18n-aria-label="common:action.close" aria-label="关闭">×</button></div>
+      <div id="dialog-fields"></div>
+      <p id="dialog-error" class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button id="form-dialog-cancel" type="button" class="button quiet" data-i18n="common:action.cancel">取消</button><button id="dialog-submit" type="submit" value="default" class="button primary" data-i18n="common:action.save">保存</button></div>
+    </form>
+  </dialog>
+
+  <div id="review-selection-toolbar" class="review-selection-toolbar" role="toolbar" data-i18n-aria-label="review:selection.toolbarAria" aria-label="对正文选区发起讨论" hidden>
+    <button class="button" type="button" data-selection-action="question" data-i18n="review:selection.question">提问</button>
+    <button class="button" type="button" data-selection-action="modify" data-i18n="review:selection.modify">建议修改</button>
+    <button class="button" type="button" data-selection-action="evidence" data-i18n="review:selection.evidence">要求核证</button>
+  </div>
+  <div id="upload-status" class="upload-status" role="status" aria-live="polite" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/app.js?v=auto" defer></script>
+</body>
+</html>

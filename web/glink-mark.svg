@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" role="img" aria-labelledby="title desc">
+  <title id="title">Glink</title>
+  <desc id="desc">A G-shaped research orbit connected by two evidence nodes.</desc>
+  <path d="M29.4 9.9A14.2 14.2 0 1 0 30.6 29.7" fill="none" stroke="#183B56" stroke-width="4.4" stroke-linecap="round"/>
+  <path d="M20.8 20.2h12.3v9.6" fill="none" stroke="#183B56" stroke-width="4.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M29.4 9.9l3.7 10.3" fill="none" stroke="#2F7D67" stroke-width="2.2" stroke-linecap="round"/>
+  <circle cx="29.4" cy="9.9" r="3.25" fill="#2F7D67"/>
+  <circle cx="33.1" cy="20.2" r="3.25" fill="#2F7D67"/>
+</svg>

@@ -1,0 +1,23 @@
+# 凭据与本地运行态
+.env
+.env.*
+!.env.example
+data/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.uv/
+*.egg-info/
+.pytest_cache/
+
+# Node / pi 运行痕迹（前端无打包步骤，这里只挡工具缓存）
+node_modules/
+.pi/
+
+# 编辑器与系统
+.DS_Store
+.idea/
+.vscode/
