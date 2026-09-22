@@ -51,6 +51,7 @@ class HostConfig:
     e2b_template: str = _DEFAULT_E2B_TEMPLATE
     has_e2b_key: bool = False
     log_level: str = "INFO"
+    task_timeout_seconds: int = 1800
 
     @property
     def has_openai_key(self) -> bool:
@@ -145,6 +146,7 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         e2b_template=_text(values, "LOCAL_WEB_E2B_TEMPLATE", _DEFAULT_E2B_TEMPLATE),
         has_e2b_key=bool(e2b_key),
         log_level=_text(values, "LOCAL_WEB_LOG_LEVEL", "INFO").upper(),
+        task_timeout_seconds=_integer(values, "LOCAL_WEB_TASK_TIMEOUT_SECONDS", 1800),
     )
 
 

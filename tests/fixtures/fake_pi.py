@@ -10,7 +10,11 @@ Behaviour is selected by the ``type`` of each incoming command:
 
 ===========================  ===========================================
 ``get_state``                responds with a tiny state object
-``prompt``                   responds, then emits a scripted event sequence
+``prompt``                   responds, then emits a scripted event sequence;
+                             writes ``report.md`` into cwd when
+                             ``FAKE_PI_WRITE_REPORT=1``; never settles when the
+                             message contains ``NOSETTLE``
+``abort``                    responds, then emits ``agent_settled``
 ``proto_frames``             responds, then writes raw frames in one chunk
 ``silent``                   never responds (client-side timeout test)
 ``exit``                     terminates the process without responding
@@ -21,9 +25,10 @@ anything else                error response (``Unknown command: …``)
 from __future__ import annotations
 
 import json
+import os
 import sys
 
-COMMANDS = {"get_state", "prompt", "proto_frames", "silent", "exit"}
+COMMANDS = {"get_state", "prompt", "abort", "proto_frames", "silent", "exit"}
 
 PROMPT_EVENTS = [
     {"type": "agent_start"},
@@ -93,7 +98,14 @@ PROMPT_EVENTS = [
             "usage": {"input": 120, "output": 40, "totalTokens": 160},
         },
     },
-    {"type": "turn_end", "message": {"role": "assistant"}, "toolResults": []},
+    {
+        "type": "turn_end",
+        "message": {
+            "role": "assistant",
+            "usage": {"input": 120, "output": 40, "totalTokens": 160},
+        },
+        "toolResults": [],
+    },
     {"type": "agent_end", "messages": [], "willRetry": False},
     {"type": "agent_settled"},
 ]
@@ -135,6 +147,14 @@ def raw_chunk() -> None:
     sys.stdout.flush()
 
 
+def write_report(prompt: str) -> None:
+    """Stand in for the artifact the research contract asks pi to produce."""
+    from pathlib import Path
+
+    body = f"# 研究报告（fake pi）\n\n原始问题：{prompt}\n\n结论：这是测试替身产出的报告。\n"
+    Path("report.md").write_text(body, encoding="utf-8")
+
+
 def main() -> int:
     for line in sys.stdin:
         line = line.strip()
@@ -154,13 +174,24 @@ def main() -> int:
                     "isStreaming": False,
                     "isCompacting": False,
                     "sessionId": "fake-session",
+                    "sessionFile": "/tmp/fake-session.jsonl",
                     "messageCount": 0,
                 },
             )
         elif command == "prompt":
             respond(request)
+            message = str(request.get("message") or "")
+            if os.environ.get("FAKE_PI_WRITE_REPORT") == "1":
+                write_report(message)
             for event in PROMPT_EVENTS:
+                # ``NOSETTLE`` keeps the run alive: the agent never settles, so
+                # the host's timeout/cancel paths can be exercised.
+                if "NOSETTLE" in message and event.get("type") == "agent_settled":
+                    continue
                 emit(event)
+        elif command == "abort":
+            respond(request)
+            emit({"type": "agent_settled"})
         elif command == "proto_frames":
             respond(request)
             raw_chunk()

@@ -1,0 +1,73 @@
+真实 run 冒烟证据 / real run smoke evidence
+==========================================
+日期: 2026-09-22
+执行面: inproc (本机)
+命令:
+  scripts/run-local-web.sh                      # 宿主监听 127.0.0.1:7861
+  scripts/smoke-local-run.py --base-url http://127.0.0.1:7861
+模型: openai/gpt-5.6-sol @ https://openrouter.ai/api/v1  (与 FrontierAgent 同源)
+
+宿主启动输出
+------------
+pi-glink 宿主已启动 / host listening: http://127.0.0.1:7861/
+执行面 executor: inproc
+内核 pi: /Users/coldxiangyu/.nvm/versions/node/v24.16.0/bin/pi
+模型 model: openai/gpt-5.6-sol (已配置密钥 / key set)
+
+GET /api/health
+---------------
+{"status": "ok", "executor": "inproc", "pi": {"bin": "pi", "available": true},
+ "configured": {"model": true, "e2b": false}, "activeRunId": null}
+
+run 结果
+--------
+runId          5af36c0c0506
+status         finished
+stopReason     None
+耗时           45.1s
+事件数         165
+sessionId      01a0c70d-165c-7701-84a9-6f121bd73de0
+sessionFile    ~/.pi-glink/sessions/2026-09-22T02-58-38-812Z_01a0c70d-….jsonl (存在)
+report         ~/.pi-glink/workspaces/5af36c0c0506/report.md  (9648 bytes)
+usage          {"input": 3, "output": 85, "cacheRead": 9227, "cacheWrite": 3136, "totalTokens": 12451}
+
+URL 下载验证
+------------
+GET /api/runs/5af36c0c0506/report  -> 200 text/markdown; charset=utf-8  (9648 bytes)
+
+事件类型统计 (events.jsonl, 165 条)
+-----------------------------------
+run_started 1 · session_ready 1 · run_stage 2 · turn_started 3 ·
+thinking_delta 80 · assistant_message 3 · tool_started 3 · tool_finished 3 ·
+turn_finished 3 · usage_reported 3 · assistant_delta 62 · run_finished 1
+
+thinking_delta: 80 段 / 共 444 字符
+  样本: "**Considering file reading requirements**\n\nI need to read files, and there
+         seems to be a conflict with the research report URLs when it comes to local
+         sources. …"
+
+工具调用 (tool_finished): read(ok) · read(ok) · write(ok)
+
+SSE 重放验证
+------------
+GET /api/runs/5af36c0c0506/events 帧类型:
+assistant_delta, assistant_message, run_finished, run_stage, run_started,
+session_ready, thinking_delta, tool_finished, tool_started, turn_finished,
+turn_started, usage_reported
+
+prompt
+------
+请阅读 /Users/coldxiangyu/AI/git/pi-glink/docs/pi-integration-notes.md 与
+/Users/coldxiangyu/AI/git/pi-glink/host/pi_glink/kernel/rpc.py，然后在本工作区写出
+report.md：说明 pi 内核接入的关键约束与三个最容易踩的坑。用中文，报告里带上你读到的文件路径。
+
+report.md 开头（pi 产出，未人工修改）
+-------------------------------------
+# pi 内核接入：关键约束与三个高频陷阱
+
+## 结论摘要
+
+pi 应被当作**独立子进程内核**接入，而不是 Python 库：宿主通过 `pi --mode rpc` 启动进程，
+并以 stdin/stdout 上的 JSONL 协议通信。接入正确性的核心在于四点：运行期生成隔离配置、
+严格按 LF 拆帧、按请求 `id` 关联响应且不阻塞事件读取线程，以及用真正的"落定"状态
+而非中间事件判断 run 完成。

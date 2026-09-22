@@ -43,6 +43,30 @@ scripts/run-local-web.sh --port 7861     # 覆盖端口
 scripts/run-local-web.sh --print-config  # 打印生效配置（不含密钥）
 ```
 
+## 运行一次真实研究
+
+```bash
+scripts/run-local-web.sh &                                  # 启动宿主（默认 7860，可在 .env 覆盖）
+.venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7861
+```
+
+冒烟脚本走与浏览器完全相同的 HTTP 接口，产出：run 终态、事件数、sessionId、报告大小与帧类型清单；退出码非零即失败。真实证据样例见 [docs/evidence/local-m1-smoke.txt](docs/evidence/local-m1-smoke.txt)。
+
+## HTTP 接口（V1）
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/api/health` | 宿主与 pi 可用性、当前活跃 run |
+| GET | `/api/config` | 公开配置（无密钥、无宿主路径） |
+| POST | `/api/runs` | 创建并启动一次 run，body `{"prompt": "…"}` |
+| GET | `/api/runs` | run 列表（含状态与报告标记） |
+| GET | `/api/runs/{id}` | run 详情 |
+| GET | `/api/runs/{id}/events` | 事件流（SSE，支持 `Last-Event-ID` 重放） |
+| POST | `/api/runs/{id}/stop` | 请求取消 |
+| GET | `/api/runs/{id}/report` | 下载 `report.md` |
+
+本机执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id。
+
 ## 目录
 
 | 路径 | 职责 |

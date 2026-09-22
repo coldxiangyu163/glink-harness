@@ -21,6 +21,7 @@ from .agent_env import (
     prepare_agent_dir,
 )
 from .projection import extract_text, project_event, project_frames
+from .runner import REPORT_FILENAME, RESEARCH_PROMPT_FILENAME, RunBusy, RunManager
 from .rpc import (
     PiRpcClient,
     PiRpcClosed,
@@ -36,7 +37,11 @@ __all__ = [
     "PiRpcClosed",
     "PiRpcError",
     "PiRpcTimeout",
+    "REPORT_FILENAME",
+    "RESEARCH_PROMPT_FILENAME",
     "RpcResponse",
+    "RunBusy",
+    "RunManager",
     "build_pi_argv",
     "build_pi_env",
     "extract_text",

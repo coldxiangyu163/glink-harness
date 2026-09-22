@@ -26,12 +26,12 @@ PI_CODING_AGENT_DIR=<dir with models.json using $OPENAI_MODEL> pi --list-models
 
 - pi 对 `reasoning: true` 的模型**会发送**思考参数：抓包显示请求体含 `"reasoning":{"effort":"medium"}`（前提是模型定义带 `compat.thinkingFormat: "openrouter"`；默认自定义 provider 下不会发送）。
 - 上游 OpenRouter 流式响应**确实返回**思考内容，字段是 `choices[].delta.reasoning`（附带 `reasoning_details[]`）。
-- **但 pi 0.86.1 不把该字段解析成 thinking 内容块**：同一 run 的 `message_update` 序列只有 `text_*`，`message_end.message.content` 里没有 `thinking` 块，因此产品事件流里没有 `thinking_delta`。
-- pi 没有内置 `openrouter` provider（`pi --list-models` 中 0 条 openrouter 记录），无法通过内置 provider 绕过。
+- **pi 能把它解析为 thinking 内容块**：真实 run 的 `message_update` 序列里看到 80 段 `thinking_delta`（共 444 字符），见 `docs/evidence/local-m1-smoke.txt`。
+- 但**简单提示词不一定产出 thinking**：早前两次极短 prompt（“只回复两个字：收到”、“9.11 和 9.9 哪个大”）的事件序列里没有 `thinking_*`，`message_end.message.content` 也只有 text 块。当时据此误判为“pi 不解析 reasoning”；复杂多轮任务（读文件 + 写报告）则稳定产出。
 
-**结论**：本机 OpenRouter 路径下暂时拿不到思考内容。这是 pi 内核侧的解析缺口，不属于本仓库可修复范围（不 fork 内核）。接入层的 `thinking_delta → thinking_delta` 投影路径已实现并由协议级回归覆盖（`tests/fixtures/fake_pi.py` 会发 `thinking_delta`），一旦 pi 支持该字段（或换用会返回 `reasoning_content` 的上游），同一通道立刻可用，无需改动宿主与前端。
+**结论**：思考展示链路在本机 OpenRouter 路径下**可用**，但思考内容是否出现取决于任务复杂度与上游是否返回 reasoning，不能当作每次 run 的必然产物；前端必须能接受“这一轮没有思考”的正常形态（见 `docs/architecture.md` 事件契约）。
 
-抓包证据（宿主的记录代理）：
+抓包证据（宿主的记录代理，用于确认请求参数与上游响应形态）：
 
 ```
 request keys: ['max_completion_tokens','messages','model','reasoning','store','stream','stream_options','tools']
