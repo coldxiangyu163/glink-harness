@@ -232,8 +232,17 @@ def main() -> int:
                 },
             )
         elif command == "prompt":
-            respond(request)
             message = str(request.get("message") or "")
+            if "FAILSECRET" in message:
+                # Fail the command while echoing a credential, the way a
+                # rejected request or a kernel error could.
+                respond(
+                    request,
+                    success=False,
+                    error=f"rejected: OPENAI_API_KEY={runtime_secret()}",
+                )
+                continue
+            respond(request)
             if os.environ.get("FAKE_PI_WRITE_REPORT") == "1":
                 write_report(message)
             for event in prompt_events():

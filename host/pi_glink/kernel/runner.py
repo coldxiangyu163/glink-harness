@@ -264,21 +264,23 @@ class RunManager:
                 except Exception:  # pragma: no cover - best effort cleanup
                     logger.debug("removing container failed", exc_info=True)
 
-            report_path = self._collect_report(execution.workspace)
-            if status is FINISHED and report_path is None:
-                stop_reason = stop_reason or "no_report"
+            # report.md is not the only artifact a tool echo can reach, so the
+            # credential boundary runs over the whole workspace, then pi's own
+            # session log, and finally the report path itself.
+            self._sanitize_workspace(execution.workspace)
             previous = self.store.get(run_id)
             session_id = previous.session_id if previous is not None else None
             session_file = previous.session_file if previous is not None else None
-            # pi writes its own session log and we cannot intercept that write,
-            # so the credential boundary runs again on the way out here.
             self._sanitize_session_file(session_file)
+            report_path = self._collect_report(execution.workspace)
+            if status is FINISHED and report_path is None:
+                stop_reason = stop_reason or "no_report"
             record = self.store.update(
                 run_id,
                 status=status,
                 finished_at=time.time(),
                 report_path=report_path,
-                error=error,
+                error=self.redactor.redact(error) if error else error,
                 stop_reason=stop_reason,
                 usage=self._usage.pop(run_id, None),
                 redacted=self._report_redacted,
@@ -501,6 +503,45 @@ class RunManager:
             logger.warning("session file contained credentials and was redacted: %s", path)
         except OSError:
             logger.error("failed to redact session file: %s", path)
+
+    #: Text artifacts above this size are skipped by the workspace sweep.
+    _SANITIZE_MAX_BYTES = 2 * 1024 * 1024
+
+    def _sanitize_workspace(self, workspace: Path) -> None:
+        """Redact credentials in every text artifact the run left behind.
+
+        The report is not the only file a tool echo can reach; a ``write`` call
+        can leak the same value into any artifact the operator later opens. The
+        sweep is bounded (size cap, binary skip) and any change sets the
+        run-level ``redacted`` marker, so the sanitisation is visible rather
+        than silent.
+        """
+        if not workspace.is_dir():
+            return
+        for path in sorted(workspace.rglob("*")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            try:
+                if path.stat().st_size > self._SANITIZE_MAX_BYTES:
+                    continue
+                raw = path.read_bytes()
+            except OSError:
+                continue
+            if b"\x00" in raw[:1024]:  # binary-ish
+                continue
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            redacted = self.redactor.redact(text)
+            if redacted == text:
+                continue
+            try:
+                path.write_text(redacted, encoding="utf-8")
+                self._report_redacted = True
+                logger.warning("artifact contained credentials and was redacted: %s", path)
+            except OSError:
+                logger.error("failed to redact artifact: %s", path)
 
     def _emit(
         self, run_id: str, event_type: str, payload: Mapping[str, Any] | None = None

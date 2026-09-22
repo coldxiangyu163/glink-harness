@@ -232,6 +232,47 @@ def test_minimal_child_environment_does_not_inherit_host_credentials(
     assert "OPENAI_API_KEY" not in env, "the model key travels via auth.json, not the environment"
 
 
+def test_workspace_artifacts_are_swept_for_credentials(tmp_path: Path) -> None:
+    """A `write` call can leak into any artifact, not just report.md."""
+    config = make_config(tmp_path)
+    manager = RunManager(config, EventBus(), RunStore(config.data_root / "runs"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    dirty = workspace / "notes.md"
+    dirty.write_text(f"记录：OPENAI_API_KEY={AUDIT_SECRET}\n", encoding="utf-8")
+    clean = workspace / "clean.md"
+    clean.write_text("普通内容\n", encoding="utf-8")
+    binary = workspace / "image.bin"
+    binary.write_bytes(b"\x00\x01\x02binary")
+
+    manager._sanitize_workspace(workspace)  # noqa: SLF001 - the boundary unit itself
+
+    dirty_text = dirty.read_text(encoding="utf-8")
+    assert AUDIT_SECRET not in dirty_text
+    assert REPLACEMENT in dirty_text
+    assert clean.read_text(encoding="utf-8") == "普通内容\n"
+    assert binary.read_bytes() == b"\x00\x01\x02binary"
+    assert manager._report_redacted is True  # noqa: SLF001
+
+
+def test_run_error_in_metadata_is_redacted(tmp_path: Path) -> None:
+    """A kernel error carrying a credential must not leak into meta.json."""
+    config = make_config(tmp_path)
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(
+        config, EventBus(), store, client_factory=_fake_factory(echo_secret=True)
+    )
+
+    record = manager.start("FAILSECRET 让内核报错并回显凭据")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final.status == "failed"
+    meta = json.loads((store.run_dir(record.run_id) / "meta.json").read_text(encoding="utf-8"))
+    rendered = json.dumps(meta, ensure_ascii=False)
+    assert AUDIT_SECRET not in rendered, "run metadata leaked the credential"
+    assert REPLACEMENT in (meta.get("error") or ""), "the error should be visibly redacted"
+
+
 # -- report download ----------------------------------------------------------
 
 
