@@ -72,3 +72,25 @@ turn_finished · turn_started · usage_reported
    两面一致，差别是**非实时**。
 3. **会话持久化**：pi 的会话文件写在沙箱内 `/home/user/sessions`，随沙箱销毁而消失，
    因此 E2B 面的 run 元数据里 `session_id` 为空。宿主的 run 记录与报告仍然持久。
+
+完整启动命令与 prompt（可复现）
+--------------------------------
+  # 1) 构建模板（本机网络需代理；Node CLI 不认 socks5，改用 Python SDK）
+  E2B_API_KEY=… HTTPS_PROXY=socks5h://127.0.0.1:1080 \
+    .venv/bin/python scripts/build-e2b-template.py --logs
+
+  # 2) 以 e2b 执行面启动宿主。
+  #    凭据链路修复后，E2B_API_KEY 只需写在 .env 里；下面命令刻意不导出它，
+  #    用来证明 key 确实来自 .env（启动后 /api/health 的 configured.e2b 为 true）。
+  HTTPS_PROXY=socks5h://127.0.0.1:1080 \
+  LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 \
+    .venv/bin/python -m pi_glink.app
+
+  # 3) 跑真实 run（prompt 原样记录）
+  .venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7863 \
+    --prompt "先检索 pi-web-access 这个 npm 包的用途（用 web_search），然后在本工作区写出 report.md，给出你实际打开过的来源链接。用中文。"
+
+依赖安装（对应 pyproject 的可选依赖组）
+--------------------------------------
+  uv pip install -e ".[e2b]"     # e2b SDK + httpx[socks]（代理网络需要）
+  uv pip install -e ".[dev]"     # pytest

@@ -99,12 +99,19 @@ class E2BSandboxClient:
         if not self.config.has_e2b_key:
             raise ConfigError("E2B_API_KEY 未配置")
         factory = self._sandbox_factory or _default_sandbox_factory()
+        # ``Sandbox.create`` takes the credential through ``**opts`` (ApiParams),
+        # so an operator who only filled ``.env`` still authenticates: the host
+        # passes the key it read at startup instead of relying on the SDK having
+        # inherited E2B_API_KEY from the launching shell.
+        create_kwargs: dict[str, Any] = {
+            "template": template,
+            "timeout": timeout_seconds or self.config.task_timeout_seconds + 300,
+            "envs": self._model_envs(),
+        }
+        if self.config.e2b_api_key:
+            create_kwargs["api_key"] = self.config.e2b_api_key
         try:
-            self.sandbox = factory(
-                template=template,
-                timeout=timeout_seconds or self.config.task_timeout_seconds + 300,
-                envs=self._model_envs(),
-            )
+            self.sandbox = factory(**create_kwargs)
         except Exception as exc:  # noqa: BLE001 - surfaced to the run record
             raise SandboxError(f"sandbox 创建失败: {type(exc).__name__}: {exc}") from exc
         self.sandbox_id = str(getattr(self.sandbox, "sandbox_id", ""))

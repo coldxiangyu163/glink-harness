@@ -52,3 +52,15 @@ turn_started · usage_reported
 ----
 tests/test_kernel_docker_env.py（6 项）：挂载边界、凭据不落 argv、daemon 缺失时明确失败、
 强制清理命令形状、运行期配置文件存在性。
+
+完整启动命令与 prompt（可复现）
+--------------------------------
+  # 1) 构建镜像（本机网络下的基础源覆盖见上文构建命令）
+  docker build -t pi-glink-worker:latest -f docker/Dockerfile.worker .
+
+  # 2) 以 docker 执行面启动宿主（7862，避免与 inproc 面的 7861 冲突）
+  LOCAL_WEB_EXECUTOR=docker LOCAL_WEB_PORT=7862 .venv/bin/python -m pi_glink.app
+
+  # 3) 跑真实 run（prompt 原样记录）
+  .venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7862 \
+    --prompt "在本工作区创建 notes.md 写入三行关于容器化执行的事实，然后写出 report.md 总结这次运行。用中文。"

@@ -84,11 +84,13 @@ class RunManager:
         store: RunStore,
         *,
         client_factory: ClientFactory = PiRpcClient,
+        sandbox_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.config = config
         self.bus = bus
         self.store = store
         self._client_factory = client_factory
+        self._sandbox_factory = sandbox_factory
         self._lock = threading.RLock()
         self._executions: dict[str, _Execution] = {}
         self._active_run_id: str | None = None
@@ -268,9 +270,19 @@ class RunManager:
                 stop_reason=stop_reason,
                 usage=self._usage.pop(run_id, None),
             )
+            # The terminal frame must match the terminal state: a cancelled run
+            # that reports ``run_finished`` makes the workbench (and anyone
+            # reading the event log) show a stop as a success.
+            terminal_type = (
+                events.RUN_FAILED
+                if status == FAILED
+                else events.RUN_CANCELLED
+                if status == CANCELLED
+                else events.RUN_FINISHED
+            )
             self._emit(
                 run_id,
-                events.RUN_FAILED if status == FAILED else events.RUN_FINISHED,
+                terminal_type,
                 {
                     "status": status,
                     "stopReason": stop_reason,
@@ -308,7 +320,11 @@ class RunManager:
 
         run_id = execution.record.run_id
         client = E2BSandboxClient(
-            self.config, runtime, run_id=run_id, workspace=execution.workspace
+            self.config,
+            runtime,
+            run_id=run_id,
+            workspace=execution.workspace,
+            sandbox_factory=self._sandbox_factory,
         )
         execution.sandbox = client
         client.start()
@@ -331,7 +347,10 @@ class RunManager:
             if frame is not None:
                 self._on_frame(execution, frame)
         report = client.fetch_report()
-        if exit_code != 0 and report is None:
+        # A non-zero exit is a failure even when a report happens to exist: the
+        # run contract is "pi finished successfully and produced its artifact",
+        # not "a file with the right name showed up".
+        if exit_code != 0:
             raise PiRpcError(
                 f"sandbox pi exited with {exit_code}: {stderr_tail[-300:]}"
             )

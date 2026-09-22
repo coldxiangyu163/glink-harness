@@ -21,4 +21,14 @@
 - **不放置密钥。** 凭据只经环境变量传入；本目录下的文件会进版本库。
 - **不放置宿主实现。** 宿主逻辑在 `host/pi_glink/`，这里只描述内核侧行为。
 
-当前阶段（task-1）本目录只有这份说明；`settings.json` 与 `AGENTS.md` 随内核接入任务补齐。
+本目录当前包含：
+
+| 文件 | 内容 |
+|---|---|
+| `settings.json` | `defaultThinkingLevel` 与 `packages: ["npm:pi-web-access"]` |
+| `research-prompt.md` | 研究执行约定（由宿主以 `--append-system-prompt` 追加） |
+| `extensions/` | 扩展位（当前为空；新需求优先落在这里） |
+| `README.md` | 本文件 |
+
+`models.json` 与 `web-search.json` 不在本目录：它们含运行期值/凭据，由宿主渲染到
+`<data_root>/pi-agent/`（见 `host/pi_glink/kernel/agent_env.py`）。

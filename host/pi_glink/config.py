@@ -51,7 +51,7 @@ class HostConfig:
     context_window: int = _DEFAULT_CONTEXT_WINDOW
     max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS
     e2b_template: str = _DEFAULT_E2B_TEMPLATE
-    has_e2b_key: bool = False
+    e2b_api_key: str = field(repr=False, default="")
     log_level: str = "INFO"
     task_timeout_seconds: int = 1800
     web_search_key: str = field(repr=False, default="")
@@ -61,6 +61,11 @@ class HostConfig:
     def has_openai_key(self) -> bool:
         """True when a key was configured; the value itself stays unprinted."""
         return bool(self.openai_api_key)
+
+    @property
+    def has_e2b_key(self) -> bool:
+        """True when the cloud sandbox credential is configured."""
+        return bool(self.e2b_api_key)
 
     @property
     def has_web_search_key(self) -> bool:
@@ -155,7 +160,7 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
             values, "OPENAI_MAX_TOKENS", _DEFAULT_MAX_OUTPUT_TOKENS
         ),
         e2b_template=_text(values, "LOCAL_WEB_E2B_TEMPLATE", _DEFAULT_E2B_TEMPLATE),
-        has_e2b_key=bool(e2b_key),
+        e2b_api_key=e2b_key,
         log_level=_text(values, "LOCAL_WEB_LOG_LEVEL", "INFO").upper(),
         task_timeout_seconds=_integer(values, "LOCAL_WEB_TASK_TIMEOUT_SECONDS", 1800),
         web_search_key=_text(values, "PI_GLINK_WEB_SEARCH_KEY", ""),

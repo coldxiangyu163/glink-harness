@@ -24,10 +24,8 @@ import urllib.error
 import urllib.request
 
 DEFAULT_PROMPT = (
-    "请阅读 /Users/coldxiangyu/AI/git/pi-glink/docs/pi-integration-notes.md 与 "
-    "/Users/coldxiangyu/AI/git/pi-glink/host/pi_glink/kernel/rpc.py，"
-    "然后在本工作区写出 report.md：说明 pi 内核接入的关键约束与三个最容易踩的坑。"
-    "用中文，报告里带上你读到的文件路径。"
+    "先查看当前工作区有哪些文件，然后写出 report.md：用中文说明你刚做了什么，"
+    "并给出至少一条可核验的来源链接（需要时可用 web_search 检索）。"
 )
 _TIMEOUT_SECONDS = 900
 

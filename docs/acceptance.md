@@ -20,20 +20,58 @@
 
 目录边界与各目录职责见 `docs/architecture.md` §7。
 
-## 2. 实际命令与退出状态
+## 2. 实际命令、prompt 与退出状态
+
+### 回归
 
 | 命令 | 结果 |
 |---|---|
-| `scripts/run-tests.sh`（Python 全套） | 73 项通过，exit 0 |
+| `scripts/run-tests.sh` | **78 项通过**，exit 0（`test_host_app` 21 · `test_kernel_agent_env` 11 · `test_kernel_docker_env` 6 · `test_kernel_e2b_env` 7 · `test_kernel_rpc` 11 · `test_runner` 7 · `test_runs_api` 9 · `test_store` 6） |
 | `node --test tests/web/*.test.mjs` | 11 项通过，exit 0 |
-| `node tests/browser/run-smoke.mjs --base-url http://127.0.0.1:7861` | 通过（真实 run 56.4s；5 思考折叠 / 14 工具卡片 / 6 张含流式输出 / 报告预览），exit 0 |
-| `scripts/smoke-local-run.py`（inproc, pi 0.86.1） | finished，45.1s，165 事件，报告 9648B，exit 0 |
-| `scripts/smoke-local-run.py`（inproc, pi 0.87.0，升级演练） | finished，45.1s，327 事件，报告 400B，exit 0 |
-| `docker build -t pi-glink-worker:latest -f docker/Dockerfile.worker .` | 成功，镜像 1.09GB |
-| `scripts/smoke-local-run.py`（docker 面） | finished，11.5s，136 事件，报告 645B（容器内 `/workspace/` 路径），exit 0 |
-| `scripts/build-e2b-template.py`（E2B 模板） | 成功，47s，`pi-glink-worker` buildId `2bec2f1d…` |
-| `scripts/smoke-local-run.py`（e2b 面） | finished，68.4s，203 事件（13 种帧），报告 7115B / 13 URL，exit 0 |
-| pi-boundary §4 交叉核验（6 条） | 全部通过（无源码副本 / 只用官方协议 / 无内部引用 / 无密钥入库 / 凭据 600 / 前端无依赖树） |
+| `node tests/browser/run-smoke.mjs --base-url http://127.0.0.1:7861` | 通过（真实 run；思考折叠 / 工具卡片 / 报告预览 + 截图），exit 0 |
+
+### 三种执行面的真实 run（完整命令与 prompt）
+
+**本机（inproc）**
+
+```bash
+scripts/run-local-web.sh                      # 默认 127.0.0.1:7860；本机 .env 覆盖为 7861
+.venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7861 \
+  --prompt "请阅读 docs/pi-integration-notes.md 与 host/pi_glink/kernel/rpc.py，然后写出 report.md：说明 pi 内核接入的关键约束与三个最容易踩的坑。用中文。"
+```
+→ finished，45.1s，165 事件，报告 9648B（证据 `local-m1-smoke.txt`）
+
+**Docker**
+
+```bash
+docker build -t pi-glink-worker:latest -f docker/Dockerfile.worker .        # 镜像 1.09GB
+LOCAL_WEB_EXECUTOR=docker LOCAL_WEB_PORT=7862 .venv/bin/python -m pi_glink.app
+.venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7862 \
+  --prompt "在本工作区创建 notes.md 写入三行关于容器化执行的事实，然后写出 report.md 总结这次运行。用中文。"
+```
+→ finished，11.5s，136 事件，报告 645B（报告内为容器路径 `/workspace/…`）
+
+**E2B**
+
+```bash
+# 模板构建（本机网络需代理；Node CLI 不认 socks5，故用 Python SDK）
+E2B_API_KEY=… HTTPS_PROXY=socks5h://127.0.0.1:1080 \
+  .venv/bin/python scripts/build-e2b-template.py --logs        # 模板 47s，buildId 2bec2f1d…
+
+# 宿主：E2B_API_KEY 可只放 .env（修复后已实测）；代理是网络配置，不是凭据
+HTTPS_PROXY=socks5h://127.0.0.1:1080 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 \
+  .venv/bin/python -m pi_glink.app
+
+.venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7863 \
+  --prompt "先检索 pi-web-access 这个 npm 包的用途（用 web_search），然后在本工作区写出 report.md，给出你实际打开过的来源链接。用中文。"
+```
+→ finished，68.4s，203 事件（13 种帧类型），报告 7115B / 13 URL（证据 `e2b-run.txt`）
+
+### 边界核验
+
+| 命令 | 结果 |
+|---|---|
+| `docs/pi-boundary.md` §4 的 6 条交叉核验 | 全部通过（无源码副本 / 只用官方协议 / 无内部引用 / 无密钥入库 / 凭据 600 / 前端无依赖树） |
 
 ## 3. 证据文件
 
@@ -87,3 +125,21 @@
 3. **未触发需要暂停的条件**：本次创建的是**新** E2B 模板（`pi-glink-worker`），
    没有重建或覆盖 FrontierAgent 已有的 `glink-frontier-e2b` 模板；沙箱内的
    `web-search.json` 是临时的（随沙箱销毁），不存在凭据长期驻留。
+
+## 7. 审计后的返工与复验
+
+首次完成请求被独立审计驳回并列出缺口，以下是逐条返工与复验证据。
+
+| 审计缺口 | 返工 | 复验 |
+|---|---|---|
+| E2B `.env` 凭据链路不成立（`Sandbox.create()` 未收到 `api_key`） | `config.py` 新增 `e2b_api_key`（`repr=False`），`e2b_env.start()` 经 `**opts` 传给 `Sandbox.create(api_key=…)` | 单测 `test_api_key_from_env_reaches_sandbox_create`；**真实 run**：启动命令不含 `E2B_API_KEY`、仅 `.env` 提供 → `/api/health` 报 `configured.e2b: true` 且 run 通过 |
+| E2B 依赖不可复现（`pyproject.toml` 无依赖声明） | 增 `e2b` extra：`e2b>=2.0` + `httpx[socks]>=0.27`；README 增「依赖与版本」表 | `pyproject.toml` `[project.optional-dependencies]`；安装命令 `uv pip install -e ".[e2b]"` |
+| 取消时发 `run_finished` 而非 `run_cancelled` | `runner.py` 终态事件按 status 映射 | 回归：取消 run 的事件日志末帧为 `run_cancelled` |
+| E2B 非零退出但存在报告时被记为 finished | `runner._run_in_sandbox`：非零退出即失败 | `test_nonzero_exit_fails_the_run_even_with_a_report` |
+| smoke 默认 prompt 硬编码本机绝对路径 | 改为与仓库无关的描述 | `scripts/smoke-local-run.py` |
+| 验收记录数字不准确（声称 73） | 用 `--collect-only` 实测重算：**78 项**（8 个测试文件） | 本文件 §2 |
+| Docker / E2B 完整命令与 prompt 未记录 | 本文件 §2 补齐三面完整命令与 prompt；两份证据文件同步补充 | `docs/evidence/docker-run.txt`、`e2b-run.txt` |
+| README 与 `agent/README.md` 仍称「task-1 骨架阶段」 | 更新为交付状态与内容清单 | README、`agent/README.md` |
+| `styles.css` 保留大量 Glink 特有规则 | 保守裁剪：删除「选择器中所有类名均已无引用」的规则（565 条 / 254 个类），93 KB → 30 KB | 裁剪后重跑浏览器回归通过（思考折叠 / 工具卡片 / 报告预览 + 截图） |
+
+返工后的全量重跑：Python **78 项通过**、Node **11 项通过**、浏览器回归通过。

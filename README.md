@@ -2,7 +2,7 @@
 
 以 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 为执行内核的本地研究工作台。前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按 pi 的原生事件语义重写。
 
-**当前状态：骨架阶段（task-1）。** 宿主可启动、可服务前端静态资源、可提供事件流端点；pi 内核接入、真实 run、Docker 与 E2B 执行面按任务列表推进。除 `frontier_agent` 之外的任何上游模块都不参与本仓库运行。
+**当前状态：本机 / Docker / E2B 三种执行面均已跑通真实 run**，验收记录见 [docs/acceptance.md](docs/acceptance.md)，证据在 `docs/evidence/`。除前端静态资源源自 Glink 工作台外，本仓库不引用 FrontierAgent 的任何运行模块。
 
 ## 边界（先读这条）
 
@@ -10,6 +10,18 @@
 - **不复制 FrontierAgent 的 runtime。** 本仓库自有宿主只做编排、事件投影与呈现；研究方法论通过 pi 的提示词与扩展表达。
 - 前端不解析终端文本，只消费结构化事件。
 - 详见 [docs/pi-boundary.md](docs/pi-boundary.md) 与 [docs/architecture.md](docs/architecture.md)。
+
+## 依赖与版本
+
+| 组件 | 版本 | 安装 / 说明 |
+|---|---|---|
+| Python | ≥ 3.12 | 宿主与内核接入层只用标准库，无运行时依赖 |
+| Node.js | ≥ 24 | 前端与 pi 的运行时；前端回归用 `node --test` |
+| pi | 0.86.1（已实测） | `npm install -g @earendil-works/pi-coding-agent@0.86.1`；Docker / E2B 面的版本固定在各自 Dockerfile 的 `ARG PI_VERSION` |
+| pytest | ≥ 8（仅开发） | `uv pip install -e ".[dev]"` |
+| e2b SDK | ≥ 2（仅 E2B 执行面） | `uv pip install -e ".[e2b]"`（含代理网络需要的 `httpx[socks]`） |
+
+本机执行面用宿主安装的 pi；换版本做演练时用 `PI_GLINK_PI_BIN` 指向另一个二进制，无需改 PATH（见 [docs/pi-boundary.md](docs/pi-boundary.md) §3）。
 
 ## 三种执行面
 
