@@ -30,6 +30,7 @@ from typing import Any, Callable, Mapping
 
 from .. import events
 from ..config import ConfigError, HostConfig
+from ..redaction import SecretRedactor, redactor_from_config
 from ..store import CANCELLED, FAILED, FINISHED, RunRecord, RunStore
 from .agent_env import AgentRuntime, build_pi_argv, build_pi_env, prepare_agent_dir
 from .docker_env import (
@@ -91,10 +92,14 @@ class RunManager:
         self.store = store
         self._client_factory = client_factory
         self._sandbox_factory = sandbox_factory
+        # The single redaction boundary: every event payload passes through it
+        # before it reaches the bus (SSE + browser) or the event log.
+        self.redactor: SecretRedactor = redactor_from_config(config)
         self._lock = threading.RLock()
         self._executions: dict[str, _Execution] = {}
         self._active_run_id: str | None = None
         self._usage: dict[str, dict[str, Any]] = {}
+        self._report_redacted = False
 
     # -- public API -----------------------------------------------------------
 
@@ -179,6 +184,7 @@ class RunManager:
     def _execute(self, execution: _Execution) -> None:
         run_id = execution.record.run_id
         self.bus.open_run(run_id)
+        self._report_redacted = False
         status = FINISHED
         stop_reason: str | None = None
         error: str | None = None
@@ -187,6 +193,9 @@ class RunManager:
             self._emit(run_id, events.RUN_STARTED, {"prompt": execution.record.prompt})
 
             runtime = prepare_agent_dir(self.config)
+            # The search credential only exists in the rendered file, so it is
+            # learned here (never logged, never returned).
+            self.redactor.add_from_file(runtime.directory / "web-search.json")
             if self.config.executor == "e2b":
                 self._run_in_sandbox(execution, runtime)
                 settled = True
@@ -261,6 +270,9 @@ class RunManager:
             previous = self.store.get(run_id)
             session_id = previous.session_id if previous is not None else None
             session_file = previous.session_file if previous is not None else None
+            # pi writes its own session log and we cannot intercept that write,
+            # so the credential boundary runs again on the way out here.
+            self._sanitize_session_file(session_file)
             record = self.store.update(
                 run_id,
                 status=status,
@@ -269,6 +281,7 @@ class RunManager:
                 error=error,
                 stop_reason=stop_reason,
                 usage=self._usage.pop(run_id, None),
+                redacted=self._report_redacted,
             )
             # The terminal frame must match the terminal state: a cancelled run
             # that reports ``run_finished`` makes the workbench (and anyone
@@ -401,7 +414,7 @@ class RunManager:
 
     def _on_frame(self, execution: _Execution, frame: Mapping[str, Any]) -> None:
         run_id = execution.record.run_id
-        for event_type, payload in project_event(frame):
+        for event_type, payload in project_event(frame, self.redactor):
             if event_type == events.USAGE_REPORTED:
                 self._usage[run_id] = payload.get("usage", {})
             self._emit(run_id, event_type, payload)
@@ -436,11 +449,67 @@ class RunManager:
         )
 
     def _collect_report(self, workspace: Path) -> str | None:
+        """Return the report path, redacting credentials in place first.
+
+        The report is written by pi, but it is a *product* artifact this host
+        serves, and the objective requires every file the host handles to be free
+        of credentials. If a tool echo (or a config-file read) reached the text,
+        the value is masked here and the run records ``redacted=true`` so the
+        sanitisation is visible rather than silent.
+        """
         report = workspace / REPORT_FILENAME
-        return str(report) if report.is_file() else None
+        if not report.is_file():
+            return None
+        try:
+            original = report.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return str(report)
+        redacted = self.redactor.redact(original)
+        if redacted != original:
+            try:
+                report.write_text(redacted, encoding="utf-8")
+                self._report_redacted = True
+                logger.warning(
+                    "report contained credentials and was redacted in place: %s", report
+                )
+            except OSError:
+                logger.error("failed to redact report in place: %s", report)
+        return str(report)
+
+    def _sanitize_session_file(self, session_file: str | None) -> None:
+        """Mask credentials pi wrote into its own session log.
+
+        The kernel owns that file, so redaction cannot happen on the way in; it
+        happens here on the way out, and any change marks the run ``redacted``
+        so the sanitisation is visible rather than silent.
+        """
+        if not session_file:
+            return
+        path = Path(session_file)
+        if not path.is_file():
+            return
+        try:
+            original = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        redacted = self.redactor.redact(original)
+        if redacted == original:
+            return
+        try:
+            path.write_text(redacted, encoding="utf-8")
+            self._report_redacted = True
+            logger.warning("session file contained credentials and was redacted: %s", path)
+        except OSError:
+            logger.error("failed to redact session file: %s", path)
 
     def _emit(
         self, run_id: str, event_type: str, payload: Mapping[str, Any] | None = None
     ) -> None:
-        event = self.bus.publish(run_id, event_type, payload)
+        # Belt-and-braces: projection already redacts, but host-owned events
+        # (run_finished, kernel_status, …) are built here, so the same boundary
+        # runs again on the way out. Nothing reaches the bus or the log unredacted.
+        safe_payload = (
+            self.redactor.redact_payload(dict(payload)) if payload is not None else None
+        )
+        event = self.bus.publish(run_id, event_type, safe_payload)
         self.store.append_event(run_id, event.as_dict())

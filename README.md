@@ -118,6 +118,16 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 本仓库不包含 Serper / Jina 链路。检索证据见 [docs/evidence/local-web-search.txt](docs/evidence/local-web-search.txt)。
 
+## 安全边界
+
+- **凭据不进产品面**：事件流、`events.jsonl`、报告文件与下载、pi 会话文件都经过
+  `host/pi_glink/redaction.py` 的脱敏（值 + 形状双重检测）；报告下载响应带 `X-Redacted` 头标明是否发生脱敏。
+- **子进程最小权限**：pi 只拿到白名单环境变量（PATH / HOME / 代理 / 证书等）加显式注入的模型凭据，
+  宿主 shell 里的其他凭据不会外溢。
+- **残留风险**：模型凭据必须在 pi 进程内（内核用它调用模型），因此 pi 的工具理论上可读到自己进程的
+  这一个 key；需要更强隔离时用 Docker / E2B 执行面，并给内核配专用、限额的凭据。
+- **自检**：`scripts/check-no-secrets.py` 扫描运行态产物（真实命中即失败；文档占位符单独计数）。
+
 ## 目录
 
 | 路径 | 职责 |

@@ -148,11 +148,44 @@ def raw_chunk() -> None:
 
 
 def write_report(prompt: str) -> None:
-    """Stand in for the artifact the research contract asks pi to produce."""
+    """Stand in for the artifact the research contract asks pi to produce.
+
+    With ``FAKE_PI_ECHO_SECRET=1`` the report also carries the credential, so the
+    host's in-place report redaction is exercised end to end.
+    """
     from pathlib import Path
 
     body = f"# 研究报告（fake pi）\n\n原始问题：{prompt}\n\n结论：这是测试替身产出的报告。\n"
+    if os.environ.get("FAKE_PI_ECHO_SECRET") == "1":
+        secret = os.environ.get("OPENAI_API_KEY", "")
+        body += f"\n环境检查：OPENAI_API_KEY={secret}\n"
     Path("report.md").write_text(body, encoding="utf-8")
+
+
+def prompt_events() -> list[dict]:
+    """Scripted turn, optionally echoing a credential like a real tool would.
+
+    ``FAKE_PI_ECHO_SECRET=1`` makes the stand-in print ``OPENAI_API_KEY=…`` the way
+    a bash ``env`` call (or a config-file read) would — the leak the audit found.
+    """
+    events = list(PROMPT_EVENTS)
+    if os.environ.get("FAKE_PI_ECHO_SECRET") == "1":
+        secret = os.environ.get("OPENAI_API_KEY", "")
+        events.insert(
+            -1,
+            {
+                "type": "tool_execution_end",
+                "toolCallId": "echo-secret",
+                "toolName": "bash",
+                "result": {
+                    "content": [
+                        {"type": "text", "text": f"$ env | grep -i openai\nOPENAI_API_KEY={secret}"}
+                    ]
+                },
+                "isError": False,
+            },
+        )
+    return events
 
 
 def main() -> int:
@@ -183,7 +216,7 @@ def main() -> int:
             message = str(request.get("message") or "")
             if os.environ.get("FAKE_PI_WRITE_REPORT") == "1":
                 write_report(message)
-            for event in PROMPT_EVENTS:
+            for event in prompt_events():
                 # ``NOSETTLE`` keeps the run alive: the agent never settles, so
                 # the host's timeout/cancel paths can be exercised.
                 if "NOSETTLE" in message and event.get("type") == "agent_settled":

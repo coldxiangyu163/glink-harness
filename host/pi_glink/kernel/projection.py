@@ -34,13 +34,25 @@ _DELTA_EVENTS = {
 }
 
 
-def project_event(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    """Return the product events for one pi frame (possibly empty)."""
+def project_event(
+    frame: Mapping[str, Any], redactor: Any = None
+) -> list[tuple[str, dict[str, Any]]]:
+    """Return the product events for one pi frame (possibly empty).
+
+    ``redactor`` is applied to every payload before it leaves this module, so a
+    credential echoed by a tool (``env``, a config-file read, the model quoting
+    one back) is masked in the event stream, the event log and the browser.
+    """
     frame_type = frame.get("type")
     handler = _HANDLERS.get(frame_type)
     if handler is None:
         return []
-    return handler(frame)
+    produced = handler(frame)
+    if redactor is None or not produced:
+        return produced
+    return [
+        (kind, redactor.redact_payload(payload) or payload) for kind, payload in produced
+    ]
 
 
 def _agent_start(_frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
@@ -276,9 +288,11 @@ def _clip_text(text: str, limit: int) -> str:
     return f"{head}\n…[truncated {len(text) - limit} chars]"
 
 
-def project_frames(frames: Iterable[Mapping[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+def project_frames(
+    frames: Iterable[Mapping[str, Any]], redactor: Any = None
+) -> list[tuple[str, dict[str, Any]]]:
     """Convenience for tests and offline replay."""
     produced: list[tuple[str, dict[str, Any]]] = []
     for frame in frames:
-        produced.extend(project_event(frame))
+        produced.extend(project_event(frame, redactor))
     return produced

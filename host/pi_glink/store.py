@@ -50,6 +50,8 @@ class RunRecord:
     stop_reason: str | None = None
     event_count: int = 0
     usage: Mapping[str, Any] | None = None
+    #: True when a credential was masked in the event stream or the report.
+    redacted: bool = False
 
     @property
     def is_terminal(self) -> bool:

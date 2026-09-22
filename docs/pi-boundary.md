@@ -39,6 +39,8 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | 把密钥写进仓库 | 安全事故 | `.gitignore` + 密钥扫描 |
 | 容器/沙箱依赖宿主运行时 | 隔离面会失去意义 | 镜像与模板自包含（`docker/Dockerfile.worker`、`docker/e2b/Dockerfile.e2b`） |
 | 前端解析终端输出 | 事件契约的基础前提 | `tests/web/run-stream.test.mjs` 的断言 |
+| 凭据不经脱敏边界进入产品面 | 工具回显/env dump 会把 key 带进事件流、报告与会话文件 | 六层出口均过 `redaction.py`；`scripts/check-no-secrets.py` 扫描运行态产物；`tests/test_redaction.py` |
+| 把宿主整份环境变量交给 pi | 会把操作员 shell 里的其他凭据一并带入 | `kernel/agent_env.py` 的白名单 `_PASSTHROUGH_ENV` |
 
 ## 3. 升级路径
 
@@ -113,3 +115,4 @@ ls web/node_modules 2>/dev/null || echo "无前端依赖树（原生 ESM）"
 | pi 会往配置目录写运行时状态（`auth.json` / `models-store.json`） | 仓库目录会被污染 | 仓库 `agent/` 只作模板，运行期目录在 `<data_root>/pi-agent/`；`.gitignore` 兜底 |
 | E2B SDK 的 stdout 回调不触发 | E2B 面事件非实时 | 沙箱内写 JSONL、结束后回放（`e2b_env.py`）；差异记在 architecture.md |
 | 沙箱内会话文件随沙箱销毁 | E2B 面 `session_id` 为空 | 报告与 run 元数据仍持久；如实记录 |
+| pi 的工具能读到内核自用的模型 key | inproc 面的固有属性（内核与工具同进程环境） | 输出侧六层脱敏 + 子进程环境白名单；更强隔离用 Docker / E2B 面；详见 architecture.md §6 |

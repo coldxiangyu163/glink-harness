@@ -43,6 +43,24 @@ API_KEY_PLACEHOLDER = "$OPENAI_API_KEY"
 THINKING_FORMAT = "openrouter"
 #: Template entries copied verbatim into the runtime directory.
 _TEMPLATE_ENTRIES = ("settings.json", "AGENTS.md", "extensions", "skills", "prompts")
+
+#: Environment names handed to the pi process verbatim.
+#:
+#: The host deliberately does **not** inherit its whole environment: doing so
+#: would hand pi's tools every credential the operator's shell happens to export
+#: (other providers, cloud keys, CI tokens). Only what the kernel needs to run
+#: and reach the network is passed through; every credential is injected
+#: explicitly below and nothing else. (pi's tools can still read the model key
+#: the kernel itself uses — that is inherent to running the agent in-process and
+#: is recorded in docs/architecture.md §6.)
+_PASSTHROUGH_ENV = (
+    "PATH", "HOME", "SHELL", "USER", "LOGNAME", "TMPDIR", "TERM",
+    "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "NODE_OPTIONS",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "no_proxy",
+)
 #: pi-web-access credential file (read from PI_CODING_AGENT_DIR).
 WEB_SEARCH_FILENAME = "web-search.json"
 #: Default provider key used when the credential comes from the environment.
@@ -113,13 +131,17 @@ def build_pi_env(
     *,
     base_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Child environment: config redirection plus the operator's credential.
+    """Child environment: minimal passthrough plus the operator's credential.
 
     The credential is passed through the process environment only. Nothing is
     written to disk, and the value never appears in an event payload or a log
     line produced by this host.
+
+    ``base_env`` is filtered through :data:`_PASSTHROUGH_ENV` so a caller that
+    hands in ``os.environ`` cannot widen the child's view of host credentials.
     """
-    env = dict(base_env) if base_env is not None else dict(os.environ)
+    source = dict(base_env) if base_env is not None else dict(os.environ)
+    env = {name: source[name] for name in _PASSTHROUGH_ENV if name in source}
     env["PI_CODING_AGENT_DIR"] = str(runtime.directory)
     env["PI_CODING_AGENT_SESSION_DIR"] = str(config.session_dir)
     env["PI_SKIP_VERSION_CHECK"] = "1"

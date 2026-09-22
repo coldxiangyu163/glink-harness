@@ -93,11 +93,42 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 
 * 模型：`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`（与 FrontierAgent 同名语义）。
   宿主渲染 `models.json`（`baseUrl` 与模型 id 是字面量，pi 不支持它们的 `$VAR` 插值），
-  `apiKey` 保留 `$OPENAI_API_KEY` 占位，由 pi 从子进程环境解析——**密钥不落盘**。
+  `apiKey` 保留 `$OPENAI_API_KEY` 占位，由 pi 从子进程环境解析。
 * 搜索：pi-web-access 只从 `PI_CODING_AGENT_DIR/web-search.json` 读凭据。宿主按
   「`PI_GLINK_WEB_SEARCH_KEY` → 操作员本机文件」的顺序渲染该文件到运行期目录（权限 600）。
   无凭据不是错误：插件会回退到无密钥的 Exa MCP 检索。
 * 浏览器永远拿不到密钥：`/api/config` 只返回模型名与是否已配置。
+
+### 6.1 出站脱敏边界
+
+宿主持有凭据，而 pi 的工具**可以**把它们回显出来：`bash` 能跑 `env`、`read` 能打开运行期
+配置文件、模型也可能把值引用回回答。因此每一道产品出口都经过
+`host/pi_glink/redaction.py` 的 `SecretRedactor`：
+
+| 出口 | 处理 | 代码 |
+|---|---|---|
+| 事件投影 | 载荷里每个字符串递归脱敏 | `kernel/projection.py::project_event(frame, redactor)` |
+| 事件总线 / `events.jsonl` | 发布前兜底再脱敏一次 | `kernel/runner.py::_emit` |
+| 报告文件 | run 收尾时就地脱敏，并记 `redacted=true` | `kernel/runner.py::_collect_report` |
+| 会话文件 | pi 自写的 JSONL 在收尾时脱敏（保持合法 JSONL） | `kernel/runner.py::_sanitize_session_file` |
+| 报告下载 | 服务前脱敏，响应头 `X-Redacted` 标明是否发生 | `app.py::_send_report` |
+
+检测同时覆盖**值**（宿主知道的 key）与**形状**（`sk-…`、`e2b_…`、`exa-…`、`NAME=value`、
+`Bearer …`），所以宿主从未见过的第三方 token 也会被掉包。
+`scripts/check-no-secrets.py` 用同一套规则扫描运行态产物，并把**文档占位符**
+（如 README 里的 `sk-ant-...`）与真实值分开计数。
+
+### 6.2 输入侧最小权限
+
+pi 子进程拿到的不是宿主 `os.environ` 的副本：`kernel/agent_env.py` 只放行
+PATH / HOME / 代理 / 证书等运行必需项，再显式注入 `PI_*` 与模型凭据。宿主 shell 里其他
+凭据（例如 `ANTHROPIC_API_KEY`、`AWS_SECRET_ACCESS_KEY`）不会进入 pi 进程
+（回归：`tests/test_redaction.py::test_minimal_child_environment_does_not_inherit_host_credentials`）。
+
+**残留风险（如实记录）**：模型凭据必须存在于 pi 进程环境里（内核自己要用它调模型），
+因此 **pi 的工具理论上可以读到自己进程里的这一个 key**。这是“在进程内跑 agent”的固有
+属性，无法靠输出脱敏根除；需要更强隔离时应使用 Docker / E2B 执行面，并为内核配专用、
+限额的凭据。三面的凭据注入方式与已知差异见 `docs/evidence/{docker-run,e2b-run}.txt`。
 
 ## 7. 目录边界
 

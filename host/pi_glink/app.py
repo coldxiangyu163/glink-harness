@@ -268,11 +268,17 @@ class HostRequestHandler(BaseHTTPRequestHandler):
                 head_only=head_only,
             )
             return
+        # The report is a product surface too: a credential the model echoed into
+        # it must not reach the browser. The header records whether it happened.
+        original = path.read_text(encoding="utf-8", errors="replace")
+        redactor = self.server.manager.redactor
+        redacted = redactor.redact(original)
         self._send_bytes(
-            path.read_bytes(),
+            redacted.encode("utf-8"),
             "text/markdown; charset=utf-8",
             "no-cache",
             head_only=head_only,
+            extra_headers={"X-Redacted": "true" if redacted != original else "false"},
         )
 
     def _read_json_body(self) -> dict[str, Any] | None:
@@ -330,12 +336,20 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(asset.body)
 
     def _send_bytes(
-        self, body: bytes, content_type: str, cache_control: str, *, head_only: bool
+        self,
+        body: bytes,
+        content_type: str,
+        cache_control: str,
+        *,
+        head_only: bool,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", cache_control)
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         if not head_only:
             self.wfile.write(body)
@@ -406,6 +420,7 @@ def _run_view(record: RunRecord, *, live_event_count: int | None = None) -> dict
         "error": record.error,
         "eventCount": record.event_count if live_event_count is None else live_event_count,
         "usage": record.usage,
+        "redacted": record.redacted,
     }
 
 

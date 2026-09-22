@@ -154,3 +154,20 @@ HTTPS_PROXY=socks5h://127.0.0.1:1080 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 
 | 升级文档把 `PI_GLINK_PI_BIN` 放在 smoke 命令上 | 改为放在宿主启动命令上，并说明宿主与 smoke 客户端的区别 | `docs/pi-boundary.md` §3；宿主启动横幅打印实际 pi 路径 |
 | README 无效命令、不存在的顶层 `kernel/`、Node 版本未固定 | 修正为 `uv pip install -e ".[dev]"`、`host/pi_glink/kernel/`、Node **v24.16.0** + nvm 安装方式 | README |
 | `.env-only` E2B run 无 runId / 证据 / 退出码 | 记录 runId `3fc5c4734713`（26.4s / 143 事件 / sandbox `ipy0uzzdsg4e` / finished / smoke exit 0）与结构化日志路径 `~/.pi-glink/runs/3fc5c4734713/events.jsonl` | `docs/evidence/e2b-run.txt`、`docker-run.txt` |
+
+### 第三次审计返工（凭据边界）
+
+审计指出：模型 key 注入 pi 进程环境（工具可继承）、事件投影与报告下载未脱敏、用虚拟密钥构造的
+`tool_execution_end` 帧能原样穿过投影。逐条返工如下。
+
+| 审计缺口 | 返工 | 复验 |
+|---|---|---|
+| 事件投影与事件日志未脱敏 | 新增 `host/pi_glink/redaction.py`（值检测 + 形状检测 + 递归载荷脱敏）；`project_event(frame, redactor)` 投影即脱敏；`runner._emit` 在发布前再兜底一次 | `tests/test_redaction.py` 13 项，含审计复现用例 `test_audit_reproduction_tool_output_is_redacted`；`events.jsonl` 与 SSE 载荷均断言不含 key |
+| 报告下载无脱敏 | `app._send_report` 服务前脱敏并回 `X-Redacted`；`runner._collect_report` 在 run 收尾就地脱敏报告文件，meta 记 `redacted=true` | `test_report_download_is_redacted_and_flagged`、`test_runner_redacts_the_report_in_place_and_marks_the_run` |
+| pi 自写的会话文件可能含工具输出 | `runner._sanitize_session_file` 收尾脱敏（保持合法 JSONL） | `test_session_file_is_redacted_on_the_way_out` |
+| 子进程继承宿主整份环境 | `agent_env._PASSTHROUGH_ENV` 白名单：只放行运行必需项，再显式注入 `PI_*` 与模型凭据 | `test_minimal_child_environment_does_not_inherit_host_credentials`（ANTHROPIC_API_KEY / AWS_SECRET_ACCESS_KEY 不进入子进程） |
+| 仓库缺少防泄漏检查 | 新增 `scripts/check-no-secrets.py`：真实值命中判失败，文档占位符单独计数（`--show-placeholders`） | 实测：真实命中 **0 处** · 占位符 2 处（pi README 中的 `sk-ant-...`） |
+
+**残留风险（已写入 architecture.md §6.2）**：模型凭据必须存在于 pi 进程环境（内核要用它调用
+模型），因此 pi 的工具理论上可读到自己进程里的这一个 key——这是"在进程内跑 agent"的固有属性，
+输出脱敏无法根除；需要更强隔离时应使用 Docker / E2B 执行面并配专用、限额的凭据。
