@@ -229,7 +229,7 @@ def test_minimal_child_environment_does_not_inherit_host_credentials(
     assert "ANTHROPIC_API_KEY" not in env
     assert "AWS_SECRET_ACCESS_KEY" not in env
     assert env["PATH"] == "/usr/bin:/bin"
-    assert env["OPENAI_API_KEY"] == AUDIT_SECRET, "the kernel's own credential is injected"
+    assert "OPENAI_API_KEY" not in env, "the model key travels via auth.json, not the environment"
 
 
 # -- report download ----------------------------------------------------------

@@ -9,7 +9,7 @@ import pytest
 
 from pi_glink.config import ConfigError, build_config
 from pi_glink.kernel.agent_env import (
-    API_KEY_PLACEHOLDER,
+    AUTH_FILENAME,
     PROVIDER_ID,
     WEB_SEARCH_FILENAME,
     build_pi_argv,
@@ -71,16 +71,26 @@ def test_thinking_format_is_openrouter_style(tmp_path: Path, template_dir: Path)
     assert compat["supportsReasoningEffort"] is True
 
 
-def test_api_key_is_a_placeholder_and_never_written(tmp_path: Path, template_dir: Path) -> None:
+def test_model_credential_goes_to_auth_json_not_the_environment(
+    tmp_path: Path, template_dir: Path
+) -> None:
     config = _config(tmp_path, template_dir)
     runtime = prepare_agent_dir(config)
+
+    # models.json carries neither the key nor a placeholder for it…
     rendered = (runtime.directory / "models.json").read_text(encoding="utf-8")
-    assert API_KEY_PLACEHOLDER in rendered
     assert "sk-secret-value" not in rendered
-    # The whole runtime directory must stay credential-free.
-    for path in runtime.directory.rglob("*"):
-        if path.is_file():
-            assert "sk-secret-value" not in path.read_text(encoding="utf-8", errors="ignore")
+    assert "$OPENAI_API_KEY" not in rendered
+
+    # …the key lives in pi's own credential store, mode 0600…
+    auth = runtime.directory / AUTH_FILENAME
+    payload = json.loads(auth.read_text(encoding="utf-8"))
+    assert payload == {PROVIDER_ID: {"type": "api_key", "key": "sk-secret-value"}}
+    assert auth.stat().st_mode & 0o777 == 0o600
+
+    # …and the kernel process environment does not contain it at all.
+    env = build_pi_env(config, runtime, base_env={"PATH": "/usr/bin"})
+    assert "OPENAI_API_KEY" not in env
 
 
 def test_template_entries_are_copied_next_to_generated_models(tmp_path: Path, template_dir: Path) -> None:
@@ -111,7 +121,7 @@ def test_argv_and_env_redirect_pi_to_the_runtime_directory(tmp_path: Path, templ
     env = build_pi_env(config, runtime, base_env={"PATH": "/usr/bin"})
     assert env["PI_CODING_AGENT_DIR"] == str(runtime.directory)
     assert env["PI_CODING_AGENT_SESSION_DIR"] == str(config.session_dir)
-    assert env["OPENAI_API_KEY"] == "sk-secret-value"
+    assert "OPENAI_API_KEY" not in env, "the model key travels via auth.json, not the environment"
     assert env["PATH"] == "/usr/bin"
 
 

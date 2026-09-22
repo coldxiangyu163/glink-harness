@@ -93,7 +93,9 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 
 * 模型：`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`（与 FrontierAgent 同名语义）。
   宿主渲染 `models.json`（`baseUrl` 与模型 id 是字面量，pi 不支持它们的 `$VAR` 插值），
-  `apiKey` 保留 `$OPENAI_API_KEY` 占位，由 pi 从子进程环境解析。
+  且**不含 `apiKey`**）与 `auth.json`（pi 自己的凭据存储，与 `/login` 写的同一个文件）。
+  **模型 key 不进进程环境**：内核的 bash 工具跑 `env` 读不到它（三面真实 run 实测均为 0，见
+  `docs/evidence/credential-boundary.txt`）。
 * 搜索：pi-web-access 只从 `PI_CODING_AGENT_DIR/web-search.json` 读凭据。宿主按
   「`PI_GLINK_WEB_SEARCH_KEY` → 操作员本机文件」的顺序渲染该文件到运行期目录（权限 600）。
   无凭据不是错误：插件会回退到无密钥的 Exa MCP 检索。
@@ -121,14 +123,16 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 ### 6.2 输入侧最小权限
 
 pi 子进程拿到的不是宿主 `os.environ` 的副本：`kernel/agent_env.py` 只放行
-PATH / HOME / 代理 / 证书等运行必需项，再显式注入 `PI_*` 与模型凭据。宿主 shell 里其他
-凭据（例如 `ANTHROPIC_API_KEY`、`AWS_SECRET_ACCESS_KEY`）不会进入 pi 进程
-（回归：`tests/test_redaction.py::test_minimal_child_environment_does_not_inherit_host_credentials`）。
+PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置目录的 `PI_*`。宿主 shell 里其他
+凭据（例如 `ANTHROPIC_API_KEY`、`AWS_SECRET_ACCESS_KEY`）不会进入 pi 进程，模型 key 也不在
+环境里（回归：`tests/test_redaction.py::test_minimal_child_environment_does_not_inherit_host_credentials`、
+`tests/test_kernel_agent_env.py::test_model_credential_goes_to_auth_json_not_the_environment`）。
 
-**残留风险（如实记录）**：模型凭据必须存在于 pi 进程环境里（内核自己要用它调模型），
-因此 **pi 的工具理论上可以读到自己进程里的这一个 key**。这是“在进程内跑 agent”的固有
-属性，无法靠输出脱敏根除；需要更强隔离时应使用 Docker / E2B 执行面，并为内核配专用、
-限额的凭据。三面的凭据注入方式与已知差异见 `docs/evidence/{docker-run,e2b-run}.txt`。
+**残留风险（如实记录）**：key 仍以文件形式存在于运行期 `auth.json`（pi 官方凭据机制、权限 0600、
+仓库外），理论上可被工具用 `read` 打开并回显——这正是 §6.1 出站脱敏覆盖的场景（回归：
+`tests/test_redaction.py::test_runner_redacts_a_tool_echo_before_the_log_and_the_bus`）。需要更强
+隔离时应使用 Docker / E2B 执行面，并为内核配专用、限额的凭据。三面的凭据交付方式与已知差异见
+`docs/evidence/{credential-boundary,docker-run,e2b-run}.txt`。
 
 ## 7. 目录边界
 

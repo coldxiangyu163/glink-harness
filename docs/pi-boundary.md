@@ -115,4 +115,4 @@ ls web/node_modules 2>/dev/null || echo "无前端依赖树（原生 ESM）"
 | pi 会往配置目录写运行时状态（`auth.json` / `models-store.json`） | 仓库目录会被污染 | 仓库 `agent/` 只作模板，运行期目录在 `<data_root>/pi-agent/`；`.gitignore` 兜底 |
 | E2B SDK 的 stdout 回调不触发 | E2B 面事件非实时 | 沙箱内写 JSONL、结束后回放（`e2b_env.py`）；差异记在 architecture.md |
 | 沙箱内会话文件随沙箱销毁 | E2B 面 `session_id` 为空 | 报告与 run 元数据仍持久；如实记录 |
-| pi 的工具能读到内核自用的模型 key | inproc 面的固有属性（内核与工具同进程环境） | 输出侧六层脱敏 + 子进程环境白名单；更强隔离用 Docker / E2B 面；详见 architecture.md §6 |
+| 模型 key 以文件形式位于运行期 `auth.json`（不在进程环境） | 工具可用 `read` 打开并回显 | `env` 类读取已不可行（三面实测 0）；回显被出站六层脱敏覆盖；更强隔离用 Docker / E2B 面；详见 architecture.md §6.2 |

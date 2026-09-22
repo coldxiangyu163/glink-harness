@@ -61,15 +61,21 @@ def test_plan_mounts_data_and_never_the_host_filesystem(config, tmp_path: Path) 
     )
 
 
-def test_credentials_are_forwarded_by_name_not_by_value(config, tmp_path: Path) -> None:
+def test_no_credential_travels_through_argv_or_the_cli_environment(
+    config, tmp_path: Path
+) -> None:
     runtime = agent_env.prepare_agent_dir(config)
     plan = docker_env.build_plan(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws"
     )
     joined = " ".join(plan.argv)
-    assert "OPENAI_API_KEY" in plan.argv
+    assert "OPENAI_API_KEY" not in plan.argv, "the container must get no credential env var"
     assert "sk-docker-secret" not in joined, "the key must never appear in argv"
-    assert plan.env["OPENAI_API_KEY"] == "sk-docker-secret"
+    assert "OPENAI_API_KEY" not in plan.env
+    assert "sk-docker-secret" not in plan.env.values()
+
+    # The credential reaches the container as a file inside the mounted config dir.
+    assert (runtime.directory / agent_env.AUTH_FILENAME).is_file()
 
 
 def test_runtime_config_directory_carries_the_generated_models_file(config) -> None:

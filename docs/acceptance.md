@@ -168,6 +168,20 @@ HTTPS_PROXY=socks5h://127.0.0.1:1080 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 
 | 子进程继承宿主整份环境 | `agent_env._PASSTHROUGH_ENV` 白名单：只放行运行必需项，再显式注入 `PI_*` 与模型凭据 | `test_minimal_child_environment_does_not_inherit_host_credentials`（ANTHROPIC_API_KEY / AWS_SECRET_ACCESS_KEY 不进入子进程） |
 | 仓库缺少防泄漏检查 | 新增 `scripts/check-no-secrets.py`：真实值命中判失败，文档占位符单独计数（`--show-placeholders`） | 实测：真实命中 **0 处** · 占位符 2 处（pi README 中的 `sk-ant-...`） |
 
-**残留风险（已写入 architecture.md §6.2）**：模型凭据必须存在于 pi 进程环境（内核要用它调用
-模型），因此 pi 的工具理论上可读到自己进程里的这一个 key——这是"在进程内跑 agent"的固有属性，
-输出脱敏无法根除；需要更强隔离时应使用 Docker / E2B 执行面并配专用、限额的凭据。
+**残留风险（§8 修复后的状态；已被 §9 取代）**：该轮之后 key 仍在进程环境里。§9 改为把 key 写入
+pi 官方凭据存储 `auth.json`（0600，运行期目录），进程环境不再包含它——三面真实 run 由内核自己
+跑 `env | grep -c OPENAI_API_KEY` 均得到 0。
+
+### 第四次审计返工（key 不进进程环境）
+
+审计第一条指控是「`OPENAI_API_KEY` 被注入 pi 进程环境，bash 工具会继承」。输出脱敏只能保证
+“不回显”，不能消除“工具可读”；本次改为让 key **根本不进进程环境**。
+
+| 审计缺口 | 返工 | 复验 |
+|---|---|---|
+| 模型 key 经环境变量进入 pi 进程 | 弃用 `$OPENAI_API_KEY` 插值：`models.json` 不写 `apiKey`；key 写入运行期 `auth.json`（pi 官方凭据存储，0600，仓库外）；`build_pi_env` 不再注入该变量；docker 面去掉 `-e OPENAI_API_KEY`；e2b 面改为上传 `auth.json` | 三面真实 run：inproc `a6f67fde8e51`、docker `1e367674ed08`、e2b `046a51ac09d0` 全部 finished；inproc 与 e2b 让内核自己跑 `env \| grep -c OPENAI_API_KEY`，报告首行为 **0** |
+| 子进程环境可能带入宿主其他凭据 | `PASSTHROUGH_ENV` 白名单（PATH/HOME/代理/证书等）+ 显式 `PI_*` | `test_minimal_child_environment_does_not_inherit_host_credentials` |
+
+证据：`docs/evidence/credential-boundary.txt`（含 auth.json 结构/权限、三面 runId 与 `env` 检查输出）。
+残留风险已在 architecture.md §6.2 如实记录：工具理论上仍可 `read` 打开 `auth.json` 并回显，
+该场景由 §6.1 的六层出站脱敏覆盖。

@@ -9,7 +9,11 @@ Only data crosses the boundary:
 * the run workspace — read-write bind mount at ``/workspace`` (the agent's cwd);
 * the runtime config directory rendered by the host — at ``/config``;
 * the pi session directory — at ``/sessions``;
-* credentials — environment variables only, never argv and never the image.
+
+The container's configuration — including the model credential, which lives in
+``auth.json`` inside the runtime directory — arrives through those mounts, so
+nothing credential-shaped travels through argv or the CLI environment at all.
+A shell tool inside the container cannot read the key with ``env``.
 
 The image is self-contained (Node + pi + the tools the agent uses); a container
 installed-runtime dependency would defeat the point of the isolation, so this
@@ -26,7 +30,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from ..config import HostConfig
-from .agent_env import AgentRuntime
+from .agent_env import PASSTHROUGH_ENV, AgentRuntime
 
 #: Default image; override with LOCAL_WEB_WORKER_IMAGE.
 WORKER_IMAGE_DEFAULT = "pi-glink-worker:latest"
@@ -34,7 +38,14 @@ CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_CONFIG = "/config"
 CONTAINER_SESSIONS = "/sessions"
 #: Host environment variables forwarded by name (value stays out of argv).
-_FORWARDED_ENV = ("OPENAI_API_KEY",)
+#: Docker CLI needs these beyond the shared kernel whitelist (Docker Desktop / Colima).
+_DOCKER_CLI_ENV = (
+    "DOCKER_HOST",
+    "DOCKER_CONFIG",
+    "DOCKER_CONTEXT",
+    "DOCKER_TLS_VERIFY",
+    "DOCKER_CERT_PATH",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,8 +123,6 @@ def build_plan(
         "-e", "PI_SKIP_VERSION_CHECK=1",
         "-e", "PI_TELEMETRY=0",
     ]
-    for name in _FORWARDED_ENV:
-        argv.extend(["-e", name])
     argv.extend(
         [
             image,
@@ -136,14 +145,14 @@ def build_env(
 ) -> dict[str, str]:
     """Environment for the *docker CLI*, not for the container.
 
-    The container's environment is defined by the ``-e`` flags in :func:`build_plan`.
-    Here we only make sure the CLI itself can see the credential it is told to
-    forward by name.
+    The container's configuration — including the credential in ``auth.json`` —
+    arrives through the mounted config directory, so nothing credential-shaped
+    is placed on the CLI's environment or argv. The whitelist additionally keeps
+    a host shell full of unrelated tokens out of this child process.
     """
-    env = dict(base_env) if base_env is not None else dict(os.environ)
-    if config.openai_api_key:
-        env["OPENAI_API_KEY"] = config.openai_api_key
-    return env
+    source = dict(base_env) if base_env is not None else dict(os.environ)
+    names = (*PASSTHROUGH_ENV, *_DOCKER_CLI_ENV)
+    return {name: source[name] for name in names if name in source}
 
 
 def stop_argv(container_name: str) -> list[str]:

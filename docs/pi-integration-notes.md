@@ -13,7 +13,7 @@
 | `baseUrl` | ❌ 不支持 | 设 `"baseUrl": "$OPENAI_BASE_URL"` 后 `pi --list-models` 能列出模型（不校验 URL），实际请求报 `Invalid URL` |
 | `models[].id` | ❌ 不支持 | `pi --list-models` 原样打印 `$OPENAI_MODEL` 字样 |
 
-**结论**：宿主编译期无法把 endpoint 与模型 id 交给 pi 自己插值，必须由宿主在运行期渲染 `models.json`（见 `host/pi_glink/kernel/agent_env.py`）。密钥仍可用 `$OPENAI_API_KEY` 占位，由 pi 从子进程环境解析，因此**不需要落盘**。
+**结论**：宿主编译期无法把 endpoint 与模型 id 交给 pi 自己插值，必须由宿主在运行期渲染 `models.json`（见 `host/pi_glink/kernel/agent_env.py`）。密钥**不写进 `models.json`**：宿主把它写入 pi 官方凭据存储 `auth.json`（权限 0600，位于运行期目录），进程环境里不再有该变量，内核的 `env` 类读取拿不到（三面实测 0）；详见 architecture.md §6 与 docs/evidence/credential-boundary.txt。
 
 复现：
 

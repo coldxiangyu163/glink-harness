@@ -148,8 +148,10 @@ def test_api_key_from_env_reaches_sandbox_create(tmp_path: Path) -> None:
     )
     client.start()
     assert captured["template"] == "pi-glink-worker"
-    assert captured["api_key"] == "e2b-secret-key", "the key read at startup must reach the SDK"
-    assert "OPENAI_API_KEY" in captured["envs"]
+    # The *E2B* key authenticates the sandbox API…
+    assert captured["api_key"] == "e2b-secret-key"
+    # …while the *model* key travels in auth.json, never as an env var.
+    assert "OPENAI_API_KEY" not in captured["envs"]
     client.close()
 
 
@@ -185,6 +187,7 @@ def test_upload_config_includes_models_settings_and_search_credential(tmp_path: 
     client.upload_config()
     assert "/home/user/config/models.json" in sandbox.written
     assert "/home/user/config/settings.json" in sandbox.written
+    assert "/home/user/config/auth.json" in sandbox.written
     assert len(sandbox.dirs) == 3
     client.close()
 
@@ -210,8 +213,8 @@ def test_run_replays_frames_and_pulls_the_report(tmp_path: Path) -> None:
     assert "tool_started" in kinds and "tool_finished" in kinds
     assert kinds[-1] == "run_finished"
     assert sandbox.killed is True, "the sandbox must be destroyed after the run"
-    # The prompt travels through the command line (base64), never through envs.
-    assert "OPENAI_API_KEY" in sandbox.command_envs
+    # Neither the prompt nor the model credential travels through the sandbox env.
+    assert "OPENAI_API_KEY" not in sandbox.command_envs
     assert "把结果写成 report.md" not in sandbox.command
 
 

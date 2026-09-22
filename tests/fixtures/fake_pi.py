@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 
 COMMANDS = {"get_state", "prompt", "abort", "proto_frames", "silent", "exit"}
 
@@ -147,6 +148,26 @@ def raw_chunk() -> None:
     sys.stdout.flush()
 
 
+def runtime_secret() -> str:
+    """Read the credential the way a kernel tool could: from the runtime config.
+
+    The host no longer puts the model key in the process environment, so the
+    stand-in reads ``auth.json`` (pi's own credential store) exactly like the
+    ``read`` tool would.
+    """
+    config_dir = os.environ.get("PI_CODING_AGENT_DIR", "")
+    if not config_dir:
+        return ""
+    try:
+        data = json.loads((Path(config_dir) / "auth.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    for entry in data.values():
+        if isinstance(entry, dict) and isinstance(entry.get("key"), str):
+            return entry["key"]
+    return ""
+
+
 def write_report(prompt: str) -> None:
     """Stand in for the artifact the research contract asks pi to produce.
 
@@ -157,8 +178,7 @@ def write_report(prompt: str) -> None:
 
     body = f"# 研究报告（fake pi）\n\n原始问题：{prompt}\n\n结论：这是测试替身产出的报告。\n"
     if os.environ.get("FAKE_PI_ECHO_SECRET") == "1":
-        secret = os.environ.get("OPENAI_API_KEY", "")
-        body += f"\n环境检查：OPENAI_API_KEY={secret}\n"
+        body += f"\n环境检查：OPENAI_API_KEY={runtime_secret()}\n"
     Path("report.md").write_text(body, encoding="utf-8")
 
 
@@ -170,7 +190,7 @@ def prompt_events() -> list[dict]:
     """
     events = list(PROMPT_EVENTS)
     if os.environ.get("FAKE_PI_ECHO_SECRET") == "1":
-        secret = os.environ.get("OPENAI_API_KEY", "")
+        secret = runtime_secret()
         events.insert(
             -1,
             {

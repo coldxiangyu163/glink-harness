@@ -9,8 +9,10 @@ projection are identical, so the browser contract does not change.
 
 **Credential flow (recorded per the task contract).**
 
-* Model credentials travel through ``Sandbox.create(envs=…)``: they exist only
-  in the sandbox process environment and are never written to a file.
+* The model credential is uploaded inside ``auth.json`` — pi's official credential
+  store — so the sandbox kernel never receives it through its environment: a shell
+  tool inside the sandbox cannot read it with ``env``. The file exists only for the
+  sandbox lifetime (destroyed on ``kill()``).
 * The pi-web-access credential is written to ``/home/user/config/web-search.json``
   inside the sandbox. That file lives for the sandbox lifetime only (destroyed on
   ``kill()``); the host keeps just its own local copy. This is deliberate: the
@@ -40,8 +42,8 @@ SANDBOX_HOME = "/home/user"
 SANDBOX_CONFIG = f"{SANDBOX_HOME}/config"
 SANDBOX_WORKSPACE = f"{SANDBOX_HOME}/workspace"
 SANDBOX_SESSIONS = f"{SANDBOX_HOME}/sessions"
-#: Uploaded config files; the credential file is handled separately.
-_CONFIG_FILES = ("models.json", "settings.json")
+#: Uploaded config files (auth.json carries the credential; see module docstring).
+_CONFIG_FILES = ("models.json", "settings.json", "auth.json")
 REPORT_FILENAME = "report.md"
 #: The sandbox writes its JSON event stream here (see module docstring).
 _EVENTS_FILE = f"{SANDBOX_HOME}/events.jsonl"
@@ -216,15 +218,18 @@ class E2BSandboxClient:
         return self.sandbox
 
     def _model_envs(self) -> dict[str, str]:
-        envs = {
+        """Environment for the sandboxed kernel — deliberately credential-free.
+
+        The model credential travels in the uploaded ``auth.json`` (pi's own
+        store), exactly like the in-process face, so ``env`` inside the sandbox
+        cannot print it.
+        """
+        return {
             "PI_CODING_AGENT_DIR": SANDBOX_CONFIG,
             "PI_CODING_AGENT_SESSION_DIR": SANDBOX_SESSIONS,
             "PI_SKIP_VERSION_CHECK": "1",
             "PI_TELEMETRY": "0",
         }
-        if self.config.openai_api_key:
-            envs["OPENAI_API_KEY"] = self.config.openai_api_key
-        return envs
 
     def _command(self, prompt: str, system_prompt: str) -> str:
         """Compose the sandbox command.

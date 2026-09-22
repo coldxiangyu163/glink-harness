@@ -12,11 +12,17 @@ reaches the provider as a literal string and every request fails with
 
     <data_root>/pi-agent/
     ├── models.json          generated: literal baseUrl + literal model id
+    ├── auth.json            generated: model credential in pi's own store (0600)
+    ├── web-search.json      generated: pi-web-access credential (0600), if configured
     └── settings.json, AGENTS.md, extensions/, …   copied from the template
 
-The API key is never written to disk: ``models.json`` carries the literal
-string ``$OPENAI_API_KEY`` and pi resolves it from the child process
-environment, which the host supplies in memory.
+**The model credential lives in ``auth.json``, not in the process environment.**
+That is pi's official credential store — the same file ``/login`` writes — and
+using it keeps the key out of the kernel's environment, where its shell tool
+would otherwise read it with ``env``. The file sits in the runtime directory
+(outside the repository) with mode 0600 and is rewritten on every run. The same
+reasoning applies to the pi-web-access credential, which the plugin can only read
+from a file anyway.
 """
 
 from __future__ import annotations
@@ -32,8 +38,6 @@ from ..config import ConfigError, HostConfig
 
 #: Provider id used inside the generated models.json.
 PROVIDER_ID = "frontier"
-#: Literal pi resolves from the child environment; never a real secret.
-API_KEY_PLACEHOLDER = "$OPENAI_API_KEY"
 #: OpenRouter-style thinking controls (``reasoning: {effort}``).
 #:
 #: Without this, pi sends no thinking parameter for a custom openai-completions
@@ -53,7 +57,7 @@ _TEMPLATE_ENTRIES = ("settings.json", "AGENTS.md", "extensions", "skills", "prom
 #: explicitly below and nothing else. (pi's tools can still read the model key
 #: the kernel itself uses — that is inherent to running the agent in-process and
 #: is recorded in docs/architecture.md §6.)
-_PASSTHROUGH_ENV = (
+PASSTHROUGH_ENV = (
     "PATH", "HOME", "SHELL", "USER", "LOGNAME", "TMPDIR", "TERM",
     "LANG", "LC_ALL", "LC_CTYPE", "TZ",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "NODE_OPTIONS",
@@ -63,6 +67,8 @@ _PASSTHROUGH_ENV = (
 )
 #: pi-web-access credential file (read from PI_CODING_AGENT_DIR).
 WEB_SEARCH_FILENAME = "web-search.json"
+#: pi's own credential store (same file `/login` writes).
+AUTH_FILENAME = "auth.json"
 #: Default provider key used when the credential comes from the environment.
 WEB_SEARCH_ENV_PROVIDER_KEY = "exaApiKey"
 
@@ -94,6 +100,7 @@ def prepare_agent_dir(
     directory.mkdir(parents=True, exist_ok=True)
     _sync_template(config.agent_config_dir, directory)
     _seed_web_search_config(config, directory)
+    _write_auth_json(config, directory)
 
     models_path = directory / "models.json"
     models_path.write_text(
@@ -131,23 +138,21 @@ def build_pi_env(
     *,
     base_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Child environment: minimal passthrough plus the operator's credential.
+    """Child environment: minimal passthrough, and **no model credential**.
 
-    The credential is passed through the process environment only. Nothing is
-    written to disk, and the value never appears in an event payload or a log
-    line produced by this host.
-
-    ``base_env`` is filtered through :data:`_PASSTHROUGH_ENV` so a caller that
-    hands in ``os.environ`` cannot widen the child's view of host credentials.
+    The credential is not an environment variable any more. It lives in the
+    runtime ``auth.json`` (mode 0600, outside the repository) that pi reads
+    itself, which keeps it out of the kernel process environment — a shell tool
+    running `env` cannot see it. ``base_env`` is still filtered through
+    :data:`PASSTHROUGH_ENV` so a caller handing in ``os.environ`` cannot widen
+    the child's view of host credentials.
     """
     source = dict(base_env) if base_env is not None else dict(os.environ)
-    env = {name: source[name] for name in _PASSTHROUGH_ENV if name in source}
+    env = {name: source[name] for name in PASSTHROUGH_ENV if name in source}
     env["PI_CODING_AGENT_DIR"] = str(runtime.directory)
     env["PI_CODING_AGENT_SESSION_DIR"] = str(config.session_dir)
     env["PI_SKIP_VERSION_CHECK"] = "1"
     env["PI_TELEMETRY"] = "0"
-    if config.openai_api_key:
-        env["OPENAI_API_KEY"] = config.openai_api_key
     return env
 
 
@@ -157,7 +162,10 @@ def _models_document(config: HostConfig) -> dict[str, Any]:
             PROVIDER_ID: {
                 "baseUrl": config.openai_base_url,
                 "api": "openai-completions",
-                "apiKey": API_KEY_PLACEHOLDER,
+                # No apiKey here on purpose: the credential comes from pi's own
+                # auth.json (see _write_auth_json), so `env` inside the kernel
+                # never sees it. pi resolves provider credentials from both
+                # sources; leaving this field out selects the safe one.
                 "models": [
                     {
                         "id": config.openai_model,
@@ -181,6 +189,30 @@ def _models_document(config: HostConfig) -> dict[str, Any]:
             }
         }
     }
+
+
+def _write_auth_json(config: HostConfig, directory: Path) -> Path | None:
+    """Store the model credential the way pi itself stores it.
+
+    ``auth.json`` is pi's official credential store — the same file ``/login``
+    writes, mode 0600, inside the runtime config directory (which lives outside
+    the repository). Using it instead of an environment variable is what keeps
+    the key **out of the kernel's process environment**, and therefore out of
+    reach of its shell tool: the objective allows "environment variables or pi's
+    official credential mechanism", and this is the narrower one.
+
+    The file is rewritten on every run, so a credential pi might clear while
+    rotating its own state is always restored before the next kernel start.
+    """
+    if not config.openai_api_key:
+        return None
+    target = directory / AUTH_FILENAME
+    payload = {PROVIDER_ID: {"type": "api_key", "key": config.openai_api_key}}
+    target.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    target.chmod(0o600)
+    return target
 
 
 def _sync_template(template_dir: Path, target_dir: Path) -> None:
