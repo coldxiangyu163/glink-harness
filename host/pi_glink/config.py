@@ -52,11 +52,20 @@ class HostConfig:
     has_e2b_key: bool = False
     log_level: str = "INFO"
     task_timeout_seconds: int = 1800
+    web_search_key: str = field(repr=False, default="")
+    web_search_config_path: Path | None = None
 
     @property
     def has_openai_key(self) -> bool:
         """True when a key was configured; the value itself stays unprinted."""
         return bool(self.openai_api_key)
+
+    @property
+    def has_web_search_key(self) -> bool:
+        """True when a usable credential source exists (env key or real file)."""
+        if self.web_search_key:
+            return True
+        return self.web_search_config_path is not None and self.web_search_config_path.is_file()
 
     @property
     def binds_loopback(self) -> bool:
@@ -147,6 +156,12 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         has_e2b_key=bool(e2b_key),
         log_level=_text(values, "LOCAL_WEB_LOG_LEVEL", "INFO").upper(),
         task_timeout_seconds=_integer(values, "LOCAL_WEB_TASK_TIMEOUT_SECONDS", 1800),
+        web_search_key=_text(values, "PI_GLINK_WEB_SEARCH_KEY", ""),
+        web_search_config_path=_optional_path(
+            values,
+            "PI_GLINK_WEB_SEARCH_CONFIG",
+            _default_web_search_config(),
+        ),
     )
 
 
@@ -186,3 +201,28 @@ def _flag(values: Mapping[str, str], key: str, default: bool) -> bool:
 def _path(values: Mapping[str, str], key: str, default: Path) -> Path:
     raw = _text(values, key, "")
     return Path(raw).expanduser() if raw else default
+
+
+def _optional_path(values: Mapping[str, str], key: str, default: Path | None) -> Path | None:
+    raw = _text(values, key, "")
+    if raw:
+        return Path(raw).expanduser()
+    return default
+
+
+def _default_web_search_config() -> Path | None:
+    """The operator's own pi-web-access credential file, if they have one.
+
+    pi-web-access reads its config from ``PI_CODING_AGENT_DIR``, which this host
+    redirects to a runtime directory; without seeding the credential there, a
+    keyed setup would silently fall back to keyless search. The host never
+    invents its own credential format — it copies the file pi already uses.
+    """
+    candidates = (
+        Path.home() / ".pi" / "agent" / "web-search.json",
+        Path.home() / ".pi" / "web-search.json",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None

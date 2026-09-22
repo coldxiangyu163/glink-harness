@@ -1,0 +1,4 @@
+{
+  "defaultThinkingLevel": "medium",
+  "packages": ["npm:pi-web-access"]
+}

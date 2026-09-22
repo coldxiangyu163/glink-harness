@@ -1,0 +1,46 @@
+pi-web-access 接入证据 / search integration evidence
+====================================================
+日期: 2026-09-22
+执行面: inproc (本机)，宿主 127.0.0.1:7861
+插件: npm:pi-web-access（在 agent/settings.json 的 packages 中声明）
+凭据: 由宿主复制操作员本机 ~/.pi/agent/web-search.json 到运行期目录（键: exaApiKey）
+
+检索 run（强制 web_search）
+---------------------------
+runId       e985af5159d0
+duration    72.2s
+events      254
+工具调用    web_search ×1 · fetch_content ×3 · bash ×1 · read ×1 · write ×1
+报告 URL 数 10
+
+web_search 参数（真实调用）:
+  {"queries": "pi-web-access npm package\npi-web-access GitHub README web search fetch content",
+   "numResults": 8, "recencyFilter": "year", "provider": "auto", "workflow": "none"}
+
+报告中被核验过的来源（节选）:
+  https://registry.npmjs.org/pi-web-access/latest
+  https://github.com/nicobailon/pi-web-access
+
+早先一次 run（模型自行选择直接抓取）
+------------------------------------
+runId       f284639c863f
+duration    102.2s
+工具调用    bash ×3 · read ×7 · fetch_content ×4 · write ×1
+报告 URL 数 12（含官方 pi 仓库文档路径）
+说明: 这次模型没有先检索而是直接 fetch 已知 URL；两次 run 合起来证明
+      web_search 与 fetch_content 两条通道都真实可用。
+
+运行期装配
+----------
+~/.pi-glink/pi-agent/
+├── models.json         宿主渲染（baseUrl 与模型 id 为字面量）
+├── web-search.json     宿主渲染（从操作员本机配置复制；权限 600）
+├── settings.json       模板（声明 packages: ["npm:pi-web-access"]）
+├── npm/node_modules/   pi 启动时安装的插件包
+├── auth.json           pi 自身写入的运行时状态（空对象）
+└── models-store.json   pi 自身写入的模型目录缓存
+
+未被使用的链路
+--------------
+本仓库没有任何 Serper / Jina 依赖或配置（FrontierAgent 的那套检索链路不参与本仓库），
+检索能力全部来自 pi-web-access 扩展。

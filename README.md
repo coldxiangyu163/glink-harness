@@ -67,6 +67,18 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 本机执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id。
 
+## 搜索
+
+检索能力全部来自 [pi-web-access](https://github.com/nicobailon/pi-web-access) 扩展，声明在 `agent/settings.json` 的 `packages` 里（`npm:pi-web-access`），pi 启动时会把它安装到运行期配置目录。
+
+凭据由宿主渲染到运行期配置目录的 `web-search.json`（权限 600）：
+
+1. 有 `PI_GLINK_WEB_SEARCH_KEY` 时渲染为 `{"exaApiKey": …}`；
+2. 否则复制操作员本机的 `~/.pi/agent/web-search.json`（或 `~/.pi/web-search.json`）；
+3. 都没有也能工作：pi-web-access 会回退到无密钥的 Exa MCP 检索。
+
+本仓库不包含 Serper / Jina 链路。检索证据见 [docs/evidence/local-web-search.txt](docs/evidence/local-web-search.txt)。
+
 ## 目录
 
 | 路径 | 职责 |

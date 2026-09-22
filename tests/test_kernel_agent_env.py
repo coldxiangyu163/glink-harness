@@ -11,6 +11,7 @@ from pi_glink.config import ConfigError, build_config
 from pi_glink.kernel.agent_env import (
     API_KEY_PLACEHOLDER,
     PROVIDER_ID,
+    WEB_SEARCH_FILENAME,
     build_pi_argv,
     build_pi_env,
     prepare_agent_dir,
@@ -118,3 +119,49 @@ def test_config_repr_does_not_leak_the_key(tmp_path: Path, template_dir: Path) -
     config = _config(tmp_path, template_dir)
     assert "sk-secret-value" not in repr(config)
     assert config.has_openai_key is True
+
+
+# -- pi-web-access credentials ------------------------------------------------
+
+
+def test_web_search_key_is_rendered_into_the_runtime_directory(
+    tmp_path: Path, template_dir: Path
+) -> None:
+    config = _config(tmp_path, template_dir, PI_GLINK_WEB_SEARCH_KEY="exa-secret")
+    runtime = prepare_agent_dir(config)
+    payload = json.loads((runtime.directory / WEB_SEARCH_FILENAME).read_text(encoding="utf-8"))
+    assert payload == {"exaApiKey": "exa-secret"}
+    assert (runtime.directory / WEB_SEARCH_FILENAME).stat().st_mode & 0o777 == 0o600
+    assert config.has_web_search_key is True
+
+
+def test_operator_web_search_file_is_copied_when_no_env_key(
+    tmp_path: Path, template_dir: Path
+) -> None:
+    source = tmp_path / "operator-web-search.json"
+    source.write_text('{"braveApiKey": "BSA_operator"}\n', encoding="utf-8")
+    config = _config(
+        tmp_path, template_dir, PI_GLINK_WEB_SEARCH_CONFIG=str(source)
+    )
+    runtime = prepare_agent_dir(config)
+    copied = json.loads((runtime.directory / WEB_SEARCH_FILENAME).read_text(encoding="utf-8"))
+    assert copied == {"braveApiKey": "BSA_operator"}
+
+
+def test_missing_web_search_credential_is_not_an_error(
+    tmp_path: Path, template_dir: Path
+) -> None:
+    config = _config(
+        tmp_path, template_dir, PI_GLINK_WEB_SEARCH_CONFIG=str(tmp_path / "absent.json")
+    )
+    runtime = prepare_agent_dir(config)
+    # Keyless pi-web-access (Exa MCP) stays available; the run contract does not
+    # require a credential for a working search.
+    assert not (runtime.directory / WEB_SEARCH_FILENAME).exists()
+    assert config.has_web_search_key is False
+
+
+def test_template_settings_declare_the_web_access_package() -> None:
+    settings = json.loads((REPO_ROOT / "agent" / "settings.json").read_text(encoding="utf-8"))
+    assert "npm:pi-web-access" in settings["packages"]
+    assert settings["defaultThinkingLevel"] == "medium"

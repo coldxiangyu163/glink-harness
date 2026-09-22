@@ -43,6 +43,10 @@ API_KEY_PLACEHOLDER = "$OPENAI_API_KEY"
 THINKING_FORMAT = "openrouter"
 #: Template entries copied verbatim into the runtime directory.
 _TEMPLATE_ENTRIES = ("settings.json", "AGENTS.md", "extensions", "skills", "prompts")
+#: pi-web-access credential file (read from PI_CODING_AGENT_DIR).
+WEB_SEARCH_FILENAME = "web-search.json"
+#: Default provider key used when the credential comes from the environment.
+WEB_SEARCH_ENV_PROVIDER_KEY = "exaApiKey"
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +75,7 @@ def prepare_agent_dir(
     directory = runtime_dir if runtime_dir is not None else config.data_root / "pi-agent"
     directory.mkdir(parents=True, exist_ok=True)
     _sync_template(config.agent_config_dir, directory)
+    _seed_web_search_config(config, directory)
 
     models_path = directory / "models.json"
     models_path.write_text(
@@ -169,3 +174,34 @@ def _sync_template(template_dir: Path, target_dir: Path) -> None:
             shutil.copytree(source, target, dirs_exist_ok=True)
         else:
             shutil.copy2(source, target)
+
+
+def _seed_web_search_config(config: HostConfig, directory: Path) -> Path | None:
+    """Seed pi-web-access credentials into the runtime config directory.
+
+    pi-web-access resolves its config directory from ``PI_CODING_AGENT_DIR``
+    (verified in its ``utils.ts``), so redirecting that variable would silently
+    hide the operator's own ``web-search.json`` and downgrade search to the
+    keyless fallback. Two sources, in order:
+
+    1. ``PI_GLINK_WEB_SEARCH_KEY`` — rendered as ``{"exaApiKey": …}``;
+    2. the operator's own file (``~/.pi/agent/web-search.json`` or
+       ``~/.pi/web-search.json``), copied verbatim.
+
+    Having no credential at all is a supported state: pi-web-access still works
+    through keyless Exa MCP search, and the run contract does not require a key.
+    """
+    target = directory / WEB_SEARCH_FILENAME
+    if config.web_search_key:
+        payload = {WEB_SEARCH_ENV_PROVIDER_KEY: config.web_search_key}
+        target.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        target.chmod(0o600)
+        return target
+    source = config.web_search_config_path
+    if source is not None and source.is_file():
+        shutil.copy2(source, target)
+        target.chmod(0o600)
+        return target
+    return None

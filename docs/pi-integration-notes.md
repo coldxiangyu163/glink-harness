@@ -59,7 +59,13 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
 - 一次真实研究型 prompt 的事件面：`agent_start → turn_start → message_start → message_update(text_*) … → tool_execution_start/update/end → turn_end → … → agent_settled`。
 - `agent_settled` 是判断"这一次 run 完全落定"的可靠信号（`agent_end` 之后仍可能有重试/压缩/排队续跑）。
 
-## 5. 待补测
+## 5. pi-web-access 接入（已实测）
+
+- **配置目录解析**：pi-web-access 的 `utils.ts` 中 `getWebSearchConfigDir()` **优先读 `process.env.PI_CODING_AGENT_DIR`**，且不检查该目录下是否已有 `web-search.json`。这与 pi 本身的重定向一致，但也意味着：一旦宿主重定向了配置目录，操作员本机 ``~/.pi/agent/web-search.json` 就不再被读到，检索会静默退化成无凭据模式。
+- **凭据装配**：宿主在运行期目录渲染 `web-search.json`：优先用 `PI_GLINK_WEB_SEARCH_KEY`（渲染为 `{"exaApiKey": …}`），否则复制操作员本机的 `~/.pi/agent/web-search.json`（或 `~/.pi/web-search.json`）。无凭据不是错误：pi-web-access 仍可用无密钥的 Exa MCP 检索。
+- **插件安装**：在 `agent/settings.json` 的 `packages` 里声明 `npm:pi-web-access`，pi 启动时把它装到 `<PI_CODING_AGENT_DIR>/npm/`（实测会在运行期目录下生成 `npm/node_modules/`）。
+- **工具面**：实测一次检索 run 调用 `web_search`（1 次）+ `fetch_content`（3 次），事件流里以 `tool_started/tool_updated/tool_finished` 正常呈现，报告写入 10 个可核验 URL。见 `docs/evidence/local-web-search.txt`。
+
+## 6. 待补测
 
 - Docker / E2B 沙箱内 `PI_CODING_AGENT_DIR` 与凭据注入（task-6 / task-7）。
-- pi-web-access 在配置目录重定向后是否从 `PI_CODING_AGENT_DIR/web-search.json` 读取凭据（task-5）。
