@@ -139,10 +139,29 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | `host/pi_glink/` | 宿主：配置解析、事件总线、HTTP/SSE 服务、静态资源 |
 | `host/pi_glink/kernel/` | pi 接入层：headless 协议客户端（RPC / JSON）、事件投影、运行期配置渲染、三执行面适配 |
 | `agent/` | pi 侧配置模板：由宿主渲染到 `<data_root>/pi-agent/` 后作为 `PI_CODING_AGENT_DIR`，内核之外的定制只落在这里 |
-| `web/` | 前端：沿用 Glink 布局的静态 ESM 资源 |
+| `web/` | 前端：按百鉴 UI 标准库逐值对齐的静态 ESM 资源（token 层 + 组件层 + 外壳） |
 | `docs/` | `architecture.md`（进程拓扑、事件契约、执行面适配）、`pi-boundary.md`（扩展点与禁止项） |
 | `tests/` | 宿主与内核的回归 |
 | `data/`（运行时创建） | 默认 `~/.pi-glink`：会话、工作区、事件日志 |
+
+## 前端与 UI 标准库对齐
+
+前端没有打包器，所以「和标准库长得一样」不是靠引用同一份组件，而是靠**逐值抄写 + 逐值测量**：
+
+- token 数值抄自标准库 `src/styles/globals.css`（`:root` + `@theme inline`），
+  组件形态抄自 `src/components/*.tsx` 与完整页面 Demo（`src/pages/agent-assistant-demo/`）；
+- 外壳照搬「8px 外围沟槽 + 左侧导航卡 + 右侧主工作区」与 52px 栏头、36px 导航行、
+  120px 输入器（含禁用态 `opacity-45` 口径）；
+- 断点沿用标准库登记的档位（≤1250 / ≤1050 / ≤980 / ≤900 / ≤721 / ≤600）。
+
+```bash
+scripts/check-ui-tokens.py                                 # 173 项 token 逐值比对
+node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 26 个角色计算样式比对
+```
+
+口径、逐层对照表、刻意偏离与复现步骤见 [docs/ui-alignment.md](docs/ui-alignment.md)；
+证据在 `docs/evidence/ui-parity.txt` 与 `docs/evidence/ui-parity.json`。
+对齐校验需要标准库在场（`--library` 可指别处），不在场时 token 校验跳过而不是假装通过。
 
 ## 环境变量
 
@@ -154,4 +173,12 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 ```bash
 .venv/bin/python -m pytest        # 或者：scripts/run-tests.sh
+node --test tests/web/*.test.mjs  # 前端事件层回归（Node，无浏览器）
+```
+
+对齐与浏览器回归（需要宿主在跑）：
+
+```bash
+node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 像素级对齐（需要标准库参考页）
+node tests/browser/run-smoke.mjs --base-url http://127.0.0.1:7861   # 真实 run 端到端 + 截图
 ```

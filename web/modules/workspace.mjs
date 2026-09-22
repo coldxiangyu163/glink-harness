@@ -1,17 +1,22 @@
 /**
- * Workbench shell: run history, composer, live run view, report preview.
+ * Workbench shell: run history, composer, live run view, report reader.
  *
  * The shell owns navigation and nothing else. All run semantics live in
  * `run-stream.mjs` (event → model) and `run-view.mjs` (model → DOM), so the
  * interesting behaviour is testable without a browser.
+ *
+ * Visual language comes from the 百鉴 UI standard library: 8px gutter + left
+ * nav card + right work surface, 52px pane headers, 36px nav rows, the
+ * library's 120px prompt input dock. See `web/styles.css` for the token layer.
  */
 
 import { createApi } from './api.mjs';
-import { applyEvent, createRunModel, createRunSubscription, runSummary, TERMINAL_EVENT_TYPES, TERMINAL_STATUSES } from './run-stream.mjs';
+import { applyEvent, createRunModel, createRunSubscription, TERMINAL_EVENT_TYPES, TERMINAL_STATUSES } from './run-stream.mjs';
 import { createRunView } from './run-view.mjs';
 import { renderMarkdown } from './markdown.mjs';
 
 const MAX_PROMPT = 32000;
+const SIDEBAR_KEY = 'pi-glink-sidebar';
 const RECONNECT_LABELS = {
   idle: '',
   connecting: '连接事件流…',
@@ -19,6 +24,9 @@ const RECONNECT_LABELS = {
   reconnecting: '事件流重连中…',
   closed: '事件流已关闭',
 };
+
+/** The icon the run-history row wears: every run is a conversation with pi. */
+const RUN_ICON = 'chat';
 
 export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) {
   const el = (id) => document.getElementById(id);
@@ -31,8 +39,10 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   const sendButton = el('send-button');
   const promptCount = el('prompt-count');
   const runList = el('run-list');
+  const homeRunList = el('home-run-list');
   const hostStatus = el('host-status');
-  const conversation = el('conversation');
+  const hostStatusCard = el('host-status-card');
+  const conversationScroll = el('conversation-scroll');
   const runHost = el('run-view');
   const question = el('run-question');
   const banner = el('run-banner');
@@ -44,11 +54,49 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   const previewTitle = el('preview-title');
   const previewDownload = el('preview-download');
   const previewClose = el('preview-close');
+  const previewToggle = el('pane-preview-toggle');
+  const paneTitle = el('pane-title');
+  const paneHome = el('pane-home');
+  const sidebarToggle = el('sidebar-toggle');
   const toast = el('toast');
 
   let current = null; // { runId, model, subscription, view }
+  let latestRuns = [];
   let toastTimer = null;
   let disposed = false;
+
+  /* Bottom anchoring (标准库用 use-stick-to-bottom 做同一件事)：the conversation
+   * follows new frames only while the reader is already at the tail. Scrolling up
+   * is a deliberate act — one frame later the view must not yank them back. */
+  const STICK_THRESHOLD = 80;
+  const ANCHOR_SETTLE_MS = 800;
+  let stick = true;
+  let settleUntil = 0;
+  const anchored = document.getElementById('conversation');
+  const anchorFrame = () => {
+    if (!stick || !anchored) return;
+    // Folds and tool details grow with a transition, so one pin is not enough:
+    // keep following for a moment, and stop the moment the reader scrolls away.
+    settleUntil = Math.max(settleUntil, performance.now() + ANCHOR_SETTLE_MS);
+    const step = () => {
+      if (!stick) return;
+      conversationScroll.scrollTop = conversationScroll.scrollHeight;
+      if (performance.now() < settleUntil) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  };
+  if (anchored && typeof MutationObserver === 'function') {
+    new MutationObserver(anchorFrame).observe(anchored, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+    // `<details>` open/close is an attribute change, not a mutation, and Chrome's
+    // scroll anchoring fights a height change above the viewport — a size observer
+    // on the column is what actually catches "the tail moved" in every case.
+    anchored.addEventListener('toggle', anchorFrame, true);
+    if (typeof ResizeObserver === 'function') new ResizeObserver(anchorFrame).observe(anchored);
+  }
 
   // -- navigation ------------------------------------------------------------
 
@@ -56,6 +104,34 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     homeView.hidden = name !== 'home';
     chatView.hidden = name !== 'chat';
     composer.hidden = false;
+    shell.dataset.view = name;
+    if (name === 'chat') stick = true;
+    if (name === 'home') {
+      paneTitle.textContent = '新研究';
+      conversationScroll.scrollTop = 0;
+      // On the landing view no run is "current": the history marker must go too,
+      // or the sidebar claims a page the reader is not on.
+      runList.querySelectorAll('[aria-current]').forEach((node) => node.removeAttribute('aria-current'));
+    } else {
+      paneTitle.textContent = current ? shortTitle(current.title) : '研究会话';
+      // A reopened run starts at its tail; the stream keeps it anchored.
+      stick = true;
+      requestAnimationFrame(anchorFrame);
+    }
+  }
+
+  function setSidebar(collapsed, { persist = true } = {}) {
+    shell.dataset.sidebar = collapsed ? 'collapsed' : 'expanded';
+    sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
+    const label = collapsed ? '展开侧栏' : '收起侧栏';
+    sidebarToggle.setAttribute('aria-label', label);
+    sidebarToggle.dataset.tip = label;
+    if (!persist) return;
+    try {
+      localStorage.setItem(SIDEBAR_KEY, collapsed ? 'collapsed' : 'expanded');
+    } catch {
+      /* private mode / file: — the state still applies for this session */
+    }
   }
 
   function showToast(message, level = 'info') {
@@ -77,15 +153,20 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       const parts = [`执行面 ${health.executor}`, `pi ${health.pi.available ? '可用' : '未找到'}`];
       if (config.model) parts.push(config.model);
       hostStatus.textContent = parts.join(' · ');
-      hostStatus.dataset.ready = health.configured.model ? 'true' : 'false';
+      const ready = health.configured.model ? 'true' : 'false';
+      hostStatus.dataset.ready = ready;
+      hostStatusCard.dataset.ready = ready;
     } catch (error) {
       hostStatus.textContent = `宿主不可达：${error.message}`;
       hostStatus.dataset.ready = 'false';
+      hostStatusCard.dataset.ready = 'false';
     }
   }
 
   function renderRunList(runs) {
+    latestRuns = runs;
     runList.replaceChildren();
+    homeRunList.replaceChildren();
     if (!runs.length) {
       const empty = document.createElement('p');
       empty.className = 'empty-note';
@@ -94,21 +175,66 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       return;
     }
     for (const run of runs) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'nav-row nav-chat-row';
-      button.dataset.runId = run.runId;
-      button.dataset.active = current?.runId === run.runId ? 'true' : 'false';
-      const title = document.createElement('span');
-      title.className = 'nav-chat';
-      title.textContent = run.prompt.length > 34 ? `${run.prompt.slice(0, 34)}…` : run.prompt;
-      const badge = document.createElement('em');
-      badge.dataset.status = run.status;
-      badge.textContent = statusLabel(run.status);
-      button.append(title, badge);
-      button.addEventListener('click', () => openRun(run.runId));
-      runList.append(button);
+      runList.append(navRow(run));
+      homeRunList.append(homeRow(run));
     }
+  }
+
+  function navRow(run) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'nav-item';
+    button.dataset.runId = run.runId;
+    button.dataset.status = run.status;
+    button.title = run.prompt;
+    if (current?.runId === run.runId) button.setAttribute('aria-current', 'page');
+
+    const icon = document.createElement('span');
+    icon.className = 'icon';
+    icon.dataset.icon = RUN_ICON;
+    icon.setAttribute('aria-hidden', 'true');
+
+    const title = document.createElement('span');
+    title.textContent = run.prompt.length > 34 ? `${run.prompt.slice(0, 34)}…` : run.prompt;
+
+    const meta = document.createElement('em');
+    meta.className = 'nav-meta';
+    meta.textContent = statusLabel(run.status);
+
+    button.append(icon, title, meta);
+    button.addEventListener('click', () => openRun(run.runId));
+    return button;
+  }
+
+  function homeRow(run) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'home-row';
+    button.dataset.runId = run.runId;
+
+    const icon = document.createElement('span');
+    icon.className = 'icon';
+    icon.dataset.icon = RUN_ICON;
+    icon.setAttribute('aria-hidden', 'true');
+
+    const body = document.createElement('span');
+    body.className = 'home-row-body';
+    const title = document.createElement('span');
+    title.className = 'home-row-title';
+    title.textContent = run.prompt;
+    const meta = document.createElement('span');
+    meta.className = 'home-row-meta';
+    meta.textContent = `${statusLabel(run.status)} · ${run.runId}`;
+    body.append(title, meta);
+
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.dataset.variant = statusVariant(run.status);
+    badge.textContent = statusLabel(run.status);
+
+    button.append(icon, body, badge);
+    button.addEventListener('click', () => openRun(run.runId));
+    return button;
   }
 
   async function refreshRuns() {
@@ -127,8 +253,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   async function startRun() {
     const prompt = input.value.trim();
     if (!prompt) return;
-    sendButton.disabled = true;
-    sendButton.textContent = '提交中…';
+    setSending(true);
     try {
       const { run } = await api.startRun(prompt);
       input.value = '';
@@ -137,13 +262,17 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       await openRun(run.runId);
       await refreshRuns();
     } catch (error) {
-      sendButton.disabled = false;
-      sendButton.textContent = '开始研究';
       showToast(startErrorMessage(error), 'error');
       return;
+    } finally {
+      setSending(false);
     }
-    sendButton.disabled = false;
-    sendButton.textContent = '开始研究';
+  }
+
+  function setSending(sending) {
+    sendButton.disabled = sending || input.value.trim().length === 0;
+    sendButton.setAttribute('aria-label', sending ? '提交中…' : '开始研究');
+    sendButton.dataset.busy = sending ? 'true' : 'false';
   }
 
   async function openRun(runId) {
@@ -157,14 +286,13 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       renderMarkdown: (text) => renderMarkdown(text),
       onOpenReport: (openId) => openReport(openId),
     });
-    current = { runId, model, subscription: null, view };
+    current = { runId, model, subscription: null, view, title: run.prompt };
     showView('chat');
     question.textContent = run.prompt;
     view.render(model);
     updateBanner(model);
-    runList.querySelectorAll('[data-run-id]').forEach((node) => {
-      node.dataset.active = node.dataset.runId === runId ? 'true' : 'false';
-    });
+    syncSelection();
+    syncPreviewToggle(model);
 
     current.subscription = createRunSubscription({
       runId,
@@ -175,6 +303,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
         current.model = applyEvent(current.model, event);
         current.view.render(current.model);
         updateBanner(current.model);
+        syncPreviewToggle(current.model);
         // Closing on the terminal *frame* (not on the model's status) is what
         // makes history replay work: a finished run starts at status=finished,
         // so a status check would abort the subscription after the first
@@ -198,20 +327,27 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     current?.view?.dispose();
     current = null;
     closeReport();
+    syncPreviewToggle(null);
+  }
+
+  /** Move the `aria-current` marker to the run being viewed. */
+  function syncSelection() {
+    runList.querySelectorAll('[data-run-id]').forEach((node) => {
+      if (node.dataset.runId === current?.runId) node.setAttribute('aria-current', 'page');
+      else node.removeAttribute('aria-current');
+    });
   }
 
   function updateBanner(model) {
     const terminal = TERMINAL_STATUSES.has(model.status);
     banner.hidden = terminal;
     stopButton.hidden = terminal;
+    banner.dataset.status = model.status;
     if (terminal) {
-      const summary = runSummary(model);
       bannerTitle.textContent = '运行已结束';
-      banner.dataset.status = model.status;
       return;
     }
     bannerTitle.textContent = 'pi 正在本机运行';
-    banner.dataset.status = model.status;
   }
 
   async function stopRun() {
@@ -229,6 +365,17 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
 
   // -- report ----------------------------------------------------------------
 
+  function syncPreviewToggle(model) {
+    const hasReport = Boolean(model?.hasReport);
+    previewToggle.hidden = !hasReport;
+    const open = shell.classList.contains('preview-open');
+    const label = open ? '收起报告栏' : '展开报告栏';
+    previewToggle.setAttribute('aria-label', label);
+    previewToggle.dataset.tip = label;
+    previewToggle.setAttribute('aria-expanded', String(open));
+    previewToggle.firstElementChild.dataset.icon = open ? 'panel-collapse-right' : 'panel-expand-right';
+  }
+
   async function openReport(runId) {
     try {
       const response = await fetch(api.reportUrl(runId));
@@ -240,8 +387,9 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       previewBody.innerHTML = renderMarkdown(text);
       previewDrawer.hidden = false;
       // The shell grid reserves the third column only in this state; without the
-      // class the drawer renders at 0px width and overflows the layout.
+      // class the pane renders at 0px width and overflows the layout.
       shell.classList.add('preview-open');
+      syncPreviewToggle(current?.model ?? null);
     } catch (error) {
       showToast(`打开报告失败：${error.message}`, 'error');
     }
@@ -252,16 +400,53 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     shell.classList.remove('preview-open');
   }
 
+  function toggleReport() {
+    if (shell.classList.contains('preview-open')) {
+      closeReport();
+      syncPreviewToggle(current?.model ?? null);
+      return;
+    }
+    if (current?.runId) openReport(current.runId);
+  }
+
   // -- composer --------------------------------------------------------------
+
+  /** The editor grows with its content between 68 and 240px, like the library's. */
+  function autoGrow() {
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(240, Math.max(68, input.scrollHeight))}px`;
+  }
 
   function updatePromptCount() {
     const length = input.value.length;
     promptCount.hidden = length === 0;
     promptCount.textContent = `${length} / ${MAX_PROMPT}`;
-    sendButton.disabled = length === 0;
+    autoGrow();
+    setSending(false);
   }
 
   // -- wiring ----------------------------------------------------------------
+
+  /* Scroll-activity scrollbars (标准库 .sidebar-scroll-on-activity)：the bar is
+   * invisible at rest and shows while the reader is actually moving the list. */
+  function trackScrollActivity(node) {
+    if (!node) return;
+    let timer = null;
+    node.addEventListener('scroll', () => {
+      node.dataset.scrollActive = 'true';
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        delete node.dataset.scrollActive;
+      }, 800);
+    }, { passive: true });
+  }
+  conversationScroll.addEventListener('scroll', () => {
+    const distance = conversationScroll.scrollHeight - conversationScroll.scrollTop - conversationScroll.clientHeight;
+    stick = distance < STICK_THRESHOLD;
+  }, { passive: true });
+  trackScrollActivity(el('nav-scroll'));
+  trackScrollActivity(conversationScroll);
+  trackScrollActivity(previewBody);
 
   input?.addEventListener('input', updatePromptCount);
   input?.addEventListener('keydown', (event) => {
@@ -272,6 +457,11 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   });
   sendButton?.addEventListener('click', startRun);
   stopButton?.addEventListener('click', stopRun);
+  paneHome?.addEventListener('click', () => {
+    closeCurrent();
+    showView('home');
+    input.focus();
+  });
   el('new-research')?.addEventListener('click', () => {
     closeCurrent();
     showView('home');
@@ -279,11 +469,23 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   });
   previewClose?.addEventListener('click', () => {
     closeReport();
+    syncPreviewToggle(current?.model ?? null);
+  });
+  previewToggle?.addEventListener('click', toggleReport);
+  sidebarToggle?.addEventListener('click', () => {
+    setSidebar(shell.dataset.sidebar !== 'collapsed');
   });
 
   return {
     async init() {
       if (!shell) throw new Error('workbench shell is missing from the document');
+      let collapsed = false;
+      try {
+        collapsed = localStorage.getItem(SIDEBAR_KEY) === 'collapsed';
+      } catch {
+        /* private mode / file: — fall back to expanded */
+      }
+      setSidebar(collapsed, { persist: false });
       await refreshHostStatus();
       await refreshRuns();
       showView('home');
@@ -298,12 +500,25 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     get model() {
       return current?.model ?? null;
     },
+    get runId() {
+      return current?.runId ?? null;
+    },
+    get runs() {
+      return latestRuns;
+    },
     dispose() {
       disposed = true;
       closeCurrent();
       clearTimeout(toastTimer);
     },
   };
+}
+
+/** Pane-header path keeps one line: a long prompt is cut, never wrapped. */
+function shortTitle(prompt) {
+  const text = String(prompt ?? '').trim().replace(/\s+/g, ' ');
+  if (!text) return '研究会话';
+  return text.length > 42 ? `${text.slice(0, 42)}…` : text;
 }
 
 function statusLabel(status) {
@@ -318,6 +533,21 @@ function statusLabel(status) {
       return '失败';
     default:
       return status;
+  }
+}
+
+function statusVariant(status) {
+  switch (status) {
+    case 'running':
+      return 'default';
+    case 'finished':
+      return 'success';
+    case 'cancelled':
+      return 'warning';
+    case 'failed':
+      return 'destructive';
+    default:
+      return 'secondary';
   }
 }
 

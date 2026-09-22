@@ -233,3 +233,63 @@ inproc `a6f67fde8e51` / docker `03be2909302e` / e2b `db6a9e83c0b7` 均为 **0**�
 | 文档事实冲突：`pi-integration-notes.md` 称 Docker `/config` 只读（代码无 `:ro`）；称 E2B 工作区 `/home/user`；`local-web-search.txt` 称 `auth.json` 为 pi 写入空对象 | 逐一订正：`/config` 为读写 bind mount（pi 需向其中 `npm/` 装插件）；E2B 工作区 `/home/user/workspace`；`auth.json` 为宿主运行期渲染的模型凭据（0600），`models-store.json`/`npm/` 才是 pi 运行时状态；§7 同步补充终帧去重语义 | 全仓库 grep `空对象`/`只读 bind` 无残留；与 `e2b_env.SANDBOX_WORKSPACE`、`docker_env.py` 挂载参数、`agent_env.prepare_agent_dir` 交叉核对一致 |
 
 回归：Python 100 项 + Node 15 项全绿；`scripts/check-no-secrets.py` 真实命中 0。
+
+
+## 前端 UI 与百鉴 UI 标准库对齐（2026-09-22）
+
+目标：把工作台前端「像素级」对齐 `/Users/coldxiangyu/work/BR/glink-ui-library`（百鉴 UI 标准库），
+且页面功能一项不减。前端仍是**无打包链的静态 ESM**，所以对齐靠**逐值抄写 + 逐值测量**落地，
+口径与逐层对照表见 [ui-alignment.md](ui-alignment.md)。
+
+### 代码范围
+
+| 文件 | 变化 |
+|---|---|
+| `web/styles.css` | 454 → 1327 行：token 层改为抄标准库 `src/styles/globals.css`（调色板 / 语义 / 尺度 / 排版 / 海拔 / 动效），组件层按 `src/components/*.tsx` 的实测度量重写；外壳改成「8px 沟槽 + 左侧导航卡 + 右侧主工作区」 |
+| `web/index.html` | 87 → 167 行：52px 栏头 + 路径段、导航分组、120px 输入器（发送键 / 状态 / 计数）、报告右槽 |
+| `web/modules/workspace.mjs` | 导航行改为标准库 NavItem 形态；新增侧栏折叠（`data-sidebar` + 记忆）、右槽开合（`preview-open` + `aria-expanded`）、输入器自增高度（68–240） |
+| `web/modules/run-view.mjs` | 思考折叠与工具调用行改为标准库 Thinking / ToolChips 形态（行高 28 / 圆角 8·6 / chip 11px）；工具行尾新增状态字；详情默认折叠、运行中自动展开 |
+| `web/icons/`（新增） | 22 个 24×24 SVG，直接取自标准库 `public/icons/baijian/`，用同一种 mask + `currentColor` 渲染 |
+| `scripts/check-ui-tokens.py`（新增） | token 合同门禁：173 项与标准库逐值比对 |
+| `tests/browser/ui-parity.mjs`（新增） | 像素级对齐校验：26 个角色 × 计算样式逐值比对（几何 ≤1px） |
+| `tests/test_ui_tokens.py`（新增） | 上面那把门禁的 pytest 入口（标准库不在场时 skip） |
+
+### 实测
+
+| 命令 | 结果 |
+|---|---|
+| `scripts/check-ui-tokens.py` | **173 项 token 逐值一致**，exit 0 |
+| `node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861` | **26 个角色 / 0 处不一致**（三块屏：首页、纯文字对话、进度与上下文），exit 0；证据 `docs/evidence/ui-parity.txt`、`ui-parity.json` |
+| `node tests/browser/run-smoke.mjs --base-url http://127.0.0.1:7861` | 通过：真实 run 45.1s，`tools=2 toolsWithText=2 toolsRenderingTextTwice=0 texts=1 reportButton=true bannerHidden=true`，报告右槽 435px 且无横向溢出，历史重放 9 项，截图 `browser-run.png`，exit 0 |
+| `.venv/bin/python -m pytest` | **102 项通过**（新增 2 项 token 门禁） |
+| `node --test tests/web/*.test.mjs` | 15 项通过 |
+| `scripts/check-no-secrets.py` | 扫描 132 文件，真实命中 0 / 占位符 8 |
+
+### 逐项行为复验（真实浏览器，1512×900）
+
+| 项 | 实测 |
+|---|---|
+| 外壳几何 | 视口 1512 时 shell=1512、sidebar=240、main=1248、栏头 52px（与参考页逐值相同） |
+| 断点 | 1512/1250/1050/900/721/600 六档：侧栏 240→212→64、首页双列→单列、留白 104→64→48、输入器 680→贴边；六档 `scrollWidth == clientWidth`（无横向溢出） |
+| 侧栏折叠 | 点击 → 64px 图标条，`aria-expanded=false`、可访问名切「展开侧栏」；刷新后保持；再点回 240 |
+| 输入器激活态 | 聚焦时 1px 近黑描边（`--foreground`），不叠焦点环（UC-04） |
+| 运行态 | 提交 → 状态行「运行中」+ 图标微光、`#run-banner` 可见、停止键可见；点击停止 → 「已取消 · 9.159s」、banner 收起、toast「已请求停止，等待 pi 收尾」 |
+| 工具行折叠 | 运行中自动展开（看得到流式输出），终态回落为 chip 行；用户手动开合后不再被自动改写 |
+| 报告右槽 | `preview-open` 时右槽 clamp(380,34vw,620)；≤900 转覆盖浮层；1512/1100/900/721 四档均无横向溢出；下载链接与关闭键可用 |
+| 启动失败面 | 恢复卡与「重试」按钮取到设计 token（r16 / 1px `--border` / `--elev-surface` / 40 高主按钮） |
+
+### 对齐口径与刻意偏离
+
+- 比对口径：几何 ≤1px 取整差，颜色 / 圆角 / 排版 / 描边 / 海拔必须逐值相同；文本宽度等
+  内容驱动属性按角色白名单跳过，参考屏没有的角色记为 SKIPPED 而不是默认通过。
+- 刻意偏离 7 项（品牌标识、暗色主题、轨迹展开区宽度、右槽内容、首页信息架构、输入器能力、
+  工具行尾状态字）逐条登记在 [ui-alignment.md](ui-alignment.md) §5。
+
+### 未覆盖项
+
+1. **提示条（toast）与自绘 tooltip** 不做逐值比对：标准库对应实现（sonner / Radix Portal）
+   在参考页没有稳定可测的等效节点，按 token 落地（`--popover` / `--elev-surface` /
+   `--corner-lg` / `--text-body`）。
+2. **滚动条**不参与 `getComputedStyle` 比对；宽度 8px 与「滚动时才显色」的行为照抄。
+3. **暗色主题**未实现（前端是亮色单主题），标准库 `.dark` 段未复制；
+   `scripts/check-ui-tokens.py` 只比亮色块，这一点在脚本与文档里都写明。

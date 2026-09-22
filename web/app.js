@@ -25,7 +25,7 @@ function showBootFailure() {
   detail.textContent = BOOT_FAILURE.detail;
   const retry = document.createElement('button');
   retry.type = 'button';
-  retry.className = 'button primary';
+  retry.className = 'btn primary';
   retry.textContent = BOOT_FAILURE.retry;
   retry.addEventListener('click', () => {
     location.reload();

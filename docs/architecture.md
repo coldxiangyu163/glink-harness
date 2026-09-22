@@ -150,7 +150,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `static_files` / `app` |
 | `host/pi_glink/kernel/` | 接入层 | `rpc` / `projection` / `agent_env` / `docker_env` / `e2b_env` / `runner` |
 | `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`、扩展位 |
-| `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM） |
+| `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |
 | `docker/` | 执行面 | `Dockerfile.worker`（容器）、`e2b/Dockerfile.e2b`（模板） |
 | `scripts/` | 运维 | 启动、测试、真实 run 冒烟、E2B 模板构建 |
 | `docs/` | 文档与证据 | 架构、边界、集成笔记、`evidence/` |
@@ -166,6 +166,8 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 ```bash
 scripts/run-tests.sh                                   # 宿主 + 内核回归（Python）
 node --test tests/web/*.test.mjs                       # 前端事件模型回归
+scripts/check-ui-tokens.py                             # token 层与百鉴标准库逐值比对
+node tests/browser/ui-parity.mjs --base-url …          # 26 个角色的计算样式与标准库逐值比对
 node tests/browser/run-smoke.mjs --base-url …          # 真实浏览器 run（截图 + DOM 断言）
 .venv/bin/python scripts/smoke-local-run.py --base-url … --prompt "…"   # 真实 run 冒烟
 scripts/run-local-web.sh                               # 本机执行面
