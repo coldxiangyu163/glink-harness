@@ -185,3 +185,18 @@ pi 官方凭据存储 `auth.json`（0600，运行期目录），进程环境不�
 证据：`docs/evidence/credential-boundary.txt`（含 auth.json 结构/权限、三面 runId 与 `env` 检查输出）。
 残留风险已在 architecture.md §6.2 如实记录：工具理论上仍可 `read` 打开 `auth.json` 并回显，
 该场景由 §6.1 的六层出站脱敏覆盖。
+
+**最终收口（同轮）**：除上表两项外，本轮还补齐了审计可能继续追踪的四处覆盖缺口，逐项均有回归：
+
+| 缺口 | 修复 | 回归 |
+|---|---|---|
+| 只清点 `report.md`，而 `write` 工具可把回显写进任意产物 | `runner._sanitize_workspace` 收尾扫描 workspace 全部文本文件（≤2 MiB、跳过二进制/符号链接），命中即就地脱敏并置 `redacted=true` | `test_workspace_artifacts_are_swept_for_credentials` |
+| `meta.json` 的 `error` 字段可能带内核错误里的回显 | 落盘前过 redactor | `test_run_error_in_metadata_is_redacted` |
+| 投影被调用时若忘记传 redactor 会原样放行（正是审计复现的最窄形态） | `project_event` 改为 fail-closed：未传时使用模块级形状检测 redactor | `test_projection_without_an_explicit_redactor_is_fail_closed` |
+| 用户可把凭据粘进 prompt，随 `meta.json` 落盘 | 落盘/展示副本先脱敏，原始指令经 `_Execution.kernel_prompt` 交给内核（RPC 与 E2B 面一致） | `test_pasted_credential_in_the_prompt_is_not_stored_in_metadata` |
+
+最终代码下的三面复验（均由内核自己执行 `env | grep -c OPENAI_API_KEY` 并写入报告首行）：
+inproc `a6f67fde8e51` / docker `03be2909302e` / e2b `db6a9e83c0b7` 均为 **0**；
+另一常规 inproc run `9ad186ea1928` 的 `notes.md` 与 `report.md` 亦不含真实 key。
+回归：Python 95 项 + Node 11 项全绿；`scripts/check-no-secrets.py` 真实命中 0 / 占位符 2。
+
