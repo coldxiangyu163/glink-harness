@@ -2,7 +2,7 @@
 
 本文件记录**实测得到**的 pi 行为事实。每条都有可复现的命令或证据来源；架构决策引用这里的结论，而不是推测。
 
-测试基线：pi `0.86.1`、Node `v24.16.0`、宿主 Python 3.12、上游 OpenRouter（`https://openrouter.ai/api/v1`，模型 `openai/gpt-5.6-sol`）。
+测试基线：宿主 pi `0.86.1`（升级演练到 `0.87.0`）、宿主开发 Node `v24.16.0`、Docker / E2B 镜像与沙箱 Node `v24.21.0`（`node:24.21.0-bookworm-slim` 精确 tag）、宿主 Python 3.12、上游 OpenRouter（`https://openrouter.ai/api/v1`，模型 `openai/gpt-5.6-sol`）。
 
 ## 1. `models.json` 的环境变量插值范围
 

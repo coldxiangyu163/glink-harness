@@ -77,10 +77,10 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 | 内核进程位置 | 宿主机器 | 一次性容器 | 云沙箱 |
 | 协议 | `--mode rpc`（双向 JSONL） | `--mode rpc`（跨容器 stdio） | `--mode json`（单向流） |
 | 事件时序 | 实时 | 实时 | **run 结束后回放**（SDK 无 stdout 回调，见下） |
-| 运行时来源 | 宿主安装的 Node/pi | 镜像自包含（`pi-glink-worker:latest`） | 模板自包含（`pi-glink-worker`） |
+| 运行时来源 | 宿主安装的 Node v24.16.0 / pi | 镜像自包含（`pi-glink-worker:latest`，node v24.21.0 + pi 0.86.1） | 模板自包含（`pi-glink-worker`，node v24.21.0 + pi 0.86.1） |
 | 工作区 | `<data>/workspaces/<runId>` | 同左（挂到 `/workspace`） | 沙箱内 `/home/user/workspace`，结束后拉回宿主 |
-| 会话文件 | `<data>/sessions`（宿主可查） | 挂到 `/sessions` | 沙箱内，随沙箱销毁（`session_id` 为空） |
-| 模型凭据 | 子进程环境变量 | 按变量名转发（值不入 argv） | `Sandbox.create(envs=…)` |
+| 会话文件 | `<data>/sessions`（宿主可查） | 挂到 `/sessions`；宿主按挂载映射回 `<data>/sessions` 后脱敏 | 沙箱内，随沙箱销毁（`session_id` 为空） |
+| 模型凭据 | 运行期 `auth.json`（0600，不进进程环境） | 随 `/config` 挂载的 `auth.json` | 随运行期配置上传的 `auth.json`（不进沙箱进程环境） |
 | 搜索凭据 | 运行期 `web-search.json`（600） | 随 `/config` 挂载 | 上传到沙箱 `/config`（随沙箱消失） |
 | 隔离强度 | 进程级 | 容器级 | 云端沙箱级 |
 
@@ -112,7 +112,7 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 | 事件投影 | 载荷里每个字符串递归脱敏 | `kernel/projection.py::project_event(frame, redactor)` |
 | 事件总线 / `events.jsonl` | 发布前兜底再脱敏一次 | `kernel/runner.py::_emit` |
 | 报告文件 | run 收尾时就地脱敏，并记 `redacted=true` | `kernel/runner.py::_collect_report` |
-| 会话文件 | pi 自写的 JSONL 在收尾时脱敏（保持合法 JSONL） | `kernel/runner.py::_sanitize_session_file` |
+| 会话文件 | pi 自写的 JSONL 在收尾时脱敏；Docker 面先把容器路径 `/sessions/…` 映射回宿主挂载源（`docker_env.host_session_path`），保持合法 JSONL | `kernel/runner.py::_sanitize_session_file` |
 | 报告下载 | 服务前脱敏，响应头 `X-Redacted` 标明是否发生 | `app.py::_send_report` |
 
 检测同时覆盖**值**（宿主知道的 key）与**形状**（`sk-…`、`e2b_…`、`exa-…`、`NAME=value`、

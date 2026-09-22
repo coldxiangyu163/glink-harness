@@ -90,9 +90,9 @@ HTTPS_PROXY=socks5h://127.0.0.1:1080 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 
 | 标准 | 状态 | 证据 |
 |---|---|---|
 | 1) 本机一条命令启动 → 实时 thinking/工具/文本 → 报告落盘 | ✅ | local-m1-smoke.txt、browser-run.png |
-| 2) 模型与 E2B 配置与 FrontierAgent 同源，密钥不进前端/不落仓库 | ✅ | `OPENAI_*`/`E2B_*` 同名语义；`models.json` 用 `$OPENAI_API_KEY` 占位；交叉核验 ④ |
+| 2) 模型与 E2B 配置与 FrontierAgent 同源，密钥不进前端/不落仓库 | ✅ | `OPENAI_*`/`E2B_*` 同名语义；`models.json` 不含 apiKey，凭据写运行期 `auth.json`（0600，仓库外）；交叉核验 ④ |
 | 3) 搜索由 pi-web-access 完成，报告含可核验 URL，无 Serper/Jina | ✅ | local-web-search.txt（web_search + 10 URL；仓库无 Serper/Jina 依赖） |
-| 4) Docker 与 E2B 各跑通一次真实 run（含 Node + pi 与凭据注入） | ✅ | docker-run.txt（11.5s/136 事件）、e2b-run.txt（68.4s/203 事件） |
+| 4) Docker 与 E2B 各跑通一次真实 run（含 Node + pi 与凭据注入） | ✅ | docker-run.txt（e23d3ae9b640 11.5s/136 事件；返工后 824fa1975211 会话路径映射脱敏、4c589e0989fa env=0）、e2b-run.txt（99c3367c2a15 33.1s/148 事件，node v24.21.0） |
 | 5) 前端无 Glink 特有依赖、不解析终端文本、断线/迟到事件不破坏状态 | ✅ | run-stream.test.mjs（seq 去重/缺口/终态）、源码无终端解析、终态后主动关闭流 |
 | 6) architecture.md + pi-boundary.md + 可重复 smoke 命令 | ✅ | 两份文档 + `scripts/smoke-local-run.py`、`tests/browser/run-smoke.mjs` |
 | 7) 验收记录含范围/命令/退出状态/证据/未覆盖项 | ✅ | 本文档 |
@@ -200,3 +200,14 @@ inproc `a6f67fde8e51` / docker `03be2909302e` / e2b `db6a9e83c0b7` 均为 **0**�
 另一常规 inproc run `9ad186ea1928` 的 `notes.md` 与 `report.md` 亦不含真实 key。
 回归：Python 95 项 + Node 11 项全绿；`scripts/check-no-secrets.py` 真实命中 0 / 占位符 2。
 
+
+
+### 第五次审计返工（会话文件路径 / 文档一致 / Node 固定）
+
+| 审计缺口 | 返工 | 复验 |
+|---|---|---|
+| Docker `sessionFile` 是容器路径 `/sessions/…`，宿主按原样读取不存在 → 收尾脱敏静默跳过，工具回显的密钥可能永久留在会话文件 | 新增 `kernel/docker_env.py::host_session_path / translate_container_path`（纯词法映射，拒绝相对路径、前缀伪装与 `..` 穿越）；`runner._publish_session_ready` 在落库/发事件前映射为宿主路径；`_sanitize_session_file` 读不到文件时显式告警而非静默返回 | 回归：`test_container_session_paths_map_back_to_the_host_mount`、`test_docker_session_file_is_mapped_back_to_the_host_and_sanitized`；真实 Docker run `824fa1975211`（假密钥写入 notes.md）：`meta.redacted=true`，notes.md / events.jsonl / 宿主会话 JSONL 三处均无假密钥原文且含 `[REDACTED]`；宿主日志出现 `session file contained credentials and was redacted` |
+| 文档仍写过时的凭据流（env 注入 / `-e OPENAI_API_KEY` / `Sandbox.create(envs=…)`） | 逐处订正 README、architecture、pi-boundary、验收表与两份证据文件为 `auth.json` 交付：Docker 随 `/config` 挂载、E2B 随运行期配置上传 | 全仓库 grep：`envs=`、`-e OPENAI_API_KEY`、`按变量名转发`、`apiKey: "$OPENAI_API_KEY"` 均无残留（历史审计表除外） |
+| Node 版本未固定（浮动 `node:24-bookworm-slim`；README 本机 v24.16.0 与 E2B 证据 v24.21.0 不一致） | 两个 Dockerfile 固定为 `FROM node:24.21.0-bookworm-slim`；README 明确宿主开发 v24.16.0、镜像/沙箱 v24.21.0 | 重建镜像：`docker run --rm pi-glink-worker:latest node -v` → v24.21.0、`pi --version` → 0.86.1；新镜像真实 run `4c589e0989fa`：报告首行 env 计数 = 0；E2B 沙箱 `99c3367c2a15`：node v24.21.0 / env 计数 0。E2B 模板未重建（覆盖既有 tag 需先确认）；现有模板实测 Node 已与固定版本一致 |
+
+回归：Python 97 项 + Node 11 项全绿；`scripts/check-no-secrets.py` 真实命中 0。

@@ -3,7 +3,7 @@
 # 设计边界（对应 task-6 的验收契约）：
 #   * 镜像自带 Node 与 pi，容器内的执行不依赖宿主安装的运行时；
 #   * 宿主只提供数据通道：工作区 /workspace、运行期配置 /config、会话 /sessions，
-#     以及通过环境变量注入的模型凭据（不以文件形式进入镜像）；
+#     以及随 /config 挂载的运行期配置（含 auth.json 凭据文件，不经环境变量、不写进镜像）；
 #   * pi 版本在此固定，便于「不改内核、只换版本号」的升级演练（task-9）。
 #
 # 构建：
@@ -13,7 +13,9 @@
 #   docker build -t pi-glink-worker:latest -f docker/Dockerfile.worker \
 #     --build-arg DEBIAN_MIRROR=mirrors.aliyun.com \
 #     --build-arg NPM_REGISTRY=https://registry.npmmirror.com .
-FROM node:24-bookworm-slim
+# Node 固定在官方镜像的精确版本 tag（不用浮动 24-bookworm-slim）：
+# 容器内 `node -v` 实测 v24.21.0，与 E2B 模板一致。
+FROM node:24.21.0-bookworm-slim
 
 ARG PI_VERSION=0.86.1
 ARG DEBIAN_MIRROR=deb.debian.org

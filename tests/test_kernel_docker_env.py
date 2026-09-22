@@ -93,6 +93,30 @@ def test_stop_argv_is_a_force_remove() -> None:
     assert docker_env.stop_argv("pi-glink-abc") == ["docker", "rm", "-f", "pi-glink-abc"]
 
 
+def test_container_session_paths_map_back_to_the_host_mount(config) -> None:
+    """Audit regression: pi reports container paths; the host must translate them.
+
+    Without this mapping the closing sanitise pass read ``/sessions/…`` on the
+    host, found nothing, and returned silently — a raw credential echoed by a
+    tool could stay in the host-side session log forever.
+    """
+    assert (
+        docker_env.host_session_path("/sessions/abc.jsonl", config)
+        == config.session_dir / "abc.jsonl"
+    )
+    assert (
+        docker_env.host_session_path("/sessions/nested/abc.jsonl", config)
+        == config.session_dir / "nested" / "abc.jsonl"
+    )
+    # Prefix look-alikes, relative paths and traversal are refused, not guessed.
+    assert docker_env.host_session_path("/sessions-other/abc.jsonl", config) is None
+    assert docker_env.host_session_path("sessions/abc.jsonl", config) is None
+    assert docker_env.host_session_path("/sessions/../etc/passwd", config) is None
+    assert docker_env.host_session_path("", config) is None
+    # Only the session mount is translated: /config/auth.json keeps its value.
+    assert docker_env.host_session_path("/config/auth.json", config) is None
+
+
 def test_runner_refuses_docker_when_daemon_is_missing(config, tmp_path: Path, monkeypatch) -> None:
     from pi_glink.events import EventBus
     from pi_glink.kernel.runner import RunManager

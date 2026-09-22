@@ -227,7 +227,7 @@ def main() -> int:
                     "isStreaming": False,
                     "isCompacting": False,
                     "sessionId": "fake-session",
-                    "sessionFile": "/tmp/fake-session.jsonl",
+                    "sessionFile": os.environ.get("FAKE_PI_SESSION_FILE", "/tmp/fake-session.jsonl"),
                     "messageCount": 0,
                 },
             )

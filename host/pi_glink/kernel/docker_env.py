@@ -26,7 +26,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Mapping, Sequence
 
 from ..config import HostConfig
@@ -158,3 +158,38 @@ def build_env(
 def stop_argv(container_name: str) -> list[str]:
     """Force-remove a container after a cancelled or timed-out run."""
     return ["docker", "rm", "-f", container_name]
+
+
+def host_session_path(raw: str, config: HostConfig) -> Path | None:
+    """Map a session path pi reported inside the container to its host file.
+
+    pi only knows container paths (``/sessions/<file>.jsonl``); the host mounted
+    its own session directory at :data:`CONTAINER_SESSIONS`. Without this
+    translation the host-side sanitizer reads a path that does not exist and
+    silently skips the file — the leak the audit reproduced. Only the session
+    mount is translated on purpose: the credential lives in ``/config/auth.json``
+    and must keep its real value.
+    """
+    return translate_container_path(raw, ((CONTAINER_SESSIONS, config.session_dir),))
+
+
+def translate_container_path(
+    raw: str, mounts: Sequence[tuple[str, Path]]
+) -> Path | None:
+    """Map one container path back through the mounts that created it.
+
+    Purely lexical (no filesystem access): relative paths, prefix look-alikes
+    (``/sessions-other``) and traversal (``..``) are refused rather than guessed.
+    """
+    candidate = PurePosixPath(raw or "")
+    if not candidate.is_absolute():
+        return None
+    for container_root, host_root in mounts:
+        try:
+            relative = candidate.relative_to(PurePosixPath(container_root))
+        except ValueError:
+            continue
+        if ".." in relative.parts:
+            return None
+        return host_root.joinpath(*relative.parts)
+    return None

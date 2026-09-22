@@ -35,6 +35,7 @@ from ..store import CANCELLED, FAILED, FINISHED, RunRecord, RunStore
 from .agent_env import AgentRuntime, build_pi_argv, build_pi_env, prepare_agent_dir
 from .docker_env import (
     build_plan as build_docker_plan,
+    host_session_path as docker_host_session_path,
     is_available as docker_available,
     stop_argv as docker_stop_argv,
 )
@@ -446,6 +447,13 @@ class RunManager:
         model = data.get("model")
         session_id = data.get("sessionId")
         session_file = data.get("sessionFile")
+        if isinstance(session_file, str) and session_file:
+            # pi reports paths from inside its own execution face. On Docker
+            # they are container paths (``/sessions/…``) that do not exist on
+            # the host; storing them unchanged made the closing sanitize pass
+            # read a missing file and skip it silently (audit finding). The
+            # mapping happens once, here, before the path is stored or emitted.
+            session_file = self._host_session_file(session_file)
         if isinstance(session_id, str) or isinstance(session_file, str):
             self.store.update(
                 run_id,
@@ -462,6 +470,26 @@ class RunManager:
                 "thinkingLevel": data.get("thinkingLevel"),
             },
         )
+
+    def _host_session_file(self, reported: str) -> str:
+        """Translate a pi-reported session path into its host location.
+
+        The in-process face reports host paths directly. The Docker face
+        reports container paths (``/sessions/…``) while the file itself lives
+        under the mounted host session directory; only the host path can be
+        read back for sanitising. An unmappable path is logged rather than
+        silently kept, so a future face change cannot reintroduce the gap.
+        """
+        if self.config.executor != "docker":
+            return reported
+        mapped = docker_host_session_path(reported, self.config)
+        if mapped is None:
+            logger.warning(
+                "container session path does not map back to the host mount: %s",
+                reported,
+            )
+            return reported
+        return str(mapped)
 
     def _collect_report(self, workspace: Path) -> str | None:
         """Return the report path, redacting credentials in place first.
@@ -502,6 +530,9 @@ class RunManager:
             return
         path = Path(session_file)
         if not path.is_file():
+            # Not being able to open the file means the boundary did not run;
+            # say so instead of returning as if it had.
+            logger.warning("session file to sanitise is not on the host: %s", path)
             return
         try:
             original = path.read_text(encoding="utf-8", errors="replace")

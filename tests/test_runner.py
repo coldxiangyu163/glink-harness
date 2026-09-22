@@ -158,6 +158,50 @@ def test_stop_on_unknown_run_is_a_no_op(tmp_path: Path) -> None:
     assert manager.stop("does-not-exist") is False
 
 
+def test_docker_session_file_is_mapped_back_to_the_host_and_sanitized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit regression: a container ``/sessions/…`` path must be read on the host.
+
+    pi reports container paths on the Docker face while the file itself lives
+    under the mounted host session directory. Reading the raw container path
+    found nothing and the closing sanitise pass returned silently, leaving a
+    tool-echoed credential in the host session log.
+    """
+    monkeypatch.setattr("pi_glink.kernel.runner.docker_available", lambda: True)
+    monkeypatch.setattr("pi_glink.kernel.runner.subprocess.run", lambda *a, **k: None)
+
+    secret = "sk-test-0123456789abcdef"
+    config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker", OPENAI_API_KEY=secret)
+    session_file = config.session_dir / "fake-session.jsonl"
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+    session_file.write_text(
+        f'{{"role":"tool","text":"OPENAI_API_KEY={secret}"}}\n', encoding="utf-8"
+    )
+
+    def factory(argv, *, cwd=None, env=None, on_event=None):
+        merged = dict(env or {})
+        merged["FAKE_PI_WRITE_REPORT"] = "0"
+        merged["FAKE_PI_SESSION_FILE"] = "/sessions/fake-session.jsonl"
+        return PiRpcClient(
+            [sys.executable, str(FAKE_PI)], cwd=cwd, env=merged, on_event=on_event
+        )
+
+    bus = EventBus()
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, bus, store, client_factory=factory)
+    record = manager.start("docker 会话文件映射回归")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final.status == FINISHED
+    # The stored path points at the host file, and that file was sanitized.
+    assert final.session_file == str(session_file)
+    text = session_file.read_text(encoding="utf-8")
+    assert secret not in text
+    assert "[REDACTED]" in text
+    assert final.redacted is True
+
+
 def test_missing_credential_refuses_to_start(tmp_path: Path) -> None:
     manager, _store = build_manager(tmp_path, OPENAI_API_KEY="")
     with pytest.raises(Exception) as excinfo:

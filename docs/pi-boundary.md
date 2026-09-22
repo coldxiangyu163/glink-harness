@@ -12,7 +12,7 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | 扩展点 | 文档 | 本仓库的用法（实际文件） |
 |---|---|---|
 | `settings.json` | docs/settings.md | `agent/settings.json`：`defaultThinkingLevel: "medium"`、`packages: ["npm:pi-web-access"]` |
-| `models.json`（自定义 provider） | docs/models.md | 宿主渲染到运行期目录（`kernel/agent_env.py::_models_document`）：`baseUrl` 字面量、`apiKey: "$OPENAI_API_KEY"`、`compat.thinkingFormat: "openrouter"` |
+| `models.json`（自定义 provider） | docs/models.md | 宿主渲染到运行期目录（`kernel/agent_env.py::_models_document`）：`baseUrl` 与模型 id 字面量、**不含 `apiKey`**（凭据写运行期 `auth.json`）、`compat.thinkingFormat: "openrouter"` |
 | packages | docs/packages.md | `npm:pi-web-access`（检索能力全部来自它） |
 | extensions | docs/extensions.md | 目录预留（`agent/extensions/`），当前无扩展；有需求时只落在这里 |
 | skills | docs/skills.md | 目录预留（`agent/skills/`） |
@@ -20,7 +20,7 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | `AGENTS.md` | docs/quickstart.md 等 | 目录预留（`agent/AGENTS.md`），当前约定走 §下一条 |
 | `--append-system-prompt` | `pi --help` | `agent/research-prompt.md` → `kernel/runner.py::_extra_argv`，内核系统提示词本身不改 |
 | headless 协议 | docs/rpc.md、docs/json.md | `--mode rpc`（本机 / Docker 面，`kernel/rpc.py`）；`--mode json`（E2B 面，`kernel/e2b_env.py`） |
-| 环境变量 | docs/environment-variables.md | `PI_CODING_AGENT_DIR`、`PI_CODING_AGENT_SESSION_DIR`、`PI_SKIP_VERSION_CHECK`、`PI_TELEMETRY`、`OPENAI_API_KEY` |
+| 环境变量 | docs/environment-variables.md | `PI_CODING_AGENT_DIR`、`PI_CODING_AGENT_SESSION_DIR`、`PI_SKIP_VERSION_CHECK`、`PI_TELEMETRY`（模型凭据不经环境变量，写运行期 `auth.json`） |
 | CLI 参数 | docs/usage.md | `--provider`、`--model`、`--name`（`kernel/agent_env.py::build_pi_argv`） |
 | MCP（可选） | docs/mcp 相关 | 尚未使用；接入方式与 extensions 同级，属允许范围 |
 
@@ -48,8 +48,8 @@ pi 的版本在三处被固定，升级只改这三处 + 回归：
 
 | 位置 | 事实 |
 |---|---|
-| `docker/Dockerfile.worker` | `ARG PI_VERSION=0.86.1`（镜像内 pi 版本） |
-| `docker/e2b/Dockerfile.e2b` | 同一 `ARG PI_VERSION`（E2B 模板内 pi 版本） |
+| `docker/Dockerfile.worker` | `ARG PI_VERSION=0.86.1`（镜像内 pi 版本）；`FROM node:24.21.0-bookworm-slim`（Node 精确 tag） |
+| `docker/e2b/Dockerfile.e2b` | 同一 `ARG PI_VERSION`；同一 Node 精确 tag（E2B 模板内 pi / Node 版本） |
 | 本机 inproc 面 | 使用宿主安装的 pi；`PI_GLINK_PI_BIN` 可指向任意版本做隔离演练 |
 
 步骤：

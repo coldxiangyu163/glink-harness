@@ -18,7 +18,7 @@ socks5h://127.0.0.1:1080（HTTP 200 / 1.36s）。
 
 模板构建（可复现）
 ------------------
-  docker/e2b/Dockerfile.e2b        # node:24-bookworm-slim + pi 0.86.1（自包含）
+  docker/e2b/Dockerfile.e2b        # node:24.21.0-bookworm-slim（精确 tag）+ pi 0.86.1（自包含）
   scripts/build-e2b-template.py    # Template().from_dockerfile(...) + Template.build(...)
 
   E2B_API_KEY=… HTTPS_PROXY=socks5h://127.0.0.1:1080 \
@@ -30,15 +30,16 @@ tag 处理：SDK 构建产出 `default` tag。需要固定生产 tag 时用 `Tem
 沙箱内环境（契约第 1 条）
 -------------------------
   sandbox id  i9jax68nwcb076x0e69b3（探测用）
-  node        v24.21.0
+  node        v24.21.0（与 Dockerfile 固定 tag 一致）
   pi          0.86.1
   user        user（非 root）
   cwd         /home/user/workspace
 
-凭据注入方式（契约第 3 条）
---------------------------
-* 模型凭据：`Sandbox.create(envs={OPENAI_API_KEY, …})` 注入，只存在于沙箱进程环境，
-  **不写入任何文件**；宿主侧也不落盘（.env 已被 .gitignore 挡住）。
+凭据注入方式（契约第 3 条；第四次返工订正）
+------------------------------------------
+* 模型凭据：写在运行期 `auth.json`（pi 官方凭据存储，0600，仓库外），随运行期配置上传到
+  沙箱 `/home/user/config/auth.json`；**不进沙箱进程环境**（沙箱内 `env | grep -c OPENAI_API_KEY`
+  实测 0），随沙箱销毁而消失。
 * 搜索凭据：pi-web-access 只从 `web-search.json` 读凭据（无环境变量形式），因此宿主把
   运行期渲染的 `web-search.json` 上传到沙箱 `/home/user/config/`。它的生命周期等于沙箱
   生命周期——`kill()` 后随沙箱消失，宿主只保留自己本机那一份。
@@ -131,3 +132,15 @@ turn_finished · turn_started · usage_reported
   ~/.pi-glink/runs/3fc5c4734713/meta.json        状态/session/报告路径/事件数
   ~/.pi-glink/workspaces/3fc5c4734713/notes.md   沙箱内写入并拉回
   ~/.pi-glink/workspaces/3fc5c4734713/report.md  同上
+
+
+第五次审计返工复验（Node 固定 + 凭据边界）
+--------------------------------------------
+  runId       99c3367c2a15
+  status      finished
+  duration    33.1 s
+  events      148
+  prompt      让内核运行 `node --version` 与 `env | grep -c OPENAI_API_KEY || true` 并写入 report.md
+  产出        report.md 前两行：v24.21.0 / 0
+  结论        沙箱 Node 与 Dockerfile 固定的 `node:24.21.0-bookworm-slim` 一致；进程环境无模型 key。
+  说明        E2B 模板未重建（覆盖既有 tag 需先确认）；现有模板实测 Node v24.21.0 已与固定版本一致。

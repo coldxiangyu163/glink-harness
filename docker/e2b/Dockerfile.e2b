@@ -10,7 +10,8 @@
 #     --path docker/e2b --dockerfile Dockerfile.e2b \
 #     --cpu-count 2 --memory-mb 4096 \
 #     --cmd 'sleep infinity' --ready-cmd 'true'
-FROM node:24-bookworm-slim
+# Node 固定为官方镜像的精确版本 tag（与 docker/Dockerfile.worker 同一版本）：
+FROM node:24.21.0-bookworm-slim
 
 ARG PI_VERSION=0.86.1
 

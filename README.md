@@ -16,7 +16,7 @@
 | 组件 | 版本 | 安装 / 说明 |
 |---|---|---|
 | Python | ≥ 3.12 | 宿主与内核接入层只用标准库，无运行时依赖 |
-| Node.js | **v24.16.0**（本机实测） | 前端与 pi 的运行时；用 nvm 固定：`nvm install 24.16.0 && nvm use 24.16.0`（或 Homebrew `node@24`） |
+| Node.js | 宿主开发 **v24.16.0**（nvm 固定，本机实测）；Docker / E2B 镜像 **v24.21.0**（`node:24.21.0-bookworm-slim` 精确 tag，实测） | 前端与 pi 的运行时；宿主用 nvm：`nvm install 24.16.0 && nvm use 24.16.0`；镜像/模板的 Node 版本在各自 Dockerfile 里 pin 到精确 tag（不用浮动 `node:24-bookworm-slim`） |
 | pi | 0.86.1（已实测） | `npm install -g @earendil-works/pi-coding-agent@0.86.1`；Docker / E2B 面的版本固定在各自 Dockerfile 的 `ARG PI_VERSION` |
 | pytest | ≥ 8（仅开发） | `uv pip install -e ".[dev]"` |
 | e2b SDK | ≥ 2（仅 E2B 执行面） | `uv pip install -e ".[e2b]"`（含代理网络需要的 `httpx[socks]`） |
@@ -29,7 +29,7 @@
 |---|---|---|
 | 本机进程 | `inproc` | pi 以子进程运行在宿主机器上，工作区在 `<数据根>/workspaces/<runId>` |
 | 容器 | `docker` | pi 与工作区都在一次性容器内，宿主只做编排与事件投影 |
-| 云沙箱 | `e2b` | pi 与工作区都在 E2B 沙箱内（`--mode json` 单向事件流），凭据经 `envs` 注入 |
+| 云沙箱 | `e2b` | pi 与工作区都在 E2B 沙箱内（`--mode json` 单向事件流）；模型凭据随运行期 `auth.json` 上传到沙箱（不进沙箱进程环境） |
 
 ### E2B 执行面
 
@@ -41,8 +41,9 @@ E2B_API_KEY=… HTTPS_PROXY=socks5h://127.0.0.1:1080 \
 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 scripts/run-local-web.sh   # 用云沙箱跑 pi
 ```
 
-模型凭据经 `Sandbox.create(envs=…)` 注入（不落盘）；pi-web-access 凭据随运行期
-`web-search.json` 上传到沙箱，随沙箱销毁而消失。事件在 run 结束后一次性回放
+模型凭据写在运行期 `auth.json`（pi 官方凭据存储，0600，仓库外），随运行期配置上传到沙箱
+`/home/user/config/`；不进沙箱进程环境（沙箱内 `env | grep -c OPENAI_API_KEY` 实测 0），随沙箱销毁
+而消失。pi-web-access 凭据随运行期 `web-search.json` 一并上传。事件在 run 结束后一次性回放
 （E2B SDK 的 stdout 回调实测不触发），报告会拉回宿主工作区。
 证据：[docs/evidence/e2b-run.txt](docs/evidence/e2b-run.txt)。
 
@@ -53,8 +54,10 @@ docker build -t pi-glink-worker:latest -f docker/Dockerfile.worker .   # 首次
 LOCAL_WEB_EXECUTOR=docker scripts/run-local-web.sh                     # 用容器跑 pi
 ```
 
-镜像自包含（node:24-slim + 固定版本 pi）；宿主只挂载工作区（`/workspace`）、
-运行期配置（`/config`）与会话目录（`/sessions`），凭据按变量名转发。
+镜像自包含（`node:24.21.0-bookworm-slim` + 固定版本 pi，`node -v` 实测 v24.21.0）；宿主只挂载
+工作区（`/workspace`）、运行期配置（`/config`）与会话目录（`/sessions`）；模型凭据随 `/config/auth.json`
+进容器（不经环境变量或 argv）。容器内 pi 报告的会话路径（`/sessions/…`）由宿主映射回挂载源
+（`~/.pi-glink/sessions/…`）后再做收尾脱敏。
 网络受限环境可用 `--build-arg DEBIAN_MIRROR=mirrors.aliyun.com --build-arg NPM_REGISTRY=https://registry.npmmirror.com`。
 证据：[docs/evidence/docker-run.txt](docs/evidence/docker-run.txt)。
 
@@ -122,6 +125,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 - **凭据不进产品面**：事件流、`events.jsonl`、报告文件与下载、pi 会话文件都经过
   `host/pi_glink/redaction.py` 的脱敏（值 + 形状双重检测）；报告下载响应带 `X-Redacted` 头标明是否发生脱敏。
+  Docker 面先把容器内会话路径（`/sessions/…`）映射回宿主挂载源（`kernel/docker_env.py::host_session_path`）再脱敏。
 - **key 不进进程环境**：模型凭据写在运行期目录的 `auth.json`（pi 官方凭据存储，权限 0600，仓库外），
   环境变量按白名单过滤——内核的 shell 工具跑 `env` 读不到它（三面真实 run 实测为 0）。
 - **残留风险**：工具仍可能用 `read` 打开 `auth.json` 并回显；出站脱敏会把它替换为 `[REDACTED]`。
