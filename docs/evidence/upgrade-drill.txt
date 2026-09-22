@@ -1,0 +1,45 @@
+升级演练证据 / upgrade drill evidence
+=====================================
+日期: 2026-09-22
+目标: 在不修改 pi 的前提下换用更高版本并重跑 smoke。
+
+版本对照
+--------
+  实测基线（task-2 ~ task-7）      pi 0.86.1   （宿主全局）
+  本次演练（升级后）               pi 0.87.0   （宿主全局，未做任何内核改动）
+  Docker 镜像 pin                  ARG PI_VERSION=0.86.1（已实测）
+  E2B 模板 pin                     同一 ARG（已实测，模板 buildId 2bec2f1d）
+
+隔离安装验证（不动用户全局 pi 的做法）
+--------------------------------------
+  npm install --prefix /tmp/pi-upgrade @earendil-works/pi-coding-agent@latest
+  /tmp/pi-upgrade/node_modules/.bin/pi --version   →  0.87.0
+
+  做法说明：演练用 PI_GLINK_PI_BIN 指向隔离安装的二进制，宿主不改 PATH、不改用户全局。
+
+演练结果（inproc 面，真实 run）
+-------------------------------
+  命令:
+    .venv/bin/python scripts/smoke-local-run.py \
+      --base-url http://127.0.0.1:7861 \
+      --prompt "用一句话说明 pi 的 RPC 模式与 JSON 模式的区别，然后写出 report.md。用中文。"
+
+  结果:
+    status      finished
+    duration    45.1 s
+    events      327
+    sessionId   01a0c734-4194-73e9-8b0e-5b716444b6e2
+    report      report.md 400 bytes（含 pi 官方文档链接两处）
+    帧类型      assistant_delta · assistant_message · run_finished · run_stage ·
+                run_started · session_ready · thinking_delta · tool_finished ·
+                tool_started · tool_updated · turn_finished · turn_started ·
+                usage_reported            （13 种，与 0.86.1 基线完全一致）
+    退出状态    冒烟脚本 exit 0（[done] 冒烟通过）
+
+结论
+----
+* 0.87.0 下协议分帧、事件词汇、`get_state` 身份字段、`models.json` 生成与
+  `PI_CODING_AGENT_DIR` 重定向全部照旧工作，无需改动宿主或内核接入层；
+* 未修改 pi 源码或包内容（仓库侧只有 `ARG PI_VERSION` 与 `PI_GLINK_PI_BIN` 两个开关）；
+* Docker / E2B 的 pin 保持 0.86.1（已实测的版本）；升级到 0.87.0 只需改 ARG 并重建
+  镜像/模板 + 重跑对应 smoke，步骤见 docs/pi-boundary.md §3，本次演练未执行重建。
