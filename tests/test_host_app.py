@@ -103,7 +103,7 @@ def test_defaults_follow_frontier_agent_naming(tmp_path: Path) -> None:
     config = build_config({}, REPO_ROOT)
     assert config.port == 7860
     assert config.executor == "inproc"
-    assert config.e2b_template == "glink-frontier-e2b"
+    assert config.e2b_template == "pi-glink-worker"
     assert config.agent_config_dir == REPO_ROOT / "agent"
     assert config.binds_loopback is True
 

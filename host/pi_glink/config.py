@@ -19,7 +19,9 @@ from .dotenv import parse_env_file
 EXECUTORS = ("inproc", "docker", "e2b")
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _DEFAULT_PORT = 7860
-_DEFAULT_E2B_TEMPLATE = "glink-frontier-e2b"
+#: 默认使用本仓库自己的云沙箱模板（含 Node + pi）；FrontierAgent 的
+#: glink-frontier-e2b 是另一个产品的模板，只沿用它的变量语义，不复用它的模板。
+_DEFAULT_E2B_TEMPLATE = "pi-glink-worker"
 _DEFAULT_CONTEXT_WINDOW = 400_000
 _DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 
