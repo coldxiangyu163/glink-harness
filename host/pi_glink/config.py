@@ -10,7 +10,7 @@ be relabelled by editing the environment afterwards.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
@@ -20,6 +20,8 @@ EXECUTORS = ("inproc", "docker", "e2b")
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _DEFAULT_PORT = 7860
 _DEFAULT_E2B_TEMPLATE = "glink-frontier-e2b"
+_DEFAULT_CONTEXT_WINDOW = 400_000
+_DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 
 
 class ConfigError(ValueError):
@@ -43,10 +45,17 @@ class HostConfig:
     workspace_root: Path
     openai_base_url: str
     openai_model: str
-    has_openai_key: bool
-    e2b_template: str
-    has_e2b_key: bool
-    log_level: str
+    openai_api_key: str = field(repr=False, default="")
+    context_window: int = _DEFAULT_CONTEXT_WINDOW
+    max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS
+    e2b_template: str = _DEFAULT_E2B_TEMPLATE
+    has_e2b_key: bool = False
+    log_level: str = "INFO"
+
+    @property
+    def has_openai_key(self) -> bool:
+        """True when a key was configured; the value itself stays unprinted."""
+        return bool(self.openai_api_key)
 
     @property
     def binds_loopback(self) -> bool:
@@ -126,7 +135,13 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         workspace_root=_path(values, "PI_GLINK_WORKSPACE_ROOT", data_root / "workspaces"),
         openai_base_url=_text(values, "OPENAI_BASE_URL", ""),
         openai_model=_text(values, "OPENAI_MODEL", ""),
-        has_openai_key=bool(api_key),
+        openai_api_key=api_key,
+        context_window=_integer(
+            values, "OPENAI_CONTEXT_WINDOW", _DEFAULT_CONTEXT_WINDOW
+        ),
+        max_output_tokens=_integer(
+            values, "OPENAI_MAX_TOKENS", _DEFAULT_MAX_OUTPUT_TOKENS
+        ),
         e2b_template=_text(values, "LOCAL_WEB_E2B_TEMPLATE", _DEFAULT_E2B_TEMPLATE),
         has_e2b_key=bool(e2b_key),
         log_level=_text(values, "LOCAL_WEB_LOG_LEVEL", "INFO").upper(),
