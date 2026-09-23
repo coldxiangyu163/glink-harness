@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import signal
 import sys
@@ -37,7 +38,7 @@ if str(HOST_ROOT) not in sys.path:
 
 from pi_glink.accounts import AccountsStore  # noqa: E402
 import pi_glink.kernel.runner as runner_module  # noqa: E402
-from pi_glink.app import create_server  # noqa: E402
+from pi_glink.app import HostRequestHandler, create_server  # noqa: E402
 from pi_glink.config import build_config  # noqa: E402
 from pi_glink.kernel.execution import (  # noqa: E402
     ArtifactRecovery,
@@ -147,12 +148,51 @@ def bootstrap_accounts(store: AccountsStore) -> dict:
     }
 
 
+def install_request_recorder(path: Path | None) -> None:
+    """Record raw request lines and Referer headers for acceptance evidence.
+
+    The recording happens *around* the production ``log_message``: the raw line
+    is what a proxy or access log would see, while the production method still
+    sanitizes it. A missing path disables the recorder.
+    """
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = HostRequestHandler.log_message
+
+    def recording(self, format: str, *args) -> None:  # noqa: A002 - stdlib signature
+        entry = {
+            "requestline": str(self.requestline),
+            "referer": self.headers.get("Referer"),
+        }
+        with path.open("a", encoding="utf-8") as log:
+            log.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return original(self, format, *args)
+
+    HostRequestHandler.log_message = recording  # type: ignore[method-assign]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="isolated accounts host for browser acceptance")
     parser.add_argument("--state-dir", required=True, help="temporary directory for all runtime state")
+    parser.add_argument(
+        "--request-log",
+        help=(
+            "optional JSONL file that records every raw request line and Referer "
+            "header — acceptance evidence that a token never reached an HTTP URL"
+        ),
+    )
     args = parser.parse_args()
     state_dir = Path(args.state_dir).resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
+    # DEBUG so every request line really lands in the host log: the acceptance
+    # run then proves a token never shows up there either.
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    request_log = Path(args.request_log).resolve() if args.request_log else None
+    install_request_recorder(request_log)
 
     tenants_file = state_dir / "tenants.json"
     tenants_file.write_text(
@@ -206,6 +246,7 @@ def main() -> int:
         "stateDir": str(state_dir),
         "dataRoot": str(config.data_root),
         "accountsDb": str(config.accounts_db),
+        "requestLog": str(request_log) if request_log is not None else None,
         **bootstrap,
     }
     print("READY " + json.dumps(state), flush=True)

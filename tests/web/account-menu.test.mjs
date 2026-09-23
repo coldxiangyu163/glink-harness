@@ -138,8 +138,9 @@ test('the invitation dialog generates a one-time code and a copyable link', asyn
   assert.equal(h.dom.getElement('invite-result').hidden, false);
   assert.equal(
     h.dom.getElement('invite-link').value,
-    'http://127.0.0.1:43210/register?invite=invite-code-value'
+    'http://127.0.0.1:43210/register#invite=invite-code-value'
   );
+  assert.equal(h.dom.getElement('invite-link').value.includes('?'), false, 'no token in the query string');
   assert.equal(h.dom.getElement('invite-link').readOnly || h.dom.getElement('invite-link').hasAttribute('readonly'), true);
 
   h.dom.getElement('invite-copy').dispatch('click', {});

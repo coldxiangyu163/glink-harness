@@ -9,6 +9,7 @@ model call or real ``.env`` / ``~/.pi`` file is involved.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -20,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from pi_glink.accounts import AccountsStore
-from pi_glink.app import PiGlinkServer, create_server, main as app_main
+from pi_glink.app import HostRequestHandler, PiGlinkServer, create_server, main as app_main
 from pi_glink.config import ConfigError, build_config
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
@@ -503,7 +504,7 @@ def test_accounts_endpoints_do_not_exist_outside_accounts_mode(
             ("/api/auth/register", "POST"),
             ("/api/auth/logout", "POST"),
             ("/api/admin/invitations", "POST"),
-            ("/api/invitations/check?token=x", "GET"),
+            ("/api/invitations/check", "POST"),
         ):
             status, _headers, raw = raw_request(
                 server, path, method=method, body={} if method == "POST" else None
@@ -861,7 +862,8 @@ def test_invitation_check_is_bounded_and_hides_the_token(server: PiGlinkServer) 
     bootstrap_user(server, tenant="tenant-beta", tenant_name="组织乙", email="other@example.test", name="另一人")
     token = bootstrap_invitation(server, tenant="tenant-beta", email="invitee@example.test", role="admin")
     anonymous = Client(server)
-    status, payload, _headers = anonymous.get(f"/api/invitations/check?token={token}")
+    # The token travels in a JSON body, never in a URL.
+    status, payload, _headers = anonymous.post("/api/invitations/check", {"token": token})
     assert status == 200
     assert payload["valid"] is True
     assert payload["invitation"]["email"] == "invitee@example.test"
@@ -869,9 +871,130 @@ def test_invitation_check_is_bounded_and_hides_the_token(server: PiGlinkServer) 
     assert payload["invitation"]["tenant"] == {"id": "tenant-beta", "name": "组织乙"}
     assert token not in json.dumps(payload)
     for bad in ("", "made-up", token[:-2]):
-        status, payload, _headers = anonymous.get(f"/api/invitations/check?token={bad}")
+        status, payload, _headers = anonymous.post("/api/invitations/check", {"token": bad})
         assert status == 200
         assert payload == {"valid": False}
+
+
+def test_invitation_check_is_post_only_and_never_reads_a_query_token(server: PiGlinkServer) -> None:
+    token = bootstrap_invitation(server, email="invitee@example.test")
+    anonymous = Client(server)
+    status, payload, headers = anonymous.get(f"/api/invitations/check?token={token}")
+    assert status == 405
+    assert payload["error"] == "method_not_allowed"
+    assert headers.get("Allow") == "POST"
+    status, payload, _headers = anonymous.post("/api/invitations/check", {"token": token})
+    assert status == 200 and payload["valid"] is True
+
+
+def test_invitation_check_enforces_origin_and_json(server: PiGlinkServer) -> None:
+    token = bootstrap_invitation(server, email="invitee@example.test")
+    anonymous = Client(server)
+    status, payload, headers = anonymous.post(
+        "/api/invitations/check", {"token": token}, headers={"Origin": "https://evil.example"}
+    )
+    assert status == 403 and payload["error"] == "forbidden"
+    assert "Set-Cookie" not in headers
+    status, _headers, raw = raw_request(
+        server,
+        "/api/invitations/check",
+        method="POST",
+        headers={"Content-Type": "text/plain"},
+        body={"token": token},
+    )
+    assert status in {400, 415}, raw[:120]
+    status, payload, _headers = anonymous.post(
+        "/api/invitations/check",
+        {"token": token},
+        headers={"Origin": f"http://127.0.0.1:{server.server_address[1]}"},
+    )
+    assert status == 200 and payload["valid"] is True
+
+
+def test_invitation_check_rate_limit_still_applies(
+    tmp_path: Path, tenant_files: tuple[Path, Path], adapters: AdapterBehavior
+) -> None:
+    config = make_config(
+        tmp_path,
+        tenant_files,
+        PI_GLINK_INVITE_CHECK_MAX_ATTEMPTS="2",
+        PI_GLINK_INVITE_CHECK_WINDOW_SECONDS="300",
+    )
+    instance = create_server(config)
+    thread = start_server(instance)
+    try:
+        token = bootstrap_invitation(instance, email="invitee@example.test")
+        anonymous = Client(instance)
+        for _ in range(2):
+            assert anonymous.post("/api/invitations/check", {"token": token})[0] == 200
+        status, payload, headers = anonymous.post("/api/invitations/check", {"token": token})
+        assert status == 429 and payload["error"] == "rate_limited"
+        assert int(headers.get("Retry-After", "0")) > 0
+    finally:
+        stop_server(instance, thread)
+
+
+def test_invitation_tokens_never_reach_a_request_line_or_the_logs(
+    server: PiGlinkServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Our own flows must never put the invitation code into an HTTP URL.
+
+    The fragment stays in the browser; checking and registering travel in JSON
+    bodies. The server additionally sanitizes every logged request line, so even
+    a client that *tries* the legacy query form cannot get the code written into
+    a log (the log is often shipped off-host).
+    """
+    token = bootstrap_invitation(server, email="invitee@example.test")
+    raw_lines: list[str] = []
+    original = HostRequestHandler.log_message
+
+    def recording(self, format, *args):  # noqa: A002 - stdlib signature
+        raw_lines.append(str(self.requestline))
+        return original(self, format, *args)
+
+    monkeypatch.setattr(HostRequestHandler, "log_message", recording)
+    messages: list[str] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    handler = Capture(level=logging.DEBUG)
+    host_logger = logging.getLogger("pi_glink.host")
+    previous_level = host_logger.level
+    host_logger.addHandler(handler)
+    host_logger.setLevel(logging.DEBUG)
+    try:
+        anonymous = Client(server)
+        # 1) the real flow: load /register (the #invite=… fragment is never sent),
+        #    then check and register through JSON bodies.
+        status, _headers, _body = raw_request(server, "/register")
+        assert status == 200
+        status, payload, _headers = anonymous.post("/api/invitations/check", {"token": token})
+        assert status == 200 and payload["valid"] is True
+        status, payload, _headers = anonymous.post(
+            "/api/auth/register",
+            {"invite": token, "email": "invitee@example.test", "name": "受邀者", "password": PASSWORD},
+        )
+        assert status == 201, payload
+        assert raw_lines, "the request-line recorder saw the flow"
+        for line in raw_lines:
+            assert token not in line, line
+        for message in messages:
+            assert token not in message, message
+
+        # 2) a hostile client may still put it in a query; the server refuses the
+        #    method and the sanitized logger never writes the query anywhere.
+        raw_lines.clear()
+        messages.clear()
+        status, payload, headers = anonymous.get(f"/api/invitations/check?token={token}")
+        assert status == 405 and headers.get("Allow") == "POST"
+        assert messages, "the refused request was still logged"
+        for message in messages:
+            assert token not in message, message
+    finally:
+        host_logger.removeHandler(handler)
+        host_logger.setLevel(previous_level)
 
 
 def test_registration_uses_the_invitation_identity_without_creating_a_session(server: PiGlinkServer) -> None:
@@ -1189,10 +1312,11 @@ def test_operator_cli_creates_the_first_admin_invitation(
     captured = capsys.readouterr()
     assert code == 0, captured.err
     assert "邀请已创建" in captured.out
-    match = re.search(r"/register\?invite=(\S+)", captured.out)
+    match = re.search(r"/register#invite=(\S+)", captured.out)
     assert match, captured.out
     token = match.group(1)
     assert captured.out.count(token) == 1, "the raw code is shown exactly once"
+    assert "?invite=" not in captured.out, "the hand-out link must not put the code in a query"
     assert token not in captured.err
 
     store = AccountsStore(config.accounts_db)

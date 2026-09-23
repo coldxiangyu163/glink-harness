@@ -112,6 +112,8 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
   let disposed = false;
   /** The identity behind the workbench (null before login / after expiry). */
   let identity = null;
+  /** Which unauthenticated face is on screen (gateway/accounts/login). */
+  let authFaceMode = null;
   /** True once the workbench shell has been revealed for a session. */
   let entered = false;
   /* A navigation may finish after a newer one started (or after dispose); the
@@ -940,6 +942,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
   /** Show the right unauthenticated face for the identity mode the host uses. */
   function showAuthFace(mode, { notice = '', invite = '' } = {}) {
     if (!auth) return;
+    authFaceMode = mode;
     if (mode === 'gateway') {
       auth.show({ mode: 'gateway', notice });
       return;
@@ -959,8 +962,11 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
 
   function inviteFromUrl() {
     try {
-      if (typeof location === 'undefined' || !location.search) return '';
-      return new URLSearchParams(location.search).get('invite') || '';
+      // The invitation lives in the URL *fragment*: browsers never send it to
+      // the server and strip it from Referer, and `auth.mjs` clears it as soon
+      // as the client has it.
+      if (typeof location === 'undefined' || !location.hash) return '';
+      return new URLSearchParams(String(location.hash).replace(/^#/, '')).get('invite') || '';
     } catch {
       return '';
     }
@@ -1018,6 +1024,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
     setCsrfToken(null);
     identity = null;
     entered = false;
+    authFaceMode = 'accounts';
     shell.hidden = true;
     setSkipTarget(true);
     if (typeof history !== 'undefined' && typeof history.replaceState === 'function') {
@@ -1072,6 +1079,19 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
     if (skip && typeof skip.setAttribute === 'function') {
       skip.setAttribute('href', toAuth ? '#auth-view' : '#main-content');
     }
+  }
+
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    // A link like /register#invite=… pasted while the register face is already
+    // open is a same-document navigation: no reload, only a hashchange. Without
+    // this the new code would sit unused in the address bar (and stay there);
+    // with it the fragment is read and cleared like any other arrival.
+    window.addEventListener('hashchange', () => {
+      if (disposed || entered || authFaceMode !== 'accounts') return;
+      const invite = inviteFromUrl();
+      if (!invite) return;
+      showAuthFace('accounts', { invite });
+    });
   }
 
   if (typeof document !== 'undefined' && document.addEventListener) {

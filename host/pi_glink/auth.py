@@ -243,8 +243,13 @@ class AccountsAuth:
     def register(
         self, *, token: Any, email: Any, name: Any, password: Any, client_ip: str
     ) -> dict[str, Any]:
-        if not self.register_limiter.allow(f"register:{client_ip}"):
-            raise AuthError("rate_limited", "注册尝试次数过多，请稍后再试")
+        register_key = f"register:{client_ip}"
+        if not self.register_limiter.allow(register_key):
+            raise AuthError(
+                "rate_limited",
+                "注册尝试次数过多，请稍后再试",
+                retry_after=self.register_limiter.retry_after(register_key),
+            )
         invitation = self.store.inspect_invitation(token)
         if invitation is None or invitation.used_at is not None or invitation.expires_at <= self.store.now():
             raise AuthError("invitation_invalid", "邀请无效或已使用")
@@ -261,8 +266,13 @@ class AccountsAuth:
         return {"registered": True, "email": user.email}
 
     def check_invitation(self, token: Any, *, client_ip: str) -> dict[str, Any]:
-        if not self.invite_limiter.allow(f"invite:{client_ip}"):
-            raise AuthError("rate_limited", "查看邀请次数过多，请稍后再试")
+        invite_key = f"invite:{client_ip}"
+        if not self.invite_limiter.allow(invite_key):
+            raise AuthError(
+                "rate_limited",
+                "查看邀请次数过多，请稍后再试",
+                retry_after=self.invite_limiter.retry_after(invite_key),
+            )
         invitation = self.store.inspect_invitation(token)
         if (
             invitation is None

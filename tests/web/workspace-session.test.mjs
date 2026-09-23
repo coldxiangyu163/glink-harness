@@ -136,18 +136,42 @@ test('a 401 in accounts mode shows the login face and keeps the shell hidden', a
   assert.equal(h.auth.shown[0].mode, 'login');
 });
 
-test('a /register?invite URL goes straight to the invitation registration face', async (t) => {
+test('a /register#invite fragment goes straight to the invitation registration face', async (t) => {
   const h = harness({
     me: async () => {
       throw unauthorized('accounts');
     },
-    location: { pathname: '/register', search: '?invite=invite-token', origin: 'http://127.0.0.1:43210' },
+    location: { pathname: '/register', search: '', hash: '#invite=invite-token', origin: 'http://127.0.0.1:43210' },
   });
   t.after(() => h.dom.restore());
   await h.workspace.init();
   assert.equal(h.auth.shown.length, 1);
   assert.equal(h.auth.shown[0].mode, 'register');
   assert.equal(h.auth.shown[0].invite, 'invite-token');
+});
+
+test('an invite fragment arriving in the same document still opens registration', async (t) => {
+  // Pasting /register#invite=… while the register face is already open is a
+  // same-document navigation: no reload, only a hashchange. The workbench must
+  // pick the fragment up there too (and auth.js clears it before the request).
+  const h = harness({
+    me: async () => {
+      throw unauthorized('accounts');
+    },
+    location: { pathname: '/register', search: '', hash: '', origin: 'http://127.0.0.1:43210' },
+  });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  assert.equal(h.auth.shown.length, 1);
+  assert.equal(h.auth.shown[0].mode, 'register');
+  assert.equal(h.auth.shown[0].invite, '');
+
+  h.dom.location.hash = '#invite=late-arriving-token';
+  h.dom.window.dispatch('hashchange', {});
+  await tick();
+  assert.equal(h.auth.shown.length, 2);
+  assert.equal(h.auth.shown[1].mode, 'register');
+  assert.equal(h.auth.shown[1].invite, 'late-arriving-token');
 });
 
 test('gateway mode gets a gateway explanation, never a login form', async (t) => {

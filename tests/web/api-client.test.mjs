@@ -32,10 +32,11 @@ test('every mutating call is JSON with same-origin credentials', async () => {
   await api.login('member@example.test', 'correct horse battery');
   await api.register({ invite: 't', email: 'e@example.test', name: 'n', password: 'p'.repeat(12) });
   await api.createInvitation('new@example.test', 'member');
+  await api.checkInvite('secret-invite-token');
   await api.startRun('研究问题');
   await api.stopRun('run-1');
   await api.logout();
-  assert.equal(calls.length, 6);
+  assert.equal(calls.length, 7);
   for (const { init } of calls) {
     assert.equal(init.method, 'POST');
     assert.equal(init.headers['Content-Type'], 'application/json');
@@ -44,6 +45,15 @@ test('every mutating call is JSON with same-origin credentials', async () => {
     assert.doesNotThrow(() => JSON.parse(init.body));
   }
   assert.deepEqual(JSON.parse(calls[5].init.body), {}, 'logout must carry a JSON body, not an empty one');
+
+  // The invitation check posts the token in the body: it must never appear in a
+  // URL, query string or Referer.
+  const check = calls.find((item) => item.url === '/api/invitations/check');
+  assert.ok(check, 'checkInvite must call the check endpoint');
+  assert.equal(check.url.includes('secret-invite-token'), false);
+  assert.equal(check.url.includes('?'), false);
+  assert.deepEqual(JSON.parse(check.init.body), { token: 'secret-invite-token' });
+  assert.equal(check.init.headers['Content-Type'], 'application/json');
 });
 
 test('the CSRF header only appears when a session supplied a token', async () => {

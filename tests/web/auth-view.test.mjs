@@ -23,7 +23,7 @@ function harness({
   login = null,
   register = null,
   checkInvite = null,
-  location = { pathname: '/login', search: '', origin: 'http://127.0.0.1:43210' },
+  location = { pathname: '/login', search: '', hash: '', origin: 'http://127.0.0.1:43210' },
 } = {}) {
   const dom = createDomStub({ location });
   dom.install();
@@ -119,6 +119,35 @@ test('throttling and disabled identities get their own explanations', async (t) 
   assert.match(disabled.dom.getElement('login-error').textContent, /已停用/);
 });
 
+test('the invitation fragment is removed before the server answers', async (t) => {
+  let release;
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  const h = harness({
+    location: { pathname: '/register', hash: '#invite=secret-invite-token', origin: 'http://127.0.0.1:43210' },
+    checkInvite: async () => {
+      await pending;
+      return {
+        valid: true,
+        invitation: { email: 'invitee@example.test', role: 'member', tenant: { id: 'tenant-beta', name: '组织乙' } },
+      };
+    },
+  });
+  t.after(() => h.dom.restore());
+  const showing = h.view.show({ mode: 'register', invite: 'secret-invite-token' });
+  await tick();
+  // The token stays in memory only: the address bar (and therefore any copy,
+  // bookmark, screenshot or Referer) loses it before the request completes.
+  assert.equal(h.dom.location.hash, '');
+  assert.equal(h.dom.location.search, '');
+  assert.equal(h.view.invite, 'secret-invite-token');
+  release();
+  await showing;
+  assert.equal(h.view.mode, 'register');
+  assert.deepEqual(h.storageWrites, []);
+});
+
 test('a valid invitation prefills the read-only identity and registers once', async (t) => {
   const h = harness({
     checkInvite: async () => ({
@@ -128,13 +157,16 @@ test('a valid invitation prefills the read-only identity and registers once', as
   });
   t.after(() => h.dom.restore());
   await h.view.show({ mode: 'register', invite: 'invite-token-value' });
+  assert.equal(h.view.invite, 'invite-token-value');
   assert.equal(h.view.mode, 'register');
   assert.equal(h.dom.getElement('register-org').textContent, '组织乙');
   assert.equal(h.dom.getElement('register-email').value, 'invitee@example.test');
   assert.equal(h.dom.getElement('register-email').readOnly || h.dom.getElement('register-email').hasAttribute('readonly'), true);
   assert.deepEqual(h.calls.checkInvite, ['invite-token-value']);
-  // The code is stripped from the URL as soon as the server has validated it.
+  // The code never lives in the query string; the fragment is the only holder
+  // and it is cleared from the address bar as soon as the client has it.
   assert.equal(h.dom.location.search, '');
+  assert.equal(h.dom.location.hash, '');
 
   h.dom.getElement('register-name').value = '受邀者';
   h.dom.getElement('register-password').value = 'correct horse battery';

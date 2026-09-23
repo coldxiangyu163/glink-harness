@@ -206,7 +206,9 @@ export function createAccountArea({ api, onLogout = null, onNotice = null } = {}
       const payload = await api.createInvitation(email, role);
       const invitation = payload?.invitation ?? {};
       created = true;
-      const path = `/register?invite=${encodeURIComponent(invitation.code ?? '')}`;
+      // Fragment, not query: the code never reaches the server, a proxy log or
+      // a same-origin Referer, and the register page clears it on arrival.
+      const path = `/register#invite=${encodeURIComponent(invitation.code ?? '')}`;
       const origin = typeof location !== 'undefined' && location.origin ? location.origin : '';
       if (linkInput) {
         linkInput.value = `${origin}${path}`;

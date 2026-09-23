@@ -34,12 +34,12 @@ workspace-session,api-client}.test.mjs`；隔离 fixture（临时账号库 + fak
 参照 `/Users/coldxiangyu/work/BR/glink-ui-library` 的 `src/styles/globals.css`、`src/components/{input,button,field}.tsx`、`src/pages/agent-assistant-demo/demo-sidebar.tsx` 与《百鉴 UI Design Specification.md》§2.2、§3.3、§4.3。本站仍是无打包的静态 ESM：逐值映射现有 `web/styles.css` token，不引入 React、Tailwind 或第二套色板。主操作为近黑胶囊按钮，单行输入按库规范 36px/全圆角，聚焦为 1px 近黑描边，错误在字段旁显示；键盘焦点与触屏目标遵循现有无障碍合同。
 
 1. **未登录 `/login`**：保留品牌标识与浅色页面材质；主区单列，宽度约 400px，标题“登录研究工作台”，邮箱、密码、登录按钮；下方文字链接“收到邀请？创建账号”。登录失败在对应字段或表单内说明原因，不泄漏邮箱是否存在；网络失败与密码错误可重试且不清空邮箱。无营销英雄区或假的组织切换器。
-2. **邀请注册 `/register?invite=…`**：未带有效邀请时显示“需要邀请才能创建账号”并给返回登录入口；有效邀请显示组织名、受邀邮箱（只读）、姓名、密码和确认密码；密码要求与错误规则就地说明。提交成功转登录，不在 URL 或本地存储留下邀请码，不显示第三方登录按钮。
+2. **邀请注册 `/register#invite=…`**：邀请码放在 **URL fragment**（浏览器不会把它发给服务端，也不会进入同源 Referer），页面拿到后**立即 `replaceState` 清掉**，只保留在内存里；校验走 `POST /api/invitations/check` 的 JSON body。未带有效邀请时显示“需要邀请才能创建账号”并给返回登录入口；有效邀请显示组织名、受邀邮箱（只读）、姓名、密码和确认密码；密码要求与错误规则就地说明。提交成功转登录，邀请码不进入任何 HTTP URL、查询串、访问日志、Referer 或本地存储，不显示第三方登录按钮。带 fragment 的刷新仍会重新校验（浏览器在整页刷新时保留 fragment）；一旦页面把 fragment 清掉，后续刷新或重新打开 `/register` 只显示「需要邀请」页面，不会重新发送或复用旧码；已停在 `/register` 时粘贴新的 `#invite=` 链接会按 `hashchange` 重新进入校验。
 3. **工作台**：启动时先请求 `GET /api/me`，收到 `200` 才揭示研究历史；`401` 跳登录，绝不先闪现上一个身份的历史。左侧导航底部参照库 Demo 的 28px 首字母头像，显示当前**真实**组织名、姓名及账号菜单“账号信息 / 退出登录”。窄侧栏保留可访问名与 tooltip。组织名来自服务端，不从运行记录、URL 或浏览器存储猜。
 4. **会话失效**：读面 `401` 时关闭当前 SSE、清除屏幕上的研究与报告内容、引导重新登录；重新登录后重新读取有权访问的列表。退出登录废止服务器会话并清空前端当前身份数据，不能只隐藏 UI。
 
 ## 接口、兼容与验收
 
-已新增 `GET /api/me`、`POST /api/auth/login|register|logout`、`GET /api/invitations/check` 与管理员发邀请接口 `POST /api/admin/invitations`；`GET /api/me` 只回当前用户、组织的展示字段、角色与（accounts 模式）CSRF 令牌，不回签名密钥、模型凭据或其他用户。所有 run/list/detail/SSE/report/stop/follow-up 继续使用现有 owner 校验，不从新页面另造授权路径。默认 `local` 行为不变；`gateway` 模式现有断言也能提供 `/api/me` 用于身份展示，登录/注册入口应由网关提供或隐藏，不展示无后端的站内表单。
+已新增 `GET /api/me`、`POST /api/auth/login|register|logout`、`POST /api/invitations/check`（body `{"token": "…"}`；GET/查询形式返回 `405`，服务端从不读取 URL 里的邀请码）与管理员发邀请接口 `POST /api/admin/invitations`；服务端把每条日志里的请求行查询串剥掉，因此即使调用方把 token 放进 query 也不会被写入日志。`GET /api/me` 只回当前用户、组织的展示字段、角色与（accounts 模式）CSRF 令牌，不回签名密钥、模型凭据或其他用户。所有 run/list/detail/SSE/report/stop/follow-up 继续使用现有 owner 校验，不从新页面另造授权路径。默认 `local` 行为不变；`gateway` 模式现有断言也能提供 `/api/me` 用于身份展示，登录/注册入口应由网关提供或隐藏，不展示无后端的站内表单。
 
-隔离验收：两租户注册与登录、跨租户列表/详情/报告/SSE/取消/follow-up 拒绝；受邀邮箱与组织绑定、重复/过期/伪造邀请码、弱密码、登录限速、会话过期/停用/退出、CSRF、浏览器刷新与身份切换无历史串显；独立 fake pi/临时数据库/随机 loopback 端口下实际浏览器走完整流程。真实网关、邮件交付、Docker/E2B live、已有用户数据迁移与部署另验收。本提案获批前不修改真实配置、数据、服务或生产凭据。
+隔离验收：两租户注册与登录、跨租户列表/详情/报告/SSE/取消/follow-up 拒绝；受邀邮箱与组织绑定、重复/过期/伪造邀请码、弱密码、登录限速、会话过期/停用/退出、CSRF、浏览器刷新与身份切换无历史串显；邀请码不进请求行/Referer/日志（原始请求行与渲染日志双证据）、fragment 注册在真实浏览器里走通；独立 fake pi/临时数据库/随机 loopback 端口下实际浏览器走完整流程。真实网关、邮件交付、Docker/E2B live、已有用户数据迁移与部署另验收。本提案获批前不修改真实配置、数据、服务或生产凭据。

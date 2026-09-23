@@ -130,6 +130,11 @@ export function createAuthView({ api, onSession = null } = {}) {
       render('register-missing', { notice: '需要邀请才能创建账号，请联系组织管理员获取邀请链接。' });
       return;
     }
+    // Take the code out of the address bar (and therefore out of history,
+    // screenshots, bookmarks and any later Referer) *before* the request: it
+    // stays in this closure only. A manual refresh after this point shows the
+    // "invitation required" face rather than re-sending a stale code.
+    cleanUrl('/register');
     let payload;
     try {
       payload = await api.checkInvite(inviteCode);
@@ -154,7 +159,6 @@ export function createAuthView({ api, onSession = null } = {}) {
       if (registerEmail.setAttribute) registerEmail.setAttribute('aria-readonly', 'true');
     }
     render('register');
-    cleanUrl('/register');
     focusFirst(registerName);
   }
 

@@ -67,7 +67,16 @@ _HEARTBEAT_SECONDS = 15.0
 #: Every one of them enforces the same origin, Content-Type and (where a session
 #: exists) CSRF rules as the run endpoints.
 _AUTH_POST_PATHS = frozenset(
-    {"/api/auth/login", "/api/auth/register", "/api/auth/logout", "/api/admin/invitations"}
+    {
+        "/api/auth/login",
+        "/api/auth/register",
+        "/api/auth/logout",
+        "/api/admin/invitations",
+        # The invitation token travels in a JSON body: a capability that can
+        # create a member/admin account must never appear in a URL, a query
+        # string, a Referer or an access log.
+        "/api/invitations/check",
+    }
 )
 
 
@@ -177,7 +186,7 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):  # pragma: no cover - client left
             self.close_connection = True
         except Exception:  # pragma: no cover - defensive: never kill the server
-            logger.exception("unhandled error serving POST %s", self.path)
+            logger.exception("unhandled error serving POST %s", self._log_target())
             self._send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal_error"}, head_only=False
             )
@@ -218,7 +227,7 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):  # pragma: no cover - client left
             self.close_connection = True
         except Exception:  # pragma: no cover - defensive: never kill the server
-            logger.exception("unhandled error serving %s", self.path)
+            logger.exception("unhandled error serving %s", self._log_target())
             self._send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 {"error": "internal_error"},
@@ -241,7 +250,22 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             self._handle_me(head_only=head_only)
             return
         if path == "/api/invitations/check":
-            self._check_invitation(query, head_only=head_only)
+            # The check is a POST with a JSON body. A GET whose query carries a
+            # token is refused before the query is read (and before anything can
+            # log it), so the old URL form is dead rather than merely deprecated.
+            if self.server.auth is None:
+                self._send_json(
+                    HTTPStatus.NOT_FOUND,
+                    {"error": "unknown_endpoint", "path": "/api/invitations/check"},
+                    head_only=head_only,
+                )
+            else:
+                self._send_json(
+                    HTTPStatus.METHOD_NOT_ALLOWED,
+                    {"error": "method_not_allowed", "message": "邀请校验只接受 POST JSON 请求"},
+                    head_only=head_only,
+                    extra_headers={"Allow": "POST"},
+                )
             return
         context = self._authenticate()
         if self.server.tenancy is not None and context is None:
@@ -396,6 +420,9 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/admin/invitations":
             self._create_invitation()
             return
+        if path == "/api/invitations/check":
+            self._check_invitation()
+            return
         self._send_json(
             HTTPStatus.NOT_FOUND, {"error": "unknown_endpoint", "path": path}, head_only=False
         )
@@ -511,22 +538,31 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             head_only=head_only,
         )
 
-    def _check_invitation(self, query: str, *, head_only: bool) -> None:
+    def _check_invitation(self) -> None:
+        """Validate an invitation token from a JSON body (accounts mode only).
+
+        Origin/Content-Type gating and the rate limiter are the same as the other
+        auth POSTs; the token is read from the body so it cannot reach a request
+        line, a proxy log or a same-origin Referer.
+        """
         auth = self.server.auth
-        if auth is None:
+        if auth is None:  # pragma: no cover - the GET route answers this first
             self._send_json(
                 HTTPStatus.NOT_FOUND,
                 {"error": "unknown_endpoint", "path": "/api/invitations/check"},
-                head_only=head_only,
+                head_only=False,
             )
             return
-        token = (parse_qs(query).get("token") or [""])[0]
+        body = self._read_json_body()
+        if body is None:
+            return
+        token = body.get("token")
         try:
             payload = auth.check_invitation(token, client_ip=self._client_ip())
         except AuthError as exc:
             self._send_auth_error(exc)
             return
-        self._send_json(HTTPStatus.OK, payload, head_only=head_only)
+        self._send_json(HTTPStatus.OK, payload, head_only=False)
 
     def _send_auth_error(self, error: AuthError) -> None:
         payload: dict[str, Any] = {"error": error.code}
@@ -1052,11 +1088,39 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
 
+    def _sanitized_log_argument(self, value: Any) -> str:
+        """A log argument with any query string/fragment removed.
+
+        Invitation codes and session tokens must not be written to logs (which
+        are commonly shipped to a collector). Our own URLs never carry them, but
+        a hostile or outdated client can still try; everything from the first
+        ``?`` or ``#`` on is dropped before the message is formatted.
+        """
+        text = str(value)
+        for marker in ("?", "#"):
+            head, found, _tail = text.partition(marker)
+            if found:
+                text = head
+        return text
+
+    def _log_target(self) -> str:
+        """The request path without query/fragment, safe to log."""
+        target = urlsplit(self.path).path
+        return self._sanitized_log_argument(target or self.path)
+
+    def _log_request(self, level: int, format: str, args: tuple[Any, ...]) -> None:
+        safe = tuple(self._sanitized_log_argument(argument) for argument in args)
+        try:
+            message = format % safe
+        except (TypeError, ValueError):  # pragma: no cover - unusual custom format
+            message = self._log_target()
+        logger.log(level, "%s - %s", self.address_string(), message)
+
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        logger.debug("%s - %s", self.address_string(), format % args)
+        self._log_request(logging.DEBUG, format, args)
 
     def log_error(self, format: str, *args: Any) -> None:  # noqa: A002
-        logger.warning("%s - %s", self.address_string(), format % args)
+        self._log_request(logging.WARNING, format, args)
 
 
 def _persisted_sse(event: Mapping[str, Any]) -> str:
@@ -1378,7 +1442,7 @@ def _create_invite_command(config: HostConfig, args: argparse.Namespace) -> int:
         except AccountsError as exc:
             print(f"拒绝创建邀请: {exc.message}", file=sys.stderr)
             return 2
-        register_path = f"/register?invite={code}"
+        register_path = f"/register#invite={code}"
         print("邀请已创建（仅本次显示，请通过安全渠道传递；不要在普通日志或工单里留存）：")
         print(f"  组织: {display} ({record.tenant_id})")
         print(f"  邮箱: {record.email}")

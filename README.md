@@ -130,7 +130,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | POST | `/api/auth/login` | accounts 模式登录：邮箱+密码，成功设置 `HttpOnly` 会话 cookie 并回身份 |
 | POST | `/api/auth/register` | accounts 模式邀请注册：只接受绑定到邀请的邮箱，创建账号后回到登录（不静默授予会话） |
 | POST | `/api/auth/logout` | accounts 模式注销：服务端废止会话并清 cookie |
-| GET | `/api/invitations/check?token=…` | 校验邀请可用性（限速；无效与已用同形返回 `{"valid":false}`） |
+| POST | `/api/invitations/check` | 校验邀请可用性，body `{"token": "…"}`（限速；无效与已用同形返回 `{"valid":false}`；邀请码只走 JSON body，不进 URL/查询/日志） |
 | POST | `/api/admin/invitations` | 管理员为**本租户**签发一次性邀请（需要 CSRF；响应只在这一次返回邀请码原文） |
 
 本机（`local`）执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。

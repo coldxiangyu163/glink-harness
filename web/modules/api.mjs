@@ -91,8 +91,11 @@ export function createApi({ fetchImpl = globalThis.fetch } = {}) {
       ...options, method: 'POST', body: { invite, email, name, password },
     }),
     logout: () => call('/api/auth/logout', { ...options, method: 'POST', body: {} }),
-    checkInvite: (invite) =>
-      call(`/api/invitations/check?token=${encodeURIComponent(invite)}`, options),
+    // The invitation code is a capability that can create a member/admin
+    // account: it travels in a JSON body, never in a URL or query string.
+    checkInvite: (invite) => call('/api/invitations/check', {
+      ...options, method: 'POST', body: { token: invite },
+    }),
     createInvitation: (email, role) => call('/api/admin/invitations', {
       ...options, method: 'POST', body: { email, role },
     }),

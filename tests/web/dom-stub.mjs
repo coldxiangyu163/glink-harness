@@ -37,7 +37,7 @@ function makeClassList() {
 export function createDomStub({
   width = 1280,
   height = 900,
-  location: initialLocation = { pathname: '/', search: '', origin: 'http://127.0.0.1:43210' },
+  location: initialLocation = { pathname: '/', search: '', hash: '', origin: 'http://127.0.0.1:43210' },
   hidden = false,
 } = {}) {
   const byId = new Map();
@@ -198,6 +198,7 @@ export function createDomStub({
   const location = {
     pathname: initialLocation.pathname ?? '/',
     search: initialLocation.search ?? '',
+    hash: initialLocation.hash ?? '',
     origin: initialLocation.origin ?? 'http://127.0.0.1:43210',
     reloaded: false,
     reload() {
@@ -210,6 +211,8 @@ export function createDomStub({
       const parsed = new URL(url, location.origin);
       location.pathname = parsed.pathname;
       location.search = parsed.search;
+      // Fragments are part of the URL history but never travel to the server.
+      location.hash = parsed.hash;
     } catch {
       /* the stub keeps the previous URL on unparseable input */
     }
