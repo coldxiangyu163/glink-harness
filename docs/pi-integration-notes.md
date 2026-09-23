@@ -48,21 +48,21 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
 ## 3. 配置目录重定向
 
 - `PI_CODING_AGENT_DIR` 覆盖 pi 配置目录（默认 `~/.pi/agent`）；指向项目 `agent/` 后，用户个人配置（packages、models、extensions）不再加载，这正是本仓库需要的隔离语义。
-- `PI_CODING_AGENT_SESSION_DIR` 或 `--session-dir` 覆盖会话目录；宿主把它指向数据根，run 与 session 文件一一对应。
+- `PI_CODING_AGENT_SESSION_DIR` 或 `--session-dir` 覆盖会话目录；宿主把它指向**每个 run 自己的**会话子目录（`PI_CODING_AGENT_SESSION_DIR/<runId>`，默认 `<data>/sessions/<runId>`），run 与 session 文件一一对应，且不会与其他 run 混写。
 - `--provider <id> --model <含斜杠的完整 id>` 可正常工作（实测 `--provider frontier --model openai/gpt-5.6-sol`，`get_state` 返回该 id）。
-- **pi 会往配置目录写运行时状态**：实测 pi 会在其中生成 `models-store.json`、`npm/`（插件安装目录）等；`auth.json` 则是 pi 官方凭据存储，本仓库由**宿主在运行期渲染**（模型 key，0600），不是 pi 写出的空对象。因此仓库里的 `agent/` **只能作为模板**，不能直接当成 `PI_CODING_AGENT_DIR` 使用；运行期目录必须由宿主渲染到数据根下（`<data_root>/pi-agent`），`.gitignore` 保留第二道防线。
+- **pi 会往配置目录写运行时状态**：实测 pi 会在其中生成 `models-store.json`、`npm/`（插件安装目录）等；`auth.json` 则是 pi 官方凭据存储，本仓库由**宿主在运行期渲染**（模型 key，0600），不是 pi 写出的空对象。因此仓库里的 `agent/` **只能作为模板**，不能直接当成 `PI_CODING_AGENT_DIR` 使用；运行期目录必须由宿主渲染到每个 run 自己的 `runs/<runId>/pi-agent`，`.gitignore` 保留第二道防线。
 
 ## 4. RPC 协议（`pi --mode rpc`）
 
 - JSONL over stdio：命令写 stdin，`response` 帧带 `id` 回执，其余为事件；未知命令返回 `success: false` 而不中断会话（实测 `get_commands` 之外的 `get_available_commands` 会报 `Unknown command`）。
 - 帧分隔符只有 LF；含 U+2028 的字符串不会被拆帧（回归 `test_frames_split_on_lf_only_and_keep_u2028` 覆盖）。
 - 一次真实研究型 prompt 的事件面：`agent_start → turn_start → message_start → message_update(text_*) … → tool_execution_start/update/end → turn_end → … → agent_settled`。
-- `agent_settled` 是判断"这一次 run 完全落定"的可靠信号（`agent_end` 之后仍可能有重试/压缩/排队续跑）。
+- `agent_settled` 是判断“pi 不会再自动继续”的可靠信号（`agent_end` 之后仍可能有重试/压缩/排队续跑），但它**不是成功信号**：最终结果看最后一条 assistant `message_end` 的 `stopReason`（`error`/`aborted`/`length`/`stop`），终态判定见 architecture.md §4。
 
 ## 5. pi-web-access 接入（已实测）
 
 - **配置目录解析**：pi-web-access 的 `utils.ts` 中 `getWebSearchConfigDir()` **优先读 `process.env.PI_CODING_AGENT_DIR`**，且不检查该目录下是否已有 `web-search.json`。这与 pi 本身的重定向一致，但也意味着：一旦宿主重定向了配置目录，操作员本机 ``~/.pi/agent/web-search.json` 就不再被读到，检索会静默退化成无凭据模式。
-- **凭据装配**：宿主在运行期目录渲染 `web-search.json`：优先用 `PI_GLINK_WEB_SEARCH_KEY`（渲染为 `{"exaApiKey": …}`），否则复制操作员本机的 `~/.pi/agent/web-search.json`（或 `~/.pi/web-search.json`）。无凭据不是错误：pi-web-access 仍可用无密钥的 Exa MCP 检索。
+- **凭据装配**：宿主在本 run 的运行期目录渲染 `web-search.json`：优先用 `PI_GLINK_WEB_SEARCH_KEY`（渲染为 `{"exaApiKey": …}`），否则复制操作员本机的 `~/.pi/agent/web-search.json`（或 `~/.pi/web-search.json`）。无凭据不是错误：pi-web-access 仍可用无密钥的 Exa MCP 检索；每次渲染都会重建或删除该文件，所以上一 run 的凭据不会残留。
 - **插件安装**：在 `agent/settings.json` 的 `packages` 里声明 `npm:pi-web-access`，pi 启动时把它装到 `<PI_CODING_AGENT_DIR>/npm/`（实测会在运行期目录下生成 `npm/node_modules/`）。
 - **工具面**：实测一次检索 run 调用 `web_search`（1 次）+ `fetch_content`（3 次），事件流里以 `tool_started/tool_updated/tool_finished` 正常呈现，报告写入 10 个可核验 URL。见 `docs/evidence/local-web-search.txt`。
 
@@ -72,8 +72,8 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
 
 | 事实 | Docker | E2B |
 |---|---|---|
-| `PI_CODING_AGENT_DIR` | `/config`（宿主运行期目录的 bind mount，读写：pi 要往 `npm/` 装插件、写运行时状态） | `/home/user/config`（上传） |
-| 会话目录 | `/sessions`（bind mount；pi 上报容器路径，宿主词法映射回 `<data>/sessions/…`） | `/home/user/sessions`（随沙箱销毁） |
+| `PI_CODING_AGENT_DIR` | `/config`（本 run 运行期目录的 bind mount，读写：pi 要往 `npm/` 装插件、写运行时状态） | `/home/user/config`（整棵上传，带 `(路径, sha256)` 清单） |
+| 会话目录 | `/sessions`（bind mount 到本 run 的会话子目录；pi 上报容器路径，宿主词法映射回该目录） | `/home/user/sessions`（随沙箱销毁） |
 | 工作区 | `/workspace` | `/home/user/workspace`（`e2b_env.SANDBOX_WORKSPACE`） |
 | 模型凭据 | `auth.json` 在挂载内（0600，仓库外） | 上传的 `auth.json` |
 | 进程环境含 key | 否（`env \| grep -c OPENAI_API_KEY` = 0） | 否（同为 0） |

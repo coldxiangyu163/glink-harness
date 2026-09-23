@@ -6,7 +6,9 @@
     .venv/bin/python scripts/check-no-secrets.py [--data-root ~/.pi-glink]
 
 凭据来源与宿主一致：`.env` 的 `OPENAI_API_KEY` / `E2B_API_KEY` /
-`PI_GLINK_WEB_SEARCH_KEY`，以及运行期 `pi-agent/web-search.json`。
+`PI_GLINK_WEB_SEARCH_KEY`，以及每个 run 自己的运行期
+`runs/<id>/pi-agent/web-search.json`（旧共享路径 `pi-agent/web-search.json`
+也会读取，方便扫描升级前的数据）。
 另外按形状扫描（sk-…、e2b_…、exa-…、NAME=value、Bearer …），
 因此即使是宿主从未见过的第三方 token 也会被检出。
 
@@ -34,9 +36,11 @@ from pi_glink.redaction import (  # noqa: E402
 _TARGET_GLOBS = (
     "runs/*/events.jsonl",
     "runs/*/meta.json",
+    "runs/*/artifacts/*.md",
+    "runs/*/sessions/**/*.jsonl",
     "workspaces/*/*.md",
     "workspaces/*/*.txt",
-    "sessions/**/*.jsonl",
+    "sessions/**/*.jsonl",  # pre-hardening shared session directory
 )
 
 
@@ -46,6 +50,10 @@ def build_redactor(repo_root: Path, data_root: Path) -> SecretRedactor:
     redactor = SecretRedactor()
     for attribute in ("openai_api_key", "e2b_api_key", "web_search_key"):
         redactor.add(getattr(config, attribute, None))
+    # Each run renders its own credential file; the shared path is only read for
+    # data written before per-run runtime directories existed.
+    for credential in sorted(data_root.glob("runs/*/pi-agent/web-search.json")):
+        redactor.add_from_file(credential)
     redactor.add_from_file(data_root / "pi-agent" / "web-search.json")
     return redactor
 

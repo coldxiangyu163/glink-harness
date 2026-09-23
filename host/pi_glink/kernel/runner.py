@@ -1,26 +1,35 @@
-"""Run lifecycle for the local execution face.
+"""Run lifecycle for the local execution faces.
 
-One run is one workspace plus one pi process plus one session file. The manager
-keeps four promises:
+One run is one workspace plus one kernel process/sandbox plus one session file.
+The manager keeps four facts apart, each with one owner and one commit point:
 
-* **Serial by construction.** Only one run is active at a time; a second start
-  is refused with :class:`RunBusy` instead of silently interleaving. This
-  matches FrontierAgent's ``inproc`` semantics and keeps the local face honest.
-* **One stream, two sinks.** Every projected event is published to the bus *and*
-  appended to the run's ``events.jsonl``, so a reconnect and a post-mortem see
-  the same frames. ``meta.json`` is rewritten only at state transitions, never
-  per delta.
-* **Identity comes from pi.** The session id/file recorded on the run is what
-  pi reported through ``get_state``, not a guess derived from file timestamps.
-* **Terminal state from evidence.** A run is only ``finished`` after pi settled
-  and the workspace was inspected for the report; a missing report is recorded
-  as ``no_report`` and never papered over.
+* **Execution facts** — what the adapter and the model reported (outcome,
+  model stop reason, event-log health). Collected while the run is *open*.
+* **Artifact facts** — the recovered, validated, redacted report copy
+  (``report_status``/``report_path``). Written before the verdict.
+* **The verdict** — ``finished``/``failed``/``cancelled`` with a reason. It is
+  decided and committed in one critical section under the run lock: the
+  verdict is computed from all facts *and* the cancellation flag at that
+  moment, then committed as the durable terminal frame (see
+  :mod:`pi_glink.store`). This is the run's linearization point. A stop
+  accepted before it is reflected in the verdict; a stop after it is refused
+  and reports the committed status. Frames that arrive after it are dropped.
+* **Resource release** — the adapter's ``CleanupReport``. A run whose cleanup
+  did not confirm ``released: true`` keeps holding capacity after its verdict
+  (durably, across restarts) until an operator adjudicates it; finishing the
+  execution thread never implies the resource is gone.
+
+Admission is derived from those facts: a new run is accepted only when no run
+is executing in this process and no run holds unconfirmed resources.
+
+Restart reconciliation rewrites runs left ``running`` only after the host proved
+exclusive ownership of the data root (:mod:`pi_glink.ownership`); a committed
+terminal frame whose settled copy is missing is settled, never overwritten.
 """
 
 from __future__ import annotations
 
 import logging
-import subprocess
 import threading
 import time
 import uuid
@@ -29,9 +38,20 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .. import events
+from ..artifacts import ArtifactError, ArtifactMissing, ArtifactTree
 from ..config import ConfigError, HostConfig
+from ..ownership import DataRootOwnership, OwnershipRequired
 from ..redaction import SecretRedactor, redactor_from_config
-from ..store import CANCELLED, FAILED, FINISHED, RunRecord, RunStore
+from ..store import (
+    ARTIFACTS_DIRNAME,
+    CANCELLED,
+    FAILED,
+    FINISHED,
+    REPORT_FILENAME,
+    RUNNING,
+    RunRecord,
+    RunStore,
+)
 from .agent_env import AgentRuntime, build_pi_argv, build_pi_env, prepare_agent_dir
 from .docker_env import (
     build_plan as build_docker_plan,
@@ -39,41 +59,116 @@ from .docker_env import (
     is_available as docker_available,
     stop_argv as docker_stop_argv,
 )
-from .projection import project_event
-from .rpc import PiRpcClient, PiRpcError
+from .execution import (
+    CleanupReport,
+    ExecutionAdapter,
+    ExecutionOutcome,
+    ExecutionSpec,
+    SessionInfo,
+    build_adapter,
+)
+from .projection import Projector
+from .rpc import PiRpcClient
 
 logger = logging.getLogger("pi_glink.kernel.runner")
 
-#: Artifact the research contract asks pi to produce.
-REPORT_FILENAME = "report.md"
+#: Per-run pi configuration directory inside the run directory.
+RUNTIME_DIRNAME = "pi-agent"
 #: System prompt appended to every run (pi's own prompt stays untouched).
 RESEARCH_PROMPT_FILENAME = "research-prompt.md"
-#: Deadline for pi to accept and answer a command frame.
-_REQUEST_TIMEOUT_SECONDS = 60.0
+#: Ceiling for artifacts the host reads back and serves.
+REPORT_MAX_BYTES = 32 * 1024 * 1024
+#: Ceiling for one file touched by the workspace credential sweep.
+SWEEP_MAX_BYTES = 2 * 1024 * 1024
+#: Bound on how many files one sweep may visit (a runaway workspace must not
+#: turn run teardown into an unbounded walk).
+SWEEP_MAX_FILES = 2000
+_USAGE_FIELDS = ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
+
+#: Run phases. ``open`` accepts frames and cancellation; the verdict commit
+#: moves it to ``committed``, or to ``uncommitted`` when the durable terminal
+#: append failed (the run then keeps its slot until a restart reconciles it).
+_OPEN = "open"
+_COMMITTED = "committed"
+_UNCOMMITTED = "uncommitted"
 
 
 class RunBusy(RuntimeError):
-    """Raised when a run is requested while another one is active."""
+    """Raised when a run is requested while another one is executing."""
 
     def __init__(self, active_run_id: str) -> None:
         super().__init__(f"run {active_run_id} is still active")
         self.active_run_id = active_run_id
 
 
+class ResourcesUnreleased(RuntimeError):
+    """Raised when earlier runs still hold resources that are not confirmed released."""
+
+    def __init__(self, run_ids: list[str]) -> None:
+        super().__init__("执行资源尚未确认释放: " + ", ".join(run_ids))
+        self.run_ids = list(run_ids)
+
+
+class EventLogError(RuntimeError):
+    """The durable event log could not be written; the frame must stay hidden."""
+
+
+@dataclass(frozen=True, slots=True)
+class StopDecision:
+    """The answer to a stop request, decided at the run's linearization point.
+
+    ``accepted`` means the cancellation will be the run's verdict. Otherwise
+    ``reason`` says why not: ``terminal`` (a verdict is committed; ``status``
+    is it), ``finalizing`` (the verdict is decided but its commit failed),
+    ``not_owned`` (the record is not executed by this process) or ``unknown``.
+    """
+
+    accepted: bool
+    status: str | None
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Verdict:
+    status: str
+    stop_reason: str | None
+    error: str | None
+
+
 @dataclass
 class _Execution:
-    """Mutable per-run handles held for as long as the run is alive."""
+    """Mutable per-run state held from admission until the verdict is committed."""
 
     record: RunRecord
     workspace: Path
     #: The instruction as the user wrote it. ``record.prompt`` is the redacted
     #: copy that may be persisted and shown; the kernel receives this one.
     kernel_prompt: str = ""
-    settled: threading.Event = field(default_factory=threading.Event)
-    client: PiRpcClient | None = None
+    #: Guards the phase, the cancellation flag and every frame commit.
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    phase: str = _OPEN
     cancel_requested: bool = False
-    container_name: str | None = None
-    sandbox: Any | None = None
+    adapter: ExecutionAdapter | None = None
+    runtime: AgentRuntime | None = None
+    projector: Projector | None = None
+    #: Set once the finalizer finished (committed or not).
+    finalized: threading.Event = field(default_factory=threading.Event)
+    verdict: _Verdict | None = None
+    # execution facts
+    outcome: ExecutionOutcome | None = None
+    failure: str | None = None
+    event_log_error: str | None = None
+    model_stop_reason: str | None = None
+    model_error: str | None = None
+    usage_total: dict[str, Any] = field(default_factory=dict)
+    usage_keys: set[str] = field(default_factory=set)
+    # artifact facts
+    redacted: bool = False
+    report_path: Path | None = None
+    report_status: str = "none"
+    artifact_failures: list[str] = field(default_factory=list)
+    # resource facts
+    cleanup: CleanupReport | None = None
 
 
 ClientFactory = Callable[..., PiRpcClient]
@@ -90,30 +185,29 @@ class RunManager:
         *,
         client_factory: ClientFactory = PiRpcClient,
         sandbox_factory: Callable[..., Any] | None = None,
+        ownership: DataRootOwnership | None = None,
     ) -> None:
         self.config = config
         self.bus = bus
         self.store = store
         self._client_factory = client_factory
         self._sandbox_factory = sandbox_factory
+        self._ownership = ownership
         # The single redaction boundary: every event payload passes through it
         # before it reaches the bus (SSE + browser) or the event log.
         self.redactor: SecretRedactor = redactor_from_config(config)
         self._lock = threading.RLock()
         self._executions: dict[str, _Execution] = {}
-        self._active_run_id: str | None = None
-        self._usage: dict[str, dict[str, Any]] = {}
-        self._report_redacted = False
 
-    # -- public API -----------------------------------------------------------
+    # -- admission ------------------------------------------------------------
 
     @property
     def active_run_id(self) -> str | None:
         with self._lock:
-            return self._active_run_id
+            return next(iter(self._executions), None)
 
     def start(self, prompt: str) -> RunRecord:
-        """Create a run and execute it in the background."""
+        """Admit a run and execute it in the background."""
         text = (prompt or "").strip()
         if not text:
             raise ValueError("prompt must not be empty")
@@ -123,8 +217,11 @@ class RunManager:
             )
 
         with self._lock:
-            if self._active_run_id is not None:
-                raise RunBusy(self._active_run_id)
+            if self._executions:
+                raise RunBusy(next(iter(self._executions)))
+            holds = self._resource_holds()
+            if holds:
+                raise ResourcesUnreleased(holds)
             run_id = uuid.uuid4().hex[:12]
             workspace = self.config.workspace_root / run_id
             # A user can paste a credential into the prompt; the stored and
@@ -137,7 +234,10 @@ class RunManager:
                 record=record, workspace=workspace, kernel_prompt=text
             )
             self._executions[run_id] = execution
-            self._active_run_id = run_id
+            # Register the run before the caller gets the id back: a browser
+            # that opens the event stream immediately must see an open run, not
+            # a 404 race with the execution thread's first line.
+            self.bus.open_run(run_id)
 
         threading.Thread(
             target=self._execute,
@@ -147,38 +247,48 @@ class RunManager:
         ).start()
         return record
 
-    def stop(self, run_id: str) -> bool:
-        """Request cancellation; returns False only when nothing is running.
+    def _resource_holds(self) -> list[str]:
+        """Runs not executing here whose resources are not confirmed released."""
+        with self._lock:
+            executing = set(self._executions)
+        return [
+            record.run_id
+            for record in self.store.list(limit=None)
+            if record.run_id not in executing and record.holds_resources
+        ]
 
-        True means "the cancellation is accepted", not "pi acknowledged it".
-        The flag is what ends the run (the executor checks it before prompting
-        and after settling); the ``abort`` command only shortens the wait, so a
-        failed abort is logged and does not turn the request into a rejection.
+    # -- cancellation ---------------------------------------------------------
+
+    def stop(self, run_id: str) -> StopDecision:
+        """Request cancellation, decided against the run's commit point.
+
+        Accepting sets the flag the verdict reads under the same lock that
+        commits it, so an accepted stop always ends as ``cancelled``. The
+        face's own cancel only shortens the wait: a failed abort is logged and
+        does not turn an accepted stop into a rejection.
         """
         with self._lock:
             execution = self._executions.get(run_id)
         if execution is None:
-            return False
-        execution.cancel_requested = True
-        if execution.sandbox is not None:
+            record = self.store.get(run_id)
+            if record is None:
+                return StopDecision(False, None, "unknown")
+            reason = "terminal" if record.is_terminal else "not_owned"
+            return StopDecision(False, record.status, reason)
+        with execution.lock:
+            if execution.phase == _COMMITTED:
+                assert execution.verdict is not None
+                return StopDecision(False, execution.verdict.status, "terminal")
+            if execution.phase == _UNCOMMITTED:
+                return StopDecision(False, RUNNING, "finalizing")
+            execution.cancel_requested = True
+            adapter = execution.adapter
+        if adapter is not None:
             try:
-                execution.sandbox.close()
-            except Exception:  # noqa: BLE001 - teardown is best effort
-                logger.debug("killing sandbox failed", exc_info=True)
-            return True
-        client = execution.client
-        if client is None:
-            return True
-        try:
-            client.request({"type": "abort"}, timeout=10.0)
-        except (PiRpcError, OSError) as exc:
-            logger.warning(
-                "abort request failed run=%s: %s: %s (cancellation still accepted)",
-                run_id,
-                type(exc).__name__,
-                exc,
-            )
-        return True
+                adapter.cancel()
+            except Exception:  # noqa: BLE001 - the flag is what ends the run
+                logger.debug("adapter cancel failed run=%s", run_id, exc_info=True)
+        return StopDecision(True, RUNNING, "accepted")
 
     def wait(self, run_id: str, timeout: float = 60.0) -> RunRecord | None:
         """Block until the run leaves ``running`` (used by tests and smoke)."""
@@ -190,250 +300,470 @@ class RunManager:
             time.sleep(0.1)
         return self.store.get(run_id)
 
+    def shutdown(self, timeout: float = 15.0) -> list[str]:
+        """Cancel and wait for every run owned by this process.
+
+        Returns every run id that still needs an operator: runs whose verdict
+        was not committed within the bound, and runs whose resources are not
+        confirmed released (including those finished earlier). A thread that
+        ended is not evidence that its resource is gone.
+        """
+        with self._lock:
+            executions = list(self._executions.values())
+        for execution in executions:
+            self.stop(execution.record.run_id)
+        deadline = time.monotonic() + max(0.0, timeout)
+        for execution in executions:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                execution.finalized.wait(remaining)
+        with self._lock:
+            pending = set(self._executions)
+        unconfirmed = sorted(pending | set(self._resource_holds()))
+        if unconfirmed:
+            logger.error(
+                "宿主退出时仍有 run 的终态或执行资源未确认: %s", ", ".join(unconfirmed)
+            )
+        return unconfirmed
+
+    # -- restart reconciliation and resource adjudication ---------------------
+
+    def reconcile(self) -> list[str]:
+        """Close out runs a previous host process left ``running``.
+
+        Requires proof that this process owns the data root: without it, a
+        run of a live host would be rewritten. A run whose terminal frame is
+        committed is only settled. A run without one is interrupted: a
+        ``run_failed(interrupted)`` frame is committed with the resource state
+        ``released: null`` (unknown), so it keeps holding capacity until an
+        operator adjudicates it. External resources are never touched.
+        Returns the ids that were interrupted.
+        """
+        self._require_ownership()
+        with self._lock:
+            executing = set(self._executions)
+        interrupted: list[str] = []
+        for run_id in self.store.unsettled():
+            if run_id in executing:
+                continue
+            if self.store.committed_terminal(run_id) is None:
+                if self._commit_interrupted(run_id):
+                    interrupted.append(run_id)
+            try:
+                self.store.settle(run_id)
+            except Exception:  # noqa: BLE001 - the committed frame still answers readers
+                logger.exception("遗留 run 的元数据收口失败 run=%s", run_id)
+        if interrupted:
+            logger.warning(
+                "识别到 %d 个上次进程遗留的 running run，已按中断收口: %s",
+                len(interrupted),
+                ", ".join(interrupted),
+            )
+        return interrupted
+
+    def _commit_interrupted(self, run_id: str) -> bool:
+        record = self.store.get(run_id)
+        external = {
+            key: value
+            for key, value in (
+                ("container", record.container_name if record else None),
+                ("sandbox", record.sandbox_id if record else None),
+            )
+            if value
+        }
+        payload = {
+            "status": FAILED,
+            "stopReason": "interrupted",
+            "error": "宿主进程在该 run 结束前退出，已按中断收口",
+            "reportPath": None,
+            "reportStatus": "none",
+            "external": external,
+            "cleanup": {
+                "released": None,
+                "failures": ["宿主进程在该 run 结束前退出，执行资源状态未知，未自动回收"],
+                "external": external,
+            },
+        }
+        seq = max(
+            (event["seq"] for event in self.store.iter_events(run_id) if isinstance(event.get("seq"), int)),
+            default=0,
+        ) + 1
+        try:
+            self.store.commit_terminal(
+                run_id,
+                {
+                    "type": events.RUN_FAILED,
+                    "runId": run_id,
+                    "seq": seq,
+                    "ts": time.time(),
+                    "payload": payload,
+                },
+            )
+        except OSError as exc:
+            logger.error("遗留 run 的中断终帧写入失败 run=%s: %s", run_id, exc)
+            return False
+        return True
+
+    def unreleased_resources(self) -> list[dict[str, Any]]:
+        """Runs whose resources are not confirmed released, for operator review."""
+        holds = set(self._resource_holds())
+        return [
+            {
+                "runId": record.run_id,
+                "status": record.status,
+                "stopReason": record.stop_reason,
+                "container": record.container_name,
+                "sandbox": record.sandbox_id,
+                "cleanup": record.cleanup,
+            }
+            for record in self.store.list(limit=None)
+            if record.run_id in holds
+        ]
+
+    def adjudicate_release(self, run_id: str, note: str) -> RunRecord:
+        """Record an operator's decision that a run's resources are released.
+
+        This is the only way besides a confirmed cleanup to return capacity.
+        It requires data-root ownership (the host is not running) and a note
+        describing how the release was verified; nothing is cleaned up here.
+        """
+        self._require_ownership()
+        reason = (note or "").strip()
+        if not reason:
+            raise ValueError("裁决必须附带核对说明")
+        with self._lock:
+            if run_id in self._executions:
+                raise RunBusy(run_id)
+            record = self.store.get(run_id)
+            if record is None:
+                raise KeyError(run_id)
+            if not record.is_terminal:
+                raise ValueError(f"run {run_id} 尚未终态，不能裁决资源")
+            if not record.holds_resources:
+                raise ValueError(f"run {run_id} 没有待确认的执行资源")
+            return self.store.update(
+                run_id,
+                resource_adjudication={
+                    "decision": "released",
+                    "note": self.redactor.redact(reason),
+                    "at": time.time(),
+                },
+            )
+
+    def _require_ownership(self) -> None:
+        if self._ownership is None:
+            raise OwnershipRequired("恢复与资源裁决需要先取得数据目录的执行所有权")
+        self._ownership.require(self.config.data_root)
+
     # -- execution ------------------------------------------------------------
 
     def _execute(self, execution: _Execution) -> None:
         run_id = execution.record.run_id
-        self.bus.open_run(run_id)
-        self._report_redacted = False
-        status = FINISHED
-        stop_reason: str | None = None
-        error: str | None = None
         try:
             execution.workspace.mkdir(parents=True, exist_ok=True)
-            self._emit(run_id, events.RUN_STARTED, {"prompt": execution.record.prompt})
+            self._emit_open(execution, events.RUN_STARTED, {"prompt": execution.record.prompt})
 
-            runtime = prepare_agent_dir(self.config)
-            # The search credential only exists in the rendered file, so it is
-            # learned here (never logged, never returned).
-            self.redactor.add_from_file(runtime.directory / "web-search.json")
-            if self.config.executor == "e2b":
-                self._run_in_sandbox(execution, runtime)
-                settled = True
-                accepted = None
-                if execution.cancel_requested:
-                    # A stop closes the sandbox; the run ends cancelled even when
-                    # the sandbox command happened to return first.
-                    status = CANCELLED
-                    stop_reason = "abort"
-            else:
-                argv, env, cwd = self._execution_plan(runtime, run_id, execution.workspace)
-                client = self._client_factory(
-                    argv,
-                    cwd=cwd,
-                    env=env,
-                    on_event=lambda frame: self._on_frame(execution, frame),
+            runtime = self._prepare_runtime(execution)
+            adapter = self._build_adapter(execution, runtime)
+            execution.adapter = adapter
+            adapter.start()
+            self._store_external_identity(execution, adapter)
+
+            session = adapter.session_info()
+            if session is not None:
+                self._publish_session_ready(execution, session)
+
+            # Cancelled while the kernel was starting: never start the work.
+            if not execution.cancel_requested:
+                adapter.deliver_input()
+                deadline = time.monotonic() + self.config.task_timeout_seconds
+                execution.outcome = adapter.wait(
+                    cancel=lambda: execution.cancel_requested, deadline=deadline
                 )
-                execution.client = client
-                client.start()
-
-                self._publish_session_ready(run_id, client)
-                if execution.cancel_requested:
-                    # Cancelled while pi was starting: never start the work.
-                    status = CANCELLED
-                    stop_reason = "abort"
-                else:
-                    accepted = client.request(
-                        {
-                            "type": "prompt",
-                            "message": execution.kernel_prompt or execution.record.prompt,
-                        },
-                        timeout=_REQUEST_TIMEOUT_SECONDS,
-                    )
-                    if not accepted.success:
-                        raise PiRpcError(accepted.error or "pi rejected the prompt")
-
-                    settled = execution.settled.wait(self.config.task_timeout_seconds)
-                    if execution.cancel_requested:
-                        status = CANCELLED
-                        stop_reason = "abort"
-                    elif not settled:
-                        status = FAILED
-                        stop_reason = "timeout"
-                        error = (
-                            f"run did not settle within {self.config.task_timeout_seconds}s"
-                        )
-                        try:
-                            client.request({"type": "abort"}, timeout=10.0)
-                        except (PiRpcError, OSError):
-                            pass
+        except EventLogError as exc:
+            logger.error("run failed run=%s: %s", run_id, exc)
+            execution.event_log_error = execution.event_log_error or str(exc)
         except Exception as exc:  # noqa: BLE001 - every run must end with a reason
             if execution.cancel_requested:
-                # Stopping a run closes the sandbox (or aborts pi); whatever
-                # error that surfaces is the cancellation, not a failure.
-                status = CANCELLED
-                stop_reason = "abort"
+                # Stopping a run closes the sandbox (or aborts pi); the error
+                # that surfaces is the cancellation, not a failure.
                 logger.info("run cancelled run=%s (%s)", run_id, type(exc).__name__)
             else:
                 logger.exception("run failed run=%s", run_id)
-                status = FAILED
-                error = f"{type(exc).__name__}: {exc}"
+            execution.failure = f"{type(exc).__name__}: {exc}"
         finally:
-            client = execution.client
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:  # pragma: no cover - best effort
-                    logger.debug("closing pi client failed", exc_info=True)
-            if execution.sandbox is not None:
-                try:
-                    execution.sandbox.close()
-                except Exception:  # noqa: BLE001 - teardown is best effort
-                    logger.debug("closing sandbox failed", exc_info=True)
-            if execution.container_name:
-                try:
-                    subprocess.run(
-                        docker_stop_argv(execution.container_name),
-                        capture_output=True,
-                        timeout=30,
-                    )
-                except Exception:  # pragma: no cover - best effort cleanup
-                    logger.debug("removing container failed", exc_info=True)
+            self._finalize(execution)
 
-            # report.md is not the only artifact a tool echo can reach, so the
-            # credential boundary runs over the whole workspace, then pi's own
-            # session log, and finally the report path itself.
-            self._sanitize_workspace(execution.workspace)
-            previous = self.store.get(run_id)
-            session_id = previous.session_id if previous is not None else None
-            session_file = previous.session_file if previous is not None else None
-            self._sanitize_session_file(session_file)
-            report_path = self._collect_report(execution.workspace)
-            if status is FINISHED and report_path is None:
-                stop_reason = stop_reason or "no_report"
-            record = self.store.update(
-                run_id,
-                status=status,
-                finished_at=time.time(),
-                report_path=report_path,
-                error=self.redactor.redact(error) if error else error,
-                stop_reason=stop_reason,
-                usage=self._usage.pop(run_id, None),
-                redacted=self._report_redacted,
-            )
-            # The terminal frame must match the terminal state: a cancelled run
-            # that reports ``run_finished`` makes the workbench (and anyone
-            # reading the event log) show a stop as a success.
-            terminal_type = (
-                events.RUN_FAILED
-                if status == FAILED
-                else events.RUN_CANCELLED
-                if status == CANCELLED
-                else events.RUN_FINISHED
-            )
-            self._emit(
-                run_id,
-                terminal_type,
-                {
-                    "status": status,
-                    "stopReason": stop_reason,
-                    "error": error,
-                    "reportPath": report_path,
-                    "sessionId": session_id,
-                    "sessionFile": session_file,
-                    "usage": record.usage,
-                    "durationSeconds": round(record.finished_at - record.created_at, 3),
-                },
-            )
-            # The terminal frame is part of the log, so the count is written
-            # after it: ``event_count`` must equal the lines in events.jsonl.
-            self.store.update(run_id, event_count=self.bus.last_seq(run_id))
+    def _finalize(self, execution: _Execution) -> None:
+        """Collect artifact and resource facts, then commit the verdict.
+
+        Every step before the commit is guarded on its own, so a failing sweep
+        cannot prevent the verdict. The verdict and its durable commit happen
+        in one critical section with the cancellation flag.
+        """
+        run_id = execution.record.run_id
+        projector = execution.projector
+        if projector is not None:
+            # Release the answer's withheld tail now, so it stays attached to
+            # its text block ahead of any host-owned notice emitted below.
+            with execution.lock:
+                for kind, payload in projector.flush():
+                    if not self._emit_frame(execution, kind, payload):
+                        break
+
+        adapter = execution.adapter
+        if adapter is not None:
+            # Recover work products before the face is torn down: the sandbox
+            # cannot be read after it is destroyed.
+            try:
+                recovery = adapter.recover_artifacts(execution.workspace)
+                execution.artifact_failures.extend(recovery.failures)
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                execution.artifact_failures.append(
+                    f"产物回收失败: {type(exc).__name__}: {exc}"
+                )
+            try:
+                execution.cleanup = adapter.close()
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                execution.cleanup = CleanupReport(
+                    released=False,
+                    failures=(f"关闭执行面失败: {type(exc).__name__}: {exc}",),
+                    external=dict(adapter.identity()),
+                )
+        else:
+            # Nothing was acquired: no process, container or sandbox exists.
+            execution.cleanup = CleanupReport(released=True)
+
+        try:
+            if self._sanitize_workspace(execution.workspace):
+                execution.redacted = True
+        except Exception:  # noqa: BLE001 - sweep is defence in depth
+            logger.exception("workspace credential sweep failed run=%s", run_id)
+        try:
+            if self._sanitize_session(execution):
+                execution.redacted = True
+        except Exception:  # noqa: BLE001
+            logger.exception("session credential sweep failed run=%s", run_id)
+        try:
+            self._recover_report(execution)
+        except Exception:  # noqa: BLE001 - reported as a rejected artifact
+            logger.exception("report recovery failed run=%s", run_id)
+            execution.report_status = "rejected"
+            execution.report_path = None
+
+        committed = False
+        with execution.lock:
+            # Frames may have arrived while artifacts were recovered; their
+            # withheld tail still belongs to the open run, before the verdict.
+            if projector is not None:
+                for kind, payload in projector.flush():
+                    if not self._emit_frame(execution, kind, payload):
+                        break
+            verdict = self._decide(execution)
+            execution.verdict = verdict
+            try:
+                committed = self._commit_terminal(execution, verdict)
+            except Exception:  # noqa: BLE001 - an unexpected error is an uncommitted verdict
+                logger.exception("terminal commit failed run=%s", run_id)
+            execution.phase = _COMMITTED if committed else _UNCOMMITTED
+
+        if committed:
+            try:
+                self.store.settle(run_id)
+            except Exception:  # noqa: BLE001 - readers project the committed frame
+                logger.exception("settling the run record failed run=%s", run_id)
             self.bus.close(run_id)
             with self._lock:
                 self._executions.pop(run_id, None)
-                if self._active_run_id == run_id:
-                    self._active_run_id = None
-            logger.info(
-                "run finished run=%s status=%s report=%s", run_id, status, report_path or "<none>"
+        else:
+            # Every reader still sees ``running`` (nothing is committed), so the
+            # run keeps its slot and its live stream; a restart reconciles it.
+            logger.critical(
+                "run 终态未能提交，保持占用直至重启对账 run=%s status=%s", run_id, verdict.status
             )
-
-    # -- helpers --------------------------------------------------------------
-
-    def _run_in_sandbox(self, execution: _Execution, runtime: AgentRuntime) -> None:
-        """Execute this run inside an E2B sandbox (single-shot JSON stream).
-
-        The sandbox face has no bidirectional pipe, so it uses ``pi --mode json``:
-        the prompt is passed once and the events stream back line by line. The
-        projection and the product vocabulary are the same as the RPC faces, so
-        nothing downstream changes.
-        """
-        from .e2b_env import E2BSandboxClient, parse_json_stream_line
-
-        run_id = execution.record.run_id
-        client = E2BSandboxClient(
-            self.config,
-            runtime,
-            run_id=run_id,
-            workspace=execution.workspace,
-            sandbox_factory=self._sandbox_factory,
-        )
-        execution.sandbox = client
-        if execution.cancel_requested:
-            # Cancelled before the sandbox started: never create it.
-            return
-        client.start()
-        if execution.cancel_requested:
-            return
-        self._emit(
+        cleanup = execution.cleanup
+        logger.info(
+            "run finalized run=%s status=%s stop=%s committed=%s report=%s released=%s",
             run_id,
-            events.SESSION_READY,
-            {"sandboxId": client.sandbox_id, "template": self.config.e2b_template},
+            verdict.status,
+            verdict.stop_reason,
+            committed,
+            execution.report_path or "<none>",
+            cleanup.released if cleanup is not None else None,
         )
-        client.upload_config()
-        if execution.cancel_requested:
-            return
+        execution.finalized.set()
 
-        exit_code, stderr_tail = client.run_prompt(
-            execution.kernel_prompt or execution.record.prompt,
-            system_prompt=self._research_prompt_text(),
-        )
-        if execution.cancel_requested:
-            # ``stop()`` kills the sandbox; a normal return here is a race, not
-            # a finished run, and the frames are not worth replaying.
-            return
-        # The sandbox face replays the run's frames once it settles (the E2B SDK
-        # provides no working stdout callback); ordering and vocabulary are the
-        # same as the RPC faces.
-        for line in client.fetch_events():
-            frame = parse_json_stream_line(line)
-            if frame is not None:
-                self._on_frame(execution, frame)
-        report = client.fetch_report()
-        # A non-zero exit is a failure even when a report happens to exist: the
-        # run contract is "pi finished successfully and produced its artifact",
-        # not "a file with the right name showed up".
-        if exit_code != 0:
-            raise PiRpcError(
-                f"sandbox pi exited with {exit_code}: {stderr_tail[-300:]}"
-            )
+    # -- the verdict ----------------------------------------------------------
 
-    def _execution_plan(
-        self, runtime: AgentRuntime, run_id: str, workspace: Path
-    ) -> tuple[list[str], dict[str, str], Path | None]:
-        """Where pi runs: in this process tree or inside a container.
+    def _decide(self, execution: _Execution) -> _Verdict:
+        """Combine every fact into one verdict (call under the run lock).
 
-        Both faces speak the same RPC protocol over stdio, so only the command
-        line and the environment differ; the event projection does not.
+        An accepted cancellation wins: it was accepted while the run was open,
+        so it must be the verdict. ``agent_settled`` is deliberately not the
+        success signal: pi can settle after an error stop reason or a truncated
+        (``length``) response.
         """
-        extra = self._extra_argv(run_id)
-        if self.config.executor == "docker":
-            if not docker_available():
-                raise ConfigError(
-                    "LOCAL_WEB_EXECUTOR=docker requires a reachable Docker daemon"
-                )
-            plan = build_docker_plan(
-                self.config, runtime, run_id=run_id, workspace=workspace, extra=extra
-            )
-            with self._lock:
-                execution = self._executions.get(run_id)
-                if execution is not None:
-                    execution.container_name = plan.container_name
-            return plan.argv, plan.env, None
-        return (
-            build_pi_argv(self.config, runtime, extra=extra),
-            build_pi_env(self.config, runtime),
-            workspace,
+        log_error = execution.event_log_error
+        if execution.cancel_requested:
+            return _Verdict(CANCELLED, "abort", log_error)
+        if log_error:
+            return _Verdict(FAILED, "event_log_failed", log_error)
+        if execution.failure:
+            return _Verdict(FAILED, "execution_error", execution.failure)
+        outcome = execution.outcome
+        if outcome is None:
+            return _Verdict(FAILED, "execution_error", "执行面没有给出结果")
+        if outcome.cancelled:
+            return _Verdict(CANCELLED, "abort", None)
+        if outcome.timed_out:
+            return _Verdict(FAILED, "timeout", outcome.error or "run timed out")
+        if outcome.error:
+            return _Verdict(FAILED, outcome.stop_reason or "execution_error", outcome.error)
+        stop = execution.model_stop_reason
+        if stop == "error":
+            return _Verdict(FAILED, "model_error", execution.model_error or "模型返回了错误结果")
+        if stop == "aborted":
+            return _Verdict(FAILED, "aborted", execution.model_error or "模型输出被中断")
+        if stop == "length":
+            # The execution succeeded, but the answer was cut off at the output
+            # limit. That is a delivery fact the record must carry.
+            return _Verdict(FINISHED, "length", None)
+        if execution.report_path is None:
+            reason = "report_rejected" if execution.report_status == "rejected" else "no_report"
+            return _Verdict(FINISHED, reason, None)
+        return _Verdict(FINISHED, None, None)
+
+    def _commit_terminal(self, execution: _Execution, verdict: _Verdict) -> bool:
+        """Durably append the terminal frame; True once it is committed."""
+        run_id = execution.record.run_id
+        current = self.store.get(run_id) or execution.record
+        cleanup = execution.cleanup or CleanupReport(released=True)
+        terminal_type = {
+            FAILED: events.RUN_FAILED,
+            CANCELLED: events.RUN_CANCELLED,
+        }.get(verdict.status, events.RUN_FINISHED)
+        payload = {
+            "status": verdict.status,
+            "stopReason": verdict.stop_reason,
+            "error": self.redactor.redact(verdict.error) if verdict.error else None,
+            "reportPath": str(execution.report_path) if execution.report_path else None,
+            "reportStatus": execution.report_status,
+            "modelStopReason": execution.model_stop_reason,
+            "sessionId": current.session_id,
+            "sessionFile": current.session_file,
+            "usage": execution.usage_total or None,
+            "redacted": execution.redacted,
+            "durationSeconds": round(time.time() - current.created_at, 3),
+            "cleanup": {
+                "released": cleanup.released,
+                "failures": list(cleanup.failures),
+                "external": dict(cleanup.external),
+            },
+            "artifactFailures": list(execution.artifact_failures),
+        }
+        try:
+            self._emit(run_id, terminal_type, payload, terminal=True)
+        except EventLogError as exc:
+            logger.error("terminal frame could not be committed run=%s: %s", run_id, exc)
+            return False
+        return True
+
+    # -- pi configuration -----------------------------------------------------
+
+    def _prepare_runtime(self, execution: _Execution) -> AgentRuntime:
+        """Render the run's own pi configuration and session directory.
+
+        One run, one runtime directory: nothing in ``data_root/pi-agent`` is
+        shared or mutated by a run any more, so two runs cannot overwrite each
+        other's credentials, extensions or pi session state. The session
+        directory is the run's subdirectory of the configured session root
+        (``PI_CODING_AGENT_SESSION_DIR``), which keeps that setting meaningful
+        while keeping two runs apart.
+        """
+        run_id = execution.record.run_id
+        run_dir = self.store.run_dir(run_id)
+        runtime = prepare_agent_dir(
+            self.config,
+            runtime_dir=run_dir / RUNTIME_DIRNAME,
+            session_dir=Path(self.config.session_dir) / run_id,
         )
+        execution.runtime = runtime
+        # The search credential only exists in the rendered file, so it is
+        # learned here (never logged, never returned).
+        self.redactor.add_from_file(runtime.directory / "web-search.json")
+        execution.projector = Projector(self.redactor)
+        return runtime
+
+    # -- adapters -------------------------------------------------------------
+
+    def _build_adapter(
+        self, execution: _Execution, runtime: AgentRuntime
+    ) -> ExecutionAdapter:
+        run_id = execution.record.run_id
+        spec = ExecutionSpec(
+            config=self.config,
+            runtime=runtime,
+            run_id=run_id,
+            prompt=execution.kernel_prompt or execution.record.prompt,
+            system_prompt=self._research_prompt_text(),
+            workspace=execution.workspace,
+            timeout_seconds=self.config.task_timeout_seconds,
+            extra_argv=tuple(self._extra_argv(run_id)),
+        )
+        return build_adapter(
+            spec,
+            executor=self.config.executor,
+            client_factory=self._client_factory,
+            on_frame=lambda frame: self._on_frame(execution, frame),
+            sandbox_factory=self._sandbox_factory,
+            rpc_plan=self._rpc_plan,
+            docker_plan=self._docker_plan,
+            docker_stop=docker_stop_argv,
+        )
+
+    def _rpc_plan(
+        self, spec: ExecutionSpec
+    ) -> tuple[list[str], dict[str, str], Path | None]:
+        return (
+            build_pi_argv(spec.config, spec.runtime, extra=list(spec.extra_argv)),
+            build_pi_env(spec.config, spec.runtime),
+            spec.workspace,
+        )
+
+    def _docker_plan(
+        self, spec: ExecutionSpec
+    ) -> tuple[list[str], dict[str, str], str]:
+        if not docker_available():
+            raise ConfigError(
+                "LOCAL_WEB_EXECUTOR=docker requires a reachable Docker daemon"
+            )
+        plan = build_docker_plan(
+            spec.config,
+            spec.runtime,
+            run_id=spec.run_id,
+            workspace=spec.workspace,
+            session_dir=spec.runtime.session_dir,
+            extra=list(spec.extra_argv),
+        )
+        return plan.argv, plan.env, plan.container_name
+
+    def _store_external_identity(
+        self, execution: _Execution, adapter: ExecutionAdapter
+    ) -> None:
+        """Persist the container/sandbox identity as soon as it exists.
+
+        Without it, a host restart could not tell an operator which leftover
+        resource belongs to which run; with it, reconciliation is bounded to the
+        named resources instead of guessing.
+        """
+        identity = adapter.identity()
+        changes: dict[str, Any] = {}
+        if identity.get("container"):
+            changes["container_name"] = identity["container"]
+        if identity.get("sandbox"):
+            changes["sandbox_id"] = identity["sandbox"]
+        if changes:
+            self.store.update(execution.record.run_id, **changes)
 
     def _extra_argv(self, run_id: str) -> list[str]:
         extra = ["--name", f"pi-glink-{run_id}"]
@@ -442,182 +772,308 @@ class RunManager:
             extra.extend(["--append-system-prompt", text])
         return extra
 
-    def _argv_with_research_prompt(self, runtime: AgentRuntime, run_id: str) -> list[str]:
-        return build_pi_argv(self.config, runtime, extra=self._extra_argv(run_id))
-
     def _research_prompt_text(self) -> str:
         path = self.config.agent_config_dir / RESEARCH_PROMPT_FILENAME
         if not path.is_file():
             return ""
         return path.read_text(encoding="utf-8").strip()
 
-    def _on_frame(self, execution: _Execution, frame: Mapping[str, Any]) -> None:
-        run_id = execution.record.run_id
-        for event_type, payload in project_event(frame, self.redactor):
-            if event_type == events.USAGE_REPORTED:
-                self._usage[run_id] = payload.get("usage", {})
-            self._emit(run_id, event_type, payload)
-        if frame.get("type") == "agent_settled":
-            execution.settled.set()
+    # -- event projection -----------------------------------------------------
 
-    def _publish_session_ready(self, run_id: str, client: PiRpcClient) -> None:
+    def _on_frame(self, execution: _Execution, frame: Mapping[str, Any]) -> None:
+        with execution.lock:
+            if execution.phase != _OPEN or execution.projector is None:
+                # After the verdict commit nothing may follow the terminal frame.
+                logger.debug(
+                    "frame after commit dropped run=%s type=%s",
+                    execution.record.run_id,
+                    frame.get("type"),
+                )
+                return
+            for event_type, payload in execution.projector.project(frame):
+                if event_type == events.USAGE_REPORTED:
+                    payload = self._accumulate_usage(execution, frame, payload)
+                    if payload is None:
+                        continue
+                if not self._emit_frame(execution, event_type, payload):
+                    # The durable log is the fact source: a frame that cannot be
+                    # committed is not shown either.
+                    return
+            self._record_model_result(execution, frame)
+
+    def _emit_frame(
+        self, execution: _Execution, event_type: str, payload: Mapping[str, Any]
+    ) -> bool:
+        """Commit one frame of an open run (caller holds the run lock)."""
         try:
-            state = client.request({"type": "get_state"}, timeout=30.0)
-        except PiRpcError as exc:
-            logger.warning("get_state failed run=%s: %s", run_id, exc)
-            return
-        data = state.data
-        model = data.get("model")
-        session_id = data.get("sessionId")
-        session_file = data.get("sessionFile")
-        if isinstance(session_file, str) and session_file:
-            # pi reports paths from inside its own execution face. On Docker
-            # they are container paths (``/sessions/…``) that do not exist on
-            # the host; storing them unchanged made the closing sanitize pass
-            # read a missing file and skip it silently (audit finding). The
-            # mapping happens once, here, before the path is stored or emitted.
-            session_file = self._host_session_file(session_file)
-        if isinstance(session_id, str) or isinstance(session_file, str):
+            self._emit(execution.record.run_id, event_type, payload)
+        except EventLogError as exc:
+            execution.event_log_error = execution.event_log_error or str(exc)
+            logger.error("event log failed run=%s: %s", execution.record.run_id, exc)
+            return False
+        return True
+
+    def _emit_open(
+        self, execution: _Execution, event_type: str, payload: Mapping[str, Any]
+    ) -> None:
+        """Commit a host-owned frame while the run is open (raises on log failure)."""
+        with execution.lock:
+            if execution.phase != _OPEN:
+                return
+            self._emit(execution.record.run_id, event_type, payload)
+
+    def _record_model_result(
+        self, execution: _Execution, frame: Mapping[str, Any]
+    ) -> None:
+        frame_type = frame.get("type")
+        if frame_type == "message_end":
+            message = frame.get("message")
+            if isinstance(message, Mapping) and message.get("role") == "assistant":
+                stop = message.get("stopReason") or message.get("stop_reason")
+                if isinstance(stop, str) and stop:
+                    execution.model_stop_reason = stop
+                error = message.get("errorMessage")
+                execution.model_error = (
+                    error if isinstance(error, str) and error.strip() else None
+                )
+        elif frame_type == "auto_retry_end" and not frame.get("success"):
+            final = frame.get("finalError")
+            if isinstance(final, str) and final.strip():
+                execution.model_error = final
+
+    def _accumulate_usage(
+        self, execution: _Execution, frame: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """Turn one response's usage snapshot into a run cumulative total.
+
+        pi reports the usage of *one assistant response* (its own fields are
+        already cumulative for that request). The run total is the sum across
+        responses; a frame carrying the same message identity is not counted
+        twice. No price is invented: ``cost`` is summed only when pi reported it.
+        """
+        snapshot = payload.get("usage")
+        if not isinstance(snapshot, Mapping):
+            return None
+        key = self._usage_key(frame)
+        if key is not None:
+            if key in execution.usage_keys:
+                return None
+            execution.usage_keys.add(key)
+        total = execution.usage_total
+        for name in _USAGE_FIELDS:
+            value = snapshot.get(name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                total[name] = total.get(name, 0) + value
+        cost = snapshot.get("cost")
+        if isinstance(cost, Mapping):
+            cost_total = total.setdefault("cost", {})
+            for name, value in cost.items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    cost_total[name] = cost_total.get(name, 0) + value
+        total["requests"] = total.get("requests", 0) + 1
+        return {"usage": dict(total), "requestUsage": dict(snapshot)}
+
+    @staticmethod
+    def _usage_key(frame: Mapping[str, Any]) -> str | None:
+        message = frame.get("message")
+        if not isinstance(message, Mapping):
+            return None
+        for name in ("timestamp", "id"):
+            value = message.get(name)
+            if isinstance(value, str) and value:
+                return f"{name}:{value}"
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return f"{name}:{value}"
+        return None
+
+    def _publish_session_ready(
+        self, execution: _Execution, session: SessionInfo
+    ) -> None:
+        run_id = execution.record.run_id
+        session_file = session.session_file
+        if isinstance(session_file, str) and session_file and self.config.executor == "docker":
+            assert execution.runtime is not None
+            mapped = self._host_session_file(session_file, execution.runtime)
+            if mapped is None:
+                logger.warning(
+                    "container session path does not map back to the host mount: %s",
+                    session_file,
+                )
+            else:
+                session_file = mapped
+        if session.session_id or session_file:
             self.store.update(
                 run_id,
-                session_id=str(session_id) if session_id else None,
-                session_file=str(session_file) if session_file else None,
+                session_id=session.session_id,
+                session_file=session_file,
             )
-        self._emit(
-            run_id,
-            events.SESSION_READY,
-            {
-                "sessionId": session_id,
-                "sessionFile": session_file,
-                "model": model.get("id") if isinstance(model, Mapping) else None,
-                "thinkingLevel": data.get("thinkingLevel"),
-            },
-        )
+        payload: dict[str, Any] = dict(session.payload)
+        payload["sessionFile"] = session_file
+        self._emit_open(execution, events.SESSION_READY, payload)
 
-    def _host_session_file(self, reported: str) -> str:
-        """Translate a pi-reported session path into its host location.
+    def _host_session_file(self, reported: str, runtime: AgentRuntime) -> str | None:
+        """Translate a pi-reported container path into its host location.
 
         The in-process face reports host paths directly. The Docker face
-        reports container paths (``/sessions/…``) while the file itself lives
-        under the mounted host session directory; only the host path can be
-        read back for sanitising. An unmappable path is logged rather than
-        silently kept, so a future face change cannot reintroduce the gap.
+        reports container paths (``/sessions/…``) while the file itself lives in
+        the run's mounted session directory; only the host path can be read back
+        for sanitising. Only the session mount is translated: an unmappable path
+        is refused instead of being trusted.
         """
-        if self.config.executor != "docker":
-            return reported
-        mapped = docker_host_session_path(reported, self.config)
-        if mapped is None:
-            logger.warning(
-                "container session path does not map back to the host mount: %s",
-                reported,
-            )
-            return reported
-        return str(mapped)
+        mapped = docker_host_session_path(reported, runtime.session_dir)
+        return str(mapped) if mapped is not None else None
 
-    def _collect_report(self, workspace: Path) -> str | None:
-        """Return the report path, redacting credentials in place first.
+    # -- artifacts ------------------------------------------------------------
 
-        The report is written by pi, but it is a *product* artifact this host
-        serves, and the objective requires every file the host handles to be free
-        of credentials. If a tool echo (or a config-file read) reached the text,
-        the value is masked here and the run records ``redacted=true`` so the
-        sanitisation is visible rather than silent.
+    def _recover_report(self, execution: _Execution) -> None:
+        """Validate the report and copy it to a host-owned, redacted artifact.
+
+        The kernel-produced file is never served directly and never written
+        through: it is read through the run workspace's directory handle (no
+        link anywhere below the workspace root, regular file only, bounded),
+        redacted, and published under ``<run_dir>/artifacts/report.md``. A file
+        that cannot be validated is a visible ``report_rejected`` with a warning
+        event — not a fake report.
         """
-        report = workspace / REPORT_FILENAME
-        if not report.is_file():
-            return None
+        run_id = execution.record.run_id
         try:
-            original = report.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return str(report)
+            with ArtifactTree(execution.workspace) as workspace:
+                data = workspace.read(REPORT_FILENAME, max_bytes=REPORT_MAX_BYTES)
+        except ArtifactMissing:
+            execution.report_status = "missing"
+            return
+        except ArtifactError as exc:
+            execution.report_status = "rejected"
+            execution.report_path = None
+            self._report_warning(execution, f"report.md 未通过安全校验，已拒绝：{exc}")
+            return
+        original = data.decode("utf-8", errors="replace")
         redacted = self.redactor.redact(original)
         if redacted != original:
-            try:
-                report.write_text(redacted, encoding="utf-8")
-                self._report_redacted = True
-                logger.warning(
-                    "report contained credentials and was redacted in place: %s", report
+            execution.redacted = True
+        try:
+            with ArtifactTree(self.store.run_dir(run_id)) as run_tree:
+                run_tree.replace(
+                    f"{ARTIFACTS_DIRNAME}/{REPORT_FILENAME}",
+                    redacted.encode("utf-8"),
+                    max_bytes=REPORT_MAX_BYTES,
+                    create_parents=True,
                 )
-            except OSError:
-                logger.error("failed to redact report in place: %s", report)
-        return str(report)
+        except (ArtifactError, OSError) as exc:
+            execution.report_status = "rejected"
+            execution.report_path = None
+            self._report_warning(execution, f"report.md 无法写入宿主产物目录，已拒绝：{exc}")
+            return
+        execution.report_path = self.store.report_artifact_path(run_id)
+        execution.report_status = "ok"
 
-    def _sanitize_session_file(self, session_file: str | None) -> None:
+    def _report_warning(self, execution: _Execution, detail: str) -> None:
+        run_id = execution.record.run_id
+        logger.warning("run=%s %s", run_id, detail)
+        try:
+            self._emit_open(
+                execution,
+                events.KERNEL_STATUS,
+                {"level": "warning", "message": "report_rejected", "detail": detail},
+            )
+        except EventLogError as exc:
+            logger.error("report warning could not be persisted run=%s: %s", run_id, exc)
+
+    def _sanitize_session(self, execution: _Execution) -> bool:
         """Mask credentials pi wrote into its own session log.
 
         The kernel owns that file, so redaction cannot happen on the way in; it
-        happens here on the way out, and any change marks the run ``redacted``
-        so the sanitisation is visible rather than silent.
+        happens here on the way out. The path is only trusted inside the run's
+        own session directory — a kernel-reported path elsewhere on the host is
+        refused rather than rewritten.
         """
-        if not session_file:
-            return
-        path = Path(session_file)
-        if not path.is_file():
-            # Not being able to open the file means the boundary did not run;
-            # say so instead of returning as if it had.
-            logger.warning("session file to sanitise is not on the host: %s", path)
-            return
-        try:
-            original = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return
-        redacted = self.redactor.redact(original)
-        if redacted == original:
-            return
-        try:
-            path.write_text(redacted, encoding="utf-8")
-            self._report_redacted = True
-            logger.warning("session file contained credentials and was redacted: %s", path)
-        except OSError:
-            logger.error("failed to redact session file: %s", path)
+        record = self.store.get(execution.record.run_id)
+        session_file = record.session_file if record is not None else None
+        if not session_file or execution.runtime is None:
+            return False
+        return self._sanitize_session_file(session_file, root=execution.runtime.session_dir)
 
-    #: Text artifacts above this size are skipped by the workspace sweep.
-    _SANITIZE_MAX_BYTES = 2 * 1024 * 1024
+    def _sanitize_session_file(self, session_file: str, *, root: Path) -> bool:
+        """Redact one session file; returns whether its bytes changed."""
+        try:
+            with ArtifactTree(root) as tree:
+                original = tree.read(session_file, max_bytes=REPORT_MAX_BYTES).decode(
+                    "utf-8", errors="replace"
+                )
+                redacted = self.redactor.redact(original)
+                if redacted == original:
+                    return False
+                tree.replace(session_file, redacted.encode("utf-8"), max_bytes=REPORT_MAX_BYTES)
+        except (ArtifactError, OSError) as exc:
+            logger.warning("会话文件未通过安全校验或无法改写，已跳过: %s (%s)", session_file, exc)
+            return False
+        logger.warning("session file contained credentials and was redacted: %s", session_file)
+        return True
 
-    def _sanitize_workspace(self, workspace: Path) -> None:
+    def _sanitize_workspace(self, workspace: Path) -> bool:
         """Redact credentials in every text artifact the run left behind.
 
         The report is not the only file a tool echo can reach; a ``write`` call
         can leak the same value into any artifact the operator later opens. The
-        sweep is bounded (size cap, binary skip) and any change sets the
-        run-level ``redacted`` marker, so the sanitisation is visible rather
-        than silent.
+        sweep is bounded (file count, size cap, binary skip) and walks the
+        workspace through directory handles: links are never followed for
+        reading, and every rewrite is published inside the verified directory.
         """
-        if not workspace.is_dir():
-            return
-        for path in sorted(workspace.rglob("*")):
-            if not path.is_file() or path.is_symlink():
-                continue
-            try:
-                if path.stat().st_size > self._SANITIZE_MAX_BYTES:
+        try:
+            tree = ArtifactTree(workspace)
+        except ArtifactError:
+            return False
+        changed = False
+        with tree:
+            for relative in tree.files(max_files=SWEEP_MAX_FILES):
+                try:
+                    raw = tree.read(relative, max_bytes=SWEEP_MAX_BYTES)
+                except ArtifactError:
                     continue
-                raw = path.read_bytes()
-            except OSError:
-                continue
-            if b"\x00" in raw[:1024]:  # binary-ish
-                continue
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
-            redacted = self.redactor.redact(text)
-            if redacted == text:
-                continue
-            try:
-                path.write_text(redacted, encoding="utf-8")
-                self._report_redacted = True
-                logger.warning("artifact contained credentials and was redacted: %s", path)
-            except OSError:
-                logger.error("failed to redact artifact: %s", path)
+                if b"\x00" in raw[:1024]:  # binary-ish
+                    continue
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                redacted = self.redactor.redact(text)
+                if redacted == text:
+                    continue
+                try:
+                    tree.replace(relative, redacted.encode("utf-8"), max_bytes=SWEEP_MAX_BYTES)
+                except (ArtifactError, OSError) as exc:
+                    logger.error("failed to redact artifact: %s (%s)", relative, exc)
+                    continue
+                changed = True
+                logger.warning("artifact contained credentials and was redacted: %s", relative)
+        return changed
+
+    # -- persistence ----------------------------------------------------------
 
     def _emit(
-        self, run_id: str, event_type: str, payload: Mapping[str, Any] | None = None
-    ) -> None:
+        self,
+        run_id: str,
+        event_type: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        terminal: bool = False,
+    ) -> events.RunEvent:
         # Belt-and-braces: projection already redacts, but host-owned events
         # (run_finished, kernel_status, …) are built here, so the same boundary
-        # runs again on the way out. Nothing reaches the bus or the log unredacted.
+        # runs again on the way out. The frame is committed before it is shown;
+        # the terminal frame is committed durably (see RunStore.commit_terminal).
         safe_payload = (
             self.redactor.redact_payload(dict(payload)) if payload is not None else None
         )
-        event = self.bus.publish(run_id, event_type, safe_payload)
-        self.store.append_event(run_id, event.as_dict())
+        write = self.store.commit_terminal if terminal else self.store.append_event
+        try:
+            return self.bus.commit(
+                run_id,
+                event_type,
+                safe_payload,
+                persist=lambda event: write(run_id, event.as_dict()),
+            )
+        except OSError as exc:
+            raise EventLogError(
+                f"事件日志写入失败: {type(exc).__name__}: {exc}"
+            ) from exc

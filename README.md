@@ -1,6 +1,6 @@
 # pi-glink
 
-以 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 为执行内核的研究工作台，目标是通过 Docker / E2B 独立执行环境支持多租户；本地 `inproc` 保留为单 Agent 调试入口。当前三种执行面仍共用单 run 限制，尚未实现多租户身份、授权和并发隔离，不能把“能在沙箱运行”当作多租户已经交付。方向与当前能力见 [架构](docs/architecture.md#产品方向与当前实现)。前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按 pi 的原生事件语义重写。
+以 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 为执行内核的研究工作台，目标是通过 Docker / E2B 独立执行环境支持多租户；本地 `inproc` 保留为单 Agent 调试入口。当前三种执行面仍共用单 run 限制，尚未实现多租户身份、授权和并发隔离，不能把“能在沙箱运行”当作多租户已经交付。方向、当前能力与下一阶段的完整方案见 [架构](docs/architecture.md#产品方向与当前实现) 与 [多租户方案](docs/multitenancy-plan.md)（后者是设计提案，不是已上线能力）。前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按 pi 的原生事件语义重写。
 
 **当前状态：本机 / Docker / E2B 三种执行面均已跑通真实 run**，验收记录见 [docs/acceptance.md](docs/acceptance.md)，证据在 `docs/evidence/`。除前端静态资源源自 Glink 工作台外，本仓库不引用 FrontierAgent 的任何运行模块。
 
@@ -31,6 +31,10 @@
 | 容器 | `docker` | pi 与工作区都在一次性容器内，宿主只做编排与事件投影 |
 | 云沙箱 | `e2b` | pi 与工作区都在 E2B 沙箱内（`--mode json` 单向事件流）；模型凭据随运行期 `auth.json` 上传到沙箱（不进沙箱进程环境） |
 
+三面共享同一套输入/事件/收尾契约（`kernel/execution.py` 的 `ExecutionAdapter`）：每个 run 拥有
+自己的运行期配置（`runs/<id>/pi-agent/`）、session 目录（会话根基目录下的 `<id>/`，默认 `<数据根>/sessions/<id>/`）与工作区；
+收尾顺序固定为「产物回收 → 销毁执行面 → 安全校验并落盘报告 → 凭据清扫 → 终态与释放」。
+
 ### E2B 执行面
 
 ```bash
@@ -41,10 +45,12 @@ E2B_API_KEY=… HTTPS_PROXY=socks5h://127.0.0.1:1080 \
 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 scripts/run-local-web.sh   # 用云沙箱跑 pi
 ```
 
-模型凭据写在运行期 `auth.json`（pi 官方凭据存储，0600，仓库外），随运行期配置上传到沙箱
+模型凭据写在运行期 `auth.json`（pi 官方凭据存储，0600，仓库外），随本 run 的运行期配置上传到沙箱
 `/home/user/config/`；不进沙箱进程环境（沙箱内 `env | grep -c OPENAI_API_KEY` 实测 0），随沙箱销毁
-而消失。pi-web-access 凭据随运行期 `web-search.json` 一并上传。事件在 run 结束后一次性回放
-（E2B SDK 的 stdout 回调实测不触发），报告会拉回宿主工作区。
+而消失。pi-web-access 凭据随运行期 `web-search.json` 一并上传。交付内容不只几个 JSON：整个运行期目录
+（含 `AGENTS.md`、`extensions/`、`skills/`、`prompts/` 等模板条目）按同一路径语义上传，并记录
+`(相对路径, sha256)` 清单供核验；沙箱内 JSONL 按 LF 分帧（U+2028 不得拆帧）。事件在 run 结束后一次性
+回放（E2B SDK 的 stdout 回调实测不触发），报告会先拉回宿主工作区再校验/脱敏。
 证据：[docs/evidence/e2b-run.txt](docs/evidence/e2b-run.txt)。
 
 ### Docker 执行面
@@ -55,9 +61,10 @@ LOCAL_WEB_EXECUTOR=docker scripts/run-local-web.sh                     # 用容�
 ```
 
 镜像自包含（`node:24.21.0-bookworm-slim` + 固定版本 pi，`node -v` 实测 v24.21.0）；宿主只挂载
-工作区（`/workspace`）、运行期配置（`/config`）与会话目录（`/sessions`）；模型凭据随 `/config/auth.json`
-进容器（不经环境变量或 argv）。容器内 pi 报告的会话路径（`/sessions/…`）由宿主映射回挂载源
-（`~/.pi-glink/sessions/…`）后再做收尾脱敏。
+工作区（`/workspace`）、本 run 的运行期配置（`/config`）与 session 目录（`/sessions`）；模型凭据随
+`/config/auth.json` 进容器（不经环境变量或 argv）。镜像名在宿主启动时冻结，运行中的环境变量变化
+不会让已接收的 run 换镜像。容器内 pi 报告的会话路径（`/sessions/…`）由宿主映射回本 run 的
+`<会话根>/<id>/…` 后再做收尾脱敏。
 网络受限环境可用 `--build-arg DEBIAN_MIRROR=mirrors.aliyun.com --build-arg NPM_REGISTRY=https://registry.npmmirror.com`。
 证据：[docs/evidence/docker-run.txt](docs/evidence/docker-run.txt)。
 
@@ -83,7 +90,14 @@ uv pip install -e ".[dev]"        # 首次：让 pi_glink 可导入并装上 pyt
 ```bash
 scripts/run-local-web.sh --port 7861     # 覆盖端口
 scripts/run-local-web.sh --print-config  # 打印生效配置（不含密钥）
+scripts/run-local-web.sh --unreleased    # 列出执行资源未确认释放的 run（需宿主已停止）
+scripts/run-local-web.sh --mark-released <runId> --note "已核对容器/沙箱不存在"   # 记录人工裁决
 ```
+
+一个数据目录同一时间只能被一个宿主进程持有（`<数据根>/host.lock`）；第二个宿主无论用哪个端口都会
+直接拒绝启动，不会改动正在运行的任务。执行面清理未确认成功（或宿主异常退出后资源状态未知）的 run
+会持续占用运行额度，新研究返回 `409 resources_unreleased`；核对真实资源后用 `--mark-released`
+记录裁决才会放行，宿主不会自动清理任何容器或沙箱。
 
 ## 运行一次真实研究
 
@@ -103,17 +117,17 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | POST | `/api/runs` | 创建并启动一次 run，body `{"prompt": "…"}` |
 | GET | `/api/runs` | run 列表（含状态与报告标记） |
 | GET | `/api/runs/{id}` | run 详情 |
-| GET | `/api/runs/{id}/events` | 事件流（SSE，支持 `Last-Event-ID` 重放） |
-| POST | `/api/runs/{id}/stop` | 请求取消 |
-| GET | `/api/runs/{id}/report` | 下载 `report.md` |
+| GET | `/api/runs/{id}/events` | 事件流（SSE，支持 `Last-Event-ID` 重放；重放事实源是持久事件日志） |
+| POST | `/api/runs/{id}/stop` | 请求取消：受理 `200 {"requested": true}`（终态必为 `cancelled`）；已结束 `409 run_not_cancellable`（带已提交 `status`）；未知 `404` |
+| GET | `/api/runs/{id}/report` | 下载 `report.md`（宿主产物副本；旧版本的 `workspaces/<id>/report.md` 只读下载） |
 
-本机执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id。
+本机执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
 
 ## 搜索
 
 检索能力全部来自 [pi-web-access](https://github.com/nicobailon/pi-web-access) 扩展，声明在 `agent/settings.json` 的 `packages` 里（`npm:pi-web-access`），pi 启动时会把它安装到运行期配置目录。
 
-凭据由宿主渲染到运行期配置目录的 `web-search.json`（权限 600）：
+凭据由宿主渲染到**本 run 的**运行期配置目录的 `web-search.json`（权限 600）：
 
 1. 有 `PI_GLINK_WEB_SEARCH_KEY` 时渲染为 `{"exaApiKey": …}`；
 2. 否则复制操作员本机的 `~/.pi/agent/web-search.json`（或 `~/.pi/web-search.json`）；
@@ -124,12 +138,19 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 ## 安全边界
 
 - **凭据不进产品面**：事件流、`events.jsonl`、报告文件与下载、pi 会话文件都经过
-  `host/pi_glink/redaction.py` 的脱敏（值 + 形状双重检测）；报告下载响应带 `X-Redacted` 头标明是否发生脱敏。
-  Docker 面先把容器内会话路径（`/sessions/…`）映射回宿主挂载源（`kernel/docker_env.py::host_session_path`）再脱敏。
-- **key 不进进程环境**：模型凭据写在运行期目录的 `auth.json`（pi 官方凭据存储，权限 0600，仓库外），
-  环境变量按白名单过滤——内核的 shell 工具跑 `env` 读不到它（三面真实 run 实测为 0）。
-- **残留风险**：工具仍可能用 `read` 打开 `auth.json` 并回显；出站脱敏会把它替换为 `[REDACTED]`。
-  需要更强隔离时用 Docker / E2B 执行面，并给内核配专用、限额的凭据。
+  `host/pi_glink/redaction.py` 的脱敏（值 + 形状双重检测）；流式回答只释放不可能再构成凭据的前缀、
+  从不切开完整命中，释放结果等于整段脱敏，同一凭据被拆到多帧（含前后缀重叠的凭据）也无法拼回；
+  暂存最多 8192 字符，超界时本段改输出 `[REDACTED]` 而不释放未判定原文；
+  报告下载响应带 `X-Redacted` 头标明是否发生脱敏。
+- **产物路径不被链接利用**：内核可达的文件只经 run 根目录的目录句柄逐级打开（任何一级是链接都拒绝，
+  打开后再复核，写入在已核对的目录内原子替换），因此祖先目录在校验与打开之间被替换也读不到、写不到
+  外部文件；`report.md` 脱敏后复制到宿主拥有的 `runs/<id>/artifacts/report.md` 再服务，会话文件只允许
+  写在本次 run 的会话子目录内，工作区清扫也绝不跟随链接。
+- **key 不进进程环境**：模型凭据写在 run 自己的运行期目录 `auth.json`（pi 官方凭据存储，权限 0600，
+  仓库外），环境变量按白名单过滤——内核的 shell 工具跑 `env` 读不到它（三面真实 run 实测为 0）。
+- **残留风险**：工具仍可能用 `read` 打开 `auth.json` 并回显；出站脱敏会把它替换为 `[REDACTED]`，
+  但脱敏只是回显保护，不是编码级/网络级隔离。需要更强隔离时用 Docker / E2B 执行面，并给内核配
+  专用、限额的凭据（完整多租户方案见 [docs/multitenancy-plan.md](docs/multitenancy-plan.md)）。
 - **自检**：`scripts/check-no-secrets.py` 扫描运行态产物（真实命中即失败；文档占位符单独计数）。
 
 ## 目录
@@ -138,11 +159,11 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 |---|---|
 | `host/pi_glink/` | 宿主：配置解析、事件总线、HTTP/SSE 服务、静态资源 |
 | `host/pi_glink/kernel/` | pi 接入层：headless 协议客户端（RPC / JSON）、事件投影、运行期配置渲染、三执行面适配 |
-| `agent/` | pi 侧配置模板：由宿主渲染到 `<data_root>/pi-agent/` 后作为 `PI_CODING_AGENT_DIR`，内核之外的定制只落在这里 |
+| `agent/` | pi 侧配置模板：每次 run 先删再拷到 `runs/<id>/pi-agent/` 后作为 `PI_CODING_AGENT_DIR`，内核之外的定制只落在这里 |
 | `web/` | 前端：按百鉴 UI 标准库逐值对齐的静态 ESM 资源（token 层 + 组件层 + 外壳） |
-| `docs/` | `architecture.md`（进程拓扑、事件契约、执行面适配）、`pi-boundary.md`（扩展点与禁止项） |
+| `docs/` | `architecture.md`（进程拓扑、事件契约、执行器契约）、`pi-boundary.md`（扩展点与禁止项）、`multitenancy-plan.md`（下一阶段设计与决策点） |
 | `tests/` | 宿主与内核的回归 |
-| `data/`（运行时创建） | 默认 `~/.pi-glink`：会话、工作区、事件日志 |
+| `<数据根>`（默认 `~/.pi-glink`） | 运行态：`host.lock`、`runs/<id>/{meta.json,events.jsonl,pi-agent/,artifacts/}`、`sessions/<id>/`、`workspaces/<id>/` |
 
 ## 前端与 UI 标准库对齐
 

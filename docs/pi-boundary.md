@@ -12,15 +12,15 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | 扩展点 | 文档 | 本仓库的用法（实际文件） |
 |---|---|---|
 | `settings.json` | docs/settings.md | `agent/settings.json`：`defaultThinkingLevel: "medium"`、`packages: ["npm:pi-web-access"]` |
-| `models.json`（自定义 provider） | docs/models.md | 宿主渲染到运行期目录（`kernel/agent_env.py::_models_document`）：`baseUrl` 与模型 id 字面量、**不含 `apiKey`**（凭据写运行期 `auth.json`）、`compat.thinkingFormat: "openrouter"` |
+| `models.json`（自定义 provider） | docs/models.md | 宿主渲染到每个 run 自己的运行期目录（`kernel/agent_env.py::_models_document`）：`baseUrl` 与模型 id 字面量、**不含 `apiKey`**（凭据写运行期 `auth.json`）、`compat.thinkingFormat: "openrouter"`；**不写 `cost` 价格表**，因为宿主不知道操作员费率，伪造价格会让 pi 报出假计费 |
 | packages | docs/packages.md | `npm:pi-web-access`（检索能力全部来自它） |
 | extensions | docs/extensions.md | 目录预留（`agent/extensions/`），当前无扩展；有需求时只落在这里 |
 | skills | docs/skills.md | 目录预留（`agent/skills/`） |
 | prompt templates | docs/prompt-templates.md | 目录预留（`agent/prompts/`） |
 | `AGENTS.md` | docs/quickstart.md 等 | 目录预留（`agent/AGENTS.md`），当前约定走 §下一条 |
 | `--append-system-prompt` | `pi --help` | `agent/research-prompt.md` → `kernel/runner.py::_extra_argv`，内核系统提示词本身不改 |
-| headless 协议 | docs/rpc.md、docs/json.md | `--mode rpc`（本机 / Docker 面，`kernel/rpc.py`）；`--mode json`（E2B 面，`kernel/e2b_env.py`） |
-| 环境变量 | docs/environment-variables.md | `PI_CODING_AGENT_DIR`、`PI_CODING_AGENT_SESSION_DIR`、`PI_SKIP_VERSION_CHECK`、`PI_TELEMETRY`（模型凭据不经环境变量，写运行期 `auth.json`） |
+| headless 协议 | docs/rpc.md、docs/json.md | `--mode rpc`（本机 / Docker 面，`kernel/rpc.py`）；`--mode json`（E2B 面，`kernel/e2b_env.py`）；两面都只按 LF 分帧（`kernel/framing.py`，共享语料 `tests/fixtures/lf-framing.json`） |
+| 环境变量 | docs/environment-variables.md | `PI_CODING_AGENT_DIR`、`PI_CODING_AGENT_SESSION_DIR`、`PI_SKIP_VERSION_CHECK`、`PI_TELEMETRY`（模型凭据不经环境变量，写运行期 `auth.json`；两个目录都是每 run 独立） |
 | CLI 参数 | docs/usage.md | `--provider`、`--model`、`--name`（`kernel/agent_env.py::build_pi_argv`） |
 | MCP（可选） | docs/mcp 相关 | 尚未使用；接入方式与 extensions 同级，属允许范围 |
 
@@ -39,7 +39,7 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | 把密钥写进仓库 | 安全事故 | `.gitignore` + 密钥扫描 |
 | 容器/沙箱依赖宿主运行时 | 隔离面会失去意义 | 镜像与模板自包含（`docker/Dockerfile.worker`、`docker/e2b/Dockerfile.e2b`） |
 | 前端解析终端输出 | 事件契约的基础前提 | `tests/web/run-stream.test.mjs` 的断言 |
-| 凭据不经脱敏边界进入产品面 | 工具回显/env dump 会把 key 带进事件流、报告与会话文件 | 六层出口均过 `redaction.py`；`scripts/check-no-secrets.py` 扫描运行态产物；`tests/test_redaction.py` |
+| 凭据不经脱敏边界进入产品面 | 工具回显/env dump 会把 key 带进事件流、报告与会话文件 | 所有出站出口均过 `redaction.py`（含跨 delta 暂存）；`scripts/check-no-secrets.py` 扫描运行态产物；`tests/test_redaction.py` |
 | 把宿主整份环境变量交给 pi | 会把操作员 shell 里的其他凭据一并带入 | `kernel/agent_env.py` 的白名单 `_PASSTHROUGH_ENV` |
 
 ## 3. 升级路径
@@ -92,8 +92,8 @@ grep -rn "earendil-works" host/ web/ --include="*.py" --include="*.mjs" | grep -
 # ④ 密钥不入库（应当是空输出）
 git grep -nE "(sk-|exa-)[A-Za-z0-9_-]{16,}" -- . ':!*.example' ':!*.txt'
 
-# ⑤ 运行期凭据文件权限为 600 且不在仓库内
-ls -l ~/.pi-glink/pi-agent/web-search.json
+# ⑤ 运行期凭据文件权限为 600 且不在仓库内（每次 run 一个目录）
+find ~/.pi-glink/runs -path '*/pi-agent/web-search.json' -maxdepth 4 -exec ls -l {} \;
 
 # ⑥ 前端无打包依赖树
 ls web/node_modules 2>/dev/null || echo "无前端依赖树（原生 ESM）"
@@ -105,14 +105,17 @@ ls web/node_modules 2>/dev/null || echo "无前端依赖树（原生 ESM）"
 * ② 只出现 `--mode rpc`（`agent_env.py`、`docker_env.py`）与 `--mode json`（`e2b_env.py`）；
 * ③ 空输出 —— 宿主与前端连包名都不引用（注释里也不用它作为标识）；
 * ④ 空输出 —— 无密钥入库（`docs/evidence/` 已排除，因为日志里可能出现用户级别的占位字符串）；
-* ⑤ `-rw-------`（600）—— 运行期凭据文件权限正确；（⑥ 无前端依赖树。（①③④ 的空输出是预期结果。
+* ⑤ `-rw-------`（600）—— 每个 run 的运行期凭据文件权限正确；（⑥ 无前端依赖树。（①③④ 的空输出是预期结果。
+
+本次整改的核验口径变化：原 ⑤ 命令指向共享目录 `~/.pi-glink/pi-agent/`，该目录已不再是运行期配置
+（每个 run 使用 `runs/<id>/pi-agent/`），命令已同步更新。
 
 ## 5. 已知的内核侧限制（不改内核，只记录）
 
 | 限制 | 影响 | 我们怎么做 |
 |---|---|---|
-| `models.json` 的 `baseUrl` / 模型 id 不支持 `$VAR` 插值 | 无法把 endpoint 交给 pi 自己解析 | 宿主渲染运行期 `models.json`（`agent_env.py`） |
-| pi 会往配置目录写运行时状态（`auth.json` / `models-store.json`） | 仓库目录会被污染 | 仓库 `agent/` 只作模板，运行期目录在 `<data_root>/pi-agent/`；`.gitignore` 兜底 |
+| `models.json` 的 `baseUrl` / 模型 id 不支持 `$VAR` 插值 | 无法把 endpoint 交给 pi 自己解析 | 宿主渲染本 run 的运行期 `models.json`（`agent_env.py`） |
+| pi 会往配置目录写运行时状态（`auth.json` / `models-store.json`） | 仓库目录会被污染 | 仓库 `agent/` 只作模板；每次 run 渲染到 `runs/<id>/pi-agent/`（先删再拷，凭据缺失则删除旧文件）；`.gitignore` 兜底 |
 | E2B SDK 的 stdout 回调不触发 | E2B 面事件非实时 | 沙箱内写 JSONL、结束后回放（`e2b_env.py`）；差异记在 architecture.md |
 | 沙箱内会话文件随沙箱销毁 | E2B 面 `session_id` 为空 | 报告与 run 元数据仍持久；如实记录 |
-| 模型 key 以文件形式位于运行期 `auth.json`（不在进程环境） | 工具可用 `read` 打开并回显 | `env` 类读取已不可行（三面实测 0）；回显被出站六层脱敏覆盖；更强隔离用 Docker / E2B 面；详见 architecture.md §6.2 |
+| 模型 key 以文件形式位于本 run 的运行期 `auth.json`（不在进程环境） | 工具可用 `read` 打开并回显 | `env` 类读取已不可行（三面实测 0）；回显被出站脱敏覆盖（含跨 delta 分割，见 architecture.md §3.3/§6.1）；更强隔离用 Docker / E2B 面 |

@@ -29,11 +29,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Mapping, Sequence
 
-from ..config import HostConfig
+from ..config import DEFAULT_WORKER_IMAGE, HostConfig
 from .agent_env import PASSTHROUGH_ENV, AgentRuntime
 
-#: Default image; override with LOCAL_WEB_WORKER_IMAGE.
-WORKER_IMAGE_DEFAULT = "pi-glink-worker:latest"
+#: Default image; frozen at configuration time (see ``HostConfig.worker_image``).
+WORKER_IMAGE_DEFAULT = DEFAULT_WORKER_IMAGE
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_CONFIG = "/config"
 CONTAINER_SESSIONS = "/sessions"
@@ -59,10 +59,14 @@ class ContainerPlan:
 
 
 def worker_image(config: HostConfig) -> str:
-    return (
-        os.environ.get("LOCAL_WEB_WORKER_IMAGE", "").strip()
-        or WORKER_IMAGE_DEFAULT
-    )
+    """The frozen worker image for every run of this host process.
+
+    The value is resolved once at configuration time (``LOCAL_WEB_WORKER_IMAGE``
+    is part of the frozen environment). Re-reading ``os.environ`` here would let
+    an environment change after a run was accepted silently relabel that run to
+    a different image.
+    """
+    return config.worker_image
 
 
 def is_available() -> bool:
@@ -100,13 +104,16 @@ def build_plan(
     *,
     run_id: str,
     workspace: Path,
+    session_dir: Path,
     extra: Sequence[str] = (),
 ) -> ContainerPlan:
     """Compose ``docker run`` for one run.
 
     ``-i`` keeps stdin open for the RPC command stream and ``--rm`` removes the
     container when pi exits. Credentials are forwarded by *name* so their values
-    never appear in the process list.
+    never appear in the process list. ``session_dir`` is the run's own session
+    directory: a shared mount would let two runs write into each other's session
+    files.
     """
     image = worker_image(config)
     container_name = f"pi-glink-{run_id}"
@@ -117,7 +124,7 @@ def build_plan(
         "-v", f"{workspace}:{CONTAINER_WORKSPACE}",
         "-w", CONTAINER_WORKSPACE,
         "-v", f"{runtime.directory}:{CONTAINER_CONFIG}",
-        "-v", f"{config.session_dir}:{CONTAINER_SESSIONS}",
+        "-v", f"{session_dir}:{CONTAINER_SESSIONS}",
         "-e", f"PI_CODING_AGENT_DIR={CONTAINER_CONFIG}",
         "-e", f"PI_CODING_AGENT_SESSION_DIR={CONTAINER_SESSIONS}",
         "-e", "PI_SKIP_VERSION_CHECK=1",
@@ -160,17 +167,17 @@ def stop_argv(container_name: str) -> list[str]:
     return ["docker", "rm", "-f", container_name]
 
 
-def host_session_path(raw: str, config: HostConfig) -> Path | None:
+def host_session_path(raw: str, session_dir: Path) -> Path | None:
     """Map a session path pi reported inside the container to its host file.
 
     pi only knows container paths (``/sessions/<file>.jsonl``); the host mounted
-    its own session directory at :data:`CONTAINER_SESSIONS`. Without this
+    the run's own session directory at :data:`CONTAINER_SESSIONS`. Without this
     translation the host-side sanitizer reads a path that does not exist and
     silently skips the file — the leak the audit reproduced. Only the session
     mount is translated on purpose: the credential lives in ``/config/auth.json``
     and must keep its real value.
     """
-    return translate_container_path(raw, ((CONTAINER_SESSIONS, config.session_dir),))
+    return translate_container_path(raw, ((CONTAINER_SESSIONS, session_dir),))
 
 
 def translate_container_path(

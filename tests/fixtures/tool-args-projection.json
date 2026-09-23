@@ -1,0 +1,97 @@
+{
+  "description": "Shared corpus for the tool-argument payload contract: pi frames, the product events the projection must emit for them, and the sources the front-end must recover from those events. Python asserts the projection half; Node asserts the consumption half.",
+  "frames": [
+    {
+      "type": "tool_execution_start",
+      "toolCallId": "c1",
+      "toolName": "web_search",
+      "args": {
+        "queries": [
+          "跨境资金监管新规",
+          "跨境资金监管 处罚案例"
+        ],
+        "count": 2,
+        "limit": 5
+      }
+    },
+    {
+      "type": "tool_execution_start",
+      "toolCallId": "c2",
+      "toolName": "fetch_content",
+      "args": {
+        "urls": [
+          "https://example.com/a",
+          "https://example.com/b"
+        ],
+        "format": "markdown"
+      }
+    },
+    {
+      "type": "tool_execution_start",
+      "toolCallId": "c3",
+      "toolName": "bash",
+      "args": {
+        "command": "ls -la"
+      }
+    }
+  ],
+  "projected": [
+    {
+      "type": "tool_started",
+      "payload": {
+        "toolCallId": "c1",
+        "toolName": "web_search",
+        "args": {
+          "queries": [
+            "跨境资金监管新规",
+            "跨境资金监管 处罚案例"
+          ],
+          "count": 2,
+          "limit": 5
+        }
+      }
+    },
+    {
+      "type": "tool_started",
+      "payload": {
+        "toolCallId": "c2",
+        "toolName": "fetch_content",
+        "args": {
+          "urls": [
+            "https://example.com/a",
+            "https://example.com/b"
+          ],
+          "format": "markdown"
+        }
+      }
+    },
+    {
+      "type": "tool_started",
+      "payload": {
+        "toolCallId": "c3",
+        "toolName": "bash",
+        "args": {
+          "command": "ls -la"
+        }
+      }
+    }
+  ],
+  "expected_sources": {
+    "queries": [
+      "跨境资金监管新规",
+      "跨境资金监管 处罚案例"
+    ],
+    "pages": [
+      {
+        "href": "https://example.com/a",
+        "host": "example.com",
+        "path": "/a"
+      },
+      {
+        "href": "https://example.com/b",
+        "host": "example.com",
+        "path": "/b"
+      }
+    ]
+  }
+}

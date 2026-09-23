@@ -19,6 +19,16 @@ from .agent_env import (
     build_pi_argv,
     build_pi_env,
     prepare_agent_dir,
+    template_manifest,
+)
+from .execution import (
+    ArtifactRecovery,
+    CleanupReport,
+    ExecutionAdapter,
+    ExecutionOutcome,
+    ExecutionSpec,
+    SessionInfo,
+    build_adapter,
 )
 from .projection import extract_text, project_event, project_frames
 from .runner import REPORT_FILENAME, RESEARCH_PROMPT_FILENAME, RunBusy, RunManager
@@ -33,6 +43,11 @@ from .rpc import (
 
 __all__ = [
     "AgentRuntime",
+    "ArtifactRecovery",
+    "CleanupReport",
+    "ExecutionAdapter",
+    "ExecutionOutcome",
+    "ExecutionSpec",
     "PiRpcClient",
     "PiRpcClosed",
     "PiRpcError",
@@ -42,11 +57,14 @@ __all__ = [
     "RpcResponse",
     "RunBusy",
     "RunManager",
+    "SessionInfo",
+    "build_adapter",
     "build_pi_argv",
     "build_pi_env",
     "extract_text",
     "prepare_agent_dir",
     "project_event",
     "project_frames",
+    "template_manifest",
     "wait_for_idle",
 ]

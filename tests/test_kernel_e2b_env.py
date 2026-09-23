@@ -1,14 +1,20 @@
 """Regressions for the E2B execution face (no cloud calls).
 
-They pin the three behaviours the completion audit flagged:
+They pin the behaviours the completion audit flagged:
 
 * the credential read from ``.env`` reaches ``Sandbox.create`` (``api_key``);
 * a run replays its JSONL frames and pulls the report back into the host workspace;
 * a non-zero sandbox exit is a failure even when a report file exists.
+
+They also pin the delivery contract added with the architecture hardening:
+LF-only framing (U+2028 stays inside a frame), a verifiable configuration
+manifest, shell-safe command composition, and bounded/safe artifact recovery.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import sys
 import threading
@@ -20,11 +26,18 @@ import pytest
 from pi_glink.config import build_config
 from pi_glink.events import EventBus
 from pi_glink.kernel import agent_env
-from pi_glink.kernel.e2b_env import E2BSandboxClient, SandboxError, parse_json_stream_line
+from pi_glink.kernel.e2b_env import (
+    ARTIFACT_MAX_BYTES,
+    E2BSandboxClient,
+    SandboxError,
+    parse_json_stream_line,
+)
 from pi_glink.kernel.runner import RunManager
 from pi_glink.store import RunStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+FRAMING_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "lf-framing.json"
+FRAMING_FIXTURE_TEXT = FRAMING_FIXTURE.read_text(encoding="utf-8")
 
 _FAKE_EVENTS = [
     {"type": "agent_start"},
@@ -44,12 +57,14 @@ class FakeFiles:
     def make_dir(self, path: str) -> None:
         self._sandbox.dirs.append(path)
 
-    def write(self, path: str, content: str) -> None:
-        self._sandbox.written[path] = content
+    def write(self, path: str, content: Any) -> None:
+        text = content.decode("utf-8") if isinstance(content, bytes) else str(content)
+        self._sandbox.written[path] = text
 
     def read(self, path: str) -> bytes:
         if path in self._sandbox.readable:
-            return self._sandbox.readable[path].encode("utf-8")
+            value = self._sandbox.readable[path]
+            return value if isinstance(value, bytes) else value.encode("utf-8")
         raise FileNotFoundError(path)
 
     def list(self, path: str) -> list[Any]:
@@ -99,7 +114,7 @@ class FakeSandbox:
         self.exit_code = exit_code
         self.dirs: list[str] = []
         self.written: dict[str, str] = {}
-        self.readable: dict[str, str] = {}
+        self.readable: dict[str, Any] = {}
         self.workspace_files = workspace_files
         self.command = ""
         self.command_envs: dict[str, str] = {}
@@ -127,9 +142,19 @@ def make_config(tmp_path: Path, **overrides: str):
         "LOCAL_WEB_EXECUTOR": "e2b",
         "E2B_API_KEY": "e2b-secret-key",
         "LOCAL_WEB_E2B_TEMPLATE": "pi-glink-worker",
+        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
     }
     values.update(overrides)
     return build_config(values, REPO_ROOT)
+
+
+def _prepare(config, tmp_path: Path, name: str = "run-1"):
+    run_dir = tmp_path / "runs" / name
+    return agent_env.prepare_agent_dir(
+        config,
+        runtime_dir=run_dir / "pi-agent",
+        session_dir=run_dir / "sessions",
+    )
 
 
 # -- credential plumbing ------------------------------------------------------
@@ -137,7 +162,7 @@ def make_config(tmp_path: Path, **overrides: str):
 
 def test_e2b_key_reaches_create_and_model_key_stays_out_of_env(tmp_path: Path) -> None:
     config = make_config(tmp_path)
-    runtime = agent_env.prepare_agent_dir(config)
+    runtime = _prepare(config, tmp_path)
     captured: dict[str, Any] = {}
 
     def factory(**kwargs: Any) -> FakeSandbox:
@@ -158,7 +183,7 @@ def test_e2b_key_reaches_create_and_model_key_stays_out_of_env(tmp_path: Path) -
 
 def test_missing_credential_is_refused_before_any_cloud_call(tmp_path: Path) -> None:
     config = make_config(tmp_path, E2B_API_KEY="")
-    runtime = agent_env.prepare_agent_dir(config)
+    runtime = _prepare(config, tmp_path)
     client = E2BSandboxClient(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: FakeSandbox()
     )
@@ -174,40 +199,84 @@ def test_config_repr_hides_the_cloud_credential(tmp_path: Path) -> None:
     assert config.has_e2b_key is True
 
 
-# -- sandbox run --------------------------------------------------------------
+# -- configuration delivery ---------------------------------------------------
 
 
-def test_upload_config_includes_models_settings_and_search_credential(tmp_path: Path) -> None:
+def test_upload_config_delivers_the_runtime_directory_with_a_manifest(tmp_path: Path) -> None:
     config = make_config(tmp_path)
-    runtime = agent_env.prepare_agent_dir(config)
+    runtime = _prepare(config, tmp_path)
     sandbox = FakeSandbox()
     client = E2BSandboxClient(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
     )
     client.start()
     client.upload_config()
+
     assert "/home/user/config/models.json" in sandbox.written
     assert "/home/user/config/settings.json" in sandbox.written
     assert "/home/user/config/auth.json" in sandbox.written
     assert len(sandbox.dirs) == 3
+
+    # The manifest names every delivered path with its content digest, so the
+    # delivery is verifiable instead of "the directory happened to be empty".
+    manifest = dict(client.upload_manifest)
+    for relative in ("models.json", "settings.json", "auth.json"):
+        assert relative in manifest
+        digest = hashlib.sha256((runtime.directory / relative).read_bytes()).hexdigest()
+        assert manifest[relative] == digest
+    assert client.uploaded, "the uploaded path list must not be empty"
     client.close()
+
+
+def test_upload_manifest_covers_reviewable_template_entries(tmp_path: Path) -> None:
+    """Extensions/skills/prompts are delivered with the same path semantics."""
+    template = tmp_path / "template"
+    (template / "extensions").mkdir(parents=True)
+    (template / "settings.json").write_text('{"defaultThinkingLevel": "high"}\n', encoding="utf-8")
+    (template / "AGENTS.md").write_text("# agent\n", encoding="utf-8")
+    (template / "extensions" / "hello.js").write_text("export default () => {};\n", encoding="utf-8")
+    (template / "prompts").mkdir()
+    (template / "prompts" / "research.md").write_text("prompt\n", encoding="utf-8")
+    config = make_config(tmp_path, PI_CODING_AGENT_DIR=str(template))
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    client = E2BSandboxClient(
+        config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
+    )
+    client.start()
+    client.upload_config()
+
+    delivered = {relative for relative, _digest in client.upload_manifest}
+    assert {"AGENTS.md", "settings.json", "extensions/hello.js", "prompts/research.md"} <= delivered
+    assert "/home/user/config/extensions/hello.js" in sandbox.written
+    assert "/home/user/config/prompts/research.md" in sandbox.written
+    client.close()
+
+
+# -- sandbox run --------------------------------------------------------------
+
+
+def _manager(config, sandbox, tmp_path: Path):
+    storage = RunStore(config.data_root / "runs")
+    manager = RunManager(
+        config, EventBus(), store=storage, sandbox_factory=lambda **_: sandbox
+    )
+    return manager, storage
 
 
 def test_run_replays_frames_and_pulls_the_report(tmp_path: Path) -> None:
     config = make_config(tmp_path)
-    runtime = agent_env.prepare_agent_dir(config)
     sandbox = FakeSandbox(events=_FAKE_EVENTS)
-    storage = RunStore(config.data_root / "runs")
-    bus = EventBus()
-    manager = RunManager(
-        config, bus, store=storage, sandbox_factory=lambda **_: sandbox
-    )
+    manager, storage = _manager(config, sandbox, tmp_path)
     record = manager.start("把结果写成 report.md")
     final = manager.wait(record.run_id, timeout=30)
 
     assert final.status == "finished"
     assert final.report_path is not None
     assert "来自沙箱" in Path(final.report_path).read_text(encoding="utf-8")
+    # The served report is the host-owned artifact copy inside the run directory.
+    assert Path(final.report_path).is_relative_to(storage.run_dir(record.run_id))
+    assert final.report_status == "ok"
 
     kinds = [json.loads(line)["type"] for line in storage.events_path(record.run_id).read_text(encoding="utf-8").splitlines() if line.strip()]
     assert "assistant_delta" in kinds
@@ -217,13 +286,14 @@ def test_run_replays_frames_and_pulls_the_report(tmp_path: Path) -> None:
     # Neither the prompt nor the model credential travels through the sandbox env.
     assert "OPENAI_API_KEY" not in sandbox.command_envs
     assert "把结果写成 report.md" not in sandbox.command
+    # The sandbox identity is durable for restart reconciliation.
+    assert final.sandbox_id == "fake-sandbox"
 
 
 def test_nonzero_exit_fails_the_run_even_with_a_report(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     sandbox = FakeSandbox(exit_code=3, report="# 仍然有报告\n")
-    storage = RunStore(config.data_root / "runs")
-    manager = RunManager(config, EventBus(), store=storage, sandbox_factory=lambda **_: sandbox)
+    manager, storage = _manager(config, sandbox, tmp_path)
     record = manager.start("强制失败")
     final = manager.wait(record.run_id, timeout=30)
     assert final.status == "failed"
@@ -299,13 +369,10 @@ def test_stop_during_a_sandbox_run_is_cancelled_not_failed(
 ) -> None:
     config = make_config(tmp_path)
     sandbox = BlockingSandbox(raise_on_release=raise_on_release, events=_FAKE_EVENTS)
-    storage = RunStore(config.data_root / "runs")
-    manager = RunManager(
-        config, EventBus(), store=storage, sandbox_factory=lambda **_: sandbox
-    )
+    manager, storage = _manager(config, sandbox, tmp_path)
     record = manager.start("取消正在执行的沙箱 run")
     assert sandbox.command_started.wait(timeout=10), "the sandbox command never started"
-    assert manager.stop(record.run_id) is True
+    assert manager.stop(record.run_id).accepted is True
 
     final = manager.wait(record.run_id, timeout=30)
     assert final is not None, "the run never reached a terminal state"
@@ -323,8 +390,8 @@ def test_stop_that_lands_before_the_sandbox_starts_is_still_cancelled(
     """A stop during ``Sandbox.create`` returns the sandbox and returns normally.
 
     ``stop()`` only closes the client once it has a sandbox; if the stop lands
-    while the factory is still running, ``_run_in_sandbox`` must notice the
-    cancellation after ``start()`` and end as cancelled without prompting.
+    while the factory is still running, the runner must notice the cancellation
+    after ``start()`` and end as cancelled without prompting.
     """
     config = make_config(tmp_path)
     sandbox = FakeSandbox(events=_FAKE_EVENTS)
@@ -336,11 +403,11 @@ def test_stop_that_lands_before_the_sandbox_starts_is_still_cancelled(
         assert release.wait(timeout=10), "the factory was never released"
         return sandbox
 
-    storage = RunStore(config.data_root / "runs")
-    manager = RunManager(config, EventBus(), store=storage, sandbox_factory=factory)
+    manager, storage = _manager(config, sandbox, tmp_path)
+    manager._sandbox_factory = factory  # noqa: SLF001 - the injected face
     record = manager.start("沙箱启动前就取消")
     assert created.wait(timeout=10), "the sandbox factory was never called"
-    assert manager.stop(record.run_id) is True
+    assert manager.stop(record.run_id).accepted is True
     release.set()
 
     final = manager.wait(record.run_id, timeout=30)
@@ -362,3 +429,74 @@ def test_json_stream_parser_ignores_non_json_noise() -> None:
     assert parse_json_stream_line("[]") is None
     frame = parse_json_stream_line('{"type": "agent_start"}')
     assert frame == {"type": "agent_start"}
+
+
+def test_event_frames_are_split_on_lf_only(tmp_path: Path) -> None:
+    """U+2028 inside a JSON string must not tear a frame (shared corpus)."""
+    corpus = json.loads(FRAMING_FIXTURE_TEXT)
+    separator = "\u2028"
+    wire = "".join(
+        json.dumps(frame, ensure_ascii=False) + ("\r\n" if index % 2 else "\n")
+        for index, frame in enumerate(corpus["frames"])
+    )
+    assert separator in wire, "the corpus must contain the separator inside a string"
+
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    sandbox.readable["/home/user/events.jsonl"] = wire
+    client = E2BSandboxClient(
+        config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
+    )
+    client.start()
+    records = [parse_json_stream_line(line) for line in client.fetch_events()]
+    assert records == corpus["frames"]
+    client.close()
+
+
+# -- command composition ------------------------------------------------------
+
+
+def test_sandbox_command_is_shell_safe_for_hostile_prompts(tmp_path: Path) -> None:
+    """Quotes, newlines, backticks, ``$(…)`` and Unicode are base64-encoded."""
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    client = E2BSandboxClient(
+        config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: FakeSandbox()
+    )
+    prompt = 'echo "$(rm -rf /)" `whoami` \'quote\' \\ backslash\n第二行 \u2028 line'
+    command = client._command(prompt, "系统提示 with 'quotes' and $vars")  # noqa: SLF001
+    assert prompt not in command
+    assert "$(rm -rf /)" not in command
+    assert "`whoami`" not in command
+    # Both payloads survive the shell line exactly.
+    encoded_prompt = base64.b64encode(prompt.encode("utf-8")).decode("ascii")
+    encoded_system = base64.b64encode("系统提示 with 'quotes' and $vars".encode("utf-8")).decode("ascii")
+    assert f"'{encoded_prompt}'" in command
+    assert f"'{encoded_system}'" in command
+    assert base64.b64decode(encoded_prompt).decode("utf-8") == prompt
+
+
+# -- artifact recovery --------------------------------------------------------
+
+
+def test_recovered_artifacts_are_bounded_and_path_safe(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox(workspace_files=("report.md", "notes.md", "../escape.md", "huge.bin"))
+    sandbox.readable["/home/user/workspace/report.md"] = "# 报告\n"
+    sandbox.readable["/home/user/workspace/notes.md"] = "记录\n"
+    sandbox.readable["/home/user/workspace/../escape.md"] = "越界\n"
+    sandbox.readable["/home/user/workspace/huge.bin"] = b"x" * (ARTIFACT_MAX_BYTES + 1)
+    client = E2BSandboxClient(
+        config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
+    )
+    client.start()
+    files, failures = client.recover_artifacts(tmp_path / "ws")
+
+    names = {path.name for path in files}
+    assert {"report.md", "notes.md"} <= names
+    assert not (tmp_path / "escape.md").exists(), "a traversal name must not escape"
+    assert any("非法产物名" in failure for failure in failures)
+    assert any("上限" in failure for failure in failures)
+    client.close()

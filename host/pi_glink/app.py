@@ -6,8 +6,9 @@ per-run SSE stream and static assets), and keeping it on the standard library
 makes ``python -m pi_glink.app`` the only thing an operator has to run.
 
 Run events are never stored here — the bus is the live fan-out plus a bounded
-replay window; durable run metadata and artifacts belong to the store added
-with the first real run (task-3).
+replay window; durable run metadata, the committed event log and artifacts
+belong to :mod:`pi_glink.store`. A host process owns its data root exclusively
+(:mod:`pi_glink.ownership`) before it reconciles or serves anything.
 """
 
 from __future__ import annotations
@@ -22,14 +23,21 @@ import threading
 from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from .artifacts import ArtifactError, ArtifactTree
 from .config import ConfigError, HostConfig, load_config
 from .events import EventBus
-from .kernel.runner import ClientFactory, RunBusy, RunManager
+from .kernel.runner import (
+    ClientFactory,
+    REPORT_MAX_BYTES,
+    ResourcesUnreleased,
+    RunBusy,
+    RunManager,
+)
 from .kernel.rpc import PiRpcClient
+from .ownership import DataRootBusy, DataRootOwnership
 from .static_files import Asset, WebAssets
 from .store import RunRecord, RunStore
 
@@ -44,7 +52,11 @@ _HEARTBEAT_SECONDS = 15.0
 
 
 class PiGlinkServer(ThreadingHTTPServer):
-    """Threaded HTTP server carrying the frozen config, bus, store and manager."""
+    """Threaded HTTP server carrying the frozen config, bus, store and manager.
+
+    When built by :func:`create_server` it also carries the data-root
+    ownership, released by :meth:`server_close`.
+    """
 
     daemon_threads = True
     allow_reuse_address = True
@@ -56,14 +68,24 @@ class PiGlinkServer(ThreadingHTTPServer):
         store: RunStore,
         manager: RunManager,
         assets: WebAssets,
+        *,
+        ownership: DataRootOwnership | None = None,
     ) -> None:
         self.config = config
         self.bus = bus
         self.store = store
         self.manager = manager
         self.assets = assets
+        self.ownership = ownership
         self.stopping = threading.Event()
         super().__init__((config.host, config.port), HostRequestHandler)
+
+    def server_close(self) -> None:
+        try:
+            super().server_close()
+        finally:
+            if self.ownership is not None:
+                self.ownership.release()
 
 
 class HostRequestHandler(BaseHTTPRequestHandler):
@@ -206,6 +228,17 @@ class HostRequestHandler(BaseHTTPRequestHandler):
                 head_only=False,
             )
             return
+        except ResourcesUnreleased as held:
+            self._send_json(
+                HTTPStatus.CONFLICT,
+                {
+                    "error": "resources_unreleased",
+                    "message": "earlier runs hold execution resources that are not confirmed released",
+                    "runIds": held.run_ids,
+                },
+                head_only=False,
+            )
+            return
         except ConfigError as exc:
             self._send_json(
                 HTTPStatus.BAD_REQUEST,
@@ -225,18 +258,65 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _stop_run(self, run_id: str) -> None:
-        requested = self.server.manager.stop(run_id)
-        self._send_json(HTTPStatus.OK, {"requested": requested}, head_only=False)
+        decision = self.server.manager.stop(run_id)
+        if decision.accepted:
+            self._send_json(
+                HTTPStatus.OK,
+                {"requested": True, "status": decision.status},
+                head_only=False,
+            )
+        elif decision.status is None:
+            self._send_json(
+                HTTPStatus.NOT_FOUND,
+                {"error": "unknown_run", "requested": False, "runId": run_id},
+                head_only=False,
+            )
+        else:
+            # Past the run's commit point: the answer is the committed status,
+            # not a promise that the run will be stopped.
+            self._send_json(
+                HTTPStatus.CONFLICT,
+                {
+                    "error": "run_not_cancellable",
+                    "requested": False,
+                    "status": decision.status,
+                    "reason": decision.reason,
+                },
+                head_only=False,
+            )
 
     def _run_view_live(self, record: RunRecord) -> dict[str, Any]:
         """Run view with the live event count while the run is still open.
 
         ``meta.json`` is only rewritten at state transitions, so the persisted
-        count is stale during a run; the bus knows the real number and the
-        browser uses it to show progress.
+        count is stale during a run; an open run's count comes from the bus.
+        Once the run is closed the persisted count is authoritative (the bus
+        drops its per-run window at close).
         """
-        live = self.server.bus.last_seq(record.run_id)
-        return _run_view(record, live_event_count=max(live, record.event_count))
+        live = (
+            self.server.bus.last_seq(record.run_id)
+            if self.server.bus.is_open(record.run_id)
+            else None
+        )
+        return _run_view(
+            record, live_event_count=live, has_report=self._report_available(record)
+        )
+
+    def _report_available(self, record: RunRecord) -> bool:
+        """Whether the report endpoint would serve this record's report.
+
+        The flag and the download use the same location rule and the same
+        refusals, so ``hasReport`` never promises a file the endpoint refuses.
+        """
+        location = self.server.store.report_location(record)
+        if location is None:
+            return False
+        try:
+            with ArtifactTree(location.root) as tree:
+                tree.size(location.relative, max_bytes=REPORT_MAX_BYTES)
+        except (ArtifactError, OSError):
+            return False
+        return True
 
     def _send_run(self, run_id: str, *, head_only: bool) -> None:
         record = self.server.store.get(run_id)
@@ -253,15 +333,25 @@ class HostRequestHandler(BaseHTTPRequestHandler):
 
     def _send_report(self, run_id: str, *, head_only: bool) -> None:
         record = self.server.store.get(run_id)
-        if record is None or not record.report_path:
+        # ``report_path`` is not a download capability: only the run's own
+        # host artifact, or the report inside the run's own workspace written
+        # by earlier versions, may be served — read-only, through a directory
+        # handle that never follows a link.
+        location = self.server.store.report_location(record) if record else None
+        if location is None:
             self._send_json(
                 HTTPStatus.NOT_FOUND,
                 {"error": "no_report", "runId": run_id},
                 head_only=head_only,
             )
             return
-        path = Path(record.report_path)
-        if not path.is_file():
+        try:
+            with ArtifactTree(location.root) as tree:
+                data = tree.read(location.relative, max_bytes=REPORT_MAX_BYTES)
+        except (ArtifactError, OSError) as exc:
+            logger.warning(
+                "report refused run=%s layout=%s: %s", run_id, location.layout, exc
+            )
             self._send_json(
                 HTTPStatus.NOT_FOUND,
                 {"error": "no_report", "runId": run_id},
@@ -270,7 +360,7 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             return
         # The report is a product surface too: a credential the model echoed into
         # it must not reach the browser. The header records whether it happened.
-        original = path.read_text(encoding="utf-8", errors="replace")
+        original = data.decode("utf-8", errors="replace")
         redactor = self.server.manager.redactor
         redacted = redactor.redact(original)
         self._send_bytes(
@@ -358,11 +448,13 @@ class HostRequestHandler(BaseHTTPRequestHandler):
 
     def _stream_run_events(self, run_id: str, query: str) -> None:
         bus = self.server.bus
+        store = self.server.store
         live = bus.is_open(run_id)
-        # The bus only knows runs started by this host process. A run from an
-        # earlier process is still replayable from its persisted events.jsonl —
-        # otherwise every history entry would 404 after a restart.
-        persisted = not live and self.server.store.events_path(run_id).is_file()
+        # The durable log is the replay source of truth; the bus only knows runs
+        # started by this host process and is used for the live tail. A run from
+        # an earlier process is replayed from events.jsonl — otherwise every
+        # history entry would 404 after a restart.
+        persisted = store.events_path(run_id).is_file()
         if not live and not persisted:
             self._send_json(
                 HTTPStatus.NOT_FOUND, {"error": "unknown_run", "runId": run_id},
@@ -380,17 +472,32 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
-        logger.info("event stream attached run=%s after=%s persisted=%s", run_id, after, persisted)
+        logger.info("event stream attached run=%s after=%s live=%s", run_id, after, live)
+        # Subscribe *before* reading the log: the subscriber captures the live
+        # tail from this moment, and the log read captures everything already
+        # committed. Frames that fall in both are deduplicated by sequence, and
+        # a run that closes during the read still has its frames on disk.
+        subscription = bus.subscribe(run_id, after=after) if live else None
         try:
-            if live:
-                for event in bus.subscribe(run_id, after=after):
+            last = after
+            for event in store.iter_events(run_id, after=after):
+                seq = event.get("seq")
+                if isinstance(seq, int):
+                    if seq <= last:
+                        continue
+                    last = seq
+                self._write_event(_persisted_sse(event))
+            if subscription is not None:
+                for event in subscription:
+                    if event.seq <= last:
+                        continue
+                    last = event.seq
                     self._write_event(event.to_sse())
-            else:
-                for event in self.server.store.iter_events(run_id, after=after):
-                    self._write_event(_persisted_sse(event))
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
+            if subscription is not None:
+                subscription.close()
             logger.info("event stream detached run=%s", run_id)
             self._write_end_of_stream()
 
@@ -420,7 +527,9 @@ def _persisted_sse(event: Mapping[str, Any]) -> str:
     return f"id: {event.get('seq', '')}\nevent: {event['type']}\ndata: {body}\n\n"
 
 
-def _run_view(record: RunRecord, *, live_event_count: int | None = None) -> dict[str, Any]:
+def _run_view(
+    record: RunRecord, *, live_event_count: int | None = None, has_report: bool = False
+) -> dict[str, Any]:
     """Public projection of a run: no host paths, no credentials."""
     duration = None
     if record.finished_at is not None:
@@ -433,7 +542,7 @@ def _run_view(record: RunRecord, *, live_event_count: int | None = None) -> dict
         "finishedAt": record.finished_at,
         "durationSeconds": duration,
         "sessionId": record.session_id,
-        "hasReport": bool(record.report_path),
+        "hasReport": has_report,
         "stopReason": record.stop_reason,
         "error": record.error,
         "eventCount": record.event_count if live_event_count is None else live_event_count,
@@ -464,12 +573,31 @@ def create_server(
     ``client_factory`` exists for tests: production always talks to the real
     ``pi`` binary through :class:`~pi_glink.kernel.rpc.PiRpcClient`.
     """
-    bus = EventBus()
-    store = RunStore(config.data_root / "runs")
-    manager = RunManager(
-        config, bus, store, client_factory=client_factory or PiRpcClient
-    )
-    return PiGlinkServer(config, bus, store, manager, WebAssets(config.web_root))
+    # Ownership comes first: only a process that holds the data root may
+    # conclude that a ``running`` record has no live owner. A second host on
+    # the same data root (same or another port) stops here, before touching
+    # any record.
+    ownership = DataRootOwnership.acquire(config.data_root)
+    try:
+        bus = EventBus()
+        store = RunStore(config.data_root / "runs")
+        manager = RunManager(
+            config,
+            bus,
+            store,
+            client_factory=client_factory or PiRpcClient,
+            ownership=ownership,
+        )
+        # Runs left ``running`` by a previous process cannot continue; close
+        # them out honestly before the host serves history. External leftovers
+        # are not touched — their identity is recorded for an operator decision.
+        manager.reconcile()
+        return PiGlinkServer(
+            config, bus, store, manager, WebAssets(config.web_root), ownership=ownership
+        )
+    except BaseException:
+        ownership.release()
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -484,7 +612,20 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="打印生效配置（不含密钥）后退出",
     )
+    parser.add_argument(
+        "--unreleased",
+        action="store_true",
+        help="列出执行资源未确认释放的 run 后退出（需宿主未运行）",
+    )
+    parser.add_argument(
+        "--mark-released",
+        metavar="RUN_ID",
+        help="记录人工裁决：已核对该 run 的执行资源已释放（需宿主未运行，须配合 --note）",
+    )
+    parser.add_argument("--note", help="人工裁决的核对说明")
     args = parser.parse_args(argv)
+    if args.mark_released and not (args.note or "").strip():
+        parser.error("--mark-released 需要 --note 说明如何核对了资源释放")
 
     try:
         config = load_config()
@@ -505,8 +646,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_config:
         print(json.dumps(config.public_view(), ensure_ascii=False, indent=2))
         return 0
+    if args.unreleased or args.mark_released:
+        return _resource_command(config, args.mark_released, args.note)
 
-    server = create_server(config)
+    try:
+        server = create_server(config)
+    except DataRootBusy as exc:
+        print(f"启动失败 / refused: {exc}", file=sys.stderr)
+        return 2
     url = f"http://{config.host}:{server.server_address[1]}/"
     pi_path = shutil.which(config.pi_bin)
     print(f"pi-glink 宿主已启动 / host listening: {url}")
@@ -523,8 +670,48 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\n收到中断，正在退出 / interrupted, shutting down")
     finally:
+        # Cancel and reap this process's runs before the HTTP server disappears;
+        # a run that does not release in time is reported, not hidden.
+        unreleased = server.manager.shutdown(timeout=15.0)
         server.server_close()
+    if unreleased:
+        print(
+            "警告：以下 run 的终态或执行资源尚未确认，需要人工对账："
+            + ", ".join(unreleased)
+            + "（核对后用 --mark-released RUN_ID --note … 记录裁决）",
+            file=sys.stderr,
+        )
+        return 1
     return 0
+
+
+def _resource_command(config: HostConfig, run_id: str | None, note: str | None) -> int:
+    """Operator view and adjudication of unconfirmed execution resources.
+
+    Runs with the same exclusive data-root ownership as the host, so it cannot
+    race a live host; it never contacts Docker/E2B or removes anything.
+    """
+    try:
+        ownership = DataRootOwnership.acquire(config.data_root)
+    except DataRootBusy as exc:
+        print(f"{exc}；请先停止宿主再执行资源裁决", file=sys.stderr)
+        return 2
+    try:
+        manager = RunManager(
+            config, EventBus(), RunStore(config.data_root / "runs"), ownership=ownership
+        )
+        manager.reconcile()
+        if run_id:
+            try:
+                manager.adjudicate_release(run_id, note or "")
+            except (KeyError, ValueError, RunBusy) as exc:
+                print(f"裁决被拒绝: {exc}", file=sys.stderr)
+                return 1
+            print(f"已记录人工裁决：run {run_id} 的执行资源已释放")
+        print(json.dumps(manager.unreleased_resources(), ensure_ascii=False, indent=2))
+        return 0
+    finally:
+        ownership.release()
 
 
 if __name__ == "__main__":

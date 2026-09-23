@@ -218,6 +218,58 @@ test('notices and stages carry readable labels', () => {
   assert.match(model.items[2].label, /上下文压缩/);
 });
 
+test('usage frames carry run-cumulative totals and are not summed again', () => {
+  // The host accumulates per-request snapshots and publishes the run total; the
+  // front-end therefore *replaces* the display value. Summing here would double
+  // count every turn (100 + 200 would show 300 after the second frame but 600
+  // after a third), and a replayed frame would inflate it once more.
+  let model = createRunModel({ runId: 'r1' });
+  model = applyEvent(
+    model,
+    frame(1, 'usage_reported', {
+      usage: { input: 100, output: 0, totalTokens: 100, requests: 1 },
+      requestUsage: { input: 100, output: 0, totalTokens: 100 },
+    }),
+  );
+  assert.equal(model.usage.totalTokens, 100);
+
+  model = applyEvent(
+    model,
+    frame(2, 'usage_reported', {
+      usage: { input: 300, output: 0, totalTokens: 300, requests: 2 },
+      requestUsage: { input: 200, output: 0, totalTokens: 200 },
+    }),
+  );
+  assert.equal(model.usage.totalTokens, 300, 'the frame is the run total, not a delta');
+  assert.equal(model.usage.requests, 2);
+
+  // A duplicate frame at the same seq is ignored by the watermark (no inflation).
+  model = applyEvent(
+    model,
+    frame(2, 'usage_reported', {
+      usage: { input: 300, output: 0, totalTokens: 300, requests: 2 },
+    }),
+  );
+  assert.equal(model.usage.totalTokens, 300);
+  assert.equal(model.ignoredFrames, 1);
+
+  // The terminal frame carries the authoritative final total.
+  model = applyEvent(
+    model,
+    frame(3, 'run_finished', {
+      status: 'finished',
+      usage: { input: 300, output: 0, totalTokens: 300, requests: 2 },
+    }),
+  );
+  assert.equal(model.usage.totalTokens, 300);
+});
+
+test('a run with no reported usage shows none rather than a fabricated value', () => {
+  let model = createRunModel({ runId: 'r1' });
+  model = applyEvent(model, frame(1, 'run_finished', { status: 'finished' }));
+  assert.equal(model.usage, null);
+});
+
 test('unknown event types are ignored, not rendered as noise', () => {
   let model = createRunModel({ runId: 'r1' });
   const before = model.items.length;

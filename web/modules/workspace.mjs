@@ -18,6 +18,7 @@
  */
 
 import { createApi } from './api.mjs';
+import { createNavGuard } from './nav-guard.mjs';
 import { applyEvent, createRunModel, createRunSubscription, TERMINAL_EVENT_TYPES } from './run-stream.mjs';
 import { createRunView } from './run-view.mjs';
 import { createProgressPanel } from './progress-panel.mjs';
@@ -107,9 +108,14 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   let reconnectTimer = null;
   let progressFrame = null;
   let disposed = false;
+  /* A navigation may finish after a newer one started (or after dispose); the
+   * token decides whether its response still owns the screen. */
+  const nav = createNavGuard();
+  /* Observers outlive a render pass; dispose must not leave them watching. */
+  const disposers = [];
 
   const progress = createProgressPanel({ root: el('progress-panel'), onOpenReport: (runId) => openReport(runId) });
-  installTooltips({ isRail: () => shell.dataset.sidebar === 'collapsed' || rail.matches });
+  const tooltips = installTooltips({ isRail: () => shell.dataset.sidebar === 'collapsed' || rail.matches });
 
   /* Bottom anchoring (标准库用 use-stick-to-bottom 做同一件事)：the conversation
    * follows new frames only while the reader is already at the tail. */
@@ -119,29 +125,37 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   let settleUntil = 0;
   const anchored = el('conversation');
   const anchorFrame = () => {
-    if (!stick || !anchored) return;
+    if (!stick || !anchored || disposed) return;
     settleUntil = Math.max(settleUntil, performance.now() + ANCHOR_SETTLE_MS);
     const step = () => {
-      if (!stick) return;
+      if (!stick || disposed) return;
       conversationScroll.scrollTop = conversationScroll.scrollHeight;
       if (performance.now() < settleUntil) requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
   };
   if (anchored && typeof MutationObserver === 'function') {
-    new MutationObserver(anchorFrame).observe(anchored, { childList: true, subtree: true, characterData: true });
+    const observer = new MutationObserver(anchorFrame);
+    observer.observe(anchored, { childList: true, subtree: true, characterData: true });
+    disposers.push(() => observer.disconnect());
     anchored.addEventListener('toggle', anchorFrame, true);
-    if (typeof ResizeObserver === 'function') new ResizeObserver(anchorFrame).observe(anchored);
+    if (typeof ResizeObserver === 'function') {
+      const resize = new ResizeObserver(anchorFrame);
+      resize.observe(anchored);
+      disposers.push(() => resize.disconnect());
+    }
   }
 
   /* The composer's real height drives the conversation's bottom padding and the
    * progress panel's lower edge (标准库 useComposerDockHeight): a textarea that
    * grows to 240px must never cover the last line of the answer. */
   if (typeof ResizeObserver === 'function' && composerDockBody) {
-    new ResizeObserver(() => {
+    const observer = new ResizeObserver(() => {
       const height = composerDockBody.offsetHeight;
       if (height) pane.style.setProperty('--composer-dock', `${height}px`);
-    }).observe(composerDockBody);
+    });
+    observer.observe(composerDockBody);
+    disposers.push(() => observer.disconnect());
   }
 
   // -- navigation ------------------------------------------------------------
@@ -505,7 +519,8 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       await openRun(run.runId);
       await refreshRuns();
     } catch (error) {
-      showToast(startErrorMessage(error), error?.code === 'run_busy' ? 'warning' : 'error');
+      const refusal = error?.code === 'run_busy' || error?.code === 'resources_unreleased';
+      showToast(startErrorMessage(error), refusal ? 'warning' : 'error');
     } finally {
       setSending(false);
     }
@@ -520,13 +535,18 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
 
   async function openRun(runId, { withReport = false } = {}) {
     closeCurrent();
+    // This navigation owns the screen until a newer one starts or the workspace
+    // is disposed; a slow response must not overwrite what came after it.
+    const token = nav.begin();
     let run;
     try {
       ({ run } = await api.getRun(runId));
     } catch {
+      if (disposed || !nav.isCurrent(token)) return; // stale failure: stay quiet
       showToast('这项研究暂时打不开，请稍后重试。', 'error');
       return;
     }
+    if (disposed || !nav.isCurrent(token)) return;
     const model = createRunModel(run);
     // A view belongs to one run: `dispose()` is permanent.
     const view = createRunView({
@@ -606,6 +626,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   }
 
   function closeCurrent() {
+    nav.invalidate();
     clearTimeout(reconnectTimer);
     current?.subscription?.close();
     current?.view?.dispose();
@@ -626,12 +647,17 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
 
   async function stopRun() {
     if (!current) return;
+    const { runId } = current;
     stopButton.disabled = true;
     try {
-      await api.stopRun(current.runId);
-      showToast('正在停止，已完成的内容会保留。', 'info');
-    } catch {
-      showToast('停止没有成功，请重试。', 'error');
+      await api.stopRun(runId);
+      if (current?.runId === runId) showToast('正在停止，已完成的内容会保留。', 'info');
+    } catch (error) {
+      // The host decides a stop at the run's commit point: past it, the run's
+      // committed outcome stands and arrives on the stream as its terminal frame.
+      if (current?.runId === runId) {
+        showToast(stopErrorMessage(error), error?.code === 'run_not_cancellable' ? 'info' : 'error');
+      }
     } finally {
       stopButton.disabled = false;
     }
@@ -666,11 +692,12 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   // -- report ----------------------------------------------------------------
 
   async function openReport(runId) {
+    const token = nav.token;
     try {
       const response = await fetch(api.reportUrl(runId));
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const text = await response.text();
-      if (current?.runId !== runId) return;
+      if (disposed || !nav.isCurrent(token) || current?.runId !== runId) return;
       previewTitle.textContent = 'report.md';
       previewTitle.title = 'report.md';
       previewDownload.href = api.reportUrl(runId);
@@ -777,6 +804,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   /* The slot mode follows the main surface's real width (the sidebar's three
    * widths change it as much as the viewport does). */
   const syncSlotMode = () => {
+    if (disposed) return;
     const overlay = surface.getBoundingClientRect().width < CONVERSATION_MIN + 1 + REPORT_MIN;
     if (overlay !== isOverlay()) {
       shell.classList.toggle('slot-overlay', overlay);
@@ -785,8 +813,11 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     if (slot === 'report') applySplit(readSplit());
     syncHeader();
   };
-  if (typeof ResizeObserver === 'function' && surface) new ResizeObserver(syncSlotMode).observe(surface);
-  else window.addEventListener('resize', syncSlotMode);
+  if (typeof ResizeObserver === 'function' && surface) {
+    const observer = new ResizeObserver(syncSlotMode);
+    observer.observe(surface);
+    disposers.push(() => observer.disconnect());
+  } else window.addEventListener('resize', syncSlotMode);
 
   return {
     async init() {
@@ -806,6 +837,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       updatePromptCount();
     },
     startRun,
+    stopRun,
     openRun,
     openReport,
     refreshRuns,
@@ -820,15 +852,40 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     },
     dispose() {
       disposed = true;
+      nav.invalidate();
       closeCurrent();
       clearTimeout(toastTimer);
+      clearTimeout(reconnectTimer);
+      if (progressFrame !== null) cancelAnimationFrame(progressFrame);
+      progressFrame = null;
+      for (const dispose of disposers.splice(0)) {
+        try {
+          dispose();
+        } catch {
+          /* an observer that cannot be detached must not break disposal */
+        }
+      }
+      tooltips.dispose();
     },
   };
 }
 
 function startErrorMessage(error) {
   if (error?.code === 'run_busy') return '已有一项研究正在进行，请等它完成或先停止。';
+  if (error?.code === 'resources_unreleased') {
+    return '上一项研究的执行资源还没有确认释放，暂时不能开始新研究。请联系管理员核对。';
+  }
   if (error?.code === 'not_configured') return '模型服务还没有配置，暂时无法发起研究。请联系管理员完成配置。';
   if (error?.code === 'invalid_request') return '这个问题没能提交，请检查内容后重试。';
   return '研究没能开始，请稍后重试。';
+}
+
+function stopErrorMessage(error) {
+  if (error?.code === 'run_not_cancellable') {
+    return error.payload?.reason === 'finalizing'
+      ? '这项研究正在收尾，已无法停止。'
+      : '这项研究已经结束，无需停止。';
+  }
+  if (error?.code === 'unknown_run') return '找不到这项研究，请刷新后重试。';
+  return '停止没有成功，请重试。';
 }

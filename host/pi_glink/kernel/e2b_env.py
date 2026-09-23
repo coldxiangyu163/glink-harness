@@ -20,49 +20,50 @@ projection are identical, so the browser contract does not change.
   environment-variable form for it. A sandbox without the file still works
   (keyless Exa MCP search).
 
-Everything else is data: the runtime config rendered by the host (models.json,
-settings.json) is uploaded, and the report is pulled back into the host run
-workspace.
+**Configuration delivery.** The sandbox receives the *whole* per-run runtime
+directory (generated files plus the reviewed template entries: ``AGENTS.md``,
+``settings.json``, ``extensions/``, ``skills/``, ``prompts/``), with the same
+relative paths the in-process and Docker faces use. The upload records a manifest
+of ``(relative path, sha256)`` so the delivery is verifiable instead of "the
+current directory happened to be empty".
+
+**Known limitation (honest, not papered over).** The E2B SDK 2.x does not fire
+its stdout callback for ``commands.run(background=True)``, so the sandbox writes
+its event stream to a file and the host replays it after the command settles.
+The order and vocabulary match the other faces; the difference is that this face
+is **not live**. See ``docs/architecture.md`` §5 and ``docs/evidence/e2b-run.txt``.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import shutil
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from ..artifacts import ArtifactError, ArtifactTree
 from ..config import ConfigError, HostConfig
-from .agent_env import AgentRuntime, WEB_SEARCH_FILENAME
+from .agent_env import AgentRuntime
+from .framing import strip_trailing_cr
 
 #: Sandbox paths (E2B runs as a non-root user with /home/user as home).
 SANDBOX_HOME = "/home/user"
 SANDBOX_CONFIG = f"{SANDBOX_HOME}/config"
 SANDBOX_WORKSPACE = f"{SANDBOX_HOME}/workspace"
 SANDBOX_SESSIONS = f"{SANDBOX_HOME}/sessions"
-#: Uploaded config files (auth.json carries the credential; see module docstring).
-_CONFIG_FILES = ("models.json", "settings.json", "auth.json")
 REPORT_FILENAME = "report.md"
 #: The sandbox writes its JSON event stream here (see module docstring).
 _EVENTS_FILE = f"{SANDBOX_HOME}/events.jsonl"
 _STDERR_FILE = f"{SANDBOX_HOME}/pi-stderr.txt"
-#: Env vars the pi process inside the sandbox needs.
-_SANDBOX_ENV_NAMES = ("PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY")
+#: One uploaded config file / recovered artifact may not exceed this.
+UPLOAD_MAX_BYTES = 8 * 1024 * 1024
+ARTIFACT_MAX_BYTES = 32 * 1024 * 1024
 
 
 class SandboxError(RuntimeError):
     """Raised when the sandbox cannot be created or the run cannot start."""
-
-
-@dataclass(frozen=True, slots=True)
-class SandboxOutcome:
-    sandbox_id: str
-    exit_code: int
-    stderr_tail: str
-    report_path: Path | None
-    uploaded: list[str] = field(default_factory=list)
 
 
 class E2BSandboxClient:
@@ -88,6 +89,8 @@ class E2BSandboxClient:
         self._sandbox_factory = sandbox_factory
         self.sandbox: Any | None = None
         self.uploaded: list[str] = []
+        #: ``(relative path, sha256)`` for everything delivered to the sandbox.
+        self.upload_manifest: list[tuple[str, str]] = []
         self.sandbox_id: str = ""
 
     # -- lifecycle ------------------------------------------------------------
@@ -119,22 +122,37 @@ class E2BSandboxClient:
         self.sandbox_id = str(getattr(self.sandbox, "sandbox_id", ""))
 
     def upload_config(self) -> None:
-        """Upload the host-rendered config the kernel needs (see module docstring)."""
+        """Upload the run's rendered configuration directory (see module docstring).
+
+        Every file in the runtime directory is delivered with its relative path
+        intact, so the sandboxed kernel reads the same configuration the local
+        faces read. The manifest lets a test (or an operator) verify what was
+        actually delivered.
+        """
         sandbox = self._require_sandbox()
         sandbox.files.make_dir(SANDBOX_CONFIG)
         sandbox.files.make_dir(SANDBOX_WORKSPACE)
         sandbox.files.make_dir(SANDBOX_SESSIONS)
-        for name in _CONFIG_FILES:
-            source = self.runtime.directory / name
-            if source.is_file():
-                sandbox.files.write(f"{SANDBOX_CONFIG}/{name}", source.read_text(encoding="utf-8"))
-                self.uploaded.append(name)
-        credential = self.runtime.directory / WEB_SEARCH_FILENAME
-        if credential.is_file():
-            sandbox.files.write(
-                f"{SANDBOX_CONFIG}/{WEB_SEARCH_FILENAME}", credential.read_text(encoding="utf-8")
-            )
-            self.uploaded.append(WEB_SEARCH_FILENAME)
+        manifest = _runtime_manifest(self.runtime.directory)
+        if not manifest:
+            return
+        try:
+            tree = ArtifactTree(self.runtime.directory)
+        except ArtifactError as exc:
+            raise SandboxError(f"配置交付失败: {exc}") from exc
+        with tree:
+            for relative, is_dir in manifest:
+                sandbox_path = f"{SANDBOX_CONFIG}/{relative}"
+                if is_dir:
+                    sandbox.files.make_dir(sandbox_path)
+                    continue
+                try:
+                    data = tree.read(relative, max_bytes=UPLOAD_MAX_BYTES)
+                except ArtifactError as exc:
+                    raise SandboxError(f"配置交付失败: {relative}: {exc}") from exc
+                sandbox.files.write(sandbox_path, data)
+                self.uploaded.append(sandbox_path)
+                self.upload_manifest.append((relative, hashlib.sha256(data).hexdigest()))
 
     def run_prompt(
         self,
@@ -160,14 +178,23 @@ class E2BSandboxClient:
         return exit_code, self.fetch_stderr_tail()
 
     def fetch_events(self) -> list[str]:
-        """Return the JSONL frames the sandbox wrote for this run."""
+        """Return the JSONL records the sandbox wrote for this run.
+
+        Framing is LF-only (``pi`` documents strict JSONL): ``splitlines`` would
+        also split on U+2028/U+2029, tearing a valid JSON string in two and
+        losing both halves.
+        """
         sandbox = self._require_sandbox()
         try:
             content = sandbox.files.read(_EVENTS_FILE)
         except Exception:  # noqa: BLE001 - absent stream means no frames
             return []
         text = content.decode("utf-8", "replace") if isinstance(content, bytes) else str(content)
-        return [line for line in text.splitlines() if line.strip()]
+        return [
+            strip_trailing_cr(line)
+            for line in text.split("\n")
+            if line.strip()
+        ]
 
     def fetch_stderr_tail(self, limit: int = 20) -> str:
         sandbox = self._require_sandbox()
@@ -176,39 +203,68 @@ class E2BSandboxClient:
         except Exception:  # noqa: BLE001
             return ""
         text = content.decode("utf-8", "replace") if isinstance(content, bytes) else str(content)
-        return "\n".join(text.splitlines()[-limit:])
+        return "\n".join(text.split("\n")[-limit:])
 
-    def fetch_report(self) -> Path | None:
-        """Pull ``report.md`` (and any other artifacts) back into the host workspace."""
+    def recover_artifacts(self, destination: Path) -> tuple[list[Path], list[str]]:
+        """Pull the sandbox workspace back into the host run workspace.
+
+        Only direct children with simple names are recovered, each one bounded;
+        anything unreadable (a directory), oversized, or named with a path
+        separator is recorded as a failure instead of being guessed at.
+        """
         sandbox = self._require_sandbox()
-        self.workspace.mkdir(parents=True, exist_ok=True)
+        destination.mkdir(parents=True, exist_ok=True)
         try:
             entries = sandbox.files.list(SANDBOX_WORKSPACE)
-        except Exception:  # noqa: BLE001 - listing is best effort
-            entries = []
-        for entry in entries:
-            name = getattr(entry, "name", None) or ""
-            path = getattr(entry, "path", None) or f"{SANDBOX_WORKSPACE}/{name}"
-            if not name or name.startswith("."):
-                continue
-            try:
-                content = sandbox.files.read(path)
-            except Exception:  # noqa: BLE001 - skip unreadable entries (dirs)
-                continue
-            target = self.workspace / Path(path).name
-            target.write_bytes(content if isinstance(content, bytes) else str(content).encode("utf-8"))
-        report = self.workspace / REPORT_FILENAME
-        return report if report.is_file() else None
+        except Exception as exc:  # noqa: BLE001 - surfaced to the caller
+            return [], [f"无法列出沙箱工作区: {type(exc).__name__}: {exc}"]
+        try:
+            tree = ArtifactTree(destination)
+        except ArtifactError as exc:
+            return [], [f"宿主工作区不可用: {exc}"]
+        files: list[Path] = []
+        failures: list[str] = []
+        with tree:
+            for entry in entries:
+                name = str(getattr(entry, "name", None) or "")
+                path = str(getattr(entry, "path", None) or f"{SANDBOX_WORKSPACE}/{name}")
+                if not name:
+                    continue
+                # Path semantics are checked before the hidden-file skip: a name
+                # that tries to escape ("../x") starts with a dot and must be
+                # reported, not silently ignored.
+                if "/" in name or "\\" in name or name in {".", ".."}:
+                    failures.append(f"跳过非法产物名: {name!r}")
+                    continue
+                if name.startswith("."):
+                    continue
+                try:
+                    content = sandbox.files.read(path)
+                except Exception:  # noqa: BLE001 - directories and unreadable entries
+                    continue
+                data = content if isinstance(content, bytes) else str(content).encode("utf-8")
+                if len(data) > ARTIFACT_MAX_BYTES:
+                    failures.append(f"产物超过上限: {name}")
+                    continue
+                try:
+                    tree.replace(name, data, max_bytes=ARTIFACT_MAX_BYTES)
+                except (ArtifactError, OSError) as exc:
+                    failures.append(f"产物写入失败: {name}: {exc}")
+                    continue
+                files.append(destination / name)
+        return files, failures
 
-    def close(self) -> None:
+    def close(self) -> list[str]:
+        """Destroy the sandbox. Returns the failures instead of hiding them."""
         sandbox = self.sandbox
         self.sandbox = None
         if sandbox is None:
-            return
+            return []
         try:
             sandbox.kill()
-        except Exception:  # noqa: BLE001 - teardown is best effort
-            pass
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            return [f"sandbox kill failed: {type(exc).__name__}: {exc}"]
+        return []
 
     # -- internals ------------------------------------------------------------
 
@@ -234,8 +290,11 @@ class E2BSandboxClient:
     def _command(self, prompt: str, system_prompt: str) -> str:
         """Compose the sandbox command.
 
-        Both the prompt and the research contract are base64-encoded so quoting,
-        newlines and non-ASCII text cannot break the shell line.
+        Both the prompt and the research contract are base64-encoded before they
+        are interpolated into the shell line, so quoting, newlines, backticks,
+        ``$(…)`` and non-ASCII text cannot break the command or execute anything:
+        the shell only ever sees a base64 alphabet. The command is asserted by
+        the adapter tests against exactly those inputs.
         """
         encoded_prompt = base64.b64encode(prompt.encode("utf-8")).decode("ascii")
         parts = [
@@ -256,6 +315,22 @@ class E2BSandboxClient:
             pi.extend(["--append-system-prompt", '"$SYSTEM"'])
         parts.append(f"{' '.join(pi)} \"$PROMPT\" > {_EVENTS_FILE} 2> {_STDERR_FILE}")
         return " && ".join(parts)
+
+
+def _runtime_manifest(runtime_dir: Path) -> list[tuple[str, bool]]:
+    """Every file/directory to deliver, as ``(relative, is_dir)``.
+
+    The runtime directory is host-rendered before the sandbox exists; the bytes
+    are still read through :class:`~pi_glink.artifacts.ArtifactTree`.
+    """
+    manifest: list[tuple[str, bool]] = []
+    if not runtime_dir.is_dir():
+        return manifest
+    for child in sorted(runtime_dir.rglob("*")):
+        if child.is_symlink():
+            continue
+        manifest.append((child.relative_to(runtime_dir).as_posix(), child.is_dir()))
+    return manifest
 
 
 def parse_json_stream_line(line: str) -> Mapping[str, Any] | None:

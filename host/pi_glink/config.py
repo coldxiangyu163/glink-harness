@@ -22,6 +22,8 @@ _DEFAULT_PORT = 7860
 #: 默认使用本仓库自己的云沙箱模板（含 Node + pi）；FrontierAgent 的
 #: glink-frontier-e2b 是另一个产品的模板，只沿用它的变量语义，不复用它的模板。
 _DEFAULT_E2B_TEMPLATE = "pi-glink-worker"
+#: Frozen default for the disposable worker image (shared with ``docker_env``).
+DEFAULT_WORKER_IMAGE = "pi-glink-worker:latest"
 _DEFAULT_CONTEXT_WINDOW = 400_000
 _DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 
@@ -52,6 +54,9 @@ class HostConfig:
     max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS
     e2b_template: str = _DEFAULT_E2B_TEMPLATE
     e2b_api_key: str = field(repr=False, default="")
+    #: Frozen Docker worker image; re-read from the environment at run time it
+    #: could silently relabel a run that was already accepted.
+    worker_image: str = DEFAULT_WORKER_IMAGE
     log_level: str = "INFO"
     task_timeout_seconds: int = 1800
     web_search_key: str = field(repr=False, default="")
@@ -161,6 +166,7 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         ),
         e2b_template=_text(values, "LOCAL_WEB_E2B_TEMPLATE", _DEFAULT_E2B_TEMPLATE),
         e2b_api_key=e2b_key,
+        worker_image=_text(values, "LOCAL_WEB_WORKER_IMAGE", DEFAULT_WORKER_IMAGE),
         log_level=_text(values, "LOCAL_WEB_LOG_LEVEL", "INFO").upper(),
         task_timeout_seconds=_integer(values, "LOCAL_WEB_TASK_TIMEOUT_SECONDS", 1800),
         web_search_key=_text(values, "PI_GLINK_WEB_SEARCH_KEY", ""),

@@ -9,6 +9,7 @@ data/
 __pycache__/
 *.py[cod]
 .venv/
+/.venv
 .uv/
 *.egg-info/
 .pytest_cache/
