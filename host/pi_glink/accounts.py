@@ -7,6 +7,9 @@
 * 建表只覆盖最小必要模式：``tenants`` / ``users`` / ``invitations`` / ``sessions``；
   邮箱全局唯一（canonical 列唯一索引），一个用户只属于一个租户，角色只有
   ``member`` / ``admin``；
+* 账号库及 WAL/SHM 侧车必须是属主独占（文件 0600、专用目录 0700）：库在创建前
+  先以受限权限建立，已有宽权限/符号链接一律 fail-closed，宿主从不自动 chmod 真实
+  文件或目录（操作员自行迁移与收紧）；
 * 邀请码与会话令牌都只存不可逆摘要（``sha256``）；单次原文只在创建成功时返回给
   受权操作者（操作员 CLI 或管理员接口），普通日志、错误信息与数据库中都不出现；
 * 密码用 ``hashlib.scrypt``（随机盐），每行记录参数，校验走
@@ -24,9 +27,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import sqlite3
+import stat
 import threading
 import time
 from dataclasses import dataclass
@@ -76,6 +81,109 @@ class AccountsError(Exception):
         super().__init__(message or code)
         self.code = code
         self.message = message or code
+
+
+class AccountsSecurityError(AccountsError):
+    """The account database (or its directory) is not owner-only.
+
+    Raised *before* any read or migration, so an unsafe file is left exactly as
+    it was found: the operator decides whether to move and ``chmod`` it.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__("insecure_database", message)
+
+
+def _require_owner_only_directory(directory: Path) -> None:
+    """Create the database directory 0700, or refuse an unsafe existing one.
+
+    Existing directories are validated, never ``chmod``-ed: a shared parent may
+    belong to other data, and silently tightening it would be a surprise outside
+    this component's ownership.
+    """
+    try:
+        os.mkdir(directory, 0o700)
+    except FileExistsError:
+        pass
+    except FileNotFoundError:
+        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    info = os.lstat(directory)
+    if not stat.S_ISDIR(info.st_mode):
+        raise AccountsSecurityError(
+            f"账号库目录必须是普通目录（不接受符号链接/文件/设备）: {directory}"
+        )
+    if info.st_uid != os.geteuid():
+        raise AccountsSecurityError(
+            f"账号库目录不属于当前用户（uid={info.st_uid}）: {directory}"
+        )
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o077:
+        raise AccountsSecurityError(
+            f"账号库目录权限过宽（要求 0700 或更严，当前 {mode:04o}）: {directory}；"
+            "请把账号库移到仅属主可访问的目录（宿主不会自动修改已有目录）"
+        )
+
+
+def _prepare_database(path: Path) -> tuple[int, int]:
+    """Create the database owner-only or refuse an unsafe existing file.
+
+    The file is created with ``O_CREAT|O_EXCL|O_NOFOLLOW`` and mode 0600 before
+    SQLite opens it, so the first byte SQLite ever writes already lands in a
+    private file; an existing file must be a regular, owner-owned, 0600-or-tighter
+    file. The returned ``(st_dev, st_ino)`` is checked again after ``connect`` so
+    a replacement between validation and open is refused.
+    """
+    _require_owner_only_directory(path.parent)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        descriptor = os.open(
+            path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600
+        )
+        os.close(descriptor)
+        info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode):
+        raise AccountsSecurityError(
+            f"账号库必须是普通文件（不接受符号链接/目录/设备）: {path}"
+        )
+    if info.st_uid != os.geteuid():
+        raise AccountsSecurityError(f"账号库不属于当前用户（uid={info.st_uid}）: {path}")
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o077:
+        raise AccountsSecurityError(
+            f"账号库权限过宽（要求 0600 或更严，当前 {mode:04o}）: {path}；请在宿主停止时"
+            "把库移到仅属主可访问的目录并 chmod 600（宿主不会自动修改已有文件）"
+        )
+    return info.st_dev, info.st_ino
+
+
+def _check_sidecars(path: Path) -> None:
+    """Require owner-only WAL/SHM/journal sidecars.
+
+    SQLite creates these with the database file's mode, so they should already
+    be 0600. If one is wider (a legacy database, an unusual umask, a crash), it
+    is corrected with ``chmod`` — it is a host-created derivative of our own
+    database, not a user file, and it can carry committed pages.
+    """
+    for suffix in ("-wal", "-shm", "-journal"):
+        candidate = Path(f"{path}{suffix}")
+        try:
+            info = os.lstat(candidate)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise AccountsSecurityError(
+                f"账号库侧车必须是当前用户拥有的普通文件: {candidate}"
+            )
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            try:
+                os.chmod(candidate, 0o600)
+            except OSError as exc:
+                raise AccountsSecurityError(
+                    f"账号库侧车权限过宽且无法收紧（{candidate}）: {exc}"
+                ) from exc
+            if stat.S_IMODE(os.lstat(candidate).st_mode) & 0o077:
+                raise AccountsSecurityError(f"账号库侧车权限仍过宽: {candidate}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,17 +372,32 @@ class AccountsStore:
         self.path = Path(path)
         self._clock = clock
         self._params: dict[str, Any] = dict(scrypt_params or DEFAULT_SCRYPT)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._connection = sqlite3.connect(
+        # Owner-only creation/validation happens before SQLite sees the path:
+        # the database, its directory and later its WAL sidecars must never be
+        # group/world readable, and a legacy wide-permission file is refused
+        # untouched (see docs/multitenancy-plan.md §3.1).
+        self._identity = _prepare_database(self.path)
+        connection = sqlite3.connect(
             self.path, check_same_thread=False, isolation_level=None, timeout=5.0
         )
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA synchronous=NORMAL")
-        self._connection.execute("PRAGMA foreign_keys=ON")
-        self._connection.execute("PRAGMA busy_timeout=5000")
-        self._migrate()
+        self._connection = connection
+        try:
+            opened = os.lstat(self.path)
+            if (opened.st_dev, opened.st_ino) != self._identity:
+                raise AccountsSecurityError(
+                    f"账号库在检查与打开之间被替换: {self.path}"
+                )
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=5000")
+            self._migrate()
+            _check_sidecars(self.path)
+        except BaseException:
+            connection.close()
+            raise
 
     # -- lifecycle ------------------------------------------------------------
 

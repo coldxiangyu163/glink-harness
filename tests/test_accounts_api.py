@@ -169,7 +169,7 @@ def make_config(tmp_path: Path, tenant_files: tuple[Path, Path], **overrides: st
         "PI_GLINK_GATEWAY_SECRET_FILE": str(secret),
         "PI_GLINK_TENANT_CONFIG_FILE": str(tenants),
         "PI_GLINK_TENANCY_AUDIENCE": AUDIENCE,
-        "PI_GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts.db"),
+        "PI_GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts" / "accounts.db"),
         "PI_GLINK_COOKIE_SECURE": "0",
         "PI_GLINK_SESSION_ABSOLUTE_SECONDS": "3600",
         "PI_GLINK_SESSION_IDLE_SECONDS": "600",
@@ -1425,7 +1425,7 @@ def test_accounts_mode_configuration_defaults_and_refusals(tmp_path: Path) -> No
         "OPENAI_MODEL": "test/model",
     }
     config = build_config(base, REPO_ROOT)
-    assert config.accounts_db == tmp_path / "data" / "accounts.db"
+    assert config.accounts_db == tmp_path / "data" / "accounts" / "accounts.db"
     assert config.multi_tenant and config.auth_mode == "accounts"
     assert config.identity_mode == "accounts"
 

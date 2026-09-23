@@ -183,8 +183,10 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 邀请制注册 + 站内登录，保留网关模式的全部 owner/配额语义，但身份来自服务端会话而不是断言：
 
 - **配置**：`PI_GLINK_TENANCY=multitenant`、`PI_GLINK_AUTH_MODE=accounts`、`PI_GLINK_TENANT_CONFIG_FILE`
-  必需；不再需要网关签名密钥。账号库默认 `<LOCAL_WEB_DATA_ROOT>/accounts.db`（仓库外，SQLite WAL），
-  与 run/events 文件存储分离，互不迁移。宿主仍只监听 loopback，生产必须由 TLS 终止代理提供 HTTPS。
+  必需；不再需要网关签名密钥。账号库默认 `<LOCAL_WEB_DATA_ROOT>/accounts/accounts.db`（仓库外，
+  SQLite WAL），与 run/events 文件存储分离，互不迁移。宿主首次创建时建立 0700 专用目录与 0600
+  库文件（WAL/SHM 同样属主独占），已有权限过宽或符号链接一律拒绝启动且不自动 chmod——旧库需操作员
+  停止宿主后迁移并 `chmod 600`。宿主仍只监听 loopback，生产必须由 TLS 终止代理提供 HTTPS。
 - **引导**：首位管理员由操作员在**宿主停止**时离线签发（取得 data-root ownership 后）：
   `python -m pi_glink.app --create-invite --tenant tenant-alpha --tenant-name 组织甲 --email admin@example.com --role admin`。
   命令要求该租户已在 `tenants.json` 里配置模型密钥（缺 key 拒绝），邀请码只打印一次、数据库只存摘要。

@@ -453,12 +453,17 @@ Docker 面的每个容器实例额外带 `--cpus` / `--memory` / `--pids-limit`�
 宿主内完成邀请注册与登录，仍只监听 loopback（生产由 TLS 终止代理提供 HTTPS），并且**只在服务端**
 生成 `TenantContext`：
 
-- **存储**：`<data_root>/accounts.db`（SQLite，stdlib；WAL、`BEGIN IMMEDIATE` 事务、单连接加锁），
+- **存储**：`<data_root>/accounts/accounts.db`（SQLite，stdlib；WAL、`BEGIN IMMEDIATE` 事务、单连接加锁），
   表只有 `tenants` / `users` / `invitations` / `sessions`。账号数据与 run/events 文件存储分离，互不
   迁移、互不共享；历史 run 不因账号模式而改变归属。邮箱全局唯一（canonical 唯一索引），一个用户
   只属于一个租户，角色为 `member` / `admin`。文件必须在仓库外，并且**必须位于本 data_root 之内**
   （`realpath` 判定，符号链接不能指向共享库）：单宿主独占性是 `data_root` 上的锁，库在别处会让两个
   各自持有不同锁的宿主写同一份账号数据。
+- **权限**：账号库在首次创建前先建立 0700 的专用目录并以 `O_CREAT|O_EXCL|O_NOFOLLOW`、0600 创建
+  库文件，SQLite 才被允许打开它；WAL/SHM/journal 侧车必须是属主独占（宽权限的侧车会被收紧，因为
+  它是宿主自己的库的派生文件）。已有库若是符号链接、非普通文件、非属主所有或带组/其他人权限位，
+  一律 fail-closed（在读取与迁移之前拒绝启动，文件原样保留，不自动 chmod）；操作员需停止宿主后
+  把库移入 0700 目录并 `chmod 600`，无法确认来源时先备份。
 - **初始化顺序**：账号库的创建、建表迁移与 WAL 切换都是 data-root 写入，因此
   `create_server` 与 `--create-invite` 一律**先取得 `host.lock`，再打开账号库，最后才绑定端口**；
   第二宿主在打开库之前就被 `DataRootBusy` 拒绝，`accounts.db` 及其 `-wal`/`-shm` 字节不会被改写。

@@ -53,11 +53,13 @@
 `meta.json` 原子替换、`events.jsonl` 追加与终帧提交协议；owner 过滤与原子准入都落在现有模块内部。
 旧记录保持原样，不写真实历史。
 
-`accounts` 身份入口另有一个**独立**的 SQLite 库（`<data_root>/accounts.db`，stdlib + WAL）：
+`accounts` 身份入口另有一个**独立**的 SQLite 库（`<data_root>/accounts/accounts.db`，stdlib + WAL）：
 它只存租户/用户/邀请/会话，与 run 存储互不迁移、互不共享，也不改变上述 run 事务协议；停用账号
 不会改写或删除任何 run 记录。该库必须位于同一个 data_root 内（`realpath` 判定），并且只在宿主
 取得 `host.lock` **之后**才创建/迁移/打开：库文件与 WAL 侧车都是 data-root 写入，第二宿主必须
-在写任何字节之前就被拒绝；`--print-config` 不打开账号库。多宿主演进时，这个库与 run 存储一样需要
+在写任何字节之前就被拒绝；`--print-config` 不打开账号库。库目录为 0700、库文件与 WAL/SHM 侧车为
+0600，首次创建时以 `O_CREAT|O_EXCL|O_NOFOLLOW` 受限建立；已有的宽权限文件/目录或符号链接一律
+fail-closed 且不自动 chmod，操作员需停止宿主后自行迁移与收紧（见 §7 回退说明）。多宿主演进时，这个库与 run 存储一样需要
 单独的选型与迁移窗口。
 
 ### 3.2 多宿主演进（未实现）

@@ -49,7 +49,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from .accounts import AccountsStore
+from .accounts import AccountsSecurityError, AccountsStore
 from .config import ConfigError, HostConfig
 
 logger = logging.getLogger("pi_glink.tenancy")
@@ -492,7 +492,12 @@ def build_tenancy(config: HostConfig) -> Tenancy | None:
         return tenancy
     if config.accounts_db is None:  # defensive: load_identity_material checked it
         raise ConfigError("PI_GLINK_AUTH_MODE=accounts 需要 PI_GLINK_ACCOUNTS_DB")
-    store = AccountsStore(config.accounts_db)
+    try:
+        store = AccountsStore(config.accounts_db)
+    except AccountsSecurityError as exc:
+        # Fail closed: an unsafe database is a configuration refusal, never a
+        # warning. The file/directory is left exactly as it was found.
+        raise ConfigError(f"账号库不安全: {exc.message}") from exc
     logger.info(
         "账号模式已启用：账号库=%s，已配置租户=%d",
         config.accounts_db,

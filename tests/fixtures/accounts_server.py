@@ -183,7 +183,7 @@ def main() -> int:
             "PI_GLINK_TENANCY": "multitenant",
             "PI_GLINK_AUTH_MODE": "accounts",
             "PI_GLINK_TENANT_CONFIG_FILE": str(tenants_file),
-            "PI_GLINK_ACCOUNTS_DB": str(state_dir / "data" / "accounts.db"),
+            "PI_GLINK_ACCOUNTS_DB": str(state_dir / "data" / "accounts" / "accounts.db"),
             "PI_GLINK_COOKIE_SECURE": "0",  # loopback HTTP acceptance run
             "PI_GLINK_SESSION_ABSOLUTE_SECONDS": "3600",
             "PI_GLINK_SESSION_IDLE_SECONDS": "1800",

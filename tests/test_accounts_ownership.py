@@ -57,7 +57,7 @@ def config_values(tmp_path: Path, tenants: Path, **overrides: str) -> dict[str, 
         "PI_GLINK_TENANCY": "multitenant",
         "PI_GLINK_AUTH_MODE": "accounts",
         "PI_GLINK_TENANT_CONFIG_FILE": str(tenants),
-        "PI_GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts.db"),
+        "PI_GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts" / "accounts.db"),
         "PI_GLINK_COOKIE_SECURE": "0",
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "60",
     }
@@ -102,7 +102,7 @@ def test_first_initialization_happens_under_the_lock_and_a_second_host_changes_n
     try:
         # The first legitimate initialization created the database inside its
         # own data root (the config already refused any other placement).
-        assert config.accounts_db == tmp_path / "data" / "accounts.db"
+        assert config.accounts_db == tmp_path / "data" / "accounts" / "accounts.db"
         assert config.accounts_db.is_file()
         seed_account(first)
         assert first.accounts.find_user_by_email("member@example.test") is not None

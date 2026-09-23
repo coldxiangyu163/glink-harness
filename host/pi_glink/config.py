@@ -79,8 +79,9 @@ class HostConfig:
     auth_mode: str = "gateway"
     #: Gateway assertion signing key; required and owner-only in gateway mode.
     gateway_secret_file: Path | None = None
-    #: Accounts database; default ``<data_root>/accounts.db``, must stay outside
-    #: the repository. Only read in ``accounts`` mode.
+    #: Accounts database; default ``<data_root>/accounts/accounts.db``, must
+    #: stay inside the data root and outside the repository. The directory is
+    #: created owner-only (0700) and the file 0600. Only read in ``accounts`` mode.
     accounts_db: Path | None = None
     #: External HTTPS origin of the deployment, when the host sits behind a TLS
     #: terminating proxy. Frozen, trusted configuration: used for Origin checks
@@ -239,7 +240,7 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         values, "PI_CODING_AGENT_DIR", repo_root / "agent"
     )
     accounts_db = _optional_path(
-        values, "PI_GLINK_ACCOUNTS_DB", data_root / "accounts.db"
+        values, "PI_GLINK_ACCOUNTS_DB", data_root / "accounts" / "accounts.db"
     )
     if auth_mode == "accounts" and accounts_db is not None:
         _require_accounts_db(accounts_db, data_root, repo_root)
