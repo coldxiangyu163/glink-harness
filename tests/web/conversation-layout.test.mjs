@@ -10,10 +10,13 @@ function rule(selector) {
   return match[1];
 }
 
-test('process and its step rows fill the available conversation pane, while answers stay readable', () => {
+test('process and answer share the centered reading column; details stay within it', () => {
   assert.match(rule('.conversation'), /(?:^|;)\s*width:\s*100%/);
+  for (const selector of ['.pi-process', '.pi-answer']) {
+    assert.match(rule(selector), /max-width:\s*var\(--conversation-width\)/);
+    assert.match(rule(selector), /margin-inline:\s*auto/);
+  }
   assert.match(rule('.pi-step-row'), /max-width:\s*100%/);
   assert.match(rule('.pi-thinking-body'), /max-width:\s*100%/);
   assert.match(rule('.pi-tool-detail-wrap'), /max-width:\s*100%/);
-  assert.match(rule('.pi-answer'), /max-width:\s*var\(--conversation-width\)/);
 });

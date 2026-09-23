@@ -840,7 +840,7 @@ h1, h2, h3, h4, p { margin: 0; }
 .home-row-time { flex: 0 0 auto; color: var(--ink-3); font-size: var(--text-mini); line-height: var(--text-mini--line-height); }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * 对话屏：过程随主栏伸缩，问答保持 720px 阅读列 + 贴底输入器 dock
+ * 对话屏：过程与回答共用居中的 720px 阅读列 + 贴底输入器 dock
  * ═══════════════════════════════════════════════════════════════════════════ */
 .chat-view { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .conversation-scroll {
@@ -883,7 +883,7 @@ h1, h2, h3, h4, p { margin: 0; }
 
 /* ── 研究过程（标准库 Thinking · steps + ToolChips）── */
 .pi-run { display: flex; flex-direction: column; gap: var(--space-4); }
-.pi-process { display: flex; flex-direction: column; width: 100%; }
+.pi-process { display: flex; flex-direction: column; width: 100%; max-width: var(--conversation-width); min-width: 0; margin-inline: auto; }
 .pi-process-toggle {
   display: flex;
   align-items: center;
