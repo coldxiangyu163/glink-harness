@@ -131,7 +131,8 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 `X-Pi-Glink-Identity: v1.<base64url(payload)>.<base64url(hmac-sha256)>`。宿主只信任这枚断言，
 不做登录、OIDC 或用户体系；客户端无法用请求体、查询参数或自造请求头指定租户，重复断言头直接拒绝。
 断言至少携带 `tenantId`、`userId`、`role`、`audience`、`iat`、`exp`，宿主以 constant-time HMAC 校验
-签名并检查 audience、过期与寿命上限。
+签名并检查 audience、过期与寿命上限；过期即 401（无宽限窗口），签名正确但字段类型畸形的断言同样
+统一 401，不会变成 500。
 
 - **配置**：本模式要求 `PI_GLINK_GATEWAY_SECRET_FILE`、`PI_GLINK_TENANT_CONFIG_FILE`、
   `PI_GLINK_TENANCY_AUDIENCE` 三项齐备；两个文件必须在仓库外且权限 0600（或更严）。任一缺失、
@@ -148,7 +149,8 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   `429 quota_exceeded`（带 `scope` 与 `limit`，不含任何 run id），没有排队。准入检查与槽位预留
   原子完成；终态 run 只有确认资源释放才归还容量，清理状态未知会全局挡住新准入（fail-closed），
   需要运维用 `--unreleased` / `--mark-released` 人工裁决。
-- **SSE 与 CSRF**：事件流在写出任何响应头之前验权；断言中途过期时主动结束该流。POST 会检查
+- **SSE 与 CSRF**：事件流在写出任何响应头之前验权；断言过期在重放与实时两个阶段都按帧检查，
+  中途过期立即结束该流（没有宽限窗口）。POST 会检查
   `Origin`/`Referer`/`Sec-Fetch-Site`，跨站请求在启动任何执行面之前被拒绝。健康端点无需身份，但
   不返回任何 run 标识；配额与非配额准入错误也不泄露其他租户的 run id。
 - **前端**：不需要登录页，也不需要把令牌放进页面。浏览器以同源凭据访问宿主（`fetch` 使用

@@ -14,7 +14,11 @@ Design rules (see ``docs/architecture.md`` §10):
 * the signature is checked with :func:`hmac.compare_digest`
   (constant-time), the audience must match the frozen configuration, and the
   assertion must be short-lived (``exp`` within a bounded window and not
-  already expired);
+  already expired); an expiration in the past is refused without a grace
+  window, so a verified context is never already expired;
+* a correctly signed but malformed payload (non-string role, wrong field
+  types) is refused as :class:`TenantAuthError`, never as a type error, so the
+  request layer always answers a uniform 401;
 * a client cannot label itself: request bodies, query parameters and other
   headers never feed :class:`TenantContext`;
 * duplicate assertion headers are refused instead of picking one — that is the
@@ -149,9 +153,9 @@ def issue_assertion(
         # Minting is a caller-side API: a malformed identity is a programming
         # error, not an authentication failure.
         raise ValueError(str(exc)) from exc
-    if audience == "" or not isinstance(audience, str):
+    if not isinstance(audience, str) or audience == "":
         raise ValueError("audience must be a non-empty string")
-    if role not in ROLES:
+    if not isinstance(role, str) or role not in ROLES:
         raise ValueError(f"role must be one of {sorted(ROLES)}")
     issued = time.time() if now is None else float(now)
     payload: dict[str, Any] = {
@@ -187,7 +191,14 @@ def verify_assertion(
     Every check the objective names happens here: signature (constant-time),
     audience, expiration and a bounded lifetime, plus the identity fields'
     types. ``role`` is part of the signed payload, so a member cannot promote
-    itself by changing a header.
+    itself by changing a header; a non-string role (JSON array/object/number)
+    is refused with :class:`TenantAuthError` instead of raising a type error.
+
+    **Expiry is absolute.** A token whose ``exp`` has passed is refused at
+    verification time — there is deliberately no grace window for an expired
+    token, so a verified :class:`TenantContext` is never already expired. The
+    frozen clock-skew tolerance applies only to the *issue* time (a gateway
+    whose clock runs slightly ahead) and to the accepted lifetime bound.
     """
     if not isinstance(token, str) or not token or len(token) > MAX_ASSERTION_BYTES:
         raise TenantAuthError("assertion is missing or oversized")
@@ -212,7 +223,7 @@ def verify_assertion(
     if payload.get("audience") != audience:
         raise TenantAuthError("assertion audience does not match this host")
     role = payload.get("role")
-    if role not in ROLES:
+    if not isinstance(role, str) or role not in ROLES:
         raise TenantAuthError("assertion role is not recognized")
 
     stamp = time.time() if now is None else float(now)
@@ -223,7 +234,10 @@ def verify_assertion(
     if not isinstance(issued, int) or isinstance(issued, bool):
         raise TenantAuthError("assertion issue time is missing")
     skew = max(0, int(clock_skew_seconds))
-    if expires <= stamp - skew:
+    if expires <= stamp:
+        # No grace window: accepting an assertion that is already expired would
+        # return a context whose ``expired()`` answers True while the request
+        # was authorized — the two answers must agree.
         raise TenantAuthError("assertion has expired")
     if expires - issued > max(1, int(max_lifetime_seconds)) + 2 * skew:
         raise TenantAuthError("assertion lifetime exceeds the accepted bound")

@@ -239,6 +239,12 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         except TenantAuthError as exc:
             logger.info("request rejected as unauthenticated: %s", exc)
             return None
+        except Exception as exc:  # noqa: BLE001 - fail closed, never 500 on a hostile token
+            # A malformed assertion must never turn into a 500: every
+            # verification failure is an unauthenticated request. Only the
+            # exception type is logged — never the token or its payload.
+            logger.warning("assertion verification failed: %s", type(exc).__name__)
+            return None
 
     def _request_origin_allowed(self) -> bool:
         """Refuse a browser request whose own metadata says it is cross-site.
@@ -653,6 +659,17 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         try:
             last = after
             for event in store.iter_events(run_id, after=after):
+                # Expiry is checked on every frame, replay included: a long
+                # history (or a slow reader) must not keep serving frames past
+                # the assertion's expiration, with or without a live
+                # subscription. The stream then ends cleanly and the client
+                # re-authenticates.
+                if _assertion_expired(context):
+                    logger.info(
+                        "event stream ended: assertion expired during replay run=%s",
+                        run_id,
+                    )
+                    return
                 seq = event.get("seq")
                 if isinstance(seq, int):
                     if seq <= last:
@@ -664,7 +681,7 @@ class HostRequestHandler(BaseHTTPRequestHandler):
                     # A short-lived assertion must not outlive itself on a long
                     # stream: once it expires the stream is closed cleanly and
                     # the client must re-authenticate (and reconnect).
-                    if context is not None and context.expired():
+                    if _assertion_expired(context):
                         logger.info(
                             "event stream ended: assertion expired run=%s", run_id
                         )
@@ -736,6 +753,14 @@ def _run_view(
         "usage": record.usage,
         "redacted": record.redacted,
     }
+
+
+def _assertion_expired(context: TenantContext | None) -> bool:
+    """True when a verified identity has passed its expiration.
+
+    Local mode (``context is None``) carries no assertion, so nothing expires.
+    """
+    return context is not None and context.expired()
 
 
 def _same_origin(url: str, host: str) -> bool:

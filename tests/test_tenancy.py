@@ -7,7 +7,11 @@ is never read.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -35,6 +39,26 @@ def write_file(tmp_path: Path, name: str, content: bytes, mode: int = 0o600) -> 
     path.write_bytes(content)
     path.chmod(mode)
     return path
+
+
+def forge_assertion(secret: bytes, payload: dict) -> str:
+    """Mint a token with an arbitrary payload, signed like the gateway does.
+
+    ``issue_assertion`` refuses malformed identities, so auditing what a
+    malicious or buggy gateway could actually sign needs the raw format: this
+    helper only uses the documented wire contract (version, base64url payload,
+    HMAC-SHA256 over ``version.payload``), not host internals.
+    """
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).rstrip(b"=").decode("ascii")
+    signing_input = f"v1.{encoded}".encode("ascii")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(secret, signing_input, hashlib.sha256).digest()
+    ).rstrip(b"=").decode("ascii")
+    return f"v1.{encoded}.{signature}"
 
 
 def tenant_document() -> dict:
@@ -117,6 +141,90 @@ def test_expired_and_long_lived_assertions_are_refused() -> None:
         verify_assertion(SECRET, long_lived, audience=AUDIENCE)
 
 
+def test_an_expired_assertion_is_refused_without_a_grace_window() -> None:
+    """A verified context must never report itself as already expired.
+
+    The acceptance audit reproduced ``exp = now - 1s`` being accepted while
+    ``TenantContext.expired()`` answered ``True``: an assertion that is past
+    its expiration is refused at verification time, not after a grace window.
+    """
+    stale = issue_assertion(
+        SECRET,
+        tenant_id="tenant-alpha",
+        user_id="user-1",
+        audience=AUDIENCE,
+        ttl_seconds=1,
+        now=time.time() - 2,
+    )
+    with pytest.raises(TenantAuthError, match="expired"):
+        verify_assertion(SECRET, stale, audience=AUDIENCE)
+
+    # Boundary: a still-valid assertion is accepted and its context is not
+    # already expired, so ``verify`` and ``expired()`` agree.
+    fresh = issue_assertion(
+        SECRET,
+        tenant_id="tenant-alpha",
+        user_id="user-1",
+        audience=AUDIENCE,
+        ttl_seconds=2,
+    )
+    context = verify_assertion(SECRET, fresh, audience=AUDIENCE)
+    assert context.expired() is False
+    assert context.expires_at > time.time()
+
+
+def test_clock_skew_tolerates_a_future_issue_time_but_not_expiry() -> None:
+    """Legal clock drift keeps working; an already-expired token does not.
+
+    The issue time may be slightly ahead of the host clock (within the frozen
+    skew), while an expiration in the past is refused regardless of the skew.
+    """
+    stamp = time.time()
+    payload = {
+        "tenantId": "tenant-alpha",
+        "userId": "user-1",
+        "role": "member",
+        "audience": AUDIENCE,
+        "iat": int(stamp + 5),
+        "exp": int(stamp + 120),
+    }
+    context = verify_assertion(
+        SECRET, forge_assertion(SECRET, payload), audience=AUDIENCE, now=stamp
+    )
+    assert context.user_id == "user-1"
+
+    payload["iat"] = int(stamp + 3600)
+    with pytest.raises(TenantAuthError, match="validity window"):
+        verify_assertion(SECRET, forge_assertion(SECRET, payload), audience=AUDIENCE, now=stamp)
+
+    payload["iat"] = int(stamp - 5)
+    payload["exp"] = int(stamp - 1)
+    with pytest.raises(TenantAuthError, match="expired"):
+        verify_assertion(SECRET, forge_assertion(SECRET, payload), audience=AUDIENCE, now=stamp)
+
+
+@pytest.mark.parametrize("role", [["admin"], {"name": "admin"}, 7, True, None])
+def test_non_string_roles_are_refused_without_crashing(role: object) -> None:
+    """A signed payload with a non-string role is a 401, never an exception.
+
+    The audit reproduced a ``TypeError`` for JSON arrays/objects (unhashable
+    membership test), which surfaced as HTTP 500 through the request handler.
+    """
+    stamp = time.time()
+    payload = {
+        "tenantId": "tenant-alpha",
+        "userId": "user-1",
+        "role": role,
+        "audience": AUDIENCE,
+        "iat": int(stamp),
+        "exp": int(stamp + 120),
+    }
+    with pytest.raises(TenantAuthError, match="role"):
+        verify_assertion(
+            SECRET, forge_assertion(SECRET, payload), audience=AUDIENCE, now=stamp
+        )
+
+
 def test_authenticator_requires_exactly_one_header_value() -> None:
     authenticator = GatewayAuthenticator(SECRET, audience=AUDIENCE)
     token = issue_assertion(
@@ -137,6 +245,14 @@ def test_issue_assertion_rejects_malformed_identities() -> None:
     with pytest.raises(ValueError):
         issue_assertion(
             SECRET, tenant_id="tenant-alpha", user_id="user-1", audience=AUDIENCE, role="root"
+        )
+    with pytest.raises(ValueError):
+        issue_assertion(
+            SECRET,
+            tenant_id="tenant-alpha",
+            user_id="user-1",
+            audience=AUDIENCE,
+            role=["admin"],
         )
 
 

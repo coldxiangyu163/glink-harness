@@ -8,6 +8,9 @@ container, sandbox, model call or real .env / ~/.pi file is involved.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import threading
 import time
@@ -59,6 +62,71 @@ def assertion(
         role=role,
         ttl_seconds=ttl,
     )
+
+
+def forge_assertion(secret: bytes, payload: dict) -> str:
+    """Sign an arbitrary payload, using only the documented wire contract."""
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).rstrip(b"=").decode("ascii")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(secret, f"v1.{encoded}".encode("ascii"), hashlib.sha256).digest()
+    ).rstrip(b"=").decode("ascii")
+    return f"v1.{encoded}.{signature}"
+
+
+def seed_history(
+    server,
+    run_id: str,
+    *,
+    frames: int = 60,
+    tenant: str = "tenant-alpha",
+    user: str = "user-a",
+) -> None:
+    """Write a finished run with a durable history of ``frames`` events."""
+    store = server.store
+    store.create(
+        "历史回放",
+        run_id=run_id,
+        workspace=server.config.workspace_root / run_id,
+        tenant_id=tenant,
+        creator_user_id=user,
+    )
+    for seq in range(1, frames + 1):
+        store.append_event(
+            run_id,
+            {
+                "type": "kernel_status",
+                "runId": run_id,
+                "seq": seq,
+                "ts": time.time(),
+                "payload": {"level": "info", "message": f"frame-{seq}"},
+            },
+        )
+    store.commit_terminal(
+        run_id,
+        {
+            "type": "run_finished",
+            "runId": run_id,
+            "seq": frames + 1,
+            "ts": time.time(),
+            "payload": {"status": "finished", "reportStatus": "none"},
+        },
+    )
+
+
+def slow_history(server, monkeypatch: pytest.MonkeyPatch, *, delay: float = 0.05) -> None:
+    """Make a persisted-log replay slow, like a large history on a busy host."""
+    original = server.store.iter_events
+
+    def wrapped(run_id: str, after: int = 0):
+        for event in original(run_id, after=after):
+            time.sleep(delay)
+            yield event
+
+    monkeypatch.setattr(server.store, "iter_events", wrapped)
 
 
 def _auth_key(directory: Path) -> str:
@@ -374,6 +442,46 @@ def test_public_config_reports_the_callers_own_model_credential(server: PiGlinkS
     # The public view never names another tenant or a credential.
     for name in ("tenant-alpha", "tenant-beta", ALPHA_KEY, BETA_KEY, HOST_KEY):
         assert name not in json.dumps(alpha_view)
+
+
+def test_malformed_role_assertion_is_a_401_not_a_500(server: PiGlinkServer) -> None:
+    """A signed payload whose role is a JSON array/object must not crash the host.
+
+    The acceptance audit reproduced a ``TypeError`` (unhashable membership
+    test) escaping the verifier, which the request handler answered with HTTP
+    500. Every malformed but correctly signed identity is a 401.
+    """
+    stamp = time.time()
+    for role in (["admin"], {"name": "admin"}):
+        token = forge_assertion(
+            SECRET,
+            {
+                "tenantId": "tenant-alpha",
+                "userId": "user-a",
+                "role": role,
+                "audience": AUDIENCE,
+                "iat": int(stamp),
+                "exp": int(stamp + 120),
+            },
+        )
+        status, _headers, raw = request(server, "/api/runs", token=token)
+        assert status == 401, f"role={role!r} must be 401, got {status}"
+        assert json.loads(raw) == {"error": "unauthenticated"}
+
+
+def test_just_expired_assertion_is_a_401(server: PiGlinkServer) -> None:
+    """A token one second past its ``exp`` is refused, not accepted in grace."""
+    stale = issue_assertion(
+        SECRET,
+        tenant_id="tenant-alpha",
+        user_id="user-a",
+        audience=AUDIENCE,
+        ttl_seconds=1,
+        now=time.time() - 2,
+    )
+    status, _headers, raw = request(server, "/api/runs", token=stale)
+    assert status == 401
+    assert json.loads(raw) == {"error": "unauthenticated"}
 
 
 def test_client_supplied_owner_fields_are_ignored(server: PiGlinkServer) -> None:
@@ -795,7 +903,6 @@ def test_accepted_cancellation_still_wins_under_concurrency(
 
 # -- SSE ----------------------------------------------------------------------
 
-
 def test_event_stream_authorizes_before_writing_headers(
     server: PiGlinkServer, adapters: AdapterBehavior
 ) -> None:
@@ -836,6 +943,50 @@ def test_event_stream_ends_when_the_assertion_expires(
     assert elapsed < 10.0, "断言过期后流必须被终止"
     # The run itself is unaffected; a fresh assertion can read it again.
     request(server, f"/api/runs/{run['runId']}/stop", method="POST", token=short)
+
+
+def test_event_stream_stops_when_the_assertion_expires_during_replay(
+    server: PiGlinkServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A persisted-log replay must honor the assertion expiry mid-stream.
+
+    The audit reproduced the opposite: only the live subscription loop checked
+    ``exp``, so replaying a long history (a finished run, no live subscriber)
+    kept sending frames — including the terminal frame — long after the
+    assertion had expired.
+    """
+    seed_history(server, "history-expire", frames=60)
+    slow_history(server, monkeypatch)
+    short = assertion("tenant-alpha", "user-a", ttl=2)
+    started = time.monotonic()
+    status, content_type, body = read_stream(
+        server, "/api/runs/history-expire/events", token=short, timeout=20.0
+    )
+    elapsed = time.monotonic() - started
+    assert status == 200 and content_type.startswith("text/event-stream")
+    text = body.decode("utf-8")
+    assert "event: run_finished" not in text, "过期后不得继续发送历史（含终帧）"
+    assert text.count("event: kernel_status") < 60, "过期后不得继续重放剩余帧"
+    assert elapsed < 4.0, f"流应在断言过期附近结束（实际 {elapsed:.2f}s）"
+
+
+def test_event_stream_replays_the_whole_history_with_a_valid_assertion(
+    server: PiGlinkServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Positive case: a valid assertion still gets the complete replay."""
+    seed_history(server, "history-full", frames=20)
+    slow_history(server, monkeypatch)
+    token = assertion("tenant-alpha", "user-a", ttl=120)
+    started = time.monotonic()
+    status, _content_type, body = read_stream(
+        server, "/api/runs/history-full/events", token=token, timeout=20.0
+    )
+    elapsed = time.monotonic() - started
+    assert status == 200
+    text = body.decode("utf-8")
+    assert text.count("event: kernel_status") == 20
+    assert "event: run_finished" in text
+    assert elapsed >= 0.9, "测试本身要求重放足够慢，才能验证逐帧检查"
 
 
 def test_restart_replay_keeps_tenant_isolation(
