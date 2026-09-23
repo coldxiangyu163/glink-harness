@@ -39,6 +39,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -165,11 +166,46 @@ class E2BSandboxClient:
                 self.uploaded.append(sandbox_path)
                 self.upload_manifest.append((relative, hashlib.sha256(data).hexdigest()))
 
+    def upload_continuation(self, session_name: str, workspace: Path) -> None:
+        """Transfer only the host-owned session snapshot and prior report."""
+        if session_name != "continued.jsonl":
+            raise SandboxError("invalid continuation session")
+        sandbox = self._require_sandbox()
+        with ArtifactTree(self.runtime.session_dir) as tree:
+            data = tree.read(session_name, max_bytes=ARTIFACT_MAX_BYTES)
+        sandbox.files.write(f"{SANDBOX_SESSIONS}/{session_name}", data)
+        try:
+            with ArtifactTree(workspace) as tree:
+                report = tree.read(REPORT_FILENAME, max_bytes=ARTIFACT_MAX_BYTES)
+        except ArtifactError:
+            return
+        sandbox.files.write(f"{SANDBOX_WORKSPACE}/{REPORT_FILENAME}", report)
+
+    def recover_session(self) -> tuple[Path | None, str | None]:
+        """Recover a single session file before the sandbox is destroyed."""
+        sandbox = self._require_sandbox()
+        try:
+            entries = sandbox.files.list(SANDBOX_SESSIONS)
+            names = [str(getattr(entry, "name", "")) for entry in entries]
+            if len(names) != 1 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\.jsonl", names[0]):
+                return None, "沙箱会话文件不可续接"
+            name = names[0]
+            data = sandbox.files.read(f"{SANDBOX_SESSIONS}/{name}")
+            content = data if isinstance(data, bytes) else str(data).encode("utf-8")
+            if not content or len(content) > ARTIFACT_MAX_BYTES:
+                return None, "沙箱会话文件不可续接"
+            with ArtifactTree(self.runtime.session_dir) as tree:
+                tree.replace(name, content, max_bytes=ARTIFACT_MAX_BYTES)
+            return self.runtime.session_dir / name, None
+        except Exception as exc:  # noqa: BLE001 - sandbox SDK failures must not hide the verdict
+            return None, f"沙箱会话回收失败: {type(exc).__name__}"
+
     def run_prompt(
         self,
         prompt: str,
         *,
         system_prompt: str = "",
+        resume_session: str | None = None,
     ) -> tuple[int, str]:
         """Run ``pi --mode json`` once inside the sandbox.
 
@@ -182,7 +218,7 @@ class E2BSandboxClient:
         ``docs/architecture.md`` records as a known difference.
         """
         sandbox = self._require_sandbox()
-        command = self._command(prompt, system_prompt)
+        command = self._command(prompt, system_prompt, resume_session=resume_session)
         handle = sandbox.commands.run(command, background=True, envs=self._model_envs())
         result = handle.wait()
         exit_code = int(getattr(result, "exit_code", 1))
@@ -298,7 +334,7 @@ class E2BSandboxClient:
             "PI_TELEMETRY": "0",
         }
 
-    def _command(self, prompt: str, system_prompt: str) -> str:
+    def _command(self, prompt: str, system_prompt: str, *, resume_session: str | None = None) -> str:
         """Compose the sandbox command.
 
         Both the prompt and the research contract are base64-encoded before they
@@ -320,6 +356,10 @@ class E2BSandboxClient:
             "--model", self.runtime.model_id,
             "--name", f"pi-glink-{self.run_id}",
         ]
+        if resume_session:
+            if resume_session != "continued.jsonl":
+                raise SandboxError("invalid continuation session")
+            pi.extend(["--session", f"{SANDBOX_SESSIONS}/{resume_session}"])
         if system_prompt:
             encoded_system = base64.b64encode(system_prompt.encode("utf-8")).decode("ascii")
             parts.append(f"SYSTEM=$(printf '%s' '{encoded_system}' | base64 -d)")

@@ -78,6 +78,8 @@ class ExecutionSpec:
     workspace: Path
     timeout_seconds: int
     extra_argv: tuple[str, ...] = ()
+    resume_session: str | None = None
+    expected_session_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -368,6 +370,8 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
         self._released = True
         self._release_failures: list[str] = []
         self._driver: threading.Thread | None = None
+        self._session_file: Path | None = None
+        self._session_id: str | None = None
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -383,6 +387,8 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
         try:
             client.start(timeout_seconds=self.spec.timeout_seconds + 300)
             client.upload_config()
+            if self.spec.resume_session:
+                client.upload_continuation(self.spec.resume_session, self.spec.workspace)
         except Exception:
             # A partially created sandbox must still be destroyed.
             self._release_failures.extend(client.close())
@@ -398,7 +404,10 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
             payload={
                 "sandboxId": client.sandbox_id,
                 "template": self.spec.config.e2b_template,
-            }
+                "sessionId": self._session_id,
+            },
+            session_id=self._session_id,
+            session_file=str(self._session_file) if self._session_file else None,
         )
 
     def deliver_input(self) -> None:
@@ -414,7 +423,8 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
         assert client is not None
         try:
             exit_code, stderr_tail = client.run_prompt(
-                self.spec.prompt, system_prompt=self.spec.system_prompt
+                self.spec.prompt, system_prompt=self.spec.system_prompt,
+                resume_session=self.spec.resume_session,
             )
             if self._cancelled.is_set():
                 return
@@ -423,7 +433,11 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
                     return
                 frame = parse_json_stream_line(line)
                 if frame is not None:
+                    if frame.get("type") == "session" and isinstance(frame.get("id"), str):
+                        self._session_id = frame["id"]
                     self._on_frame(frame)
+            if self.spec.expected_session_id and self._session_id != self.spec.expected_session_id:
+                raise PiRpcError("continued session identity did not match the parent")
             self._outcome.exit_code = exit_code
             if exit_code != 0:
                 self._outcome.stop_reason = "kernel_exit"
@@ -483,6 +497,10 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
                 return ArtifactRecovery()
             return ArtifactRecovery(failures=("sandbox 已关闭，产物不可回收",))
         files, failures = client.recover_artifacts(destination)
+        session_file, session_failure = client.recover_session()
+        self._session_file = session_file
+        if session_failure:
+            failures.append(session_failure)
         return ArtifactRecovery(files=tuple(files), failures=tuple(failures))
 
     def close(self) -> CleanupReport:

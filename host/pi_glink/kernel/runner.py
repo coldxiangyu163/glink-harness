@@ -29,6 +29,7 @@ terminal frame whose settled copy is missing is settled, never overwritten.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
@@ -134,6 +135,14 @@ class RunQuotaExceeded(RuntimeError):
         self.limit = limit
 
 
+class FollowupUnavailable(RuntimeError):
+    """A parent run cannot safely supply a resumable session."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class EventLogError(RuntimeError):
     """The durable event log could not be written; the frame must stay hidden."""
 
@@ -178,6 +187,10 @@ class _Execution:
     #: this run's credentials only, so one tenant's secret is never used to
     #: redact (or leaked into) another tenant's events, logs or artifacts.
     redactor: SecretRedactor | None = None
+    #: Snapshot of the sanitized previous session. Never share a mutable session file.
+    session_seed: bytes | None = None
+    parent_run_id: str | None = None
+    seeded_report_digest: str | None = None
     #: Guards the phase, the cancellation flag and every frame commit.
     lock: threading.RLock = field(default_factory=threading.RLock)
     phase: str = _OPEN
@@ -255,7 +268,13 @@ class RunManager:
                 None,
             )
 
-    def start(self, prompt: str, context: TenantContext | None = None) -> RunRecord:
+    def start(
+        self,
+        prompt: str,
+        context: TenantContext | None = None,
+        *,
+        parent_run_id: str | None = None,
+    ) -> RunRecord:
         """Admit a run and execute it in the background.
 
         ``context`` is the verified tenant identity in multi-tenant mode and
@@ -263,6 +282,11 @@ class RunManager:
         from that context alone — never from the request body, a query parameter
         or any other client-controlled input — and are written atomically with
         the admission record.
+
+        ``parent_run_id`` continues one earlier research conversation. In
+        multi-tenant mode the parent must belong to the caller's own tenant:
+        an unknown, foreign or ownerless parent is refused as ``unknown_run``
+        **before** its session, report, status or children are read.
         """
         text = (prompt or "").strip()
         if not text:
@@ -279,6 +303,7 @@ class RunManager:
 
         with self._lock:
             self._check_admission(context)
+            seed = self._resume_seed(context, parent_run_id, redactor)
             run_id = uuid.uuid4().hex[:12]
             workspace = self.config.workspace_root / run_id
             record = self.store.create(
@@ -287,6 +312,7 @@ class RunManager:
                 workspace=workspace,
                 tenant_id=context.tenant_id if context is not None else None,
                 creator_user_id=context.user_id if context is not None else None,
+                parent_run_id=parent_run_id,
             )
             execution = _Execution(
                 record=record,
@@ -295,6 +321,8 @@ class RunManager:
                 context=context,
                 credentials=credentials,
                 redactor=redactor,
+                session_seed=seed,
+                parent_run_id=parent_run_id,
             )
             self._executions[run_id] = execution
             # Register the run before the caller gets the id back: a browser
@@ -330,6 +358,81 @@ class RunManager:
                 origin="tenant",
             )
         return RunCredentials.from_host(self.config)
+
+    # -- follow-up parents ----------------------------------------------------
+
+    def _authorized_parent(
+        self, context: TenantContext | None, parent_run_id: str
+    ) -> RunRecord | None:
+        """The parent this run may resume, or ``None`` (same as an unknown run).
+
+        The tenant gate runs before any other field of the parent is read. In
+        multi-tenant mode an unknown, foreign or ownerless (legacy) parent is
+        therefore invisible: the caller cannot learn its status, session,
+        report, children or existence. Local mode has no tenant identity and
+        keeps the original single-user behaviour.
+        """
+        parent = self.store.get(parent_run_id)
+        if parent is None:
+            return None
+        if self.config.multi_tenant and (
+            context is None or parent.tenant_id != context.tenant_id
+        ):
+            return None
+        return parent
+
+    def _visible_records(self, context: TenantContext | None) -> list[RunRecord]:
+        """Every run the caller may see (all runs in local mode)."""
+        if not self.config.multi_tenant:
+            return self.store.list(limit=None)
+        return self.store.list_for(context.tenant_id, limit=None)
+
+    def _resume_seed(
+        self,
+        context: TenantContext | None,
+        parent_run_id: str | None,
+        redactor: SecretRedactor,
+    ) -> bytes | None:
+        """Snapshot the sanitized session of an authorized parent run.
+
+        The owner gate comes first: nothing of an unknown or other-tenant
+        parent is read before :meth:`_authorized_parent` approved it. The
+        recorded session path is not a capability either — it must be a direct
+        file in that run's own session directory, and the bytes are re-redacted
+        before they can reach the next kernel. Caller holds the admission lock.
+        """
+        if parent_run_id is None:
+            return None
+        parent = self._authorized_parent(context, parent_run_id)
+        if parent is None:
+            raise FollowupUnavailable("unknown_run")
+        if not parent.is_terminal:
+            raise FollowupUnavailable("run_busy")
+        if any(
+            item.parent_run_id == parent_run_id
+            for item in self._visible_records(context)
+        ):
+            raise FollowupUnavailable("stale_run")
+        # The recorded path is not a capability. It must be a direct file in
+        # that run's own session directory; ArtifactTree refuses links.
+        session_dir = Path(self.config.session_dir) / parent_run_id
+        path = Path(parent.session_file or "")
+        if path.parent != session_dir or path.suffix != ".jsonl":
+            raise FollowupUnavailable("session_unavailable")
+        try:
+            with ArtifactTree(session_dir) as tree:
+                seed = tree.read(path.name, max_bytes=REPORT_MAX_BYTES)
+        except (ArtifactError, OSError) as exc:
+            raise FollowupUnavailable("session_unavailable") from exc
+        if not seed.strip() or not parent.session_id:
+            raise FollowupUnavailable("session_unavailable")
+        try:
+            # Historical files may predate the latest redaction rules. Never
+            # hand an unchecked copy to the next kernel.
+            seed = redactor.redact(seed.decode("utf-8")).encode("utf-8")
+        except UnicodeError as exc:
+            raise FollowupUnavailable("session_unavailable") from exc
+        return seed
 
     def _redactor_for(self, credentials: RunCredentials) -> SecretRedactor:
         """A per-run redaction boundary: host secrets + this run's credentials."""
@@ -677,6 +780,7 @@ class RunManager:
         run_id = execution.record.run_id
         try:
             execution.workspace.mkdir(parents=True, exist_ok=True)
+            self._seed_report(execution)
             self._emit_open(execution, events.RUN_STARTED, {"prompt": execution.record.prompt})
 
             runtime = self._prepare_runtime(execution)
@@ -686,6 +790,12 @@ class RunManager:
             self._store_external_identity(execution, adapter)
 
             session = adapter.session_info()
+            if execution.parent_run_id and self.config.executor != "e2b":
+                parent = self._authorized_parent(
+                    execution.context, execution.parent_run_id
+                )
+                if not session or not parent or session.session_id != parent.session_id:
+                    raise FollowupUnavailable("session_unavailable")
             if session is not None:
                 self._publish_session_ready(execution, session)
 
@@ -734,6 +844,10 @@ class RunManager:
             try:
                 recovery = adapter.recover_artifacts(execution.workspace)
                 execution.artifact_failures.extend(recovery.failures)
+                if self.config.executor == "e2b":
+                    recovered_session = adapter.session_info()
+                    if recovered_session and recovered_session.session_file:
+                        self._publish_session_ready(execution, recovered_session)
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 execution.artifact_failures.append(
                     f"产物回收失败: {type(exc).__name__}: {exc}"
@@ -888,6 +1002,28 @@ class RunManager:
 
     # -- pi configuration -----------------------------------------------------
 
+    def _seed_report(self, execution: _Execution) -> None:
+        """Put the previous deliverable in this run's private workspace for revisions.
+
+        The parent is owner-checked again here (it was authorized at admission):
+        a report is copied only from a run this run's tenant may read, never
+        from another tenant or an ownerless legacy record.
+        """
+        if not execution.parent_run_id:
+            return
+        parent = self._authorized_parent(execution.context, execution.parent_run_id)
+        location = self.store.report_location(parent) if parent else None
+        if location is None:
+            return
+        try:
+            with ArtifactTree(location.root) as source:
+                content = source.read(location.relative, max_bytes=REPORT_MAX_BYTES)
+            with ArtifactTree(execution.workspace) as destination:
+                destination.replace(REPORT_FILENAME, content, max_bytes=REPORT_MAX_BYTES)
+            execution.seeded_report_digest = hashlib.sha256(content).hexdigest()
+        except (ArtifactError, OSError) as exc:
+            raise FollowupUnavailable("report_unavailable") from exc
+
     def _prepare_runtime(self, execution: _Execution) -> AgentRuntime:
         """Render the run's own pi configuration and session directory.
 
@@ -907,6 +1043,12 @@ class RunManager:
             credentials=execution.credentials,
         )
         execution.runtime = runtime
+        if execution.session_seed is not None:
+            with ArtifactTree(runtime.session_dir) as tree:
+                tree.replace(
+                    "continued.jsonl", execution.session_seed, max_bytes=REPORT_MAX_BYTES
+                )
+            execution.session_seed = None
         # This run's own redaction boundary: the host's secrets plus the
         # credentials this run was actually given. The rendered search
         # credential only exists in the file, so it is learned here (never
@@ -926,6 +1068,15 @@ class RunManager:
         self, execution: _Execution, runtime: AgentRuntime
     ) -> ExecutionAdapter:
         run_id = execution.record.run_id
+        parent = (
+            self._authorized_parent(execution.context, execution.parent_run_id)
+            if execution.parent_run_id
+            else None
+        )
+        if execution.parent_run_id and parent is None:
+            # The parent disappeared or is no longer readable by this run's
+            # tenant: never start a kernel with an unverified resume target.
+            raise FollowupUnavailable("session_unavailable")
         spec = ExecutionSpec(
             config=self.config,
             runtime=runtime,
@@ -935,6 +1086,8 @@ class RunManager:
             workspace=execution.workspace,
             timeout_seconds=self.config.task_timeout_seconds,
             extra_argv=tuple(self._extra_argv(run_id)),
+            resume_session="continued.jsonl" if parent else None,
+            expected_session_id=parent.session_id if parent else None,
         )
         return build_adapter(
             spec,
@@ -951,7 +1104,10 @@ class RunManager:
         self, spec: ExecutionSpec
     ) -> tuple[list[str], dict[str, str], Path | None]:
         return (
-            build_pi_argv(spec.config, spec.runtime, extra=list(spec.extra_argv)),
+            build_pi_argv(spec.config, spec.runtime, extra=[
+                *spec.extra_argv,
+                *(["--session", str(spec.runtime.session_dir / spec.resume_session)] if spec.resume_session else []),
+            ]),
             build_pi_env(spec.config, spec.runtime),
             spec.workspace,
         )
@@ -969,7 +1125,7 @@ class RunManager:
             run_id=spec.run_id,
             workspace=spec.workspace,
             session_dir=spec.runtime.session_dir,
-            extra=list(spec.extra_argv),
+            extra=[*spec.extra_argv, *(["--session", f"/sessions/{spec.resume_session}"] if spec.resume_session else [])],
         )
         return plan.argv, plan.env, plan.container_name
 
@@ -1172,6 +1328,10 @@ class RunManager:
             execution.report_status = "rejected"
             execution.report_path = None
             self._report_warning(execution, f"report.md 未通过安全校验，已拒绝：{exc}")
+            return
+        if execution.seeded_report_digest is not None and execution.seeded_report_digest == hashlib.sha256(data).hexdigest():
+            # The previous deliverable is context, not a newly generated file.
+            execution.report_status = "missing"
             return
         original = data.decode("utf-8", errors="replace")
         redacted = self._run_redactor(execution).redact(original)

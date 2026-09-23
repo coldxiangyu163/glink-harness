@@ -107,6 +107,104 @@ def test_start_run_returns_a_run_view(server: PiGlinkServer) -> None:
     assert final["eventCount"] > 0
 
 
+def test_followup_continues_the_same_session_without_mutating_previous_run(tmp_path: Path) -> None:
+    def factory(argv, *, cwd=None, env=None, on_event=None):
+        return PiRpcClient(
+            [sys.executable, str(FAKE_PI), *argv[1:]], cwd=cwd,
+            env={**(env or {}), "FAKE_PI_PERSIST_SESSION": "1", "FAKE_PI_WRITE_REPORT": "1"},
+            on_event=on_event,
+        )
+
+    instance = create_server(make_config(tmp_path), client_factory=factory)
+    thread = threading.Thread(target=instance.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, _, raw = request(instance, "/api/runs", method="POST", body={"prompt": "第一个问题"})
+        assert status == 201
+        parent = json.loads(raw)["run"]
+        wait_for_terminal(instance, parent["runId"])
+        parent_record = instance.store.get(parent["runId"])
+        parent_bytes = Path(parent_record.session_file).read_bytes()
+
+        status, _, raw = request(instance, "/api/runs", method="POST", body={
+            "prompt": "追问细节", "parentRunId": parent["runId"],
+        })
+        assert status == 201, raw
+        child = json.loads(raw)["run"]
+        assert child["parentRunId"] == parent["runId"]
+        final = wait_for_terminal(instance, child["runId"])
+        assert final["status"] == "finished"
+        child_record = instance.store.get(child["runId"])
+        assert child_record.session_id == parent_record.session_id
+        assert Path(parent_record.session_file).read_bytes() == parent_bytes
+        assert b"\xe8\xbf\xbd\xe9\x97\xae" in Path(child_record.session_file).read_bytes()
+        assert final["hasReport"] is True
+        assert instance.store.get(parent["runId"]).event_count == parent_record.event_count
+
+        status, _, raw = request(instance, "/api/runs", method="POST", body={
+            "prompt": "不能从旧轮分叉", "parentRunId": parent["runId"],
+        })
+        assert status == 409
+        assert json.loads(raw)["error"] == "stale_run"
+    finally:
+        instance.shutdown()
+        instance.server_close()
+        thread.join(timeout=5)
+
+
+def test_followup_refuses_a_kernel_that_did_not_resume_parent_session(tmp_path: Path) -> None:
+    launches = 0
+
+    def factory(argv, *, cwd=None, env=None, on_event=None):
+        nonlocal launches
+        launches += 1
+        return PiRpcClient(
+            [sys.executable, str(FAKE_PI), *argv[1:]], cwd=cwd,
+            env={**(env or {}), "FAKE_PI_PERSIST_SESSION": "1",
+                 "FAKE_PI_SESSION_ID": "original" if launches == 1 else "unexpected"},
+            on_event=on_event,
+        )
+
+    instance = create_server(make_config(tmp_path), client_factory=factory)
+    thread = threading.Thread(target=instance.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _, _, raw = request(instance, "/api/runs", method="POST", body={"prompt": "原问题"})
+        parent_id = json.loads(raw)["run"]["runId"]
+        wait_for_terminal(instance, parent_id)
+        _, _, raw = request(instance, "/api/runs", method="POST", body={
+            "prompt": "不应交给错误的会话", "parentRunId": parent_id,
+        })
+        child_id = json.loads(raw)["run"]["runId"]
+        final = wait_for_terminal(instance, child_id)
+        assert final["status"] == "failed"
+        assert instance.store.get(child_id).parent_run_id == parent_id
+        # The child never prompted the wrong session; only the copied seed exists.
+        copied = Path(instance.config.session_dir) / child_id / "continued.jsonl"
+        assert "不应交给错误的会话" not in copied.read_text(encoding="utf-8")
+    finally:
+        instance.shutdown()
+        instance.server_close()
+        thread.join(timeout=5)
+
+
+def test_followup_without_a_run_owned_session_is_rejected(server: PiGlinkServer) -> None:
+    status, _, raw = request(server, "/api/runs", method="POST", body={"prompt": "原问题"})
+    parent_id = json.loads(raw)["run"]["runId"]
+    wait_for_terminal(server, parent_id)
+    status, _, raw = request(server, "/api/runs", method="POST", body={
+        "prompt": "追问", "parentRunId": parent_id,
+    })
+    assert status == 409
+    assert json.loads(raw)["error"] == "session_unavailable"
+    assert len(server.store.list(limit=None)) == 1
+    status, _, raw = request(server, "/api/runs", method="POST", body={
+        "prompt": "非法父级", "parentRunId": "../other",
+    })
+    assert status == 400
+    assert json.loads(raw)["error"] == "invalid_request"
+
+
 def test_runs_are_listed_and_readable(server: PiGlinkServer) -> None:
     _status, _headers, raw = request(server, "/api/runs", method="POST", body={"prompt": "列我"})
     run_id = json.loads(raw)["run"]["runId"]

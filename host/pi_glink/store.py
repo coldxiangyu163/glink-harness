@@ -76,6 +76,8 @@ class RunRecord:
     status: str
     created_at: float
     workspace: str
+    #: Previous execution in the same research conversation; None for its first turn.
+    parent_run_id: str | None = None
     finished_at: float | None = None
     session_id: str | None = None
     session_file: str | None = None
@@ -226,12 +228,14 @@ class RunStore:
         workspace: Path | None = None,
         tenant_id: str | None = None,
         creator_user_id: str | None = None,
+        parent_run_id: str | None = None,
     ) -> RunRecord:
         """Admit a run and write its assignment facts in one atomic meta write.
 
         The owner labels (``tenant_id`` / ``creator_user_id``) are part of the
         same replacement as the run id and created-at stamp, so no reader can
-        observe an ownerless run that an authenticated request must hide.
+        observe an ownerless run that an authenticated request must hide. The
+        optional ``parent_run_id`` records the follow-up chain in the same write.
         """
         identifier = run_id or uuid.uuid4().hex[:12]
         directory = self.run_dir(identifier)
@@ -244,6 +248,7 @@ class RunStore:
             workspace=str(workspace) if workspace is not None else str(directory / "workspace"),
             tenant_id=tenant_id,
             creator_user_id=creator_user_id,
+            parent_run_id=parent_run_id,
         )
         self._write(record)
         return record

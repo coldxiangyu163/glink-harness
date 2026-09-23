@@ -21,7 +21,7 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | `--append-system-prompt` | `pi --help` | `agent/research-prompt.md` → `kernel/runner.py::_extra_argv`，内核系统提示词本身不改 |
 | headless 协议 | docs/rpc.md、docs/json.md | `--mode rpc`（本机 / Docker 面，`kernel/rpc.py`）；`--mode json`（E2B 面，`kernel/e2b_env.py`）；两面都只按 LF 分帧（`kernel/framing.py`，共享语料 `tests/fixtures/lf-framing.json`） |
 | 环境变量 | docs/environment-variables.md | `PI_CODING_AGENT_DIR`、`PI_CODING_AGENT_SESSION_DIR`、`PI_SKIP_VERSION_CHECK`、`PI_TELEMETRY`（模型凭据不经环境变量，写运行期 `auth.json`；两个目录都是每 run 独立） |
-| CLI 参数 | docs/usage.md | `--provider`、`--model`、`--name`（`kernel/agent_env.py::build_pi_argv`） |
+| CLI 参数 | docs/cli.md、docs/sessions.md | `--provider`、`--model`、`--name`；追问用 `--session <path>` 打开上一轮会话的独立副本（`kernel/agent_env.py::build_pi_argv`、`kernel/runner.py`、`kernel/e2b_env.py`） |
 | MCP（可选） | docs/mcp 相关 | 尚未使用；接入方式与 extensions 同级，属允许范围 |
 
 **判断新需求是否越界的顺序**：先看有没有官方扩展点能表达 → 没有则在 `extensions/` 写扩展
@@ -117,5 +117,5 @@ ls web/node_modules 2>/dev/null || echo "无前端依赖树（原生 ESM）"
 | `models.json` 的 `baseUrl` / 模型 id 不支持 `$VAR` 插值 | 无法把 endpoint 交给 pi 自己解析 | 宿主渲染本 run 的运行期 `models.json`（`agent_env.py`） |
 | pi 会往配置目录写运行时状态（`auth.json` / `models-store.json`） | 仓库目录会被污染 | 仓库 `agent/` 只作模板；每次 run 渲染到 `runs/<id>/pi-agent/`（先删再拷，凭据缺失则删除旧文件）；`.gitignore` 兜底 |
 | E2B SDK 的 stdout 回调不触发 | E2B 面事件非实时 | 沙箱内写 JSONL、结束后回放（`e2b_env.py`）；差异记在 architecture.md |
-| 沙箱内会话文件随沙箱销毁 | E2B 面 `session_id` 为空 | 报告与 run 元数据仍持久；如实记录 |
+| E2B 会话文件不会自动留存 | 未回收则不能追问 | 销毁前回收单个有界 `.jsonl` 到本 run 专属目录并脱敏；失败时明确拒绝追问 |
 | 模型 key 以文件形式位于本 run 的运行期 `auth.json`（不在进程环境） | 工具可用 `read` 打开并回显 | `env` 类读取已不可行（三面实测 0）；回显被出站脱敏覆盖（含跨 delta 分割，见 architecture.md §3.3/§6.1）；更强隔离用 Docker / E2B 面 |

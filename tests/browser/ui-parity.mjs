@@ -282,7 +282,9 @@ const BOX = {
   composerSend: 'both',
   userBubble: 'none',
   thinkingToggle: 'height',
-  toolRow: 'both',
+  // Deliberate responsive process width: compare row height and component styling,
+  // not its width against the reference demo's fixed 420px container.
+  toolRow: 'height',
   toolChip: 'height',
   infoCard: 'none',
   navLabel: 'height',
@@ -509,6 +511,7 @@ try {
     '',
     '比对口径: 几何容许 ≤1px 取整差；颜色 / 圆角 / 排版 / 描边 / 海拔必须逐值相同。',
     '内容驱动的属性按角色白名单跳过（文本宽度、跨产品文本高度），未在参考屏出现的角色记为 SKIPPED。',
+    '过程行宽度是有意偏离：跟随本工作台主栏，仍逐值比对行高、颜色、圆角与排版；宽度由隔离浏览器布局断言覆盖。',
     '已登记的两处刻意等价写法: ① 参考页的卡片用 inset 1px 阴影画发丝线（Demo 页面覆盖），',
     '工作台用组件默认的 1px border，渲染同为 1px --border；② 输入器禁用态的底色取自 Button 的',
     'disabled:opacity-45 口径，与按钮的 disabled 状态同源。',

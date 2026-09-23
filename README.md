@@ -33,6 +33,12 @@
 
 三面共享同一套输入/事件/收尾契约（`kernel/execution.py` 的 `ExecutionAdapter`）：每个 run 拥有
 自己的运行期配置（`runs/<id>/pi-agent/`）、session 目录（会话根基目录下的 `<id>/`，默认 `<数据根>/sessions/<id>/`）与工作区；
+完成后在同一对话发送追问会提交 `POST /api/runs {"prompt":"…","parentRunId":"<上一轮 runId>"}`，
+返回新 run 的 `parentRunId`。它复制上一轮经安全校验的会话副本，通过 pi 官方 `--session` 续接，
+不会另起会话或改写旧 run；侧栏按研究汇总，旧报告仍可打开。会话记录不可续接时返回
+`409 session_unavailable`，从旧轮分叉返回 `409 stale_run`。多租户模式下 `parentRunId` 只允许属于调用者
+自己租户的父 run：未知/异租户/无 owner 的父 run 统一返回 `404 unknown_run`，且在确认所有者之前不读取
+它的会话、报告、状态或子 run 计数。
 收尾顺序固定为「产物回收 → 销毁执行面 → 安全校验并落盘报告 → 凭据清扫 → 终态与释放」。
 
 ### E2B 执行面
@@ -141,6 +147,8 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 - **归属**：run 在受理时原子写入 `tenant_id` 与 `creator_user_id`。同租户成员可看列表、详情、SSE 与
   报告；只有创建者或同租户 `admin` 能取消。其他租户、未知 run 与没有 owner 的旧记录（legacy
   `meta.json`）在列表/详情/SSE/报告/取消上都得到同一个 404，且不产生副作用；旧数据不迁移、不修改。
+  追问（`parentRunId`）同样先过租户门禁：异租户/未知/legacy 父 run 统一 `404 unknown_run`，在确认
+  所有者之前不读取其 session、报告、状态或子 run 计数，也不会把它的会话或报告复制给新 run。
 - **凭据**：每 run 的模型 key（与可选搜索 key）来自该租户在 `tenants.json` 中的条目，缺
   `modelApiKey` 直接拒绝准入；绝不回退宿主全局 `OPENAI_API_KEY`、操作员 `~/.pi/web-search.json`
   或别的租户。E2B 平台 key 属于宿主资源管理，不是租户模型 key。每 run 的脱敏边界只包含本 run

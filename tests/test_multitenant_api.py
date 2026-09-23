@@ -27,6 +27,7 @@ from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
     ExecutionOutcome,
+    SessionInfo,
 )
 from pi_glink.tenancy import ASSERTION_HEADER, issue_assertion
 
@@ -144,7 +145,16 @@ class FakeAdapter:
     """Synthetic execution face: records rendered credentials, then settles."""
 
     def __init__(
-        self, spec, *, on_frame, settle=True, release=True, frames=(), write_report=False
+        self,
+        spec,
+        *,
+        on_frame,
+        settle=True,
+        release=True,
+        frames=(),
+        write_report=False,
+        persist_session=False,
+        session_id="fake-session",
     ):
         self.spec = spec
         self._on_frame = on_frame
@@ -152,10 +162,13 @@ class FakeAdapter:
         self._release = release
         self._frames = tuple(frames)
         self._write_report = write_report
+        self._persist_session = persist_session
+        self._session_id = session_id
         self._cancelled = False
         self.runtime_dir = spec.runtime.directory
         self.auth_key = _auth_key(spec.runtime.directory)
         self.web_search_present = (spec.runtime.directory / "web-search.json").is_file()
+        self.session_file: Path | None = None
 
     def start(self) -> None:
         if self._write_report:
@@ -163,6 +176,17 @@ class FakeAdapter:
             (self.spec.workspace / "report.md").write_text(
                 "# 合成报告\n\n来自 fake 执行面。\n", encoding="utf-8"
             )
+        if self._persist_session:
+            # Like pi: a resumed run appends to the copied session file, a new
+            # run starts its own. The session id stays the same on resume.
+            directory = self.spec.runtime.session_dir
+            directory.mkdir(parents=True, exist_ok=True)
+            name = self.spec.resume_session or "fake-session.jsonl"
+            self.session_file = directory / name
+            with self.session_file.open("a", encoding="utf-8") as log:
+                log.write(
+                    json.dumps({"prompt": self.spec.prompt}, ensure_ascii=False) + "\n"
+                )
         for frame in self._frames:
             self._on_frame(frame)
 
@@ -170,7 +194,13 @@ class FakeAdapter:
         pass
 
     def session_info(self):
-        return None
+        if not self._persist_session or self.session_file is None:
+            return None
+        return SessionInfo(
+            payload={"sessionId": self._session_id},
+            session_id=self._session_id,
+            session_file=str(self.session_file),
+        )
 
     def identity(self):
         return {}
@@ -202,6 +232,8 @@ class AdapterBehavior:
         self.release = True
         self.frames: tuple[dict, ...] = ()
         self.write_report = False
+        self.persist_session = False
+        self.session_id = "fake-session"
         self.created: list[FakeAdapter] = []
 
 
@@ -217,6 +249,8 @@ def adapters(monkeypatch: pytest.MonkeyPatch) -> AdapterBehavior:
             release=behavior.release,
             frames=behavior.frames,
             write_report=behavior.write_report,
+            persist_session=behavior.persist_session,
+            session_id=behavior.session_id,
         )
         behavior.created.append(adapter)
         return adapter
@@ -623,6 +657,200 @@ def test_sse_reconnect_resumes_after_the_cursor(
         connection.close()
     assert b"event: run_started" not in body, "游标之前不重发"
     assert b"event: run_cancelled" in body
+
+
+def test_foreign_parent_is_unknown_and_copies_nothing(
+    server: PiGlinkServer, adapters: AdapterBehavior
+) -> None:
+    """A follow-up must never read another tenant's session or report.
+
+    The cross-tenant parent is refused as an unknown run, no run is admitted for
+    the caller, and the parent's session file, workspace and event log stay
+    untouched (nothing was read from them to seed a copy).
+    """
+    adapters.persist_session = True
+    adapters.write_report = True
+    alpha = assertion("tenant-alpha", "user-a")
+    beta = assertion("tenant-beta", "user-b")
+    parent = start_run(server, "alpha 第一轮", token=alpha)
+    assert wait_for_terminal(server, parent["runId"], alpha)["status"] == "finished"
+    parent_record = server.store.get(parent["runId"])
+    assert parent_record is not None and parent_record.session_file
+    session_path = Path(parent_record.session_file)
+    session_bytes = session_path.read_bytes()
+    sessions_before = sorted(p.name for p in Path(server.config.session_dir).iterdir())
+
+    status, _headers, raw = request(
+        server,
+        "/api/runs",
+        method="POST",
+        body={"prompt": "异租户追问", "parentRunId": parent["runId"]},
+        token=beta,
+    )
+    assert status == 404
+    assert json.loads(raw) == {"error": "unknown_run"}
+    assert server.store.list_for("tenant-beta", limit=None) == []
+    assert (
+        sorted(p.name for p in Path(server.config.session_dir).iterdir()) == sessions_before
+    ), "异租户追问不得创建会话目录或复制会话"
+    assert session_path.read_bytes() == session_bytes
+    assert server.store.get(parent["runId"]).event_count == parent_record.event_count
+
+
+def test_foreign_parent_state_is_not_probed(
+    server: PiGlinkServer, adapters: AdapterBehavior
+) -> None:
+    """A foreign parent answers ``unknown_run`` whatever its own state says.
+
+    If the owner gate ran after the parent was inspected, a running parent
+    would answer ``run_busy`` and a parent that already has a follow-up would
+    answer ``stale_run`` — both disclose existence across tenants. The
+    same-tenant caller still gets those specific refusals.
+    """
+    adapters.persist_session = True
+    adapters.settle = False
+    alpha = assertion("tenant-alpha", "user-a")
+    beta = assertion("tenant-beta", "user-b")
+    running = start_run(server, "长跑", token=alpha)
+
+    status, _headers, raw = request(
+        server,
+        "/api/runs",
+        method="POST",
+        body={"prompt": "异租户追问", "parentRunId": running["runId"]},
+        token=beta,
+    )
+    assert status == 404
+    assert json.loads(raw) == {"error": "unknown_run"}
+
+    status, _headers, raw = request(
+        server,
+        "/api/runs",
+        method="POST",
+        body={"prompt": "同租户追问未结束的轮次", "parentRunId": running["runId"]},
+        token=alpha,
+    )
+    assert status == 409
+    assert json.loads(raw)["error"] == "run_busy"
+
+
+def test_unknown_and_legacy_parents_are_unknown_runs(server: PiGlinkServer) -> None:
+    """Ownerless legacy records are never resumable in multi-tenant mode."""
+    alpha = assertion("tenant-alpha", "user-a")
+    status, _headers, raw = request(
+        server,
+        "/api/runs",
+        method="POST",
+        body={"prompt": "x", "parentRunId": "doesnotexist01"},
+        token=alpha,
+    )
+    assert status == 404 and json.loads(raw)["error"] == "unknown_run"
+
+    workspace = server.config.workspace_root / "legacyparent"
+    workspace.mkdir(parents=True, exist_ok=True)
+    session_dir = Path(server.config.session_dir) / "legacyparent"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session_file = session_dir / "legacy.jsonl"
+    original = '{"legacy": true}\n'
+    session_file.write_text(original, encoding="utf-8")
+    server.store.create("旧研究", run_id="legacyparent", workspace=workspace)
+    server.store.update(
+        "legacyparent",
+        status="finished",
+        session_id="legacy-session",
+        session_file=str(session_file),
+        finished_at=time.time(),
+    )
+    status, _headers, raw = request(
+        server,
+        "/api/runs",
+        method="POST",
+        body={"prompt": "追问旧数据", "parentRunId": "legacyparent"},
+        token=alpha,
+    )
+    assert status == 404 and json.loads(raw)["error"] == "unknown_run"
+    assert session_file.read_text(encoding="utf-8") == original
+
+
+def test_same_tenant_followup_resumes_private_session_and_report(
+    server: PiGlinkServer, adapters: AdapterBehavior
+) -> None:
+    """The legitimate follow-up keeps owner, private session copy and report seed."""
+    adapters.persist_session = True
+    adapters.write_report = True
+    alpha = assertion("tenant-alpha", "user-a")
+    parent = start_run(server, "第一轮问题", token=alpha)
+    parent_final = wait_for_terminal(server, parent["runId"], alpha)
+    assert parent_final["status"] == "finished" and parent_final["hasReport"] is True
+    parent_record = server.store.get(parent["runId"])
+    assert parent_record is not None and parent_record.session_file
+    parent_session = Path(parent_record.session_file)
+    parent_bytes = parent_session.read_bytes()
+
+    adapters.write_report = False  # 子 run 不产出新报告：复制的报告不得冒充本轮产物
+    status, _headers, raw = request(
+        server,
+        "/api/runs",
+        method="POST",
+        body={"prompt": "追问细节", "parentRunId": parent["runId"]},
+        token=alpha,
+    )
+    assert status == 201, raw.decode("utf-8", "replace")
+    child = json.loads(raw)["run"]
+    assert child["parentRunId"] == parent["runId"]
+    child_final = wait_for_terminal(server, child["runId"], alpha)
+    assert child_final["status"] == "finished"
+
+    child_record = server.store.get(child["runId"])
+    assert child_record is not None
+    assert child_record.tenant_id == "tenant-alpha"
+    assert child_record.creator_user_id == "user-a"
+    assert child_record.session_id == parent_record.session_id
+    # 父会话未被改写；子会话是本 run 专属的副本并带上追问。
+    assert parent_session.read_bytes() == parent_bytes
+    child_session = Path(server.config.session_dir) / child["runId"] / "continued.jsonl"
+    assert child_session.is_file()
+    assert "追问细节" in child_session.read_text(encoding="utf-8")
+    # 上一轮报告已复制进子工作区，但本轮没有新报告。
+    assert (Path(child_record.workspace) / "report.md").is_file()
+    assert child_final["hasReport"] is False
+
+    status, _headers, raw = request(
+        server,
+        "/api/runs",
+        method="POST",
+        body={"prompt": "再追问", "parentRunId": parent["runId"]},
+        token=alpha,
+    )
+    assert status == 409 and json.loads(raw)["error"] == "stale_run"
+
+
+def test_same_tenant_member_followup_records_the_new_creator(
+    server: PiGlinkServer, adapters: AdapterBehavior
+) -> None:
+    """同租户成员可以续接该租户的父 run；新 run 的 creator 是发起者。"""
+    adapters.persist_session = True
+    creator = assertion("tenant-alpha", "user-a")
+    peer = assertion("tenant-alpha", "user-b")
+    parent = start_run(server, "第一轮", token=creator)
+    assert wait_for_terminal(server, parent["runId"], creator)["status"] == "finished"
+
+    status, _headers, raw = request(
+        server,
+        "/api/runs",
+        method="POST",
+        body={"prompt": "同租户成员追问", "parentRunId": parent["runId"]},
+        token=peer,
+    )
+    assert status == 201, raw.decode("utf-8", "replace")
+    child = json.loads(raw)["run"]
+    child_record = server.store.get(child["runId"])
+    assert child_record is not None
+    assert child_record.tenant_id == "tenant-alpha"
+    assert child_record.creator_user_id == "user-b", "新 run 的 creator 必须是发起者"
+    # 同租户的另一个成员仍可读它。
+    assert wait_for_terminal(server, child["runId"], creator)["status"] == "finished"
+    assert request(server, f"/api/runs/{child['runId']}", token=creator)[0] == 200
 
 
 def test_legacy_ownerless_records_are_invisible_to_every_tenant(
