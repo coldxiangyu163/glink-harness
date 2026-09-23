@@ -28,18 +28,27 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .artifacts import ArtifactError, ArtifactTree
 from .config import ConfigError, HostConfig, load_config
-from .events import EventBus
+from .events import EventBus, IDLE_POLL
 from .kernel.runner import (
     ClientFactory,
     REPORT_MAX_BYTES,
     ResourcesUnreleased,
     RunBusy,
     RunManager,
+    RunQuotaExceeded,
 )
 from .kernel.rpc import PiRpcClient
 from .ownership import DataRootBusy, DataRootOwnership
 from .static_files import Asset, WebAssets
 from .store import RunRecord, RunStore
+from .tenancy import (
+    ASSERTION_HEADER,
+    Tenancy,
+    TenantAuthError,
+    TenantContext,
+    TenantNotConfigured,
+    build_tenancy,
+)
 
 logger = logging.getLogger("pi_glink.host")
 
@@ -60,6 +69,10 @@ class PiGlinkServer(ThreadingHTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
+    #: Accept a burst of concurrent connections: the admission ceiling (not the
+    #: listen backlog) must be what refuses a request, otherwise a client sees a
+    #: connection reset instead of an explainable 429.
+    request_queue_size = 64
 
     def __init__(
         self,
@@ -70,6 +83,7 @@ class PiGlinkServer(ThreadingHTTPServer):
         assets: WebAssets,
         *,
         ownership: DataRootOwnership | None = None,
+        tenancy: Tenancy | None = None,
     ) -> None:
         self.config = config
         self.bus = bus
@@ -77,6 +91,8 @@ class PiGlinkServer(ThreadingHTTPServer):
         self.manager = manager
         self.assets = assets
         self.ownership = ownership
+        #: Frozen multi-tenant trust material; ``None`` in local mode.
+        self.tenancy = tenancy
         self.stopping = threading.Event()
         super().__init__((config.host, config.port), HostRequestHandler)
 
@@ -106,6 +122,16 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         parts = urlsplit(self.path)
         path = unquote(parts.path)
         try:
+            # Multi-tenant POSTs carry the gateway-injected identity, and a
+            # browser can be made to send one cross-site; refuse requests whose
+            # own origin metadata says they came from another site.
+            if self.server.tenancy is not None and not self._request_origin_allowed():
+                self._send_json(
+                    HTTPStatus.FORBIDDEN,
+                    {"error": "forbidden", "message": "cross-site request refused"},
+                    head_only=False,
+                )
+                return
             if path == "/api/runs":
                 self._start_run()
                 return
@@ -145,16 +171,34 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             )
 
     def _handle_api(self, path: str, query: str, *, head_only: bool) -> None:
+        # The health probe stays reachable without an identity (a gateway or
+        # process supervisor may poll it), but in multi-tenant mode it never
+        # reports another tenant's active run. Every other /api route requires a
+        # verified assertion before it reads or reveals anything.
         if path == "/api/health":
             self._send_json(HTTPStatus.OK, self._health_payload(), head_only=head_only)
             return
+        context = self._authenticate()
+        if self.server.tenancy is not None and context is None:
+            self._send_json(
+                HTTPStatus.UNAUTHORIZED,
+                {"error": "unauthenticated"},
+                head_only=head_only,
+            )
+            return
         if path == "/api/config":
             self._send_json(
-                HTTPStatus.OK, self.server.config.public_view(), head_only=head_only
+                HTTPStatus.OK,
+                self._public_config(context),
+                head_only=head_only,
             )
             return
         if path == "/api/runs":
-            records = self.server.store.list(limit=100)
+            records = (
+                self.server.store.list_for(context.tenant_id, limit=100)
+                if context is not None
+                else self.server.store.list(limit=100)
+            )
             self._send_json(
                 HTTPStatus.OK,
                 {"runs": [self._run_view_live(record) for record in records]},
@@ -163,20 +207,74 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             return
         events_match = _RUN_EVENTS_RE.match(path)
         if events_match is not None:
-            self._stream_run_events(events_match.group("run_id"), query)
+            self._stream_run_events(events_match.group("run_id"), query, context)
             return
         report_match = _RUN_REPORT_RE.match(path)
         if report_match is not None:
-            self._send_report(report_match.group("run_id"), head_only=head_only)
+            self._send_report(report_match.group("run_id"), context, head_only=head_only)
             return
         run_match = _RUN_RE.match(path)
         if run_match is not None:
-            self._send_run(run_match.group("run_id"), head_only=head_only)
+            self._send_run(run_match.group("run_id"), context, head_only=head_only)
             return
         self._send_json(
             HTTPStatus.NOT_FOUND, {"error": "unknown_endpoint", "path": path},
             head_only=head_only,
         )
+
+    # -- identity -------------------------------------------------------------
+
+    def _authenticate(self) -> TenantContext | None:
+        """Verify the gateway assertion, or ``None`` in the local mode.
+
+        The assertion is read from exactly one header value; duplicate headers
+        are refused instead of choosing one. Nothing from the body, the query
+        string or any other header can label the request.
+        """
+        tenancy = self.server.tenancy
+        if tenancy is None:
+            return None
+        try:
+            return tenancy.authenticator.authenticate(self.headers.get_all(ASSERTION_HEADER))
+        except TenantAuthError as exc:
+            logger.info("request rejected as unauthenticated: %s", exc)
+            return None
+
+    def _request_origin_allowed(self) -> bool:
+        """Refuse a browser request whose own metadata says it is cross-site.
+
+        A non-browser client (the gateway, curl, a smoke script) sends none of
+        these headers, and cannot be tricked by a website into carrying the
+        gateway's identity header. Any header that is present must agree that
+        the request came from this origin.
+        """
+        host = self.headers.get("Host", "")
+        origin = self.headers.get("Origin")
+        if origin is not None and not _same_origin(origin, host):
+            return False
+        referer = self.headers.get("Referer")
+        if referer is not None and not _same_origin(referer, host):
+            return False
+        site = self.headers.get("Sec-Fetch-Site")
+        if site is not None and site not in {"same-origin", "none"}:
+            return False
+        return True
+
+    def _public_config(self, context: TenantContext | None) -> dict[str, Any]:
+        """Public configuration for the requesting identity.
+
+        ``configured.model`` answers "can this caller start a run": in local
+        mode that is the host's key, in multi-tenant mode the caller's own
+        tenant credential — never whether another tenant has one.
+        """
+        view = dict(self.server.config.public_view())
+        if context is not None and self.server.tenancy is not None:
+            tenant = self.server.tenancy.credentials.get(context.tenant_id)
+            view["configured"] = {
+                **view["configured"],
+                "model": bool(tenant is not None and tenant.model_api_key),
+            }
+        return view
 
     def _handle_static(self, path: str, *, head_only: bool) -> None:
         asset = self.server.assets.resolve(path)
@@ -193,17 +291,27 @@ class HostRequestHandler(BaseHTTPRequestHandler):
     def _health_payload(self) -> dict[str, Any]:
         config = self.server.config
         pi_path = shutil.which(config.pi_bin)
-        return {
+        payload: dict[str, Any] = {
             "status": "ok",
             "executor": config.executor,
             "pi": {"bin": config.pi_bin, "available": pi_path is not None},
             "configured": config.public_view()["configured"],
-            "activeRunId": self.server.manager.active_run_id,
         }
+        # An unauthenticated probe must not disclose whether (or which) runs are
+        # active in the multi-tenant surface.
+        if self.server.tenancy is None:
+            payload["activeRunId"] = self.server.manager.active_run_id
+        return payload
 
     # -- run endpoints --------------------------------------------------------
 
     def _start_run(self) -> None:
+        context = self._authenticate()
+        if self.server.tenancy is not None and context is None:
+            self._send_json(
+                HTTPStatus.UNAUTHORIZED, {"error": "unauthenticated"}, head_only=False
+            )
+            return
         body = self._read_json_body()
         if body is None:
             return
@@ -216,26 +324,44 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             )
             return
         try:
-            record = self.server.manager.start(prompt)
-        except RunBusy as busy:
+            record = self.server.manager.start(prompt, context)
+        except RunQuotaExceeded as quota:
+            # Explain the ceiling, never who else is using it.
             self._send_json(
-                HTTPStatus.CONFLICT,
+                HTTPStatus.TOO_MANY_REQUESTS,
                 {
-                    "error": "run_busy",
-                    "message": "another run is still active",
-                    "activeRunId": busy.active_run_id,
+                    "error": "quota_exceeded",
+                    "scope": quota.scope,
+                    "limit": quota.limit,
+                    "message": "concurrency limit reached; retry later",
                 },
                 head_only=False,
             )
             return
+        except RunBusy as busy:
+            payload: dict[str, Any] = {
+                "error": "run_busy",
+                "message": "another run is still active",
+            }
+            if not self.server.config.multi_tenant:
+                payload["activeRunId"] = busy.active_run_id
+            self._send_json(HTTPStatus.CONFLICT, payload, head_only=False)
+            return
         except ResourcesUnreleased as held:
+            payload = {
+                "error": "resources_unreleased",
+                "message": "earlier runs hold execution resources that are not confirmed released",
+            }
+            # The held run ids belong to their owners: a tenant must not learn
+            # another tenant's identifiers from a refusal.
+            if not self.server.config.multi_tenant:
+                payload["runIds"] = held.run_ids
+            self._send_json(HTTPStatus.CONFLICT, payload, head_only=False)
+            return
+        except TenantNotConfigured as exc:
             self._send_json(
-                HTTPStatus.CONFLICT,
-                {
-                    "error": "resources_unreleased",
-                    "message": "earlier runs hold execution resources that are not confirmed released",
-                    "runIds": held.run_ids,
-                },
+                HTTPStatus.FORBIDDEN,
+                {"error": "forbidden", "message": str(exc)},
                 head_only=False,
             )
             return
@@ -258,17 +384,29 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _stop_run(self, run_id: str) -> None:
-        decision = self.server.manager.stop(run_id)
+        context = self._authenticate()
+        if self.server.tenancy is not None and context is None:
+            self._send_json(
+                HTTPStatus.UNAUTHORIZED, {"error": "unauthenticated"}, head_only=False
+            )
+            return
+        decision = self.server.manager.stop(run_id, context)
         if decision.accepted:
             self._send_json(
                 HTTPStatus.OK,
                 {"requested": True, "status": decision.status},
                 head_only=False,
             )
-        elif decision.status is None:
+        elif decision.reason == "unknown":
             self._send_json(
                 HTTPStatus.NOT_FOUND,
                 {"error": "unknown_run", "requested": False, "runId": run_id},
+                head_only=False,
+            )
+        elif decision.reason == "forbidden":
+            self._send_json(
+                HTTPStatus.FORBIDDEN,
+                {"error": "forbidden", "requested": False},
                 head_only=False,
             )
         else:
@@ -318,8 +456,14 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _send_run(self, run_id: str, *, head_only: bool) -> None:
-        record = self.server.store.get(run_id)
+    def _send_run(
+        self, run_id: str, context: TenantContext | None, *, head_only: bool
+    ) -> None:
+        record = (
+            self.server.store.get_for(run_id, context.tenant_id)
+            if context is not None
+            else self.server.store.get(run_id)
+        )
         if record is None:
             self._send_json(
                 HTTPStatus.NOT_FOUND,
@@ -331,12 +475,19 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             HTTPStatus.OK, {"run": self._run_view_live(record)}, head_only=head_only
         )
 
-    def _send_report(self, run_id: str, *, head_only: bool) -> None:
-        record = self.server.store.get(run_id)
+    def _send_report(
+        self, run_id: str, context: TenantContext | None, *, head_only: bool
+    ) -> None:
+        record = (
+            self.server.store.get_for(run_id, context.tenant_id)
+            if context is not None
+            else self.server.store.get(run_id)
+        )
         # ``report_path`` is not a download capability: only the run's own
         # host artifact, or the report inside the run's own workspace written
         # by earlier versions, may be served — read-only, through a directory
-        # handle that never follows a link.
+        # handle that never follows a link. An unknown run, another tenant's run
+        # and a legacy ownerless record all answer the same 404.
         location = self.server.store.report_location(record) if record else None
         if location is None:
             self._send_json(
@@ -360,8 +511,10 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             return
         # The report is a product surface too: a credential the model echoed into
         # it must not reach the browser. The header records whether it happened.
+        # The redaction boundary is the record's own tenant credentials, so one
+        # tenant's report is never compared against another tenant's secrets.
         original = data.decode("utf-8", errors="replace")
-        redactor = self.server.manager.redactor
+        redactor = self.server.manager.redactor_for_record(record)
         redacted = redactor.redact(original)
         self._send_bytes(
             redacted.encode("utf-8"),
@@ -446,9 +599,20 @@ class HostRequestHandler(BaseHTTPRequestHandler):
 
     # -- server-sent events ---------------------------------------------------
 
-    def _stream_run_events(self, run_id: str, query: str) -> None:
+    def _stream_run_events(
+        self, run_id: str, query: str, context: TenantContext | None
+    ) -> None:
         bus = self.server.bus
         store = self.server.store
+        # Authorization happens before a single response header is written. An
+        # unknown run, another tenant's run and an ownerless legacy record all
+        # answer the same 404, so the stream cannot be used to probe existence.
+        if context is not None and store.get_for(run_id, context.tenant_id) is None:
+            self._send_json(
+                HTTPStatus.NOT_FOUND, {"error": "unknown_run", "runId": run_id},
+                head_only=False,
+            )
+            return
         live = bus.is_open(run_id)
         # The durable log is the replay source of truth; the bus only knows runs
         # started by this host process and is used for the live tail. A run from
@@ -462,22 +626,30 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             )
             return
         after = _resume_offset(self.headers.get("Last-Event-ID"), query)
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("X-Accel-Buffering", "no")
-        # The body below is written as HTTP/1.1 chunks (_write_event); without this
-        # header a client reads the chunk-size lines as part of the event stream.
-        self.send_header("Transfer-Encoding", "chunked")
-        self.send_header("Connection", "close")
-        self.end_headers()
+        # Subscribe *before* the response headers are written: the subscriber
+        # captures the live tail from this moment, so a run that closes between
+        # the liveness check and the header write cannot swallow frames that
+        # exist only in the bus ring (persisted frames are replayed from the log
+        # either way). Reading the log still happens after subscribing.
+        subscription = (
+            bus.subscribe(run_id, after=after, idle_poll=IDLE_POLL) if live else None
+        )
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            # The body below is written as HTTP/1.1 chunks (_write_event); without
+            # this header a client reads the chunk-size lines as part of the stream.
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        except BaseException:
+            if subscription is not None:
+                subscription.close()
+            raise
         self.close_connection = True
         logger.info("event stream attached run=%s after=%s live=%s", run_id, after, live)
-        # Subscribe *before* reading the log: the subscriber captures the live
-        # tail from this moment, and the log read captures everything already
-        # committed. Frames that fall in both are deduplicated by sequence, and
-        # a run that closes during the read still has its frames on disk.
-        subscription = bus.subscribe(run_id, after=after) if live else None
         try:
             last = after
             for event in store.iter_events(run_id, after=after):
@@ -488,7 +660,22 @@ class HostRequestHandler(BaseHTTPRequestHandler):
                     last = seq
                 self._write_event(_persisted_sse(event))
             if subscription is not None:
-                for event in subscription:
+                while True:
+                    # A short-lived assertion must not outlive itself on a long
+                    # stream: once it expires the stream is closed cleanly and
+                    # the client must re-authenticate (and reconnect).
+                    if context is not None and context.expired():
+                        logger.info(
+                            "event stream ended: assertion expired run=%s", run_id
+                        )
+                        break
+                    try:
+                        item = next(subscription)
+                    except StopIteration:
+                        break
+                    if item is IDLE_POLL:
+                        continue
+                    event = item
                     if event.seq <= last:
                         continue
                     last = event.seq
@@ -551,6 +738,21 @@ def _run_view(
     }
 
 
+def _same_origin(url: str, host: str) -> bool:
+    """True when a browser-supplied Origin/Referer names this exact host.
+
+    Parsed with :func:`urlsplit`; anything unparseable, a non-HTTP scheme or a
+    mismatched netloc is refused. ``null`` origins (sandboxed iframes, file://)
+    are refused as well.
+    """
+    if not host:
+        return False
+    parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"}:
+        return False
+    return parts.netloc.lower() == host.lower()
+
+
 def _resume_offset(last_event_id: str | None, query: str) -> int:
     """Resolve the resume cursor: header wins, then ``?after=``, else 0."""
     candidates = [last_event_id]
@@ -573,6 +775,10 @@ def create_server(
     ``client_factory`` exists for tests: production always talks to the real
     ``pi`` binary through :class:`~pi_glink.kernel.rpc.PiRpcClient`.
     """
+    # Multi-tenant material is loaded before anything is bound or written: a
+    # missing or over-permissive key file refuses to start instead of falling
+    # back to the unauthenticated local surface.
+    tenancy = build_tenancy(config)
     # Ownership comes first: only a process that holds the data root may
     # conclude that a ``running`` record has no live owner. A second host on
     # the same data root (same or another port) stops here, before touching
@@ -587,13 +793,20 @@ def create_server(
             store,
             client_factory=client_factory or PiRpcClient,
             ownership=ownership,
+            credential_store=tenancy.credentials if tenancy is not None else None,
         )
         # Runs left ``running`` by a previous process cannot continue; close
         # them out honestly before the host serves history. External leftovers
         # are not touched — their identity is recorded for an operator decision.
         manager.reconcile()
         return PiGlinkServer(
-            config, bus, store, manager, WebAssets(config.web_root), ownership=ownership
+            config,
+            bus,
+            store,
+            manager,
+            WebAssets(config.web_root),
+            ownership=ownership,
+            tenancy=tenancy,
         )
     except BaseException:
         ownership.release()
@@ -644,6 +857,11 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.print_config:
+        try:
+            build_tenancy(config)
+        except ConfigError as exc:
+            print(f"配置错误 / configuration error: {exc}", file=sys.stderr)
+            return 2
         print(json.dumps(config.public_view(), ensure_ascii=False, indent=2))
         return 0
     if args.unreleased or args.mark_released:
@@ -653,6 +871,9 @@ def main(argv: list[str] | None = None) -> int:
         server = create_server(config)
     except DataRootBusy as exc:
         print(f"启动失败 / refused: {exc}", file=sys.stderr)
+        return 2
+    except ConfigError as exc:
+        print(f"配置错误 / configuration error: {exc}", file=sys.stderr)
         return 2
     url = f"http://{config.host}:{server.server_address[1]}/"
     pi_path = shutil.which(config.pi_bin)

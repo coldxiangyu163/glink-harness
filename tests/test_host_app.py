@@ -90,13 +90,22 @@ def test_executor_must_be_known() -> None:
         build_config({"LOCAL_WEB_EXECUTOR": "kubernetes"}, REPO_ROOT)
 
 
-def test_non_loopback_host_requires_explicit_opt_in() -> None:
-    with pytest.raises(ConfigError, match="LOCAL_WEB_ALLOW_REMOTE"):
+def test_non_loopback_host_is_refused_in_every_mode() -> None:
+    """One behaviour migration: no unauthenticated host beyond loopback.
+
+    Remote access goes through the local authentication gateway in multi-tenant
+    mode; the legacy ``LOCAL_WEB_ALLOW_REMOTE`` switch no longer opens an
+    unauthenticated public surface.
+    """
+    with pytest.raises(ConfigError, match="loopback"):
         build_config({"LOCAL_WEB_HOST": "0.0.0.0"}, REPO_ROOT)
-    config = build_config(
-        {"LOCAL_WEB_HOST": "0.0.0.0", "LOCAL_WEB_ALLOW_REMOTE": "1"}, REPO_ROOT
-    )
-    assert config.allow_remote is True
+    with pytest.raises(ConfigError, match="loopback"):
+        build_config(
+            {"LOCAL_WEB_HOST": "0.0.0.0", "LOCAL_WEB_ALLOW_REMOTE": "1"}, REPO_ROOT
+        )
+    with pytest.raises(ConfigError, match="loopback"):
+        build_config({"LOCAL_WEB_HOST": "192.168.1.10"}, REPO_ROOT)
+    assert build_config({}, REPO_ROOT).binds_loopback is True
 
 
 def test_defaults_follow_frontier_agent_naming(tmp_path: Path) -> None:

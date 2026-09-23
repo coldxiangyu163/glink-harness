@@ -480,6 +480,46 @@ def test_sandbox_command_is_shell_safe_for_hostile_prompts(tmp_path: Path) -> No
 # -- artifact recovery --------------------------------------------------------
 
 
+def test_sandbox_lifetime_is_bounded_by_configuration(tmp_path: Path) -> None:
+    """The configured ceiling wins over the adapter's larger bound.
+
+    E2B's SDK path exposes no CPU/memory controls, so lifetime is the one
+    resource limit the host can hand the cloud provider; it never claims more
+    than the configuration allows.
+    """
+    config = make_config(tmp_path, LOCAL_WEB_E2B_TIMEOUT_SECONDS="120")
+    runtime = _prepare(config, tmp_path)
+    captured: dict[str, Any] = {}
+
+    def factory(**kwargs: Any) -> FakeSandbox:
+        captured.update(kwargs)
+        return FakeSandbox()
+
+    client = E2BSandboxClient(
+        config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=factory
+    )
+    client.start(timeout_seconds=99_999)
+    assert captured["timeout"] == 120
+    client.close()
+
+
+def test_sandbox_lifetime_defaults_to_the_task_timeout_plus_headroom(tmp_path: Path) -> None:
+    config = make_config(tmp_path, LOCAL_WEB_TASK_TIMEOUT_SECONDS="900")
+    runtime = _prepare(config, tmp_path)
+    captured: dict[str, Any] = {}
+
+    def factory(**kwargs: Any) -> FakeSandbox:
+        captured.update(kwargs)
+        return FakeSandbox()
+
+    client = E2BSandboxClient(
+        config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=factory
+    )
+    client.start()
+    assert captured["timeout"] == 1200
+    client.close()
+
+
 def test_recovered_artifacts_are_bounded_and_path_safe(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     runtime = _prepare(config, tmp_path)

@@ -81,6 +81,11 @@ _SUBSCRIBER_CAPACITY = 2000
 
 PersistCallback = Callable[["RunEvent"], None]
 
+#: Sentinel a subscriber can ask for while it waits for the next frame. It is
+#: never a :class:`RunEvent`: callers use it to regain control (deadline and
+#: expiry checks, heartbeats) without polling the durable log.
+IDLE_POLL = object()
+
 
 @dataclass(frozen=True, slots=True)
 class RunEvent:
@@ -205,7 +210,9 @@ class EventBus:
         for subscriber in subscribers:
             subscriber.offer(None)
 
-    def subscribe(self, run_id: str, after: int = 0) -> Iterator[RunEvent]:
+    def subscribe(
+        self, run_id: str, after: int = 0, *, idle_poll: object | None = None
+    ) -> Iterator[RunEvent | object]:
         """Yield frames with ``seq > after``, then any frame published later.
 
         Registration happens when this method is called, not when iteration
@@ -215,6 +222,11 @@ class EventBus:
         (:attr:`_Subscriber.overflowed`), or when the caller stops iterating.
         Callers that need the whole history read the durable log first and pass
         the last persisted sequence as ``after``.
+
+        ``idle_poll`` (default: nothing) is yielded whenever the bounded wait
+        for the next frame times out, letting a long-lived consumer (the SSE
+        endpoint) check its own deadlines — for example an identity assertion
+        expiring mid-stream — without busy-waiting or reading the log again.
         """
         with self._lock:
             pending = [
@@ -225,7 +237,7 @@ class EventBus:
                 subscriber = _Subscriber(_SUBSCRIBER_CAPACITY)
                 self._subscribers.setdefault(run_id, set()).add(subscriber)
 
-        def _iterate() -> Iterator[RunEvent]:
+        def _iterate() -> Iterator[RunEvent | object]:
             try:
                 yield from pending
                 if subscriber is None:
@@ -240,6 +252,8 @@ class EventBus:
                     try:
                         item = subscriber.queue.get(timeout=0.2)
                     except queue.Empty:
+                        if idle_poll is not None:
+                            yield idle_poll
                         continue
                     if item is None:
                         return

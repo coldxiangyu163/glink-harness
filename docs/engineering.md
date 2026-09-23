@@ -10,7 +10,10 @@
 
 - pi 版本或官方接入方式、依赖方向、研究方法论在宿主与内核间的归属；pi 内核本身保持外部依赖。
 - 产品事件的累计/增量/终态语义，SSE 重放与历史记录格式。
-- 租户身份来源、授权、资源与凭据归属、存储隔离、执行并发和取消权限。
+- 租户身份来源、授权、资源与凭据归属、存储隔离、执行并发和取消权限。单宿主多租户已按
+  [架构 §10](architecture.md#10-单宿主多租户已实现合成验证) 落地（网关注入签名断言、owner 过滤、
+  每租户凭据、Docker/E2B 并发上限与全局 fail-closed 资源台账）；**多宿主租约、SQLite/Postgres、
+  短期凭据代理、BYOK、历史迁移与真实环境验收仍需先取得决定**。
 - 真实数据迁移、历史报告改写、发布原子性、Docker 镜像或 E2B 模板切换。
 - UI 标准或已批准交互的改变，而非仅对齐其现有要求。
 
@@ -57,7 +60,8 @@ bash scripts/check.sh
 | RPC、投影、run 生命周期 | `python -m pytest tests/test_kernel_rpc.py tests/test_runner.py tests/test_runs_api.py` | 正常、缺报告、被拒报告、模型 error/aborted/length、重试成功/失败、进程死亡、超时、取消；回收/关闭/报告阶段受理的取消必为 `cancelled`、与终帧提交竞争的取消返回已提交状态；清理未确认时拒绝准入、`shutdown` 如实上报、仅人工裁决放行；旧布局报告只读下载；产品事件或 HTTP 口径变化同时验证 Node 消费方 |
 | 宿主所有权 | `python -m pytest tests/test_ownership.py` | 同端口/不同端口/跨进程的第二宿主在对账前被拒绝，活跃 owner 的记录字节不变；无所有权的对账被拒绝；`flock` 只证明单机本地文件系统 |
 | 事件提交与重放 | `python -m pytest tests/test_event_replay.py` | 先落盘再发布、写盘失败不产生幻影帧、超环容量重放、活跃→结束接续、`Last-Event-ID`、重启对账与慢消费者断开；终帧发布瞬间详情/列表/报告已可读；在终帧已写入、`fsync` 未返回处阻塞时 HTTP 与 Store 均看不到终态，`fsync` 成功后单调可见、失败后从未可见（含重启对账与半行修复）；落定副本写失败、终帧写失败、报告副本写失败及重启后各读面一致 |
-| 三面执行接口 | `python -m pytest tests/test_kernel_execution.py tests/test_kernel_docker_env.py tests/test_kernel_e2b_env.py` | 适配器协议调用顺序、三面事件与终态一致、LF 分帧共享语料、配置上传清单、shell 输入安全；mock SDK/进程行为不是真实隔离或云端质量证明 |
+| 三面执行接口 | `python -m pytest tests/test_kernel_execution.py tests/test_kernel_docker_env.py tests/test_kernel_e2b_env.py` | 适配器协议调用顺序、三面事件与终态一致、LF 分帧共享语料、配置上传清单、shell 输入安全；Docker 资源上限/降权参数与 E2B 生命周期上限只在命令契约层验证；mock SDK/进程行为不是真实隔离或云端质量证明 |
+| 多租户身份、归属与并发 | `python -m pytest tests/test_tenancy.py tests/test_multitenant_api.py` | 合成密钥文件（可含非法权限/仓库内路径）、自签断言（伪造/过期/超长寿命/错误 audience/重复头）、跨租户列表/详情/SSE/报告/取消矩阵、legacy 不可见、每租户凭据渲染与每 run 脱敏边界、全局/租户配额与九请求竞争、资源未释放挡准入、断言过期终止 SSE、CSRF 来源拒绝；不包含真实网关注入、Docker/E2B live 或多宿主 |
 | 存储与 HTTP | `python -m pytest tests/test_store.py tests/test_host_app.py tests/test_runs_api.py` | 真实临时 HTTP/文件路径，拒绝与错误状态；历史格式变化需单独兼容决定 |
 | 前端状态与呈现逻辑 | `node --test tests/web/*.test.mjs` | 累计快照、权威终帧、取消/失败、重复帧、缺口；导航竞态/dispose（stub DOM）；工具参数数组跨层语料；不证明 DOM 布局 |
 | UI 布局与交互 | Node 回归及 [UI 对齐文档](ui-alignment.md)的对应浏览器步骤 | 现有浏览器脚本有下述副作用，默认检查不自动执行 |
@@ -71,7 +75,7 @@ bash scripts/check.sh
 
 后续浏览器自动门禁应复用 `tests/fixtures/fake_pi.py` 和 `create_server(..., client_factory=...)`：只替换外部 pi，保留真实 Runner、存储、投影、HTTP/SSE 和生产前端；服务绑定 OS 分配的 loopback 端口，报告与历史由本次合成生成，结束时等待自己的子进程退出。浏览器开发依赖需锁定，不能从个人 npx 缓存猜版本。这套隔离浏览器入口目前尚未实现，不声明为默认检查覆盖。
 
-真实 pi / Docker / E2B 验收单独记录版本、执行面、目标服务与资源范围。模板构建、切换及云端付费调用不因一次本地测试授权自动获准。多租户上线还需要架构中列出的跨租户拒绝与隔离证据，不能由单 run smoke 替代。
+真实 pi / Docker / E2B 验收单独记录版本、执行面、目标服务与资源范围。模板构建、切换及云端付费调用不因一次本地测试授权自动获准。多租户上线还需要架构中列出的跨租户拒绝与隔离证据，不能由单 run smoke 替代；合成矩阵（临时密钥、自签断言、fake 执行面）只证明宿主侧授权、归属、凭据与准入逻辑，不证明真实网关、镜像/模板隔离强度或云沙箱资源限制。
 
 ## 分工与收敛
 

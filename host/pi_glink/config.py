@@ -17,8 +17,15 @@ from typing import Mapping
 from .dotenv import parse_env_file
 
 EXECUTORS = ("inproc", "docker", "e2b")
+#: ``local`` keeps the single-user surface; ``multitenant`` requires the
+#: gateway-asserted identity material and a container/sandbox execution face.
+TENANCY_MODES = ("local", "multitenant")
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _DEFAULT_PORT = 7860
+_DEFAULT_MAX_GLOBAL_RUNS = 4
+_DEFAULT_MAX_TENANT_RUNS = 2
+_DEFAULT_ASSERTION_MAX_SECONDS = 300
+_DEFAULT_ASSERTION_SKEW_SECONDS = 30
 #: 默认使用本仓库自己的云沙箱模板（含 Node + pi）；FrontierAgent 的
 #: glink-frontier-e2b 是另一个产品的模板，只沿用它的变量语义，不复用它的模板。
 _DEFAULT_E2B_TEMPLATE = "pi-glink-worker"
@@ -41,7 +48,6 @@ class HostConfig:
     data_root: Path
     host: str
     port: int
-    allow_remote: bool
     executor: str
     pi_bin: str
     agent_config_dir: Path
@@ -61,6 +67,30 @@ class HostConfig:
     task_timeout_seconds: int = 1800
     web_search_key: str = field(repr=False, default="")
     web_search_config_path: Path | None = None
+    #: ``local`` (single user) or ``multitenant`` (gateway-asserted identity).
+    tenancy_mode: str = "local"
+    #: Gateway assertion signing key; required and owner-only in multi-tenant mode.
+    gateway_secret_file: Path | None = None
+    #: Per-tenant credential file; required and owner-only in multi-tenant mode.
+    tenant_config_file: Path | None = None
+    tenancy_audience: str = ""
+    assertion_max_lifetime_seconds: int = _DEFAULT_ASSERTION_MAX_SECONDS
+    assertion_clock_skew_seconds: int = _DEFAULT_ASSERTION_SKEW_SECONDS
+    #: Concurrent-run ceilings. The global one covers the whole host, the tenant
+    #: one covers a single tenant; both apply only in multi-tenant mode.
+    max_global_runs: int = _DEFAULT_MAX_GLOBAL_RUNS
+    max_tenant_runs: int = _DEFAULT_MAX_TENANT_RUNS
+    #: Container resource ceilings (Docker face only; the image is never changed).
+    docker_cpus: str = "2"
+    docker_memory: str = "2g"
+    docker_pids_limit: int = 512
+    #: E2B sandbox lifetime ceiling; 0 keeps the adapter default (task timeout + 300s).
+    e2b_sandbox_timeout_seconds: int = 0
+
+    @property
+    def multi_tenant(self) -> bool:
+        """True when the host runs the explicit multi-tenant surface."""
+        return self.tenancy_mode == "multitenant"
 
     @property
     def has_openai_key(self) -> bool:
@@ -89,6 +119,7 @@ class HostConfig:
             "executor": self.executor,
             "model": self.openai_model,
             "baseUrl": self.openai_base_url,
+            "multiTenant": self.multi_tenant,
             "configured": {
                 "model": self.has_openai_key and bool(self.openai_model),
                 "e2b": self.has_e2b_key and self.executor == "e2b",
@@ -124,17 +155,28 @@ def load_config(
 def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     host = _text(values, "LOCAL_WEB_HOST", "127.0.0.1")
     port = _integer(values, "LOCAL_WEB_PORT", _DEFAULT_PORT)
-    allow_remote = _flag(values, "LOCAL_WEB_ALLOW_REMOTE", False)
     executor = _text(values, "LOCAL_WEB_EXECUTOR", "inproc").lower()
+    tenancy_mode = _text(values, "PI_GLINK_TENANCY", "local").lower()
 
     if executor not in EXECUTORS:
         raise ConfigError(
             f"LOCAL_WEB_EXECUTOR must be one of {', '.join(EXECUTORS)}; got {executor!r}"
         )
-    if host not in _LOOPBACK_HOSTS and not allow_remote:
+    if tenancy_mode not in TENANCY_MODES:
         raise ConfigError(
-            f"LOCAL_WEB_HOST={host} is not loopback; set LOCAL_WEB_ALLOW_REMOTE=1 to allow it"
+            f"PI_GLINK_TENANCY must be one of {', '.join(TENANCY_MODES)}; got {tenancy_mode!r}"
         )
+    if host not in _LOOPBACK_HOSTS:
+        # One behaviour migration: an unauthenticated host may no longer be
+        # exposed beyond loopback. Remote access goes through the local
+        # authentication gateway (PI_GLINK_TENANCY=multitenant); the legacy
+        # ``LOCAL_WEB_ALLOW_REMOTE`` switch no longer opens one.
+        raise ConfigError(
+            f"LOCAL_WEB_HOST={host} 不是 loopback；宿主只允许本机监听，"
+            "远端访问必须由本机认证网关反代（PI_GLINK_TENANCY=multitenant）"
+        )
+    if tenancy_mode == "multitenant":
+        _require_multitenant(values, executor)
 
     api_key = _text(values, "OPENAI_API_KEY", "")
     e2b_key = _text(values, "E2B_API_KEY", "")
@@ -149,7 +191,6 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         data_root=data_root,
         host=host,
         port=port,
-        allow_remote=allow_remote,
         executor=executor,
         pi_bin=_text(values, "PI_GLINK_PI_BIN", "pi"),
         agent_config_dir=agent_config_dir,
@@ -175,7 +216,47 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
             "PI_GLINK_WEB_SEARCH_CONFIG",
             _default_web_search_config(),
         ),
+        tenancy_mode=tenancy_mode,
+        gateway_secret_file=_optional_path(values, "PI_GLINK_GATEWAY_SECRET_FILE", None),
+        tenant_config_file=_optional_path(values, "PI_GLINK_TENANT_CONFIG_FILE", None),
+        tenancy_audience=_text(values, "PI_GLINK_TENANCY_AUDIENCE", ""),
+        assertion_max_lifetime_seconds=_integer(
+            values, "PI_GLINK_ASSERTION_MAX_SECONDS", _DEFAULT_ASSERTION_MAX_SECONDS
+        ),
+        assertion_clock_skew_seconds=_integer(
+            values, "PI_GLINK_ASSERTION_SKEW_SECONDS", _DEFAULT_ASSERTION_SKEW_SECONDS
+        ),
+        max_global_runs=_integer(values, "PI_GLINK_MAX_GLOBAL_RUNS", _DEFAULT_MAX_GLOBAL_RUNS),
+        max_tenant_runs=_integer(values, "PI_GLINK_MAX_TENANT_RUNS", _DEFAULT_MAX_TENANT_RUNS),
+        docker_cpus=_text(values, "LOCAL_WEB_DOCKER_CPUS", "2"),
+        docker_memory=_text(values, "LOCAL_WEB_DOCKER_MEMORY", "2g"),
+        docker_pids_limit=_integer(values, "LOCAL_WEB_DOCKER_PIDS_LIMIT", 512),
+        e2b_sandbox_timeout_seconds=_integer(values, "LOCAL_WEB_E2B_TIMEOUT_SECONDS", 0),
     )
+
+
+def _require_multitenant(values: Mapping[str, str], executor: str) -> None:
+    """Reject a multi-tenant configuration that cannot be safe.
+
+    The host only ever binds loopback (the local gateway proxies to it) and the
+    execution face must be a container/sandbox (the in-process face shares the
+    host's filesystem and is a single-user debug entry), and the identity /
+    credential files must be configured. Missing material is a startup refusal,
+    never a fallback to the unauthenticated local surface; the files themselves
+    are loaded and permission-checked by :func:`pi_glink.tenancy.build_tenancy`
+    before the host binds a port.
+    """
+    if executor == "inproc":
+        raise ConfigError(
+            "PI_GLINK_TENANCY=multitenant 要求 Docker/E2B 执行面；inproc 仅用于本地单用户调试"
+        )
+    for key in (
+        "PI_GLINK_GATEWAY_SECRET_FILE",
+        "PI_GLINK_TENANT_CONFIG_FILE",
+        "PI_GLINK_TENANCY_AUDIENCE",
+    ):
+        if not _text(values, key, ""):
+            raise ConfigError(f"{key} 在 PI_GLINK_TENANCY=multitenant 时必须配置")
 
 
 def _default_repo_root() -> Path:
@@ -202,13 +283,6 @@ def _integer(values: Mapping[str, str], key: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ConfigError(f"{key} must be an integer; got {raw!r}") from exc
-
-
-def _flag(values: Mapping[str, str], key: str, default: bool) -> bool:
-    raw = values.get(key)
-    if raw is None or not raw.strip():
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _path(values: Mapping[str, str], key: str, default: Path) -> Path:

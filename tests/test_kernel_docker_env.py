@@ -139,6 +139,58 @@ def test_container_session_paths_map_back_to_the_run_mount(config, tmp_path: Pat
     assert docker_env.host_session_path("/config/auth.json", session_dir) is None
 
 
+def test_plan_applies_resource_ceilings_and_drops_privileges(config, tmp_path: Path) -> None:
+    """Every container gets explicit limits and a reduced privilege profile.
+
+    The image/template are untouched; these are per-instance ``docker run``
+    arguments. No live daemon is contacted here, so this asserts the command
+    contract, not what a daemon enforced.
+    """
+    runtime = _prepare(config, tmp_path)
+    plan = docker_env.build_plan(
+        config,
+        runtime,
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        session_dir=runtime.session_dir,
+    )
+    argv = plan.argv
+    assert argv[argv.index("--cpus") + 1] == "2"
+    assert argv[argv.index("--memory") + 1] == "2g"
+    assert argv[argv.index("--pids-limit") + 1] == "512"
+    assert argv[argv.index("--cap-drop") + 1] == "ALL"
+    assert argv[argv.index("--security-opt") + 1] == "no-new-privileges"
+    assert plan.image in argv, "the frozen image stays the one selected at startup"
+
+
+def test_resource_ceilings_are_configurable_at_startup(tmp_path: Path) -> None:
+    config = build_config(
+        {
+            "OPENAI_API_KEY": "sk-docker-secret",
+            "OPENAI_BASE_URL": "https://example.invalid/v1",
+            "OPENAI_MODEL": "test/model",
+            "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
+            "LOCAL_WEB_EXECUTOR": "docker",
+            "LOCAL_WEB_DOCKER_CPUS": "1.5",
+            "LOCAL_WEB_DOCKER_MEMORY": "1g",
+            "LOCAL_WEB_DOCKER_PIDS_LIMIT": "128",
+        },
+        REPO_ROOT,
+    )
+    runtime = _prepare(config, tmp_path)
+    plan = docker_env.build_plan(
+        config,
+        runtime,
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        session_dir=runtime.session_dir,
+    )
+    argv = plan.argv
+    assert argv[argv.index("--cpus") + 1] == "1.5"
+    assert argv[argv.index("--memory") + 1] == "1g"
+    assert argv[argv.index("--pids-limit") + 1] == "128"
+
+
 def test_worker_image_is_frozen_at_configuration_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

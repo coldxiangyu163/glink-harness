@@ -102,6 +102,12 @@ class RunRecord:
     #: Operator decision that an unconfirmed resource is released
     #: (``{"decision": "released", "note": …, "at": …}``); never set automatically.
     resource_adjudication: Mapping[str, Any] | None = None
+    #: Owner of the run, written atomically with admission. Records written by
+    #: the single-user surface (or before owner tracking) carry ``None`` and are
+    #: therefore invisible to every multi-tenant read: history is never
+    #: imported into a tenant and never rewritten.
+    tenant_id: str | None = None
+    creator_user_id: str | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -218,7 +224,15 @@ class RunStore:
         *,
         run_id: str | None = None,
         workspace: Path | None = None,
+        tenant_id: str | None = None,
+        creator_user_id: str | None = None,
     ) -> RunRecord:
+        """Admit a run and write its assignment facts in one atomic meta write.
+
+        The owner labels (``tenant_id`` / ``creator_user_id``) are part of the
+        same replacement as the run id and created-at stamp, so no reader can
+        observe an ownerless run that an authenticated request must hide.
+        """
         identifier = run_id or uuid.uuid4().hex[:12]
         directory = self.run_dir(identifier)
         directory.mkdir(parents=True, exist_ok=True)
@@ -228,6 +242,8 @@ class RunStore:
             status=RUNNING,
             created_at=time.time(),
             workspace=str(workspace) if workspace is not None else str(directory / "workspace"),
+            tenant_id=tenant_id,
+            creator_user_id=creator_user_id,
         )
         self._write(record)
         return record
@@ -250,6 +266,32 @@ class RunStore:
         """The run as every reader must see it (committed terminal projected)."""
         record = self._read_meta(run_id)
         return self._project(record) if record is not None else None
+
+    def get_for(self, run_id: str, tenant_id: str) -> RunRecord | None:
+        """The run only when it belongs to ``tenant_id``.
+
+        An unknown run, another tenant's run and a legacy record without an
+        owner are all ``None``: the HTTP layer turns every one of them into the
+        same 404, so existence is not disclosed across tenants.
+        """
+        record = self.get(run_id)
+        if record is None or record.tenant_id != tenant_id:
+            return None
+        return record
+
+    def list_for(self, tenant_id: str, limit: int | None = 50) -> list[RunRecord]:
+        """Runs of exactly one tenant, newest first (legacy records excluded)."""
+        if not self._root.is_dir():
+            return []
+        records: list[RunRecord] = []
+        for entry in sorted(self._root.iterdir(), key=lambda item: item.name):
+            if not entry.is_dir():
+                continue
+            record = self.get(entry.name)
+            if record is not None and record.tenant_id == tenant_id:
+                records.append(record)
+        records.sort(key=lambda item: item.created_at, reverse=True)
+        return records if limit is None else records[:limit]
 
     def list(self, limit: int | None = 50) -> list[RunRecord]:
         if not self._root.is_dir():

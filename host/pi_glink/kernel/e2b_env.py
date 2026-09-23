@@ -108,9 +108,20 @@ class E2BSandboxClient:
         # so an operator who only filled ``.env`` still authenticates: the host
         # passes the key it read at startup instead of relying on the SDK having
         # inherited E2B_API_KEY from the launching shell.
+        # ``timeout_seconds`` is the adapter's bound (task timeout + teardown
+        # headroom); the frozen configuration may set a tighter ceiling.  E2B
+        # does not expose CPU/memory controls through this SDK path, so the host
+        # can only bound lifetime — it never claims a resource limit the cloud
+        # provider was not asked to enforce.
+        adapter_bound = int(timeout_seconds or 0)
+        ceiling = int(
+            self.config.e2b_sandbox_timeout_seconds
+            or (self.config.task_timeout_seconds + 300)
+        )
+        timeout = min(adapter_bound, ceiling) if adapter_bound > 0 else ceiling
         create_kwargs: dict[str, Any] = {
             "template": template,
-            "timeout": timeout_seconds or self.config.task_timeout_seconds + 300,
+            "timeout": timeout,
             "envs": self._model_envs(),
         }
         if self.config.e2b_api_key:

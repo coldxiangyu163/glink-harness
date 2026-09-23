@@ -7,9 +7,9 @@
 
 ## 产品方向与当前实现
 
-产品的既定方向是多租户研究工作台：通过 Docker / E2B 为研究 run 提供独立执行环境，本地 `inproc` 保留为单 Agent 开发与调试入口。当前三种执行面都受单 run 槽限制，尚无租户身份和授权模型；这只是现阶段实现，不是把产品永久限定为单用户的设计决定。
+产品的既定方向是多租户研究工作台：通过 Docker / E2B 为研究 run 提供独立执行环境，本地 `inproc` 保留为单 Agent 开发与调试入口。默认 `PI_GLINK_TENANCY=local` 仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用单宿主多租户实现（§10）：本机认证网关注入短时效签名身份、宿主验签，run 带租户归属，每租户使用自己的模型凭据，Docker/E2B 可并发。该实现目前只有**合成验证**（临时密钥文件、自签断言、fake 执行面、临时数据根）；真实网关、Docker/E2B live 与生产数据验收未覆盖，不能由单 run smoke 替代。
 
-多租户扩展必须同时明确并验证：服务端可信租户身份；run、工作区、事件、会话和产物的归属；列表、SSE、报告下载与取消的跨租户拒绝；运行期配置和凭据的独立交付；并发、超时、配额及资源回收。单独容器/沙箱提供执行隔离，但不自动解决宿主 API 授权、存储隔离或凭据访问。当前共享的配置目录和单 run 调度不能仅通过移除并发锁就升级为多租户实现。
+多租户实现已覆盖服务端可信身份、run/事件/报告/取消的归属过滤、每 run 凭据交付与脱敏边界、显式并发准入与全局 fail-closed 资源台账；仍未覆盖多宿主租约、共享存储、真实网关与云环境的资源上限执行。单独容器/沙箱提供执行隔离，但不自动解决宿主 API 授权、存储隔离或凭据访问，也不构成本仓库对容器/沙箱实际隔离强度的保证。
 
 具体接口与迁移在对应任务中决定，不预建无消费者的租户抽象；修改这些承诺遵循 [工程约束](engineering.md)。现有单 run 测试继续保护当前行为，将来的多租户变更在取得决定后同步替换相关断言，而不是把当前串行测试当作永久需求。
 
@@ -311,8 +311,8 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 
 **脱敏不是安全沙箱**：它处理的是「宿主已能把值交付给内核、内核又把它回显到产品面」这一层的
 回显保护；任意编码、分拆到不同工具输出、写入二进制或直接网络外传不在承诺范围。需要更强隔离
-时应使用 Docker / E2B 执行面，并为内核配专用、限额的凭据（完整多租户设计见
-`docs/multitenancy-plan.md`）。
+时应使用 Docker / E2B 执行面，并为内核配专用、限额的凭据；多租户的每 run 凭据渲染与脱敏边界
+见 §10.3，配置与迁移见 `docs/multitenancy-plan.md`。
 
 ### 6.2 输入侧最小权限
 
@@ -332,7 +332,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 
 | 路径 | 属于 | 说明 |
 |---|---|---|
-| `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `ownership` / `static_files` / `app` |
+| `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `app` |
 | `host/pi_glink/kernel/` | 接入层 | `rpc` / `framing` / `projection` / `agent_env` / `execution` / `docker_env` / `e2b_env` / `runner` |
 | `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
 | `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`、扩展位 |
@@ -369,4 +369,64 @@ LOCAL_WEB_EXECUTOR=e2b scripts/run-local-web.sh        # 云沙箱执行面
 ## 9. 本阶段不做（边界）
 
 场景能力包与档位、多账户与分享、资料库与上传/OCR、DOCX/PDF 导出与图表、报告审阅工作区、
-多角色编排、上下文压缩调优、成本治理、E2B 模板的生产级硬化。多租户身份、授权和并发隔离亦尚未实现，但属于上述既定产品方向，不是永久排除项；具体接口、准入、配额、迁移与验收见 [多租户方案](multitenancy-plan.md)，相关工作在不改内核的前提下按明确契约增量接入。
+多角色编排、上下文压缩调优、成本治理、E2B 模板的生产级硬化。单宿主多租户已按 §10 实现（合成验证）；
+多宿主、共享存储、真实网关接入、BYOK 自助与短期凭据代理、计费、上线部署与真实数据迁移仍不在
+本期范围，具体接口、迁移与上线验收见 [多租户方案](multitenancy-plan.md)。
+
+## 10. 单宿主多租户（已实现，合成验证）
+
+默认 `PI_GLINK_TENANCY=local`；宿主任一模式都只绑定 loopback（见 §10.5 的行为迁移），开启
+`multitenant` 后部署在本机认证网关之后，由网关注入身份断言，宿主不实现登录、OIDC 或用户体系。
+
+### 10.1 身份与请求授权
+
+- 断言：`X-Pi-Glink-Identity: v1.<base64url(payload)>.<base64url(hmac-sha256)>`，payload 至少含
+  `tenantId`、`userId`、`role`、`audience`、`iat`、`exp`；宿主用仓库外 0600 密钥文件做 constant-time
+  HMAC 校验，并检查 audience、过期与寿命上限（默认 300 秒）。重复断言头直接拒绝——这是宿主侧的
+  “网关必须清除客户端同名头”。
+- 请求体、查询参数与其它请求头不参与身份推导：多租户下除 `/api/health` 外所有 `/api/*` 先验签；
+  未认证 401，权限不足 403，未知/异租户/无 owner 的 legacy 记录统一同形 404。
+- 事件流在写出任何响应头之前用同一 owner 规则验权；流循环每 0.2 秒检查一次断言是否过期，过期即
+  结束该流（`EventBus.subscribe(idle_poll=…)` 提供返回控制流的空轮询，不改变持久事件语义）。
+- POST 检查 `Origin` / `Referer` / `Sec-Fetch-Site`：任何表示跨站的元数据都会在启动执行面之前被拒绝；
+  无这些头的非浏览器客户端（网关、运维脚本）不受影响。
+
+### 10.2 owner 与历史数据
+
+`RunStore.create` 在受理时用同一次 `meta.json` 原子写 `tenant_id` / `creator_user_id`；`get_for` /
+`list_for` 按 tenant 过滤。没有 owner 的旧记录不匹配任何租户，因此在多租户读面上始终不可见/不可下载/
+不可 SSE/不可取消，也不会被迁移或改写；`local` 模式仍按旧口径可读。取消在同一把 run 锁内先做
+owner/role 判定再受理：其他租户得到与未知 run 相同的 404 且无副作用，同租户非创建者的 member 得到 403。
+
+### 10.3 凭据与脱敏边界
+
+租户凭据文件（仓库外、0600）为每个租户提供 `modelApiKey`（必需）与 `webSearchKey`（可选）。渲染时
+`RunCredentials(origin="tenant")` 只允许本租户的值：缺模型 key 拒绝准入，绝不回退宿主 `.env`、操作员
+`~/.pi/web-search.json` 或别的租户；缺搜索 key 时按现有无 key 检索行为渲染（删除 `web-search.json`）。
+E2B 平台 key 属于宿主资源管理，不是租户模型 key。每 run 构造一个只包含“宿主已知秘密 + 本 run 凭据”
+的 `SecretRedactor`，事件投影、提交、报告拷贝、工作区/会话清扫与报告下载都用它，因此不同租户的秘密
+不会互相写入对方的边界或产物。工具能读到自己本 run 的 `auth.json` 仍属于既有残留风险（§6.2），
+脱敏只做回显保护，不承诺阻止任意编码或网络外传。
+
+### 10.4 准入与并发
+
+只有多租户 + Docker/E2B 可并发：默认全局上限 4、单租户上限 2；准入检查与槽位预留（写入执行表 +
+打开事件流）在同一把 manager 锁内完成，超额立即返回 `429 quota_exceeded`（带 scope 与 limit，不含
+任何 run id），不排队。资源账保持全局 fail-closed：任意租户的未确认释放资源都会挡住新准入，仍由运维
+`--unreleased` / `--mark-released` 人工裁决。已受理的取消仍与终帧提交在同一线性化点上裁决。`inproc`
+在两种模式下都维持全局单 run；多租户配置直接拒绝 `inproc`（它共享宿主文件系统）。
+
+Docker 面的每个容器实例额外带 `--cpus` / `--memory` / `--pids-limit`（默认 2 / 2g / 512，可配置）与
+`--cap-drop ALL` / `--security-opt no-new-privileges`，镜像与模板不变。E2B 面只能限制沙箱生命周期
+（`LOCAL_WEB_E2B_TIMEOUT_SECONDS`，默认 task timeout + 300 秒）；SDK 不暴露 CPU/内存控制，因此宿主
+只声明自己实际传给云端的限制，不把未请求的限制当作已执行。两者都未在本次交付中做 live 验证。
+
+### 10.5 行为迁移、回退与未覆盖范围
+
+- **迁移**：任何模式都不再允许绑定非 loopback：无认证公网模式被移除，历史的 `LOCAL_WEB_ALLOW_REMOTE`
+  不再生效；远端访问必须经过本机认证网关注入身份（`PI_GLINK_TENANCY=multitenant`）。这是本次交付
+  明确的行为收紧。
+- **回退**：关闭 `PI_GLINK_TENANCY` 回到单用户模式；新旧记录都保留，不需要删除、迁移或改写；
+  多租户密钥文件也不再被读取。
+- **未覆盖**：真实网关注入、密钥轮换与撤销；真实 Docker/E2B live 资源上限、沙箱模板的实际隔离强度；
+  多宿主租约与共享存储；BYOK、短期凭据代理、计费与上线运维。合成矩阵通过不等于多租户已经安全上线。

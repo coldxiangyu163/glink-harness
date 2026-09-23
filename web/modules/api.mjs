@@ -26,7 +26,11 @@ async function parse(response) {
 }
 
 async function call(path, { method = 'GET', body = null, fetchImpl = globalThis.fetch } = {}) {
-  const init = { method, headers: { Accept: 'application/json' } };
+  // Same-origin credentials travel by default; making it explicit documents the
+  // multi-tenant contract: an authentication gateway in front of this host
+  // injects the short-lived identity from the session cookie it already holds,
+  // so the workbench needs no login page and no token in the page.
+  const init = { method, headers: { Accept: 'application/json' }, credentials: 'same-origin' };
   if (body !== null) {
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);

@@ -114,6 +114,12 @@ def build_plan(
     never appear in the process list. ``session_dir`` is the run's own session
     directory: a shared mount would let two runs write into each other's session
     files.
+    Every run gets explicit resource ceilings and a reduced privilege profile
+    (``--cpus`` / ``--memory`` / ``--pids-limit``, all capabilities dropped,
+    ``no-new-privileges``). The image and its template are never changed here;
+    the limits apply to the container instance only. They are contract, not
+    measured facts: no live Docker run is performed by the default test suite,
+    so the host cannot claim what the daemon actually enforced.
     """
     image = worker_image(config)
     container_name = f"pi-glink-{run_id}"
@@ -121,6 +127,11 @@ def build_plan(
         "docker", "run", "--rm", "-i",
         "--name", container_name,
         "--label", f"pi-glink.run={run_id}",
+        "--cpus", str(config.docker_cpus),
+        "--memory", str(config.docker_memory),
+        "--pids-limit", str(config.docker_pids_limit),
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
         "-v", f"{workspace}:{CONTAINER_WORKSPACE}",
         "-w", CONTAINER_WORKSPACE,
         "-v", f"{runtime.directory}:{CONTAINER_CONFIG}",

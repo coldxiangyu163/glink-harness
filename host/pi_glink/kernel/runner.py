@@ -52,7 +52,13 @@ from ..store import (
     RunRecord,
     RunStore,
 )
-from .agent_env import AgentRuntime, build_pi_argv, build_pi_env, prepare_agent_dir
+from .agent_env import (
+    AgentRuntime,
+    RunCredentials,
+    build_pi_argv,
+    build_pi_env,
+    prepare_agent_dir,
+)
 from .docker_env import (
     build_plan as build_docker_plan,
     host_session_path as docker_host_session_path,
@@ -69,6 +75,11 @@ from .execution import (
 )
 from .projection import Projector
 from .rpc import PiRpcClient
+from ..tenancy import (
+    TenantContext,
+    TenantCredentialStore,
+    TenantNotConfigured,
+)
 
 logger = logging.getLogger("pi_glink.kernel.runner")
 
@@ -109,6 +120,20 @@ class ResourcesUnreleased(RuntimeError):
         self.run_ids = list(run_ids)
 
 
+class RunQuotaExceeded(RuntimeError):
+    """Raised when admitting a run would exceed a configured concurrency ceiling.
+
+    ``scope`` names which ceiling was hit (``global`` or ``tenant``). The HTTP
+    layer answers a 429 with that scope and limit, never with another tenant's
+    run id: an over-quota refusal must not disclose who else is running.
+    """
+
+    def __init__(self, scope: str, limit: int) -> None:
+        super().__init__(f"{scope} 并发上限 {limit} 已达")
+        self.scope = scope
+        self.limit = limit
+
+
 class EventLogError(RuntimeError):
     """The durable event log could not be written; the frame must stay hidden."""
 
@@ -144,6 +169,15 @@ class _Execution:
     #: The instruction as the user wrote it. ``record.prompt`` is the redacted
     #: copy that may be persisted and shown; the kernel receives this one.
     kernel_prompt: str = ""
+    #: Verified tenant identity (multi-tenant mode) or ``None`` (local mode).
+    context: TenantContext | None = None
+    #: The credentials this run may render — its own tenant's in multi-tenant
+    #: mode, the host's frozen configuration in local mode.
+    credentials: RunCredentials | None = None
+    #: This run's redaction boundary. It contains the host's known secrets plus
+    #: this run's credentials only, so one tenant's secret is never used to
+    #: redact (or leaked into) another tenant's events, logs or artifacts.
+    redactor: SecretRedactor | None = None
     #: Guards the phase, the cancellation flag and every frame commit.
     lock: threading.RLock = field(default_factory=threading.RLock)
     phase: str = _OPEN
@@ -186,6 +220,7 @@ class RunManager:
         client_factory: ClientFactory = PiRpcClient,
         sandbox_factory: Callable[..., Any] | None = None,
         ownership: DataRootOwnership | None = None,
+        credential_store: TenantCredentialStore | None = None,
     ) -> None:
         self.config = config
         self.bus = bus
@@ -193,9 +228,16 @@ class RunManager:
         self._client_factory = client_factory
         self._sandbox_factory = sandbox_factory
         self._ownership = ownership
-        # The single redaction boundary: every event payload passes through it
-        # before it reaches the bus (SSE + browser) or the event log.
+        self._credential_store = credential_store
+        # The host-level redaction boundary: it carries the host's own secrets
+        # (global model/search keys, sandbox key, the operator's own search
+        # file). Each run derives its own copy and adds only its own credentials
+        # to it, so tenant secrets stay apart. Reading the operator file here —
+        # rather than while rendering a run — also keeps the download boundary
+        # able to mask old reports after a restart.
         self.redactor: SecretRedactor = redactor_from_config(config)
+        if config.web_search_config_path is not None:
+            self.redactor.add_from_file(config.web_search_config_path)
         self._lock = threading.RLock()
         self._executions: dict[str, _Execution] = {}
 
@@ -204,34 +246,55 @@ class RunManager:
     @property
     def active_run_id(self) -> str | None:
         with self._lock:
-            return next(iter(self._executions), None)
+            return next(
+                (
+                    run_id
+                    for run_id, execution in self._executions.items()
+                    if execution.phase != _COMMITTED
+                ),
+                None,
+            )
 
-    def start(self, prompt: str) -> RunRecord:
-        """Admit a run and execute it in the background."""
+    def start(self, prompt: str, context: TenantContext | None = None) -> RunRecord:
+        """Admit a run and execute it in the background.
+
+        ``context`` is the verified tenant identity in multi-tenant mode and
+        ``None`` in the single-user local mode. The run's owner labels come
+        from that context alone — never from the request body, a query parameter
+        or any other client-controlled input — and are written atomically with
+        the admission record.
+        """
         text = (prompt or "").strip()
         if not text:
             raise ValueError("prompt must not be empty")
-        if not self.config.has_openai_key:
+        credentials = self._credentials_for_context(context)
+        if not credentials.model_api_key:
             raise ConfigError(
                 "OPENAI_API_KEY is not configured; set it in .env before starting a run"
             )
+        # Build the run's redaction boundary before anything derived from the
+        # prompt can be stored: a credential pasted into the prompt is masked
+        # with the same knowledge the run's own output will be.
+        redactor = self._redactor_for(credentials)
 
         with self._lock:
-            if self._executions:
-                raise RunBusy(next(iter(self._executions)))
-            holds = self._resource_holds()
-            if holds:
-                raise ResourcesUnreleased(holds)
+            self._check_admission(context)
             run_id = uuid.uuid4().hex[:12]
             workspace = self.config.workspace_root / run_id
-            # A user can paste a credential into the prompt; the stored and
-            # displayed copy is masked, while the kernel still receives the
-            # original instruction.
             record = self.store.create(
-                self.redactor.redact(text), run_id=run_id, workspace=workspace
+                redactor.redact(text),
+                run_id=run_id,
+                workspace=workspace,
+                tenant_id=context.tenant_id if context is not None else None,
+                creator_user_id=context.user_id if context is not None else None,
             )
             execution = _Execution(
-                record=record, workspace=workspace, kernel_prompt=text
+                record=record,
+                workspace=workspace,
+                kernel_prompt=text,
+                context=context,
+                credentials=credentials,
+                redactor=redactor,
             )
             self._executions[run_id] = execution
             # Register the run before the caller gets the id back: a browser
@@ -247,25 +310,135 @@ class RunManager:
         ).start()
         return record
 
+    def _credentials_for_context(self, context: TenantContext | None) -> RunCredentials:
+        """Select the credentials one run may render (caller holds no lock).
+
+        Multi-tenant mode requires a verified context and the tenant's own
+        model key; a missing entry is a refusal, never a fallback to the host's
+        global ``.env`` key or to another tenant's credential file.
+        """
+        if self.config.multi_tenant:
+            if context is None:
+                raise TenantNotConfigured("多租户模式需要已验证的租户身份")
+            if self._credential_store is None:
+                raise TenantNotConfigured("宿主未加载租户凭据配置")
+            tenant = self._credential_store.require(context.tenant_id)
+            return RunCredentials(
+                model_api_key=tenant.model_api_key,
+                web_search_key=tenant.web_search_key,
+                web_search_config_path=None,
+                origin="tenant",
+            )
+        return RunCredentials.from_host(self.config)
+
+    def _redactor_for(self, credentials: RunCredentials) -> SecretRedactor:
+        """A per-run redaction boundary: host secrets + this run's credentials."""
+        redactor = SecretRedactor(self.redactor.known_values)
+        redactor.add(credentials.model_api_key)
+        redactor.add(credentials.web_search_key)
+        return redactor
+
+    def _run_redactor(self, execution: _Execution) -> SecretRedactor:
+        """The run's own boundary, falling back to the host-level one.
+
+        Production always sets the run's boundary at admission; the fallback
+        keeps an execution object constructed directly (unit tests, future
+        callers) from emitting through no boundary at all.
+        """
+        return execution.redactor or self.redactor
+
+    def redactor_for_record(self, record: RunRecord) -> SecretRedactor:
+        """The redaction boundary appropriate for an already-persisted run.
+
+        Used by the report download: a multi-tenant report is masked against
+        the record's own tenant credentials, never another tenant's.
+        """
+        if not self.config.multi_tenant or self._credential_store is None:
+            return self.redactor
+        tenant = self._credential_store.get(record.tenant_id)
+        if tenant is None:
+            return self.redactor
+        redactor = SecretRedactor(self.redactor.known_values)
+        redactor.add(tenant.model_api_key)
+        redactor.add(tenant.web_search_key)
+        return redactor
+
+    def _check_admission(self, context: TenantContext | None) -> None:
+        """Authorize concurrency and reserve the slot (caller holds the lock).
+
+        Two durable facts drive the decision — never a wall-clock guess: the
+        runs executing in this process, and the runs (of any tenant) whose
+        execution resources are not confirmed released. The latter stays a
+        global fail-closed hold: an unknown leftover blocks new admissions
+        instead of being quietly forgiven.
+
+        In multi-tenant Docker/E2B mode the ceilings are global 4 / per-tenant
+        2 by default and an over-limit request is refused immediately (no
+        unbounded queue). Every other mode keeps the original single-run slot:
+        ``inproc`` is a single-user debug entry, including in multi-tenant
+        deployments (the configuration layer refuses ``inproc`` entirely
+        there).
+        """
+        holds = self._resource_holds()
+        if holds:
+            raise ResourcesUnreleased(holds)
+        # A run past its commit point no longer occupies a concurrency slot: its
+        # capacity is now governed by the resource ledger above.
+        active = [
+            execution
+            for execution in self._executions.values()
+            if execution.phase != _COMMITTED
+        ]
+        if not self.config.multi_tenant:
+            if active:
+                raise RunBusy(active[0].record.run_id)
+            return
+        # Refuse on the most specific ceiling first: a tenant already at its own
+        # limit should be told about its own quota, not about the host total.
+        tenant_id = context.tenant_id if context is not None else None
+        tenant_active = sum(1 for item in active if item.record.tenant_id == tenant_id)
+        if tenant_active >= self.config.max_tenant_runs:
+            raise RunQuotaExceeded("tenant", self.config.max_tenant_runs)
+        if len(active) >= self.config.max_global_runs:
+            raise RunQuotaExceeded("global", self.config.max_global_runs)
+
     def _resource_holds(self) -> list[str]:
-        """Runs not executing here whose resources are not confirmed released."""
+        """Runs whose resources are not confirmed released (global fail-closed).
+
+        A run still in flight in this process occupies a concurrency slot
+        instead; only a run past its terminal commit can hold resources beyond
+        that slot. The distinction matters during the window between the commit
+        and the execution leaving the table: the committed run must already
+        block new admissions when its cleanup did not confirm release, otherwise
+        a race would hand its unreleased resources to the next run.
+        """
         with self._lock:
-            executing = set(self._executions)
+            in_flight = {
+                run_id
+                for run_id, execution in self._executions.items()
+                if execution.phase != _COMMITTED
+            }
         return [
             record.run_id
             for record in self.store.list(limit=None)
-            if record.run_id not in executing and record.holds_resources
+            if record.run_id not in in_flight and record.holds_resources
         ]
 
     # -- cancellation ---------------------------------------------------------
 
-    def stop(self, run_id: str) -> StopDecision:
+    def stop(self, run_id: str, context: TenantContext | None = None) -> StopDecision:
         """Request cancellation, decided against the run's commit point.
 
         Accepting sets the flag the verdict reads under the same lock that
         commits it, so an accepted stop always ends as ``cancelled``. The
         face's own cancel only shortens the wait: a failed abort is logged and
         does not turn an accepted stop into a rejection.
+
+        ``context`` is the verified identity in multi-tenant mode. The owner
+        and role check runs under the run's own lock, so it cannot race the
+        verdict commit: another tenant (or a legacy ownerless record) is
+        answered like an unknown run, while a same-tenant member who did not
+        create the run is refused with ``forbidden``.
         """
         with self._lock:
             execution = self._executions.get(run_id)
@@ -273,9 +446,15 @@ class RunManager:
             record = self.store.get(run_id)
             if record is None:
                 return StopDecision(False, None, "unknown")
+            refused = self._stop_access(record, context)
+            if refused is not None:
+                return refused
             reason = "terminal" if record.is_terminal else "not_owned"
             return StopDecision(False, record.status, reason)
         with execution.lock:
+            refused = self._stop_access(execution.record, context)
+            if refused is not None:
+                return refused
             if execution.phase == _COMMITTED:
                 assert execution.verdict is not None
                 return StopDecision(False, execution.verdict.status, "terminal")
@@ -283,12 +462,49 @@ class RunManager:
                 return StopDecision(False, RUNNING, "finalizing")
             execution.cancel_requested = True
             adapter = execution.adapter
-        if adapter is not None:
-            try:
-                adapter.cancel()
-            except Exception:  # noqa: BLE001 - the flag is what ends the run
-                logger.debug("adapter cancel failed run=%s", run_id, exc_info=True)
+        self._cancel_adapter(run_id, adapter)
         return StopDecision(True, RUNNING, "accepted")
+
+    def _stop_owned(self, execution: _Execution) -> None:
+        """Cancel one run this process owns, bypassing the tenant role gate.
+
+        Shutdown is host lifecycle, not an authenticated user action, so it
+        must not depend on a request context. Ownership is already proven by
+        the in-memory execution table.
+        """
+        with execution.lock:
+            if execution.phase != _OPEN:
+                return
+            execution.cancel_requested = True
+            adapter = execution.adapter
+        self._cancel_adapter(execution.record.run_id, adapter)
+
+    @staticmethod
+    def _cancel_adapter(run_id: str, adapter: ExecutionAdapter | None) -> None:
+        if adapter is None:
+            return
+        try:
+            adapter.cancel()
+        except Exception:  # noqa: BLE001 - the flag is what ends the run
+            logger.debug("adapter cancel failed run=%s", run_id, exc_info=True)
+
+    def _stop_access(
+        self, record: RunRecord, context: TenantContext | None
+    ) -> StopDecision | None:
+        """Owner/role gate for cancellation; ``None`` means allowed.
+
+        Another tenant and an ownerless legacy record are answered exactly like
+        an unknown run (404, no side effect). A same-tenant member who is not
+        the creator is refused; the creator and tenant admins may stop it.
+        Local mode has no identity and keeps its original behaviour.
+        """
+        if not self.config.multi_tenant:
+            return None
+        if context is None or record.tenant_id != context.tenant_id:
+            return StopDecision(False, None, "unknown")
+        if context.is_admin or record.creator_user_id == context.user_id:
+            return None
+        return StopDecision(False, record.status, "forbidden")
 
     def wait(self, run_id: str, timeout: float = 60.0) -> RunRecord | None:
         """Block until the run leaves ``running`` (used by tests and smoke)."""
@@ -311,7 +527,7 @@ class RunManager:
         with self._lock:
             executions = list(self._executions.values())
         for execution in executions:
-            self.stop(execution.record.run_id)
+            self._stop_owned(execution)
         deadline = time.monotonic() + max(0.0, timeout)
         for execution in executions:
             remaining = deadline - time.monotonic()
@@ -445,7 +661,7 @@ class RunManager:
                 run_id,
                 resource_adjudication={
                     "decision": "released",
-                    "note": self.redactor.redact(reason),
+                    "note": self.redactor_for_record(record).redact(reason),
                     "at": time.time(),
                 },
             )
@@ -535,7 +751,7 @@ class RunManager:
             execution.cleanup = CleanupReport(released=True)
 
         try:
-            if self._sanitize_workspace(execution.workspace):
+            if self._sanitize_workspace(execution.workspace, self._run_redactor(execution)):
                 execution.redacted = True
         except Exception:  # noqa: BLE001 - sweep is defence in depth
             logger.exception("workspace credential sweep failed run=%s", run_id)
@@ -645,7 +861,9 @@ class RunManager:
         payload = {
             "status": verdict.status,
             "stopReason": verdict.stop_reason,
-            "error": self.redactor.redact(verdict.error) if verdict.error else None,
+            "error": self._run_redactor(execution).redact(verdict.error)
+            if verdict.error
+            else None,
             "reportPath": str(execution.report_path) if execution.report_path else None,
             "reportStatus": execution.report_status,
             "modelStopReason": execution.model_stop_reason,
@@ -662,7 +880,7 @@ class RunManager:
             "artifactFailures": list(execution.artifact_failures),
         }
         try:
-            self._emit(run_id, terminal_type, payload, terminal=True)
+            self._emit(execution, terminal_type, payload, terminal=True)
         except EventLogError as exc:
             logger.error("terminal frame could not be committed run=%s: %s", run_id, exc)
             return False
@@ -686,12 +904,20 @@ class RunManager:
             self.config,
             runtime_dir=run_dir / RUNTIME_DIRNAME,
             session_dir=Path(self.config.session_dir) / run_id,
+            credentials=execution.credentials,
         )
         execution.runtime = runtime
-        # The search credential only exists in the rendered file, so it is
-        # learned here (never logged, never returned).
-        self.redactor.add_from_file(runtime.directory / "web-search.json")
-        execution.projector = Projector(self.redactor)
+        # This run's own redaction boundary: the host's secrets plus the
+        # credentials this run was actually given. The rendered search
+        # credential only exists in the file, so it is learned here (never
+        # logged, never returned). Adding it to the run's boundary — not to the
+        # host-level one — keeps two tenants' secrets from mixing.
+        if execution.redactor is None:
+            execution.redactor = self._redactor_for(
+                execution.credentials or RunCredentials.from_host(self.config)
+            )
+        execution.redactor.add_from_file(runtime.directory / "web-search.json")
+        execution.projector = Projector(execution.redactor)
         return runtime
 
     # -- adapters -------------------------------------------------------------
@@ -806,7 +1032,7 @@ class RunManager:
     ) -> bool:
         """Commit one frame of an open run (caller holds the run lock)."""
         try:
-            self._emit(execution.record.run_id, event_type, payload)
+            self._emit(execution, event_type, payload)
         except EventLogError as exc:
             execution.event_log_error = execution.event_log_error or str(exc)
             logger.error("event log failed run=%s: %s", execution.record.run_id, exc)
@@ -820,7 +1046,7 @@ class RunManager:
         with execution.lock:
             if execution.phase != _OPEN:
                 return
-            self._emit(execution.record.run_id, event_type, payload)
+            self._emit(execution, event_type, payload)
 
     def _record_model_result(
         self, execution: _Execution, frame: Mapping[str, Any]
@@ -948,7 +1174,7 @@ class RunManager:
             self._report_warning(execution, f"report.md 未通过安全校验，已拒绝：{exc}")
             return
         original = data.decode("utf-8", errors="replace")
-        redacted = self.redactor.redact(original)
+        redacted = self._run_redactor(execution).redact(original)
         if redacted != original:
             execution.redacted = True
         try:
@@ -991,16 +1217,31 @@ class RunManager:
         session_file = record.session_file if record is not None else None
         if not session_file or execution.runtime is None:
             return False
-        return self._sanitize_session_file(session_file, root=execution.runtime.session_dir)
+        return self._sanitize_session_file(
+            session_file,
+            root=execution.runtime.session_dir,
+            redactor=self._run_redactor(execution),
+        )
 
-    def _sanitize_session_file(self, session_file: str, *, root: Path) -> bool:
-        """Redact one session file; returns whether its bytes changed."""
+    def _sanitize_session_file(
+        self,
+        session_file: str,
+        *,
+        root: Path,
+        redactor: SecretRedactor | None = None,
+    ) -> bool:
+        """Redact one session file; returns whether its bytes changed.
+
+        ``redactor`` is the run's own boundary; the default keeps the host-level
+        one for callers that have no run (unit tests, future maintenance).
+        """
+        boundary = redactor or self.redactor
         try:
             with ArtifactTree(root) as tree:
                 original = tree.read(session_file, max_bytes=REPORT_MAX_BYTES).decode(
                     "utf-8", errors="replace"
                 )
-                redacted = self.redactor.redact(original)
+                redacted = boundary.redact(original)
                 if redacted == original:
                     return False
                 tree.replace(session_file, redacted.encode("utf-8"), max_bytes=REPORT_MAX_BYTES)
@@ -1010,7 +1251,9 @@ class RunManager:
         logger.warning("session file contained credentials and was redacted: %s", session_file)
         return True
 
-    def _sanitize_workspace(self, workspace: Path) -> bool:
+    def _sanitize_workspace(
+        self, workspace: Path, redactor: SecretRedactor | None = None
+    ) -> bool:
         """Redact credentials in every text artifact the run left behind.
 
         The report is not the only file a tool echo can reach; a ``write`` call
@@ -1018,7 +1261,11 @@ class RunManager:
         sweep is bounded (file count, size cap, binary skip) and walks the
         workspace through directory handles: links are never followed for
         reading, and every rewrite is published inside the verified directory.
+
+        ``redactor`` is the run's own boundary; the default is the host-level
+        one for callers that have no run.
         """
+        boundary = redactor or self.redactor
         try:
             tree = ArtifactTree(workspace)
         except ArtifactError:
@@ -1036,7 +1283,7 @@ class RunManager:
                     text = raw.decode("utf-8")
                 except UnicodeDecodeError:
                     continue
-                redacted = self.redactor.redact(text)
+                redacted = boundary.redact(text)
                 if redacted == text:
                     continue
                 try:
@@ -1052,19 +1299,23 @@ class RunManager:
 
     def _emit(
         self,
-        run_id: str,
+        execution: _Execution,
         event_type: str,
         payload: Mapping[str, Any] | None = None,
         *,
         terminal: bool = False,
     ) -> events.RunEvent:
         # Belt-and-braces: projection already redacts, but host-owned events
-        # (run_finished, kernel_status, …) are built here, so the same boundary
-        # runs again on the way out. The frame is committed before it is shown;
-        # the terminal frame is committed durably (see RunStore.commit_terminal).
+        # (run_finished, kernel_status, …) are built here, so the run's own
+        # boundary runs again on the way out. The frame is committed before it
+        # is shown; the terminal frame is committed durably (see
+        # RunStore.commit_terminal).
         safe_payload = (
-            self.redactor.redact_payload(dict(payload)) if payload is not None else None
+            self._run_redactor(execution).redact_payload(dict(payload))
+            if payload is not None
+            else None
         )
+        run_id = execution.record.run_id
         write = self.store.commit_terminal if terminal else self.store.append_event
         try:
             return self.bus.commit(

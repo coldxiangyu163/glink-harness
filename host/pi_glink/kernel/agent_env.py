@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -90,6 +90,33 @@ WEB_SEARCH_ENV_PROVIDER_KEY = "exaApiKey"
 
 
 @dataclass(frozen=True, slots=True)
+class RunCredentials:
+    """The credentials one run may render, and where they came from.
+
+    ``origin`` is ``"host"`` in the single-user surface (the frozen
+    configuration and, for search, the operator's own pi file) and
+    ``"tenant"`` in multi-tenant mode, where **only** the run's tenant may
+    supply values: there is no fallback to the host's global ``.env`` key or to
+    the operator's ``~/.pi`` search configuration. The dataclass keeps the
+    values out of ``repr`` so an accidental log line cannot print them.
+    """
+
+    model_api_key: str = field(repr=False, default="")
+    web_search_key: str = field(repr=False, default="")
+    web_search_config_path: Path | None = None
+    origin: str = "host"
+
+    @classmethod
+    def from_host(cls, config: HostConfig) -> "RunCredentials":
+        return cls(
+            model_api_key=config.openai_api_key,
+            web_search_key=config.web_search_key,
+            web_search_config_path=config.web_search_config_path,
+            origin="host",
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AgentRuntime:
     """Where pi will read its configuration for one run, and which model."""
 
@@ -110,6 +137,7 @@ def prepare_agent_dir(
     *,
     runtime_dir: Path,
     session_dir: Path | None = None,
+    credentials: RunCredentials | None = None,
 ) -> AgentRuntime:
     """Render the per-run pi configuration directory and return its handle.
 
@@ -117,19 +145,25 @@ def prepare_agent_dir(
     into a shared directory would let concurrent runs overwrite each other's
     credentials and extensions. ``session_dir`` defaults to a sibling
     ``sessions`` directory; the host always passes the run's own path.
+
+    ``credentials`` selects what the rendered ``auth.json`` / ``web-search.json``
+    contain. The default derives them from the host configuration (local mode);
+    multi-tenant runs pass the run's own tenant credentials, so one tenant's
+    key is never rendered into another tenant's directory.
     """
     if not config.openai_base_url:
         raise ConfigError("OPENAI_BASE_URL is required to launch the pi kernel")
     if not config.openai_model:
         raise ConfigError("OPENAI_MODEL is required to launch the pi kernel")
 
+    source = credentials if credentials is not None else RunCredentials.from_host(config)
     directory = Path(runtime_dir)
     sessions = Path(session_dir) if session_dir is not None else directory.parent / "sessions"
     directory.mkdir(parents=True, exist_ok=True)
     sessions.mkdir(parents=True, exist_ok=True)
     _sync_template(config.agent_config_dir, directory)
-    _seed_web_search_config(config, directory)
-    _write_auth_json(config, directory)
+    _seed_web_search_config(source, directory)
+    _write_auth_json(source, directory)
 
     models_path = directory / "models.json"
     models_path.write_text(
@@ -247,8 +281,8 @@ def _models_document(config: HostConfig) -> dict[str, Any]:
     }
 
 
-def _write_auth_json(config: HostConfig, directory: Path) -> Path | None:
-    """Store the model credential the way pi itself stores it.
+def _write_auth_json(credentials: RunCredentials, directory: Path) -> Path | None:
+    """Store the run's model credential the way pi itself stores it.
 
     ``auth.json`` is pi's official credential store — the same file ``/login``
     writes, mode 0600, inside the run's runtime config directory (which lives
@@ -263,10 +297,10 @@ def _write_auth_json(config: HostConfig, directory: Path) -> Path | None:
     rather than left behind.
     """
     target = directory / AUTH_FILENAME
-    if not config.openai_api_key:
+    if not credentials.model_api_key:
         target.unlink(missing_ok=True)
         return None
-    payload = {PROVIDER_ID: {"type": "api_key", "key": config.openai_api_key}}
+    payload = {PROVIDER_ID: {"type": "api_key", "key": credentials.model_api_key}}
     target.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -308,17 +342,22 @@ def _sync_template(template_dir: Path, target_dir: Path) -> None:
             shutil.copy2(source, target)
 
 
-def _seed_web_search_config(config: HostConfig, directory: Path) -> Path | None:
+def _seed_web_search_config(credentials: RunCredentials, directory: Path) -> Path | None:
     """Seed pi-web-access credentials into the runtime config directory.
 
     pi-web-access resolves its config directory from ``PI_CODING_AGENT_DIR``
     (verified in its ``utils.ts``), so redirecting that variable would silently
     hide the operator's own ``web-search.json`` and downgrade search to the
-    keyless fallback. Two sources, in order:
+    keyless fallback. Local mode has two sources, in order:
 
     1. ``PI_GLINK_WEB_SEARCH_KEY`` — rendered as ``{"exaApiKey": …}``;
     2. the operator's own file (``~/.pi/agent/web-search.json`` or
        ``~/.pi/web-search.json``), copied verbatim.
+
+    Multi-tenant mode passes a :class:`RunCredentials` with ``origin="tenant"``
+    and an explicit ``web_search_config_path`` of ``None``: only the run's own
+    tenant key may be rendered, and a tenant without one gets no search
+    credential (keyless fallback) instead of another tenant's or the operator's.
 
     Having no credential at all is a supported state: pi-web-access still works
     through keyless Exa MCP search, and the run contract does not require a key.
@@ -326,14 +365,18 @@ def _seed_web_search_config(config: HostConfig, directory: Path) -> Path | None:
     directory can never keep a previous credential behind.
     """
     target = directory / WEB_SEARCH_FILENAME
-    if config.web_search_key:
-        payload = {WEB_SEARCH_ENV_PROVIDER_KEY: config.web_search_key}
+    if credentials.web_search_key:
+        payload = {WEB_SEARCH_ENV_PROVIDER_KEY: credentials.web_search_key}
         target.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
         target.chmod(0o600)
         return target
-    source = config.web_search_config_path
+    source = credentials.web_search_config_path
+    if credentials.origin == "tenant":
+        # Multi-tenant: a tenant never inherits the operator's own credential
+        # file, even if a caller hands one in by mistake.
+        source = None
     if source is not None and source.is_file():
         shutil.copy2(source, target)
         target.chmod(0o600)
