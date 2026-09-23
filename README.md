@@ -204,6 +204,11 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 - **回退**：切回 `PI_GLINK_AUTH_MODE=gateway`（或关闭多租户）即可；账号库保留只读，不自动改写 run
   历史，也不降低 owner 校验。
 
+> **合并窗口兼容**：静态前端由宿主逐次读盘，先更新代码、后重启宿主时，运行中的旧 `local` 宿主
+> 没有 `GET /api/me`。前端仅在 `/api/me` 明确 404 且 `/api/config` 成功返回严格 `multiTenant:false`
+> 时按旧 local 流程初始化（旧历史照常显示）；401、网络错误、多租户或含糊配置一律 fail-closed，
+> 不会因此绕过账号身份。宿主重启后该兼容分支即失效。
+
 > 隔离范围：宿主 API 授权、run 归属、凭据交付与 redaction 在宿主侧完成；容器/沙箱提供执行环境
 > 隔离，但不构成对宿主 API 或存储的替代边界。合成验收覆盖账号存储/会话/CSRF/跨租户与 fake 执行面；
 > 真实网关、真实 HTTPS/TLS 代理、邮件交付、Docker/E2B live 与生产数据仍未验证，上线前仍需按
