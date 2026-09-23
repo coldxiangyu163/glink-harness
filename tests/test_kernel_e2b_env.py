@@ -372,7 +372,7 @@ def test_stop_during_a_sandbox_run_is_cancelled_not_failed(
     manager, storage = _manager(config, sandbox, tmp_path)
     record = manager.start("取消正在执行的沙箱 run")
     assert sandbox.command_started.wait(timeout=10), "the sandbox command never started"
-    assert manager.stop(record.run_id) is True
+    assert manager.stop(record.run_id).accepted is True
 
     final = manager.wait(record.run_id, timeout=30)
     assert final is not None, "the run never reached a terminal state"
@@ -407,7 +407,7 @@ def test_stop_that_lands_before_the_sandbox_starts_is_still_cancelled(
     manager._sandbox_factory = factory  # noqa: SLF001 - the injected face
     record = manager.start("沙箱启动前就取消")
     assert created.wait(timeout=10), "the sandbox factory was never called"
-    assert manager.stop(record.run_id) is True
+    assert manager.stop(record.run_id).accepted is True
     release.set()
 
     final = manager.wait(record.run_id, timeout=30)

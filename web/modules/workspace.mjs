@@ -519,7 +519,8 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       await openRun(run.runId);
       await refreshRuns();
     } catch (error) {
-      showToast(startErrorMessage(error), error?.code === 'run_busy' ? 'warning' : 'error');
+      const refusal = error?.code === 'run_busy' || error?.code === 'resources_unreleased';
+      showToast(startErrorMessage(error), refusal ? 'warning' : 'error');
     } finally {
       setSending(false);
     }
@@ -646,12 +647,17 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
 
   async function stopRun() {
     if (!current) return;
+    const { runId } = current;
     stopButton.disabled = true;
     try {
-      await api.stopRun(current.runId);
-      showToast('正在停止，已完成的内容会保留。', 'info');
-    } catch {
-      showToast('停止没有成功，请重试。', 'error');
+      await api.stopRun(runId);
+      if (current?.runId === runId) showToast('正在停止，已完成的内容会保留。', 'info');
+    } catch (error) {
+      // The host decides a stop at the run's commit point: past it, the run's
+      // committed outcome stands and arrives on the stream as its terminal frame.
+      if (current?.runId === runId) {
+        showToast(stopErrorMessage(error), error?.code === 'run_not_cancellable' ? 'info' : 'error');
+      }
     } finally {
       stopButton.disabled = false;
     }
@@ -831,6 +837,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       updatePromptCount();
     },
     startRun,
+    stopRun,
     openRun,
     openReport,
     refreshRuns,
@@ -865,7 +872,20 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
 
 function startErrorMessage(error) {
   if (error?.code === 'run_busy') return '已有一项研究正在进行，请等它完成或先停止。';
+  if (error?.code === 'resources_unreleased') {
+    return '上一项研究的执行资源还没有确认释放，暂时不能开始新研究。请联系管理员核对。';
+  }
   if (error?.code === 'not_configured') return '模型服务还没有配置，暂时无法发起研究。请联系管理员完成配置。';
   if (error?.code === 'invalid_request') return '这个问题没能提交，请检查内容后重试。';
   return '研究没能开始，请稍后重试。';
+}
+
+function stopErrorMessage(error) {
+  if (error?.code === 'run_not_cancellable') {
+    return error.payload?.reason === 'finalizing'
+      ? '这项研究正在收尾，已无法停止。'
+      : '这项研究已经结束，无需停止。';
+  }
+  if (error?.code === 'unknown_run') return '找不到这项研究，请刷新后重试。';
+  return '停止没有成功，请重试。';
 }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -14,6 +15,7 @@ import pytest
 from pi_glink.config import HostConfig, build_config
 from pi_glink.events import EventBus
 from pi_glink.kernel.rpc import PiRpcClient
+from pi_glink.kernel.execution import ArtifactRecovery, CleanupReport, ExecutionOutcome
 from pi_glink.kernel.runner import RunBusy, RunManager
 from pi_glink.store import CANCELLED, FAILED, FINISHED, RunStore
 
@@ -138,7 +140,7 @@ def test_second_run_is_refused_while_one_is_active(tmp_path: Path) -> None:
         manager.start("第二个 run")
     assert excinfo.value.active_run_id == record.run_id
 
-    assert manager.stop(record.run_id) is True
+    assert manager.stop(record.run_id).accepted is True
     final = manager.wait(record.run_id, timeout=30)
     assert final.status == CANCELLED
     assert final.stop_reason == "abort"
@@ -158,7 +160,9 @@ def test_timeout_marks_the_run_failed(tmp_path: Path) -> None:
 
 def test_stop_on_unknown_run_is_a_no_op(tmp_path: Path) -> None:
     manager, _store = build_manager(tmp_path)
-    assert manager.stop("does-not-exist") is False
+    decision = manager.stop("does-not-exist")
+    assert decision.accepted is False
+    assert decision.status is None and decision.reason == "unknown"
 
 
 def test_docker_session_file_is_mapped_back_to_the_host_and_sanitized(
@@ -380,6 +384,7 @@ def test_process_death_after_the_prompt_converges_quickly(tmp_path: Path) -> Non
 
 def test_usage_is_summed_across_requests_and_not_double_counted(tmp_path: Path) -> None:
     """100 + 200 tokens must add up to 300; a repeated identity counts once."""
+    from pi_glink.kernel.projection import Projector  # noqa: PLC0415
     from pi_glink.kernel.runner import _Execution  # noqa: PLC0415 - private unit under test
 
     config = make_config(tmp_path)
@@ -387,7 +392,7 @@ def test_usage_is_summed_across_requests_and_not_double_counted(tmp_path: Path) 
     manager = RunManager(config, EventBus(), store)
     record = store.create("用量", run_id="usage", workspace=tmp_path / "ws")
     execution = _Execution(record=record, workspace=tmp_path / "ws")
-    execution.stream = manager.redactor.stream()
+    execution.projector = Projector(manager.redactor)
     manager.bus.open_run(record.run_id)
 
     def turn(timestamp: int, tokens: int) -> dict:
@@ -432,31 +437,50 @@ def test_shutdown_cancels_and_releases_an_active_run(tmp_path: Path) -> None:
     assert final is not None and final.status == CANCELLED
 
 
-def test_terminal_store_failure_still_releases_the_slot_and_the_stream(
+def test_settle_failure_still_releases_the_slot_and_the_stream(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Audit regression: a failed final store.update kept the run slot forever."""
-    manager, store = build_manager(tmp_path, write_report=True)
-    original_update = store.update
+    """Audit regression (A3) on the committed-terminal model.
 
-    def failing_update(run_id: str, **changes: object):
-        if changes.get("status") in {FINISHED, FAILED, CANCELLED}:
+    The verdict is committed by the terminal frame; copying it into meta.json
+    afterwards may fail without keeping the slot or the stream, and without
+    changing what any reader sees. Reconciliation settles the committed verdict
+    instead of rewriting it as ``interrupted``.
+    """
+    from pi_glink.ownership import DataRootOwnership  # noqa: PLC0415
+
+    config = make_config(tmp_path)
+    store = RunStore(config.data_root / "runs")
+    ownership = DataRootOwnership.acquire(config.data_root)
+    try:
+        manager = RunManager(
+            config, EventBus(), store,
+            client_factory=fake_factory(write_report=True), ownership=ownership,
+        )
+
+        def failing_settle(run_id: str):
             raise OSError("simulated disk failure")
-        return original_update(run_id, **changes)
 
-    monkeypatch.setattr(store, "update", failing_update)
-    record = manager.start("收尾写盘失败也要释放槽位")
-    assert wait_for(lambda: manager.active_run_id is None, timeout=30)
+        original_settle = store.settle
+        monkeypatch.setattr(store, "settle", failing_settle)
+        record = manager.start("收尾写盘失败也要释放槽位")
+        assert wait_for(lambda: manager.active_run_id is None, timeout=30)
 
-    assert manager.bus.is_open(record.run_id) is False, "the live stream must be closed"
-    # The terminal frame is in the durable log even when meta.json could not be
-    # written; the next host start reconciles the record as interrupted.
-    assert read_events(store, record.run_id)[-1]["type"] == "run_finished"
-    monkeypatch.setattr(store, "update", original_update)
-    reconciled = manager.reconcile()
-    assert reconciled == [record.run_id]
-    assert store.get(record.run_id).status == FAILED
-    assert store.get(record.run_id).stop_reason == "interrupted"
+        assert manager.bus.is_open(record.run_id) is False, "the live stream must be closed"
+        meta = json.loads((store.run_dir(record.run_id) / "meta.json").read_text(encoding="utf-8"))
+        assert meta["status"] == "running", "the settled copy was never written"
+        seen = store.get(record.run_id)
+        assert seen.status == FINISHED and seen.report_path, "readers see the committed verdict"
+        assert read_events(store, record.run_id)[-1]["type"] == "run_finished"
+
+        monkeypatch.setattr(store, "settle", original_settle)
+        assert manager.reconcile() == [], "a committed verdict is never interrupted"
+        meta = json.loads((store.run_dir(record.run_id) / "meta.json").read_text(encoding="utf-8"))
+        assert meta["status"] == FINISHED
+        assert [event["type"] for event in read_events(store, record.run_id)].count("run_finished") == 1
+        assert not any(event["type"] == "run_failed" for event in read_events(store, record.run_id))
+    finally:
+        ownership.release()
 
 
 def test_cleanup_failure_is_recorded_not_hidden(tmp_path: Path) -> None:
@@ -533,3 +557,264 @@ def test_missing_credential_refuses_to_start(tmp_path: Path) -> None:
     with pytest.raises(Exception) as excinfo:
         manager.start("没有密钥")
     assert "OPENAI_API_KEY" in str(excinfo.value)
+
+
+# -- R4: resource release is its own fact ---------------------------------------
+
+
+class ScriptedAdapter:
+    """External execution stand-in: settles at once, blocks where told to.
+
+    It writes a report during recovery like a sandbox pull-back would, and its
+    ``close()`` result is scripted. ``gates`` maps a phase name to an event the
+    call waits on after signalling ``entered[phase]``.
+    """
+
+    def __init__(self, *, close=None, gates=None) -> None:
+        self._close = close or (lambda: CleanupReport(released=True))
+        self.gates = gates or {}
+        self.entered = {name: threading.Event() for name in ("recover", "close")}
+        self.cancelled = threading.Event()
+
+    def start(self) -> None:
+        pass
+
+    def identity(self):
+        return {"sandbox": "synthetic-owned-resource"}
+
+    def session_info(self):
+        return None
+
+    def deliver_input(self) -> None:
+        pass
+
+    def wait(self, *, cancel, deadline):
+        return ExecutionOutcome(settled=True)
+
+    def _gate(self, name: str) -> None:
+        self.entered[name].set()
+        gate = self.gates.get(name)
+        if gate is not None:
+            assert gate.wait(10), f"test never released the {name} gate"
+
+    def recover_artifacts(self, destination):
+        self._gate("recover")
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "report.md").write_text("# 替身报告\n", encoding="utf-8")
+        return ArtifactRecovery(files=(destination / "report.md",))
+
+    def close(self):
+        self._gate("close")
+        return self._close()
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+
+
+def scripted_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter: ScriptedAdapter):
+    config = make_config(tmp_path)
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", lambda spec, **kwargs: adapter)
+    return config, store, manager
+
+
+def _raise_on_close():
+    raise RuntimeError("synthetic kill failed")
+
+
+@pytest.mark.parametrize(
+    "close",
+    [
+        lambda: CleanupReport(
+            released=False,
+            failures=("synthetic kill failed",),
+            external={"sandbox": "synthetic-owned-resource"},
+        ),
+        _raise_on_close,
+    ],
+    ids=["released-false", "close-raises"],
+)
+def test_an_unconfirmed_release_keeps_capacity_until_an_operator_adjudicates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, close
+) -> None:
+    """R4: a finished thread is not a released resource.
+
+    The WIP recorded ``released=false`` and then freed the slot: the next run
+    was admitted and shutdown returned an empty list.
+    """
+    config, store, manager = scripted_manager(tmp_path, monkeypatch, ScriptedAdapter(close=close))
+    first = manager.start("资源释放失败")
+    final = manager.wait(first.run_id, timeout=30)
+    assert final.status == FINISHED, "the verdict does not depend on cleanup"
+    assert final.cleanup["released"] is False and final.cleanup["failures"]
+    assert final.sandbox_id == "synthetic-owned-resource"
+
+    with pytest.raises(Exception) as refused:
+        manager.start("第二个 run 不能被放行")
+    assert type(refused.value).__name__ == "ResourcesUnreleased"
+    assert refused.value.run_ids == [first.run_id]
+    assert manager.shutdown(timeout=0.1) == [first.run_id], "shutdown must report it"
+    listed = manager.unreleased_resources()
+    assert [item["runId"] for item in listed] == [first.run_id]
+    assert listed[0]["sandbox"] == "synthetic-owned-resource"
+
+    # The hold is durable: a restarted manager (no memory of the run) refuses too.
+    restarted = RunManager(config, EventBus(), store)
+    with pytest.raises(Exception) as again:
+        restarted.start("重启后仍不放行")
+    assert type(again.value).__name__ == "ResourcesUnreleased"
+
+    # Only an explicit operator decision, made while owning the data root, frees it.
+    from pi_glink.ownership import DataRootOwnership, OwnershipRequired  # noqa: PLC0415
+
+    with pytest.raises(OwnershipRequired):
+        restarted.adjudicate_release(first.run_id, "未持有所有权")
+    ownership = DataRootOwnership.acquire(config.data_root)
+    try:
+        operator = RunManager(config, EventBus(), store, ownership=ownership)
+        with pytest.raises(ValueError):
+            operator.adjudicate_release(first.run_id, "   ")
+        record = operator.adjudicate_release(first.run_id, "已在控制台确认沙箱不存在")
+        assert record.cleanup["released"] is False, "the original fact is kept"
+        assert record.resource_adjudication["decision"] == "released"
+        assert operator.unreleased_resources() == []
+    finally:
+        ownership.release()
+    admitted = restarted.start("裁决后放行")
+    assert restarted.wait(admitted.run_id, timeout=30).is_terminal
+
+
+def test_shutdown_reports_a_release_that_does_not_finish_in_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate = threading.Event()
+    adapter = ScriptedAdapter(gates={"close": gate})
+    _config, store, manager = scripted_manager(tmp_path, monkeypatch, adapter)
+    record = manager.start("关闭迟迟不返回")
+    assert adapter.entered["close"].wait(10)
+    try:
+        assert manager.shutdown(timeout=0.3) == [record.run_id]
+        with pytest.raises(RunBusy):
+            manager.start("释放未确认时不放行")
+    finally:
+        gate.set()
+    final = manager.wait(record.run_id, timeout=30)
+    assert final.cleanup["released"] is True
+    # The stop from shutdown was accepted while the run was open.
+    assert final.status == CANCELLED
+    assert wait_for(lambda: manager.active_run_id is None)
+    assert manager.shutdown(timeout=1) == []
+
+
+# -- R5: cancellation and the verdict share one linearization point -------------
+
+
+@pytest.mark.parametrize("phase", ["recover", "close", "report"])
+def test_a_stop_accepted_during_finalization_becomes_the_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    """R5: ``stop()`` returned true during recovery, yet the run ended finished."""
+    gate = threading.Event()
+    adapter = ScriptedAdapter(gates={phase: gate} if phase != "report" else {})
+    _config, store, manager = scripted_manager(tmp_path, monkeypatch, adapter)
+    entered = threading.Event()
+    if phase == "report":
+        original = manager._recover_report  # noqa: SLF001 - timing hook only
+
+        def slow_report(execution):
+            entered.set()
+            assert gate.wait(10)
+            original(execution)
+
+        monkeypatch.setattr(manager, "_recover_report", slow_report)
+    else:
+        entered = adapter.entered[phase]
+
+    record = manager.start(f"收尾阶段取消：{phase}")
+    assert entered.wait(10)
+    try:
+        decision = manager.stop(record.run_id)
+    finally:
+        gate.set()
+    assert getattr(decision, "accepted", decision) is True
+    final = manager.wait(record.run_id, timeout=30)
+    events = read_events(store, record.run_id)
+    assert final.status == CANCELLED and final.stop_reason == "abort"
+    assert events[-1]["type"] == "run_cancelled"
+    assert not any(event["type"] == "run_finished" for event in events)
+    # Stop keeps what was produced: the report recovered before the verdict stays.
+    assert final.report_status == "ok" and final.report_path
+
+
+def test_a_stop_racing_the_commit_is_answered_by_the_committed_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop that arrives while the terminal frame is being committed waits
+    for the commit and reports the committed status instead of accepting."""
+    adapter = ScriptedAdapter()
+    _config, store, manager = scripted_manager(tmp_path, monkeypatch, adapter)
+    committing = threading.Event()
+    release = threading.Event()
+    original_commit = store.commit_terminal
+
+    def slow_terminal(run_id, event):
+        committing.set()
+        assert release.wait(10)
+        return original_commit(run_id, event)
+
+    monkeypatch.setattr(store, "commit_terminal", slow_terminal)
+    record = manager.start("与提交竞争的取消")
+    assert committing.wait(10)
+    answers: list[object] = []
+    stopper = threading.Thread(target=lambda: answers.append(manager.stop(record.run_id)))
+    stopper.start()
+    stopper.join(0.3)
+    assert stopper.is_alive(), "a stop may not be decided while the verdict is being committed"
+    release.set()
+    stopper.join(10)
+
+    decision = answers[0]
+    assert getattr(decision, "accepted", decision) is False
+    assert decision.status == FINISHED and decision.reason == "terminal"
+    final = manager.wait(record.run_id, timeout=30)
+    assert final.status == FINISHED
+    assert read_events(store, record.run_id)[-1]["type"] == "run_finished"
+    assert not adapter.cancelled.is_set(), "a refused stop does not touch the face"
+
+    after = manager.stop(record.run_id)
+    assert (after.accepted, after.status, after.reason) == (False, FINISHED, "terminal")
+
+
+def test_a_tail_withheld_during_finalization_is_released_before_the_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Frames can still arrive while artifacts are recovered; nothing the stream
+    withheld may be lost, and nothing may follow the terminal frame."""
+    config = make_config(tmp_path)
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    adapter = ScriptedAdapter()
+    sink: dict[str, object] = {}
+
+    def build(spec, **kwargs):
+        sink["on_frame"] = kwargs["on_frame"]
+        return adapter
+
+    original_recover = adapter.recover_artifacts
+
+    def recover_with_late_frame(destination):
+        # "O" could start OPENAI_API_KEY=…, so the stream withholds it.
+        sink["on_frame"](
+            {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "迟到的尾部 O"}}
+        )
+        return original_recover(destination)
+
+    adapter.recover_artifacts = recover_with_late_frame  # type: ignore[method-assign]
+    monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", build)
+    record = manager.start("收尾期间到达的帧")
+    manager.wait(record.run_id, timeout=30)
+    events = read_events(store, record.run_id)
+    text = "".join(e["payload"]["text"] for e in events if e["type"] == "assistant_delta")
+    assert text == "迟到的尾部 O"
+    assert events[-1]["type"] == "run_finished"

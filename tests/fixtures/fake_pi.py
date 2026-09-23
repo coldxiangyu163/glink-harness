@@ -199,6 +199,7 @@ def prompt_events(message: str = "") -> list[dict]:
 
     ``FAKE_PI_ECHO_SECRET=1`` makes the stand-in print ``OPENAI_API_KEY=…`` the way
     a bash ``env`` call (or a config-file read) would — the leak the audit found.
+    ``FAKE_PI_TEXT_DELTAS`` scripts the answer's text deltas.
 
     Prompt markers select the terminal model result the host must handle:
 
@@ -213,6 +214,22 @@ def prompt_events(message: str = "") -> list[dict]:
     ===================  ======================================================
     """
     events: list[dict] = copy.deepcopy(PROMPT_EVENTS)
+    scripted = os.environ.get("FAKE_PI_TEXT_DELTAS")
+    if scripted:
+        # ``FAKE_PI_TEXT_DELTAS=<JSON list>`` replaces the answer text with the
+        # given deltas, in order (split-credential streaming regressions).
+        index = next(
+            position
+            for position, event in enumerate(events)
+            if event.get("assistantMessageEvent", {}).get("type") == "text_delta"
+        )
+        events[index : index + 1] = [
+            {
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "contentIndex": 1, "delta": delta},
+            }
+            for delta in json.loads(scripted)
+        ]
     if os.environ.get("FAKE_PI_ECHO_SECRET") == "1":
         secret = runtime_secret()
         events.insert(

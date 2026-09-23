@@ -282,3 +282,169 @@ def test_event_stream_replays_finished_runs(server: PiGlinkServer) -> None:
         assert b"event: run_started" in head
     finally:
         connection.close()
+
+
+# -- R5: the stop endpoint reports the run's commit point -------------------------
+
+
+def test_stop_answers_follow_the_committed_state(server: PiGlinkServer) -> None:
+    """R5 consumer contract: accepted → 200; past the commit → 409 with the
+    committed status; unknown run → 404. The WIP answered 200 for all three."""
+    _status, _headers, raw = request(server, "/api/runs", method="POST", body={"prompt": "已结束的 run"})
+    run_id = json.loads(raw)["run"]["runId"]
+    assert wait_for_terminal(server, run_id)["status"] == "finished"
+
+    status, _headers, raw = request(server, f"/api/runs/{run_id}/stop", method="POST")
+    assert status == 409
+    body = json.loads(raw)
+    assert body == {
+        "error": "run_not_cancellable",
+        "requested": False,
+        "status": "finished",
+        "reason": "terminal",
+    }
+    status, _headers, raw = request(server, "/api/runs/does-not-exist/stop", method="POST")
+    assert status == 404
+    assert json.loads(raw)["error"] == "unknown_run"
+
+
+# -- R4: admission follows resource release -------------------------------------
+
+
+def test_start_is_refused_while_a_release_is_unconfirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pi_glink.kernel.execution import ArtifactRecovery, CleanupReport, ExecutionOutcome  # noqa: PLC0415
+
+    class LeakingAdapter:
+        def start(self): pass
+        def identity(self): return {"sandbox": "synthetic-owned-resource"}
+        def session_info(self): return None
+        def deliver_input(self): pass
+        def wait(self, *, cancel, deadline): return ExecutionOutcome(settled=True)
+        def recover_artifacts(self, destination): return ArtifactRecovery()
+        def close(self):
+            return CleanupReport(released=False, failures=("synthetic kill failed",))
+        def cancel(self): pass
+
+    monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", lambda spec, **kwargs: LeakingAdapter())
+    instance = create_server(make_config(tmp_path), client_factory=fake_factory())
+    thread = threading.Thread(target=instance.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _status, _headers, raw = request(instance, "/api/runs", method="POST", body={"prompt": "泄漏"})
+        run_id = json.loads(raw)["run"]["runId"]
+        assert wait_for_terminal(instance, run_id)["status"] == "finished"
+        status, _headers, raw = request(instance, "/api/runs", method="POST", body={"prompt": "下一个"})
+        assert status == 409
+        body = json.loads(raw)
+        assert body["error"] == "resources_unreleased" and body["runIds"] == [run_id]
+        health = json.loads(request(instance, "/api/health")[2])
+        assert health["activeRunId"] is None, "no run executes; capacity is held by the resource"
+    finally:
+        instance.shutdown()
+        instance.server_close()
+        thread.join(timeout=5)
+
+
+# -- R6: reports written before host copies existed stay readable ----------------
+
+
+def _legacy_record(server: PiGlinkServer, run_id: str, *, report: str | None = None,
+                   report_path: Path | None = None, workspace: Path | None = None) -> Path:
+    """An old-schema record: report_path points into workspaces/<id>/report.md.
+
+    The meta.json fields introduced later are removed, as an upgraded host
+    finds them on disk.
+    """
+    store = server.store
+    workspace = workspace or (server.config.workspace_root / run_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+    target = workspace / "report.md"
+    if report is not None:
+        target.write_text(report, encoding="utf-8")
+    store.create("历史研究", run_id=run_id, workspace=workspace)
+    store.update(run_id, status="finished", report_path=str(report_path or target),
+                 finished_at=time.time(), event_count=0)
+    meta_path = store.run_dir(run_id) / "meta.json"
+    fields = json.loads(meta_path.read_text(encoding="utf-8"))
+    for key in ("model_stop_reason", "report_status", "cleanup", "container_name",
+                "sandbox_id", "resource_adjudication"):
+        fields.pop(key, None)
+    meta_path.write_text(json.dumps(fields), encoding="utf-8")
+    return target
+
+
+def _view(server: PiGlinkServer, run_id: str) -> dict:
+    detail = json.loads(request(server, f"/api/runs/{run_id}")[2])["run"]
+    listed = next(r for r in json.loads(request(server, "/api/runs")[2])["runs"] if r["runId"] == run_id)
+    assert detail["hasReport"] == listed["hasReport"]
+    return detail
+
+
+def test_a_legacy_workspace_report_is_downloadable_read_only(server: PiGlinkServer) -> None:
+    """R6: the upgrade kept the file but the endpoint answered 404."""
+    secret_line = "OPENAI_API_KEY=sk-legacy0123456789abcdef"
+    original = f"# 历史报告\n\n{secret_line}\n"
+    target = _legacy_record(server, "legacyrun01", report=original)
+    before = target.stat()
+
+    assert _view(server, "legacyrun01")["hasReport"] is True
+    status, headers, body = request(server, "/api/runs/legacyrun01/report")
+    assert status == 200
+    assert body.decode("utf-8").startswith("# 历史报告")
+    assert "sk-legacy0123456789abcdef" not in body.decode("utf-8")
+    assert headers.get("X-Redacted") == "true"
+    after = target.stat()
+    assert target.read_text(encoding="utf-8") == original, "history is never rewritten"
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
+def test_legacy_layout_does_not_reopen_arbitrary_report_paths(
+    server: PiGlinkServer, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = outside / "report.md"
+    external.write_text("# 外部文件\n", encoding="utf-8")
+    workspace_root = server.config.workspace_root
+
+    # A path outside the run's workspace.
+    _legacy_record(server, "legacyout01", report="# 本体\n", report_path=external)
+    # A path deeper inside the workspace than the legacy layout allows.
+    nested = workspace_root / "legacynest1" / "sub"
+    nested.mkdir(parents=True)
+    (nested / "report.md").write_text("# 嵌套\n", encoding="utf-8")
+    _legacy_record(server, "legacynest1", report="# 本体\n", report_path=nested / "report.md")
+    # A workspace that is not the run's own (another run's directory).
+    _legacy_record(server, "legacyother", report_path=workspace_root / "legacyrun99" / "report.md",
+                   workspace=workspace_root / "legacyrun99")
+    (workspace_root / "legacyrun99" / "report.md").write_text("# 别人的\n", encoding="utf-8")
+    # A legacy report.md that is a link to an external file.
+    linked = _legacy_record(server, "legacylink1")
+    linked.symlink_to(external)
+    # A legacy workspace directory replaced by a link to an external directory.
+    swapped = workspace_root / "legacyswap1"
+    _legacy_record(server, "legacyswap1", report="# 本体\n")
+    (swapped / "report.md").unlink()
+    swapped.rmdir()
+    swapped.symlink_to(outside, target_is_directory=True)
+
+    for run_id in ("legacyout01", "legacynest1", "legacyother", "legacylink1", "legacyswap1"):
+        assert _view(server, run_id)["hasReport"] is False, run_id
+        assert request(server, f"/api/runs/{run_id}/report")[0] == 404, run_id
+    assert external.read_text(encoding="utf-8") == "# 外部文件\n"
+
+
+def test_a_host_artifact_behind_a_directory_link_is_not_served(server: PiGlinkServer, tmp_path: Path) -> None:
+    """R2 consumer path: the artifacts directory swapped for a link."""
+    outside = tmp_path / "outside-artifacts"
+    outside.mkdir()
+    (outside / "report.md").write_text("# 外部\n", encoding="utf-8")
+    store = server.store
+    store.create("产物目录被替换", run_id="swapartifact", workspace=tmp_path / "ws")
+    (store.run_dir("swapartifact") / "artifacts").symlink_to(outside, target_is_directory=True)
+    store.update("swapartifact", status="finished",
+                 report_path=str(store.run_dir("swapartifact") / "artifacts" / "report.md"))
+    assert _view(server, "swapartifact")["hasReport"] is False
+    assert request(server, "/api/runs/swapartifact/report")[0] == 404

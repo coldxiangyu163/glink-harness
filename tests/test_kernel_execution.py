@@ -162,7 +162,7 @@ def test_cancellation_goes_through_the_adapter_not_a_face_branch(
 
     record = manager.start("取消走适配器")
     assert entered.wait(timeout=10)
-    assert manager.stop(record.run_id) is True
+    assert manager.stop(record.run_id).accepted is True
     assert "cancel" in adapter.calls, "stop must call the adapter's cancel"
     release.set()
     final = manager.wait(record.run_id, timeout=30)

@@ -1,29 +1,32 @@
 """Regressions for the safe artifact boundary and the run report pipeline.
 
-Audit reproduction: ``_collect_report`` accepted a ``report.md`` symlink that
-pointed outside the workspace, read the target and (when it contained a
-credential) rewrote it through the link. The HTTP report endpoint had the same
-shape. These tests pin the replacement: only regular files inside the run's own
-directories are read, reads and writes are bounded, writes never follow a link,
-and a rejected artifact is visible as such instead of being served or hidden.
+Audit reproductions:
+
+* ``_collect_report`` accepted a ``report.md`` symlink that pointed outside the
+  workspace, read the target and rewrote it through the link;
+* (R1 review, R2) the replacement still checked containment with ``realpath``
+  and then opened the file again by name, so an ancestor directory swapped for
+  a link between the check and the open made the host read an external file.
+
+These tests pin the directory-anchored replacement: every component below a
+run root is opened without following links, identities are re-verified after
+the open, writes are published inside the verified directory, and a refused
+artifact is visible as such instead of being served or hidden. The race tests
+inject the swap at the exact step between walking and opening.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
 import pytest
 
-from pi_glink.artifacts import (
-    ArtifactError,
-    copy_regular_file,
-    read_regular_file,
-    replace_with_bytes,
-    replace_with_text,
-)
+from pi_glink import artifacts as artifacts_module
+from pi_glink.artifacts import ArtifactError, ArtifactMissing, ArtifactTree
 from pi_glink.config import build_config
 from pi_glink.events import EventBus
 from pi_glink.kernel.rpc import PiRpcClient
@@ -33,90 +36,209 @@ from pi_glink.store import FINISHED, RunStore
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
 SECRET = "AUDIT_DUMMY_SECRET_0123456789abcdef"
+INSIDE = b"INSIDE-BYTES"
+OUTSIDE = b"OUTSIDE_SYNTHETIC"
 
 
-# -- the artifact reader ------------------------------------------------------
+def _layout(tmp_path: Path) -> tuple[Path, Path]:
+    """``root/sub/report.md`` (inside) and ``outside/report.md`` (external)."""
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub" / "report.md").write_bytes(INSIDE)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "report.md").write_bytes(OUTSIDE)
+    return root, outside
+
+
+def _swap_to_link(root: Path, outside: Path) -> None:
+    (root / "sub").rename(root / "moved-sub")
+    (root / "sub").symlink_to(outside, target_is_directory=True)
+
+
+# -- the directory-anchored reader --------------------------------------------
 
 
 def test_reads_a_regular_file_and_rejects_links_and_special_files(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()
-    regular = root / "report.md"
-    regular.write_text("# ok\n", encoding="utf-8")
-    assert read_regular_file(regular, root=root) == b"# ok\n"
-
+    (root / "report.md").write_text("# ok\n", encoding="utf-8")
     outside = tmp_path / "outside.md"
     outside.write_text("secret\n", encoding="utf-8")
-    link = root / "linked.md"
-    link.symlink_to(outside)
-    with pytest.raises(ArtifactError, match="符号链接"):
-        read_regular_file(link, root=root)
+    (root / "linked.md").symlink_to(outside)
+    (root / "dir").mkdir()
+    os.mkfifo(root / "pipe")
 
-    directory = root / "dir"
-    directory.mkdir()
-    with pytest.raises(ArtifactError, match="非普通文件"):
-        read_regular_file(directory, root=root)
-
-    if hasattr(__import__("os"), "mkfifo"):
-        fifo = root / "pipe"
-        __import__("os").mkfifo(fifo)
-        with pytest.raises(ArtifactError):
-            read_regular_file(fifo, root=root)
-
-    with pytest.raises(ArtifactError, match="允许范围"):
-        read_regular_file(outside, root=root)
+    with ArtifactTree(root) as tree:
+        assert tree.read("report.md") == b"# ok\n"
+        assert tree.read(root / "report.md") == b"# ok\n", "absolute paths inside the root work"
+        with pytest.raises(ArtifactError, match="符号链接"):
+            tree.read("linked.md")
+        with pytest.raises(ArtifactError, match="非普通文件"):
+            tree.read("dir")
+        started = time.monotonic()
+        with pytest.raises(ArtifactError, match="非普通文件"):
+            tree.read("pipe")
+        assert time.monotonic() - started < 5, "a FIFO must be refused, never waited on"
+        with pytest.raises(ArtifactMissing):
+            tree.read("absent.md")
+        for escape in (outside, "../outside.md", "sub/../../outside.md", root / ".." / "outside.md"):
+            with pytest.raises(ArtifactError, match="允许范围"):
+                tree.read(escape)
     assert outside.read_text(encoding="utf-8") == "secret\n"
+
+
+def test_a_root_that_is_itself_a_link_is_refused(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "report.md").write_bytes(OUTSIDE)
+    (tmp_path / "root").symlink_to(real, target_is_directory=True)
+    with pytest.raises(ArtifactError):
+        ArtifactTree(tmp_path / "root")
 
 
 def test_read_is_bounded_before_and_during_the_read(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()
-    big = root / "big.md"
-    big.write_bytes(b"x" * 5000)
-    with pytest.raises(ArtifactError, match="上限"):
-        read_regular_file(big, max_bytes=100, root=root)
-    assert read_regular_file(big, max_bytes=5000, root=root) == b"x" * 5000
+    (root / "big.md").write_bytes(b"x" * 5000)
+    with ArtifactTree(root) as tree:
+        with pytest.raises(ArtifactError, match="上限"):
+            tree.read("big.md", max_bytes=100)
+        with pytest.raises(ArtifactError, match="上限"):
+            tree.size("big.md", max_bytes=100)
+        assert tree.read("big.md", max_bytes=5000) == b"x" * 5000
+        assert tree.size("big.md", max_bytes=5000) == 5000
+
+
+def test_an_ancestor_directory_link_is_refused_for_reads_and_writes(tmp_path: Path) -> None:
+    root, outside = _layout(tmp_path)
+    _swap_to_link(root, outside)
+    with ArtifactTree(root) as tree:
+        with pytest.raises(ArtifactError, match="链接"):
+            tree.read("sub/report.md")
+        with pytest.raises(ArtifactError, match="链接"):
+            tree.size("sub/report.md")
+        with pytest.raises(ArtifactError, match="链接"):
+            tree.replace("sub/report.md", b"REWRITTEN")
+        with pytest.raises(ArtifactError, match="链接"):
+            tree.replace("sub/new.md", b"CREATED", create_parents=True)
+        assert tree.files(max_files=10) == ["moved-sub/report.md"], "links are never walked"
+    assert (outside / "report.md").read_bytes() == OUTSIDE
+    assert sorted(path.name for path in outside.iterdir()) == ["report.md"]
+
+
+def test_ancestor_swap_between_walk_and_open_never_reads_the_external_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 reproduction on the new reader: the swap lands after the walk."""
+    root, outside = _layout(tmp_path)
+    original_walk = ArtifactTree._walk
+
+    def walk_then_swap(self, directories, *, create):
+        chain = original_walk(self, directories, create=create)
+        _swap_to_link(root, outside)
+        return chain
+
+    monkeypatch.setattr(ArtifactTree, "_walk", walk_then_swap)
+    with ArtifactTree(root) as tree:
+        with pytest.raises(ArtifactError, match="替换"):
+            tree.read("sub/report.md")
+    assert (outside / "report.md").read_bytes() == OUTSIDE
+
+
+def test_ancestor_swap_during_the_walk_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The swap lands just before the ``sub`` component is opened."""
+    root, outside = _layout(tmp_path)
+    original_open = os.open
+    swapped: list[bool] = []
+
+    def swapping_open(path, flags, *args, **kwargs):
+        if path == "sub" and not swapped and kwargs.get("dir_fd") is not None:
+            swapped.append(True)
+            _swap_to_link(root, outside)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(artifacts_module.os, "open", swapping_open)
+    with ArtifactTree(root) as tree:
+        with pytest.raises(ArtifactError, match="链接"):
+            tree.read("sub/report.md")
+    assert swapped == [True]
+    assert (outside / "report.md").read_bytes() == OUTSIDE
+
+
+def test_ancestor_swap_before_publishing_a_write_never_touches_the_outside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, outside = _layout(tmp_path)
+    original_verify = ArtifactTree._verify
+
+    def swap_then_verify(chain, parts):
+        _swap_to_link(root, outside)
+        return original_verify(chain, parts)
+
+    monkeypatch.setattr(ArtifactTree, "_verify", staticmethod(swap_then_verify))
+    with ArtifactTree(root) as tree:
+        with pytest.raises(ArtifactError, match="替换"):
+            tree.replace("sub/report.md", b"REWRITTEN")
+    assert (outside / "report.md").read_bytes() == OUTSIDE
+    assert sorted(path.name for path in outside.iterdir()) == ["report.md"]
+    moved = root / "moved-sub"
+    assert (moved / "report.md").read_bytes() == INSIDE
+    assert sorted(path.name for path in moved.iterdir()) == ["report.md"], "no temp file left"
+
+
+def test_leaf_swapped_after_the_check_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leaf replaced by a link (or another file) between stat and open."""
+    root, outside = _layout(tmp_path)
+    original_stat = ArtifactTree._leaf_stat
+
+    def stat_then_swap(parent, leaf, shown):
+        info = original_stat(parent, leaf, shown)
+        target = root / "sub" / "report.md"
+        target.unlink()
+        target.symlink_to(outside / "report.md")
+        return info
+
+    monkeypatch.setattr(ArtifactTree, "_leaf_stat", staticmethod(stat_then_swap))
+    with ArtifactTree(root) as tree:
+        with pytest.raises(ArtifactError):
+            tree.read("sub/report.md")
+    assert (outside / "report.md").read_bytes() == OUTSIDE
 
 
 def test_replace_never_writes_through_a_symlink(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
     outside = tmp_path / "outside.md"
     outside.write_text("original\n", encoding="utf-8")
-    link = tmp_path / "report.md"
-    link.symlink_to(outside)
+    (root / "report.md").symlink_to(outside)
 
-    replace_with_text(link, "replaced\n")
+    with ArtifactTree(root) as tree:
+        tree.replace("report.md", b"replaced\n")
 
     assert outside.read_text(encoding="utf-8") == "original\n", "the link target was rewritten"
-    assert not link.is_symlink(), "the symlink itself must be replaced"
-    assert link.read_text(encoding="utf-8") == "replaced\n"
+    assert not (root / "report.md").is_symlink(), "the symlink itself must be replaced"
+    assert (root / "report.md").read_text(encoding="utf-8") == "replaced\n"
 
 
-def test_replace_breaks_a_hard_link(tmp_path: Path) -> None:
+def test_replace_breaks_a_hard_link_and_is_bounded(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
     original = tmp_path / "original.md"
     original.write_text("original\n", encoding="utf-8")
-    alias = tmp_path / "alias.md"
-    alias.hardlink_to(original)
+    (root / "alias.md").hardlink_to(original)
 
-    replace_with_bytes(alias, b"replaced\n")
+    with ArtifactTree(root) as tree:
+        tree.replace("alias.md", b"replaced\n")
+        with pytest.raises(ArtifactError, match="上限"):
+            tree.replace("alias.md", b"x" * 11, max_bytes=10)
 
     assert original.read_text(encoding="utf-8") == "original\n"
-    assert alias.read_text(encoding="utf-8") == "replaced\n"
-
-
-def test_copy_refuses_a_link_and_keeps_the_destination_host_owned(tmp_path: Path) -> None:
-    outside = tmp_path / "outside.md"
-    outside.write_text("secret\n", encoding="utf-8")
-    link = tmp_path / "link.md"
-    link.symlink_to(outside)
-    destination = tmp_path / "host" / "copy.md"
-    with pytest.raises(ArtifactError):
-        copy_regular_file(link, destination, root=tmp_path)
-    assert not destination.exists()
-
-    regular = tmp_path / "regular.md"
-    regular.write_text("data\n", encoding="utf-8")
-    assert copy_regular_file(regular, destination, root=tmp_path) == 5
-    assert destination.read_text(encoding="utf-8") == "data\n"
+    assert (root / "alias.md").read_text(encoding="utf-8") == "replaced\n"
 
 
 # -- the run pipeline ---------------------------------------------------------
@@ -230,7 +352,7 @@ def test_a_cancelled_run_keeps_the_work_it_already_produced(tmp_path: Path) -> N
     assert _wait_for(
         lambda: (Path(record.workspace) / "report.md").is_file(), timeout=20
     )
-    assert manager.stop(record.run_id) is True
+    assert manager.stop(record.run_id).accepted is True
     final = manager.wait(record.run_id, timeout=30)
 
     assert final.status == "cancelled"

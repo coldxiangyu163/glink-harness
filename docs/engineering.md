@@ -52,10 +52,11 @@ bash scripts/check.sh
 |---|---|---|
 | 仓库边界、Dockerfile 版本声明 | `python -m pytest tests/test_repository_boundaries.py` | 非法输入反例和当前工作区；不证明部署产物版本 |
 | 默认检查入口 | `python -m pytest tests/test_check_entrypoint.py` | 环境隔离、无自动安装、原退出码、失败不继续、资源清理 |
-| 配置与凭据交付（每 run 独立） | `python -m pytest tests/test_kernel_agent_env.py tests/test_redaction.py` | 合成凭据穿过真实投影/存储/下载/会话路径；跨 delta 分割的流式脱敏；同目录重渲染不会残留旧凭据/扩展；用临时 HOME，不读个人 `web-search.json` |
-| 产物接收与路径安全 | `python -m pytest tests/test_artifacts.py` | 符号链接/非普通文件/超限/越界一律拒绝；拒绝后外部字节不变；宿主拥有 `artifacts/report.md` 副本；HTTP 下载走同一道校验 |
-| RPC、投影、run 生命周期 | `python -m pytest tests/test_kernel_rpc.py tests/test_runner.py tests/test_runs_api.py` | 正常、缺报告、被拒报告、模型 error/aborted/length、重试成功/失败、进程死亡、超时、取消；产品事件变化同时验证 Node 消费方 |
-| 事件提交与重放 | `python -m pytest tests/test_event_replay.py` | 先落盘再发布、写盘失败不产生幻影帧、超环容量重放、活跃→结束接续、`Last-Event-ID`、重启对账与慢消费者断开 |
+| 配置与凭据交付（每 run 独立） | `python -m pytest tests/test_kernel_agent_env.py tests/test_redaction.py` | 合成凭据穿过真实投影/存储/下载/会话路径；流式释放等于整段脱敏（前后缀重叠、重复片段、全部分割位置、多帧、逐字符与合法相邻文本），并走 fake pi → runner → 日志/总线；`HOLD_CAP` 边界（8192/8193/8194/20000 字符已知值、重叠长值、任意多帧）不释放未判定文本、暂存不超界、越界后本块失败即闭合；同目录重渲染不会残留旧凭据/扩展；用临时 HOME，不读个人 `web-search.json` |
+| 产物接收与路径安全 | `python -m pytest tests/test_artifacts.py` | 符号链接/目录链接/非普通文件（含 FIFO）/超限/越界一律拒绝；在遍历、打开、发布写入前注入祖先目录替换，外部文件不被读写；宿主拥有 `artifacts/report.md` 副本；HTTP 下载与 `hasReport` 走同一道校验 |
+| RPC、投影、run 生命周期 | `python -m pytest tests/test_kernel_rpc.py tests/test_runner.py tests/test_runs_api.py` | 正常、缺报告、被拒报告、模型 error/aborted/length、重试成功/失败、进程死亡、超时、取消；回收/关闭/报告阶段受理的取消必为 `cancelled`、与终帧提交竞争的取消返回已提交状态；清理未确认时拒绝准入、`shutdown` 如实上报、仅人工裁决放行；旧布局报告只读下载；产品事件或 HTTP 口径变化同时验证 Node 消费方 |
+| 宿主所有权 | `python -m pytest tests/test_ownership.py` | 同端口/不同端口/跨进程的第二宿主在对账前被拒绝，活跃 owner 的记录字节不变；无所有权的对账被拒绝；`flock` 只证明单机本地文件系统 |
+| 事件提交与重放 | `python -m pytest tests/test_event_replay.py` | 先落盘再发布、写盘失败不产生幻影帧、超环容量重放、活跃→结束接续、`Last-Event-ID`、重启对账与慢消费者断开；终帧发布瞬间详情/列表/报告已可读；在终帧已写入、`fsync` 未返回处阻塞时 HTTP 与 Store 均看不到终态，`fsync` 成功后单调可见、失败后从未可见（含重启对账与半行修复）；落定副本写失败、终帧写失败、报告副本写失败及重启后各读面一致 |
 | 三面执行接口 | `python -m pytest tests/test_kernel_execution.py tests/test_kernel_docker_env.py tests/test_kernel_e2b_env.py` | 适配器协议调用顺序、三面事件与终态一致、LF 分帧共享语料、配置上传清单、shell 输入安全；mock SDK/进程行为不是真实隔离或云端质量证明 |
 | 存储与 HTTP | `python -m pytest tests/test_store.py tests/test_host_app.py tests/test_runs_api.py` | 真实临时 HTTP/文件路径，拒绝与错误状态；历史格式变化需单独兼容决定 |
 | 前端状态与呈现逻辑 | `node --test tests/web/*.test.mjs` | 累计快照、权威终帧、取消/失败、重复帧、缺口；导航竞态/dispose（stub DOM）；工具参数数组跨层语料；不证明 DOM 布局 |
@@ -89,7 +90,7 @@ bash scripts/check.sh
 3. **生效对象**：源码、隔离服务、用户当前服务、Docker 镜像或 E2B 模板分别说明；旧报告不因代码更新自动重算。
 4. **剩余范围**：未验证的模型质量、云端、UI 与租户能力；阻塞项和非阻塞风险分开。
 5. **资源与回退**：本任务创建的资源、处置结果、配置/模板变更的回退方法；不清理未知资源。
-6. **隔离与清理结论**：run 记录里的 `cleanup.released/failures`、被拒产物（`report_rejected`）与遗留外部身份；未释放资源不能写成已清理。
+6. **隔离与清理结论**：run 记录里的 `cleanup.released/failures`（`null` 表示未知）、`resource_adjudication`、被拒产物（`report_rejected`）与遗留外部身份；未释放或未知的资源不能写成已清理，人工裁决要写明核对依据。
 
 新过程日志和截图使用仓库外临时目录；确需长期保护的脱敏输入与断言进入 `tests/fixtures/`。`docs/evidence/` 的既有记录是历史证据，现有脚本会覆盖它们，运行时必须明确这一点。正式决定更新所属文档，不复制整段会话或堆叠过期“最终通过”记录。
 

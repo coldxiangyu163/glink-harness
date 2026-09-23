@@ -10,13 +10,13 @@
 
 | 能力 | 现状 | 复用点 |
 |---|---|---|
-| Run 生命周期 | `RunManager` 管理单 run 槽、终态判定、收尾与释放 | 后续调度只替换「准入/排队」，不改 Run 语义 |
+| Run 生命周期 | `RunManager` 管理单 run 槽；结论与取消在同一线性化点裁决并以终帧提交；准入由「执行中 run + 未确认释放的资源台账」导出 | 后续调度只替换「准入/排队」的容量模型，不改 Run 语义与提交点 |
 | 执行面抽象 | `ExecutionAdapter`（`start/session_info/deliver_input/wait/recover_artifacts/close/identity`） | 新执行面/多宿主机只需新适配器 |
 | 每 run 独立环境 | 运行期配置与产物副本在 `runs/<id>/`，session 在会话根下的 `<id>/`，工作区在 `workspaces/<id>/` | 租户隔离的天然边界，待加 owner 标签 |
-| 持久事件 | `events.jsonl` 为提交事实源，先落盘再发布，支持 `Last-Event-ID` 重放 | 多宿主演进时成为 outbox/事件源 |
-| 产物安全 | 报告经安全读取后复制到宿主拥有的 `artifacts/`，拒绝链接/越界/超限 | 下载与清理只认校验过的宿主路径 |
+| 持久事件 | `events.jsonl` 为提交事实源，先落盘再发布，支持 `Last-Event-ID` 重放；终帧即终态提交，`meta.json` 终态字段是落定副本 | 多宿主演进时成为 outbox/事件源 |
+| 产物安全 | 内核可达文件经目录句柄逐级不跟随链接读写；报告复制到宿主拥有的 `artifacts/`；下载只认宿主产物与旧版本工作区报告两个固定位置 | 下载与清理只认校验过的宿主路径 |
 | 凭据与脱敏 | 每 run 的 `auth.json`/`web-search.json`（0600），出站值+形状+跨 delta 脱敏 | 单机回显保护；不构成租户级凭据隔离 |
-| 外部资源身份 | `container_name` / `sandbox_id` 持久化，重启 `reconcile()` 收口遗留 run | 租约/对账的持久锚点 |
+| 外部资源身份 | `container_name` / `sandbox_id` 持久化；取得 `data_root` 独占所有权后 `reconcile()` 才收口遗留 run；未确认释放的资源持续占用容量，只能人工裁决放行 | 租约/对账的持久锚点 |
 
 **尚未实现**：可信租户身份与授权、任何 owner 校验、并发准入与配额、跨宿主存储、per-tenant
 凭据代理、跨租户拒绝验收。当前服务默认只绑 loopback，且同一时间只允许一个 run。
@@ -106,10 +106,11 @@ inproc 面保持单 Agent 调试入口，不因并发支持而取消全局安全
 
 | 场景 | 语义 | 现状 |
 |---|---|---|
-| 宿主进程退出，run 未终态 | 重启对账为 `failed/interrupted`，附外部身份 | 已实现（`reconcile()`） |
-| 执行面资源仍存在 | 不自动销毁；`orphaned_resources()` 列出待人工决定 | 已实现（列出） |
+| 宿主进程退出，run 未终态 | 新宿主取得 `data_root` 独占所有权后对账为 `failed/interrupted`，附外部身份，资源状态记为未知；已提交终帧的 run 只落定、不改写 | 已实现（单机：`host.lock` + `reconcile()`） |
+| 同一数据目录启动第二个宿主 | 在对账前以 `DataRootBusy` 拒绝，不改动活跃 owner 的 run | 已实现（单机本地文件系统 `flock`；不是多宿主租约） |
+| 执行面资源仍存在或状态未知 | 不自动销毁；持续占用容量，新 run 返回 `409 resources_unreleased`；`--unreleased` 列出、`--mark-released` 人工裁决后放行 | 已实现（单机） |
 | 多宿主租约过期 | 接管方按策略终止执行面并标记 `interrupted`，写入接管审计 | 未实现 |
-| 取消请求与终态竞争 | 取消优先，终态必须是 `cancelled`（不得出现 `finished`） | 已实现（单机） |
+| 取消请求与终态竞争 | 取消与结论在同一线性化点裁决：提交前受理的取消必为 `cancelled`，提交后的取消返回 `409` 与已提交状态 | 已实现（单机） |
 | 事件流断线 | 客户端按 `Last-Event-ID` 从持久日志补齐 | 已实现（单机） |
 
 ## 6. 凭据策略（下一阶段，需产品决定）

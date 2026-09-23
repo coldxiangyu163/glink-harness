@@ -1,32 +1,35 @@
 """Run lifecycle for the local execution faces.
 
 One run is one workspace plus one kernel process/sandbox plus one session file.
-The manager keeps five promises:
+The manager keeps four facts apart, each with one owner and one commit point:
 
-* **Serial by construction.** Only one run is active at a time; a second start
-  is refused with :class:`RunBusy` instead of silently interleaving, and the
-  in-process face stays a single-agent debug entry point.
-* **Commit before publish.** Every projected event is persisted through
-  :meth:`EventBus.commit` and only then shown live, so the durable log is the
-  replay source of truth and a failed append can never produce a frame that
-  exists only in the browser.
-* **Identity comes from pi.** The session id/file recorded on the run is what
-  pi reported through ``get_state``, mapped back to the host path when the
-  kernel ran inside a container.
-* **Result, execution and artifact are separate facts.** ``agent_settled`` only
-  means "pi will not continue automatically". The run is only ``finished`` once
-  the execution settled *and* the final model result is not an error, while a
-  missing or rejected report is recorded as such (``no_report`` /
-  ``report_rejected``) instead of being papered over.
-* **Bounded, honest teardown.** The run result is persisted independently of
-  resource cleanup; a cleanup failure is reported in the record instead of
-  pretending the resource was released, and the active slot is always freed.
+* **Execution facts** — what the adapter and the model reported (outcome,
+  model stop reason, event-log health). Collected while the run is *open*.
+* **Artifact facts** — the recovered, validated, redacted report copy
+  (``report_status``/``report_path``). Written before the verdict.
+* **The verdict** — ``finished``/``failed``/``cancelled`` with a reason. It is
+  decided and committed in one critical section under the run lock: the
+  verdict is computed from all facts *and* the cancellation flag at that
+  moment, then committed as the durable terminal frame (see
+  :mod:`pi_glink.store`). This is the run's linearization point. A stop
+  accepted before it is reflected in the verdict; a stop after it is refused
+  and reports the committed status. Frames that arrive after it are dropped.
+* **Resource release** — the adapter's ``CleanupReport``. A run whose cleanup
+  did not confirm ``released: true`` keeps holding capacity after its verdict
+  (durably, across restarts) until an operator adjudicates it; finishing the
+  execution thread never implies the resource is gone.
+
+Admission is derived from those facts: a new run is accepted only when no run
+is executing in this process and no run holds unconfirmed resources.
+
+Restart reconciliation rewrites runs left ``running`` only after the host proved
+exclusive ownership of the data root (:mod:`pi_glink.ownership`); a committed
+terminal frame whose settled copy is missing is settled, never overwritten.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 import uuid
@@ -35,13 +38,16 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .. import events
-from ..artifacts import ArtifactError, read_regular_file, replace_with_text
+from ..artifacts import ArtifactError, ArtifactMissing, ArtifactTree
 from ..config import ConfigError, HostConfig
-from ..redaction import SecretRedactor, StreamRedactor, redactor_from_config
+from ..ownership import DataRootOwnership, OwnershipRequired
+from ..redaction import SecretRedactor, redactor_from_config
 from ..store import (
+    ARTIFACTS_DIRNAME,
     CANCELLED,
     FAILED,
     FINISHED,
+    REPORT_FILENAME,
     RUNNING,
     RunRecord,
     RunStore,
@@ -54,7 +60,6 @@ from .docker_env import (
     stop_argv as docker_stop_argv,
 )
 from .execution import (
-    ArtifactRecovery,
     CleanupReport,
     ExecutionAdapter,
     ExecutionOutcome,
@@ -62,15 +67,11 @@ from .execution import (
     SessionInfo,
     build_adapter,
 )
-from .projection import project_event
+from .projection import Projector
 from .rpc import PiRpcClient
 
 logger = logging.getLogger("pi_glink.kernel.runner")
 
-#: Artifact the research contract asks pi to produce.
-REPORT_FILENAME = "report.md"
-#: Host-owned artifact directory inside the run directory.
-ARTIFACTS_DIRNAME = "artifacts"
 #: Per-run pi configuration directory inside the run directory.
 RUNTIME_DIRNAME = "pi-agent"
 #: System prompt appended to every run (pi's own prompt stays untouched).
@@ -82,54 +83,92 @@ SWEEP_MAX_BYTES = 2 * 1024 * 1024
 #: Bound on how many files one sweep may visit (a runaway workspace must not
 #: turn run teardown into an unbounded walk).
 SWEEP_MAX_FILES = 2000
-#: Delta events whose split-credential protection needs stream state.
-_DELTA_EVENTS = frozenset({events.ASSISTANT_DELTA, events.THINKING_DELTA})
-#: Frames that end a streaming block; the withheld redaction tail is flushed
-#: before their own product events so it still belongs to the block it came from.
-_STREAM_BOUNDARY_FRAMES = frozenset(
-    {"turn_end", "message_end", "agent_end", "agent_settled"}
-)
 _USAGE_FIELDS = ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
+
+#: Run phases. ``open`` accepts frames and cancellation; the verdict commit
+#: moves it to ``committed``, or to ``uncommitted`` when the durable terminal
+#: append failed (the run then keeps its slot until a restart reconciles it).
+_OPEN = "open"
+_COMMITTED = "committed"
+_UNCOMMITTED = "uncommitted"
 
 
 class RunBusy(RuntimeError):
-    """Raised when a run is requested while another one is active."""
+    """Raised when a run is requested while another one is executing."""
 
     def __init__(self, active_run_id: str) -> None:
         super().__init__(f"run {active_run_id} is still active")
         self.active_run_id = active_run_id
 
 
+class ResourcesUnreleased(RuntimeError):
+    """Raised when earlier runs still hold resources that are not confirmed released."""
+
+    def __init__(self, run_ids: list[str]) -> None:
+        super().__init__("执行资源尚未确认释放: " + ", ".join(run_ids))
+        self.run_ids = list(run_ids)
+
+
 class EventLogError(RuntimeError):
     """The durable event log could not be written; the frame must stay hidden."""
 
 
+@dataclass(frozen=True, slots=True)
+class StopDecision:
+    """The answer to a stop request, decided at the run's linearization point.
+
+    ``accepted`` means the cancellation will be the run's verdict. Otherwise
+    ``reason`` says why not: ``terminal`` (a verdict is committed; ``status``
+    is it), ``finalizing`` (the verdict is decided but its commit failed),
+    ``not_owned`` (the record is not executed by this process) or ``unknown``.
+    """
+
+    accepted: bool
+    status: str | None
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Verdict:
+    status: str
+    stop_reason: str | None
+    error: str | None
+
+
 @dataclass
 class _Execution:
-    """Mutable per-run handles held for as long as the run is alive."""
+    """Mutable per-run state held from admission until the verdict is committed."""
 
     record: RunRecord
     workspace: Path
     #: The instruction as the user wrote it. ``record.prompt`` is the redacted
     #: copy that may be persisted and shown; the kernel receives this one.
     kernel_prompt: str = ""
+    #: Guards the phase, the cancellation flag and every frame commit.
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    phase: str = _OPEN
     cancel_requested: bool = False
     adapter: ExecutionAdapter | None = None
     runtime: AgentRuntime | None = None
-    stream: StreamRedactor | None = None
-    #: Set once the execution thread finished its teardown (shutdown waits on it).
-    done: threading.Event = field(default_factory=threading.Event)
-    #: Run-level redaction marker (per run, never shared between runs).
+    projector: Projector | None = None
+    #: Set once the finalizer finished (committed or not).
+    finalized: threading.Event = field(default_factory=threading.Event)
+    verdict: _Verdict | None = None
+    # execution facts
+    outcome: ExecutionOutcome | None = None
+    failure: str | None = None
+    event_log_error: str | None = None
+    model_stop_reason: str | None = None
+    model_error: str | None = None
+    usage_total: dict[str, Any] = field(default_factory=dict)
+    usage_keys: set[str] = field(default_factory=set)
+    # artifact facts
     redacted: bool = False
     report_path: Path | None = None
     report_status: str = "none"
-    model_stop_reason: str | None = None
-    model_error: str | None = None
-    event_log_error: str | None = None
-    usage_total: dict[str, Any] = field(default_factory=dict)
-    usage_keys: set[str] = field(default_factory=set)
-    cleanup: CleanupReport | None = None
     artifact_failures: list[str] = field(default_factory=list)
+    # resource facts
+    cleanup: CleanupReport | None = None
 
 
 ClientFactory = Callable[..., PiRpcClient]
@@ -146,28 +185,29 @@ class RunManager:
         *,
         client_factory: ClientFactory = PiRpcClient,
         sandbox_factory: Callable[..., Any] | None = None,
+        ownership: DataRootOwnership | None = None,
     ) -> None:
         self.config = config
         self.bus = bus
         self.store = store
         self._client_factory = client_factory
         self._sandbox_factory = sandbox_factory
+        self._ownership = ownership
         # The single redaction boundary: every event payload passes through it
         # before it reaches the bus (SSE + browser) or the event log.
         self.redactor: SecretRedactor = redactor_from_config(config)
         self._lock = threading.RLock()
         self._executions: dict[str, _Execution] = {}
-        self._active_run_id: str | None = None
 
-    # -- public API -----------------------------------------------------------
+    # -- admission ------------------------------------------------------------
 
     @property
     def active_run_id(self) -> str | None:
         with self._lock:
-            return self._active_run_id
+            return next(iter(self._executions), None)
 
     def start(self, prompt: str) -> RunRecord:
-        """Create a run and execute it in the background."""
+        """Admit a run and execute it in the background."""
         text = (prompt or "").strip()
         if not text:
             raise ValueError("prompt must not be empty")
@@ -177,8 +217,11 @@ class RunManager:
             )
 
         with self._lock:
-            if self._active_run_id is not None:
-                raise RunBusy(self._active_run_id)
+            if self._executions:
+                raise RunBusy(next(iter(self._executions)))
+            holds = self._resource_holds()
+            if holds:
+                raise ResourcesUnreleased(holds)
             run_id = uuid.uuid4().hex[:12]
             workspace = self.config.workspace_root / run_id
             # A user can paste a credential into the prompt; the stored and
@@ -191,7 +234,6 @@ class RunManager:
                 record=record, workspace=workspace, kernel_prompt=text
             )
             self._executions[run_id] = execution
-            self._active_run_id = run_id
             # Register the run before the caller gets the id back: a browser
             # that opens the event stream immediately must see an open run, not
             # a 404 race with the execution thread's first line.
@@ -205,26 +247,48 @@ class RunManager:
         ).start()
         return record
 
-    def stop(self, run_id: str) -> bool:
-        """Request cancellation; returns False only when nothing is running.
+    def _resource_holds(self) -> list[str]:
+        """Runs not executing here whose resources are not confirmed released."""
+        with self._lock:
+            executing = set(self._executions)
+        return [
+            record.run_id
+            for record in self.store.list(limit=None)
+            if record.run_id not in executing and record.holds_resources
+        ]
 
-        True means "the cancellation is accepted", not "pi acknowledged it".
-        The flag is what ends the run (the execution loop checks it around every
-        blocking step); the face's own cancel only shortens the wait, so a
-        failed abort is logged and does not turn the request into a rejection.
+    # -- cancellation ---------------------------------------------------------
+
+    def stop(self, run_id: str) -> StopDecision:
+        """Request cancellation, decided against the run's commit point.
+
+        Accepting sets the flag the verdict reads under the same lock that
+        commits it, so an accepted stop always ends as ``cancelled``. The
+        face's own cancel only shortens the wait: a failed abort is logged and
+        does not turn an accepted stop into a rejection.
         """
         with self._lock:
             execution = self._executions.get(run_id)
         if execution is None:
-            return False
-        execution.cancel_requested = True
-        adapter = execution.adapter
+            record = self.store.get(run_id)
+            if record is None:
+                return StopDecision(False, None, "unknown")
+            reason = "terminal" if record.is_terminal else "not_owned"
+            return StopDecision(False, record.status, reason)
+        with execution.lock:
+            if execution.phase == _COMMITTED:
+                assert execution.verdict is not None
+                return StopDecision(False, execution.verdict.status, "terminal")
+            if execution.phase == _UNCOMMITTED:
+                return StopDecision(False, RUNNING, "finalizing")
+            execution.cancel_requested = True
+            adapter = execution.adapter
         if adapter is not None:
             try:
                 adapter.cancel()
-            except Exception:  # noqa: BLE001 - teardown is best effort here
+            except Exception:  # noqa: BLE001 - the flag is what ends the run
                 logger.debug("adapter cancel failed run=%s", run_id, exc_info=True)
-        return True
+        return StopDecision(True, RUNNING, "accepted")
 
     def wait(self, run_id: str, timeout: float = 60.0) -> RunRecord | None:
         """Block until the run leaves ``running`` (used by tests and smoke)."""
@@ -239,95 +303,93 @@ class RunManager:
     def shutdown(self, timeout: float = 15.0) -> list[str]:
         """Cancel and wait for every run owned by this process.
 
-        Returns the run ids that did **not** finish releasing within the bound:
-        a cleanup failure is reported, not hidden behind a shorter timeout. The
-        host calls this on exit; tests call it with a synthetic run.
+        Returns every run id that still needs an operator: runs whose verdict
+        was not committed within the bound, and runs whose resources are not
+        confirmed released (including those finished earlier). A thread that
+        ended is not evidence that its resource is gone.
         """
         with self._lock:
             executions = list(self._executions.values())
-        if not executions:
-            return []
         for execution in executions:
-            execution.cancel_requested = True
-            adapter = execution.adapter
-            if adapter is not None:
-                try:
-                    adapter.cancel()
-                except Exception:  # noqa: BLE001 - the wait below is the bound
-                    logger.debug(
-                        "adapter cancel failed run=%s",
-                        execution.record.run_id,
-                        exc_info=True,
-                    )
+            self.stop(execution.record.run_id)
         deadline = time.monotonic() + max(0.0, timeout)
-        unreleased: list[str] = []
         for execution in executions:
             remaining = deadline - time.monotonic()
             if remaining > 0:
-                execution.done.wait(remaining)
-            if not execution.done.is_set():
-                unreleased.append(execution.record.run_id)
-        if unreleased:
+                execution.finalized.wait(remaining)
+        with self._lock:
+            pending = set(self._executions)
+        unconfirmed = sorted(pending | set(self._resource_holds()))
+        if unconfirmed:
             logger.error(
-                "宿主退出前仍有 run 未在 %.1fs 内释放: %s",
-                timeout,
-                ", ".join(unreleased),
+                "宿主退出时仍有 run 的终态或执行资源未确认: %s", ", ".join(unconfirmed)
             )
-        return unreleased
+        return unconfirmed
 
-    # -- restart reconciliation ----------------------------------------------
+    # -- restart reconciliation and resource adjudication ---------------------
 
     def reconcile(self) -> list[str]:
-        """Close out runs left ``running`` by a previous host process.
+        """Close out runs a previous host process left ``running``.
 
-        A run whose process is gone cannot continue; it becomes ``failed`` with
-        ``stop_reason=interrupted`` and a terminal frame appended to its log, so
-        the history is honest instead of showing a run that never ends. External
-        resources (container/sandbox) are **not** touched: their durable identity
-        is recorded in the run record and reported by
-        :meth:`orphaned_resources` for a bounded operator decision.
+        Requires proof that this process owns the data root: without it, a
+        run of a live host would be rewritten. A run whose terminal frame is
+        committed is only settled. A run without one is interrupted: a
+        ``run_failed(interrupted)`` frame is committed with the resource state
+        ``released: null`` (unknown), so it keeps holding capacity until an
+        operator adjudicates it. External resources are never touched.
+        Returns the ids that were interrupted.
         """
-        reconciled: list[str] = []
+        self._require_ownership()
         with self._lock:
-            active = set(self._executions)
-        for record in self.store.list():
-            if record.status != RUNNING or record.run_id in active:
+            executing = set(self._executions)
+        interrupted: list[str] = []
+        for run_id in self.store.unsettled():
+            if run_id in executing:
                 continue
-            self._recover_abandoned_run(record)
-            reconciled.append(record.run_id)
-        if reconciled:
+            if self.store.committed_terminal(run_id) is None:
+                if self._commit_interrupted(run_id):
+                    interrupted.append(run_id)
+            try:
+                self.store.settle(run_id)
+            except Exception:  # noqa: BLE001 - the committed frame still answers readers
+                logger.exception("遗留 run 的元数据收口失败 run=%s", run_id)
+        if interrupted:
             logger.warning(
                 "识别到 %d 个上次进程遗留的 running run，已按中断收口: %s",
-                len(reconciled),
-                ", ".join(reconciled),
+                len(interrupted),
+                ", ".join(interrupted),
             )
-        return reconciled
+        return interrupted
 
-    def _recover_abandoned_run(self, record: RunRecord) -> None:
-        run_id = record.run_id
+    def _commit_interrupted(self, run_id: str) -> bool:
+        record = self.store.get(run_id)
         external = {
             key: value
             for key, value in (
-                ("container", record.container_name),
-                ("sandbox", record.sandbox_id),
+                ("container", record.container_name if record else None),
+                ("sandbox", record.sandbox_id if record else None),
             )
             if value
         }
         payload = {
             "status": FAILED,
             "stopReason": "interrupted",
-            "error": "宿主进程重启时该 run 仍在运行，已按中断收口",
+            "error": "宿主进程在该 run 结束前退出，已按中断收口",
+            "reportPath": None,
             "reportStatus": "none",
             "external": external,
             "cleanup": {
-                "released": False,
-                "failures": ["宿主进程重启，未自动回收外部资源"],
+                "released": None,
+                "failures": ["宿主进程在该 run 结束前退出，执行资源状态未知，未自动回收"],
                 "external": external,
             },
         }
+        seq = max(
+            (event["seq"] for event in self.store.iter_events(run_id) if isinstance(event.get("seq"), int)),
+            default=0,
+        ) + 1
         try:
-            seq = self._last_persisted_seq(run_id) + 1
-            self.store.append_event(
+            self.store.commit_terminal(
                 run_id,
                 {
                     "type": events.RUN_FAILED,
@@ -338,62 +400,68 @@ class RunManager:
                 },
             )
         except OSError as exc:
-            logger.error("遗留 run 的终态事件写入失败 run=%s: %s", run_id, exc)
-        try:
-            self.store.update(
-                run_id,
-                status=FAILED,
-                finished_at=time.time(),
-                stop_reason="interrupted",
-                error=payload["error"],
-                report_status="none",
-                cleanup=payload["cleanup"],
-                event_count=self.store.count_events(run_id),
-            )
-        except Exception:  # noqa: BLE001 - one broken record must not stop startup
-            logger.exception("遗留 run 的元数据收口失败 run=%s", run_id)
+            logger.error("遗留 run 的中断终帧写入失败 run=%s: %s", run_id, exc)
+            return False
+        return True
 
-    def _last_persisted_seq(self, run_id: str) -> int:
-        last = 0
-        for event in self.store.iter_events(run_id):
-            seq = event.get("seq")
-            if isinstance(seq, int):
-                last = max(last, seq)
-        return last
+    def unreleased_resources(self) -> list[dict[str, Any]]:
+        """Runs whose resources are not confirmed released, for operator review."""
+        holds = set(self._resource_holds())
+        return [
+            {
+                "runId": record.run_id,
+                "status": record.status,
+                "stopReason": record.stop_reason,
+                "container": record.container_name,
+                "sandbox": record.sandbox_id,
+                "cleanup": record.cleanup,
+            }
+            for record in self.store.list(limit=None)
+            if record.run_id in holds
+        ]
 
-    def orphaned_resources(self) -> list[dict[str, Any]]:
-        """Runs whose external resources may still exist, for operator review."""
+    def adjudicate_release(self, run_id: str, note: str) -> RunRecord:
+        """Record an operator's decision that a run's resources are released.
+
+        This is the only way besides a confirmed cleanup to return capacity.
+        It requires data-root ownership (the host is not running) and a note
+        describing how the release was verified; nothing is cleaned up here.
+        """
+        self._require_ownership()
+        reason = (note or "").strip()
+        if not reason:
+            raise ValueError("裁决必须附带核对说明")
         with self._lock:
-            active = set(self._executions)
-        resources: list[dict[str, Any]] = []
-        for record in self.store.list():
-            if record.run_id in active:
-                continue
-            if not (record.container_name or record.sandbox_id):
-                continue
-            resources.append(
-                {
-                    "runId": record.run_id,
-                    "status": record.status,
-                    "stopReason": record.stop_reason,
-                    "container": record.container_name,
-                    "sandbox": record.sandbox_id,
-                    "cleanup": record.cleanup,
-                }
+            if run_id in self._executions:
+                raise RunBusy(run_id)
+            record = self.store.get(run_id)
+            if record is None:
+                raise KeyError(run_id)
+            if not record.is_terminal:
+                raise ValueError(f"run {run_id} 尚未终态，不能裁决资源")
+            if not record.holds_resources:
+                raise ValueError(f"run {run_id} 没有待确认的执行资源")
+            return self.store.update(
+                run_id,
+                resource_adjudication={
+                    "decision": "released",
+                    "note": self.redactor.redact(reason),
+                    "at": time.time(),
+                },
             )
-        return resources
+
+    def _require_ownership(self) -> None:
+        if self._ownership is None:
+            raise OwnershipRequired("恢复与资源裁决需要先取得数据目录的执行所有权")
+        self._ownership.require(self.config.data_root)
 
     # -- execution ------------------------------------------------------------
 
     def _execute(self, execution: _Execution) -> None:
         run_id = execution.record.run_id
-        self.bus.open_run(run_id)
-        status = FINISHED
-        stop_reason: str | None = None
-        error: str | None = None
         try:
             execution.workspace.mkdir(parents=True, exist_ok=True)
-            self._emit(run_id, events.RUN_STARTED, {"prompt": execution.record.prompt})
+            self._emit_open(execution, events.RUN_STARTED, {"prompt": execution.record.prompt})
 
             runtime = self._prepare_runtime(execution)
             adapter = self._build_adapter(execution, runtime)
@@ -405,54 +473,43 @@ class RunManager:
             if session is not None:
                 self._publish_session_ready(execution, session)
 
-            if execution.cancel_requested:
-                # Cancelled while the kernel was starting: never start the work.
-                status, stop_reason = CANCELLED, "abort"
-            else:
+            # Cancelled while the kernel was starting: never start the work.
+            if not execution.cancel_requested:
                 adapter.deliver_input()
                 deadline = time.monotonic() + self.config.task_timeout_seconds
-                outcome = adapter.wait(
+                execution.outcome = adapter.wait(
                     cancel=lambda: execution.cancel_requested, deadline=deadline
                 )
-                status, stop_reason, error = self._resolve_status(execution, outcome)
+        except EventLogError as exc:
+            logger.error("run failed run=%s: %s", run_id, exc)
+            execution.event_log_error = execution.event_log_error or str(exc)
         except Exception as exc:  # noqa: BLE001 - every run must end with a reason
             if execution.cancel_requested:
-                # Stopping a run closes the sandbox (or aborts pi); whatever
-                # error that surfaces is the cancellation, not a failure.
-                status = CANCELLED
-                stop_reason = "abort"
-                error = None
+                # Stopping a run closes the sandbox (or aborts pi); the error
+                # that surfaces is the cancellation, not a failure.
                 logger.info("run cancelled run=%s (%s)", run_id, type(exc).__name__)
-            elif isinstance(exc, EventLogError):
-                logger.error("run failed run=%s: %s", run_id, exc)
-                status = FAILED
-                stop_reason = "event_log_failed"
-                error = str(exc)
             else:
                 logger.exception("run failed run=%s", run_id)
-                status = FAILED
-                stop_reason = "execution_error"
-                error = f"{type(exc).__name__}: {exc}"
+            execution.failure = f"{type(exc).__name__}: {exc}"
         finally:
-            self._finish(execution, status, stop_reason, error)
+            self._finalize(execution)
 
-    def _finish(
-        self,
-        execution: _Execution,
-        status: str,
-        stop_reason: str | None,
-        error: str | None,
-    ) -> None:
-        """Land the result, recover artifacts, then release resources.
+    def _finalize(self, execution: _Execution) -> None:
+        """Collect artifact and resource facts, then commit the verdict.
 
-        Each step is guarded on its own: a cleanup error cannot overwrite the
-        run's result, and a persistence error cannot leave the active slot held.
+        Every step before the commit is guarded on its own, so a failing sweep
+        cannot prevent the verdict. The verdict and its durable commit happen
+        in one critical section with the cancellation flag.
         """
         run_id = execution.record.run_id
-        try:
-            self._flush_streams(execution)
-        except Exception:  # noqa: BLE001 - a flush must not block teardown
-            logger.exception("flushing stream redaction state failed run=%s", run_id)
+        projector = execution.projector
+        if projector is not None:
+            # Release the answer's withheld tail now, so it stays attached to
+            # its text block ahead of any host-owned notice emitted below.
+            with execution.lock:
+                for kind, payload in projector.flush():
+                    if not self._emit_frame(execution, kind, payload):
+                        break
 
         adapter = execution.adapter
         if adapter is not None:
@@ -460,19 +517,21 @@ class RunManager:
             # cannot be read after it is destroyed.
             try:
                 recovery = adapter.recover_artifacts(execution.workspace)
+                execution.artifact_failures.extend(recovery.failures)
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-                recovery = ArtifactRecovery(
-                    failures=(f"产物回收失败: {type(exc).__name__}: {exc}",)
+                execution.artifact_failures.append(
+                    f"产物回收失败: {type(exc).__name__}: {exc}"
                 )
-            execution.artifact_failures.extend(recovery.failures)
             try:
                 execution.cleanup = adapter.close()
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 execution.cleanup = CleanupReport(
                     released=False,
                     failures=(f"关闭执行面失败: {type(exc).__name__}: {exc}",),
+                    external=dict(adapter.identity()),
                 )
         else:
+            # Nothing was acquired: no process, container or sandbox exists.
             execution.cleanup = CleanupReport(released=True)
 
         try:
@@ -492,49 +551,122 @@ class RunManager:
             execution.report_status = "rejected"
             execution.report_path = None
 
-        if status == FINISHED and execution.report_path is None and stop_reason is None:
-            stop_reason = (
-                "report_rejected" if execution.report_status == "rejected" else "no_report"
+        committed = False
+        with execution.lock:
+            # Frames may have arrived while artifacts were recovered; their
+            # withheld tail still belongs to the open run, before the verdict.
+            if projector is not None:
+                for kind, payload in projector.flush():
+                    if not self._emit_frame(execution, kind, payload):
+                        break
+            verdict = self._decide(execution)
+            execution.verdict = verdict
+            try:
+                committed = self._commit_terminal(execution, verdict)
+            except Exception:  # noqa: BLE001 - an unexpected error is an uncommitted verdict
+                logger.exception("terminal commit failed run=%s", run_id)
+            execution.phase = _COMMITTED if committed else _UNCOMMITTED
+
+        if committed:
+            try:
+                self.store.settle(run_id)
+            except Exception:  # noqa: BLE001 - readers project the committed frame
+                logger.exception("settling the run record failed run=%s", run_id)
+            self.bus.close(run_id)
+            with self._lock:
+                self._executions.pop(run_id, None)
+        else:
+            # Every reader still sees ``running`` (nothing is committed), so the
+            # run keeps its slot and its live stream; a restart reconciles it.
+            logger.critical(
+                "run 终态未能提交，保持占用直至重启对账 run=%s status=%s", run_id, verdict.status
             )
-        try:
-            self._finalize_record(execution, status, stop_reason, error)
-        finally:
-            execution.done.set()
-            self._release_slot(run_id)
+        cleanup = execution.cleanup
+        logger.info(
+            "run finalized run=%s status=%s stop=%s committed=%s report=%s released=%s",
+            run_id,
+            verdict.status,
+            verdict.stop_reason,
+            committed,
+            execution.report_path or "<none>",
+            cleanup.released if cleanup is not None else None,
+        )
+        execution.finalized.set()
 
-    # -- status resolution ----------------------------------------------------
+    # -- the verdict ----------------------------------------------------------
 
-    def _resolve_status(
-        self, execution: _Execution, outcome: ExecutionOutcome
-    ) -> tuple[str, str | None, str | None]:
-        """Combine execution, model result and cancellation into one verdict.
+    def _decide(self, execution: _Execution) -> _Verdict:
+        """Combine every fact into one verdict (call under the run lock).
 
-        ``agent_settled`` is deliberately not the success signal: pi can settle
-        after an error stop reason or a truncated (``length``) response. The
-        artifact policy is applied later, in :meth:`_finish`.
+        An accepted cancellation wins: it was accepted while the run was open,
+        so it must be the verdict. ``agent_settled`` is deliberately not the
+        success signal: pi can settle after an error stop reason or a truncated
+        (``length``) response.
         """
-        if execution.event_log_error:
-            return FAILED, "event_log_failed", execution.event_log_error
-        if execution.cancel_requested or outcome.cancelled:
-            return CANCELLED, "abort", None
+        log_error = execution.event_log_error
+        if execution.cancel_requested:
+            return _Verdict(CANCELLED, "abort", log_error)
+        if log_error:
+            return _Verdict(FAILED, "event_log_failed", log_error)
+        if execution.failure:
+            return _Verdict(FAILED, "execution_error", execution.failure)
+        outcome = execution.outcome
+        if outcome is None:
+            return _Verdict(FAILED, "execution_error", "执行面没有给出结果")
+        if outcome.cancelled:
+            return _Verdict(CANCELLED, "abort", None)
         if outcome.timed_out:
-            return FAILED, "timeout", outcome.error or "run timed out"
+            return _Verdict(FAILED, "timeout", outcome.error or "run timed out")
         if outcome.error:
-            return FAILED, outcome.stop_reason or "execution_error", outcome.error
+            return _Verdict(FAILED, outcome.stop_reason or "execution_error", outcome.error)
         stop = execution.model_stop_reason
         if stop == "error":
-            return (
-                FAILED,
-                "model_error",
-                execution.model_error or "模型返回了错误结果",
-            )
+            return _Verdict(FAILED, "model_error", execution.model_error or "模型返回了错误结果")
         if stop == "aborted":
-            return FAILED, "aborted", execution.model_error or "模型输出被中断"
+            return _Verdict(FAILED, "aborted", execution.model_error or "模型输出被中断")
         if stop == "length":
             # The execution succeeded, but the answer was cut off at the output
             # limit. That is a delivery fact the record must carry.
-            return FINISHED, "length", None
-        return FINISHED, None, None
+            return _Verdict(FINISHED, "length", None)
+        if execution.report_path is None:
+            reason = "report_rejected" if execution.report_status == "rejected" else "no_report"
+            return _Verdict(FINISHED, reason, None)
+        return _Verdict(FINISHED, None, None)
+
+    def _commit_terminal(self, execution: _Execution, verdict: _Verdict) -> bool:
+        """Durably append the terminal frame; True once it is committed."""
+        run_id = execution.record.run_id
+        current = self.store.get(run_id) or execution.record
+        cleanup = execution.cleanup or CleanupReport(released=True)
+        terminal_type = {
+            FAILED: events.RUN_FAILED,
+            CANCELLED: events.RUN_CANCELLED,
+        }.get(verdict.status, events.RUN_FINISHED)
+        payload = {
+            "status": verdict.status,
+            "stopReason": verdict.stop_reason,
+            "error": self.redactor.redact(verdict.error) if verdict.error else None,
+            "reportPath": str(execution.report_path) if execution.report_path else None,
+            "reportStatus": execution.report_status,
+            "modelStopReason": execution.model_stop_reason,
+            "sessionId": current.session_id,
+            "sessionFile": current.session_file,
+            "usage": execution.usage_total or None,
+            "redacted": execution.redacted,
+            "durationSeconds": round(time.time() - current.created_at, 3),
+            "cleanup": {
+                "released": cleanup.released,
+                "failures": list(cleanup.failures),
+                "external": dict(cleanup.external),
+            },
+            "artifactFailures": list(execution.artifact_failures),
+        }
+        try:
+            self._emit(run_id, terminal_type, payload, terminal=True)
+        except EventLogError as exc:
+            logger.error("terminal frame could not be committed run=%s: %s", run_id, exc)
+            return False
+        return True
 
     # -- pi configuration -----------------------------------------------------
 
@@ -559,7 +691,7 @@ class RunManager:
         # The search credential only exists in the rendered file, so it is
         # learned here (never logged, never returned).
         self.redactor.add_from_file(runtime.directory / "web-search.json")
-        execution.stream = self.redactor.stream()
+        execution.projector = Projector(self.redactor)
         return runtime
 
     # -- adapters -------------------------------------------------------------
@@ -649,28 +781,46 @@ class RunManager:
     # -- event projection -----------------------------------------------------
 
     def _on_frame(self, execution: _Execution, frame: Mapping[str, Any]) -> None:
-        run_id = execution.record.run_id
-        if frame.get("type") in _STREAM_BOUNDARY_FRAMES:
-            self._flush_streams(execution)
-        for event_type, payload in project_event(frame, self.redactor):
-            try:
-                if event_type in _DELTA_EVENTS:
-                    payload = self._stream_delta(execution, event_type, payload)
-                    if payload is None:
-                        continue
-                elif event_type == events.USAGE_REPORTED:
+        with execution.lock:
+            if execution.phase != _OPEN or execution.projector is None:
+                # After the verdict commit nothing may follow the terminal frame.
+                logger.debug(
+                    "frame after commit dropped run=%s type=%s",
+                    execution.record.run_id,
+                    frame.get("type"),
+                )
+                return
+            for event_type, payload in execution.projector.project(frame):
+                if event_type == events.USAGE_REPORTED:
                     payload = self._accumulate_usage(execution, frame, payload)
                     if payload is None:
                         continue
-                self._emit(run_id, event_type, payload)
-            except EventLogError as exc:
-                # The durable log is the fact source: a frame that cannot be
-                # committed is not shown either. End the run now instead of
-                # letting the reader thread keep collecting unpersisted frames.
-                execution.event_log_error = str(exc)
-                logger.error("event log failed run=%s: %s", run_id, exc)
+                if not self._emit_frame(execution, event_type, payload):
+                    # The durable log is the fact source: a frame that cannot be
+                    # committed is not shown either.
+                    return
+            self._record_model_result(execution, frame)
+
+    def _emit_frame(
+        self, execution: _Execution, event_type: str, payload: Mapping[str, Any]
+    ) -> bool:
+        """Commit one frame of an open run (caller holds the run lock)."""
+        try:
+            self._emit(execution.record.run_id, event_type, payload)
+        except EventLogError as exc:
+            execution.event_log_error = execution.event_log_error or str(exc)
+            logger.error("event log failed run=%s: %s", execution.record.run_id, exc)
+            return False
+        return True
+
+    def _emit_open(
+        self, execution: _Execution, event_type: str, payload: Mapping[str, Any]
+    ) -> None:
+        """Commit a host-owned frame while the run is open (raises on log failure)."""
+        with execution.lock:
+            if execution.phase != _OPEN:
                 return
-        self._record_model_result(execution, frame)
+            self._emit(execution.record.run_id, event_type, payload)
 
     def _record_model_result(
         self, execution: _Execution, frame: Mapping[str, Any]
@@ -690,34 +840,6 @@ class RunManager:
             final = frame.get("finalError")
             if isinstance(final, str) and final.strip():
                 execution.model_error = final
-
-    def _stream_delta(
-        self, execution: _Execution, event_type: str, payload: Mapping[str, Any]
-    ) -> dict[str, Any] | None:
-        stream = execution.stream
-        text = payload.get("text")
-        if stream is None or not isinstance(text, str) or not text:
-            return dict(payload)
-        safe = stream.push(event_type, text)
-        if not safe:
-            # The whole delta was withheld: it may be the prefix of a
-            # credential. It is emitted once the value is recognisable.
-            return None
-        return {**payload, "text": safe}
-
-    def _flush_streams(self, execution: _Execution) -> None:
-        stream = execution.stream
-        if stream is None:
-            return
-        for kind in (events.THINKING_DELTA, events.ASSISTANT_DELTA):
-            safe = stream.flush(kind)
-            if not safe:
-                continue
-            try:
-                self._emit(execution.record.run_id, kind, {"text": safe})
-            except EventLogError as exc:
-                execution.event_log_error = str(exc)
-                return
 
     def _accumulate_usage(
         self, execution: _Execution, frame: Mapping[str, Any], payload: Mapping[str, Any]
@@ -787,7 +909,7 @@ class RunManager:
             )
         payload: dict[str, Any] = dict(session.payload)
         payload["sessionFile"] = session_file
-        self._emit(run_id, events.SESSION_READY, payload)
+        self._emit_open(execution, events.SESSION_READY, payload)
 
     def _host_session_file(self, reported: str, runtime: AgentRuntime) -> str | None:
         """Translate a pi-reported container path into its host location.
@@ -807,44 +929,50 @@ class RunManager:
         """Validate the report and copy it to a host-owned, redacted artifact.
 
         The kernel-produced file is never served directly and never written
-        through: it is read through the safe artifact reader (no symlink, regular
-        file only, bounded), redacted, and published under
-        ``<run_dir>/artifacts/report.md``. A file that cannot be validated is a
-        visible ``report_rejected`` with a warning event — not a fake report.
+        through: it is read through the run workspace's directory handle (no
+        link anywhere below the workspace root, regular file only, bounded),
+        redacted, and published under ``<run_dir>/artifacts/report.md``. A file
+        that cannot be validated is a visible ``report_rejected`` with a warning
+        event — not a fake report.
         """
         run_id = execution.record.run_id
-        candidate = execution.workspace / REPORT_FILENAME
-        if not (candidate.exists() or candidate.is_symlink()):
+        try:
+            with ArtifactTree(execution.workspace) as workspace:
+                data = workspace.read(REPORT_FILENAME, max_bytes=REPORT_MAX_BYTES)
+        except ArtifactMissing:
             execution.report_status = "missing"
             return
-        try:
-            data = read_regular_file(
-                candidate, max_bytes=REPORT_MAX_BYTES, root=execution.workspace
-            )
         except ArtifactError as exc:
             execution.report_status = "rejected"
             execution.report_path = None
-            self._report_warning(run_id, f"report.md 未通过安全校验，已拒绝：{exc}")
+            self._report_warning(execution, f"report.md 未通过安全校验，已拒绝：{exc}")
             return
-        redacted = self.redactor.redact(data.decode("utf-8", errors="replace"))
-        if redacted != data.decode("utf-8", errors="replace"):
+        original = data.decode("utf-8", errors="replace")
+        redacted = self.redactor.redact(original)
+        if redacted != original:
             execution.redacted = True
-        destination = self.store.run_dir(run_id) / ARTIFACTS_DIRNAME / REPORT_FILENAME
         try:
-            replace_with_text(destination, redacted, max_bytes=REPORT_MAX_BYTES)
+            with ArtifactTree(self.store.run_dir(run_id)) as run_tree:
+                run_tree.replace(
+                    f"{ARTIFACTS_DIRNAME}/{REPORT_FILENAME}",
+                    redacted.encode("utf-8"),
+                    max_bytes=REPORT_MAX_BYTES,
+                    create_parents=True,
+                )
         except (ArtifactError, OSError) as exc:
             execution.report_status = "rejected"
             execution.report_path = None
-            self._report_warning(run_id, f"report.md 无法写入宿主产物目录，已拒绝：{exc}")
+            self._report_warning(execution, f"report.md 无法写入宿主产物目录，已拒绝：{exc}")
             return
-        execution.report_path = destination
+        execution.report_path = self.store.report_artifact_path(run_id)
         execution.report_status = "ok"
 
-    def _report_warning(self, run_id: str, detail: str) -> None:
+    def _report_warning(self, execution: _Execution, detail: str) -> None:
+        run_id = execution.record.run_id
         logger.warning("run=%s %s", run_id, detail)
         try:
-            self._emit(
-                run_id,
+            self._emit_open(
+                execution,
                 events.KERNEL_STATUS,
                 {"level": "warning", "message": "report_rejected", "detail": detail},
             )
@@ -861,29 +989,23 @@ class RunManager:
         """
         record = self.store.get(execution.record.run_id)
         session_file = record.session_file if record is not None else None
-        if not session_file:
+        if not session_file or execution.runtime is None:
             return False
-        runtime = execution.runtime
-        if runtime is None:
-            return False
-        return self._sanitize_session_file(session_file, root=runtime.session_dir)
+        return self._sanitize_session_file(session_file, root=execution.runtime.session_dir)
 
     def _sanitize_session_file(self, session_file: str, *, root: Path) -> bool:
         """Redact one session file; returns whether its bytes changed."""
         try:
-            original = read_regular_file(
-                session_file, max_bytes=REPORT_MAX_BYTES, root=root
-            ).decode("utf-8", errors="replace")
-        except ArtifactError as exc:
-            logger.warning("会话文件未通过安全校验，拒绝改写: %s (%s)", session_file, exc)
-            return False
-        redacted = self.redactor.redact(original)
-        if redacted == original:
-            return False
-        try:
-            replace_with_text(session_file, redacted, max_bytes=REPORT_MAX_BYTES)
+            with ArtifactTree(root) as tree:
+                original = tree.read(session_file, max_bytes=REPORT_MAX_BYTES).decode(
+                    "utf-8", errors="replace"
+                )
+                redacted = self.redactor.redact(original)
+                if redacted == original:
+                    return False
+                tree.replace(session_file, redacted.encode("utf-8"), max_bytes=REPORT_MAX_BYTES)
         except (ArtifactError, OSError) as exc:
-            logger.error("failed to redact session file: %s (%s)", session_file, exc)
+            logger.warning("会话文件未通过安全校验或无法改写，已跳过: %s (%s)", session_file, exc)
             return False
         logger.warning("session file contained credentials and was redacted: %s", session_file)
         return True
@@ -893,186 +1015,63 @@ class RunManager:
 
         The report is not the only file a tool echo can reach; a ``write`` call
         can leak the same value into any artifact the operator later opens. The
-        sweep is bounded (file count, size cap, binary skip) and symlink-safe:
-        linked files and directories are skipped entirely, and every rewrite is
-        an atomic replace, so a link planted in the workspace can neither be
-        followed for reading nor written through.
+        sweep is bounded (file count, size cap, binary skip) and walks the
+        workspace through directory handles: links are never followed for
+        reading, and every rewrite is published inside the verified directory.
         """
-        if not workspace.is_dir():
+        try:
+            tree = ArtifactTree(workspace)
+        except ArtifactError:
             return False
         changed = False
-        for path in self._iter_workspace_files(workspace):
-            try:
-                raw = read_regular_file(
-                    path, max_bytes=SWEEP_MAX_BYTES, root=workspace
-                )
-            except ArtifactError:
-                continue
-            if b"\x00" in raw[:1024]:  # binary-ish
-                continue
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                continue
-            redacted = self.redactor.redact(text)
-            if redacted == text:
-                continue
-            try:
-                replace_with_text(path, redacted, max_bytes=SWEEP_MAX_BYTES)
-            except (ArtifactError, OSError) as exc:
-                logger.error("failed to redact artifact: %s (%s)", path, exc)
-                continue
-            changed = True
-            logger.warning("artifact contained credentials and was redacted: %s", path)
-        return changed
-
-    @staticmethod
-    def _iter_workspace_files(workspace: Path) -> list[Path]:
-        """Bounded, symlink-free walk of the run workspace (files only)."""
-        found: list[Path] = []
-        stack = [workspace]
-        while stack and len(found) < SWEEP_MAX_FILES:
-            directory = stack.pop()
-            try:
-                entries = sorted(os.scandir(directory), key=lambda item: item.name)
-            except OSError:
-                continue
-            for entry in entries:
-                if entry.is_symlink():
+        with tree:
+            for relative in tree.files(max_files=SWEEP_MAX_FILES):
+                try:
+                    raw = tree.read(relative, max_bytes=SWEEP_MAX_BYTES)
+                except ArtifactError:
                     continue
-                if entry.is_dir(follow_symlinks=False):
-                    stack.append(Path(entry.path))
-                elif entry.is_file(follow_symlinks=False):
-                    found.append(Path(entry.path))
-                    if len(found) >= SWEEP_MAX_FILES:
-                        break
-        return found
+                if b"\x00" in raw[:1024]:  # binary-ish
+                    continue
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                redacted = self.redactor.redact(text)
+                if redacted == text:
+                    continue
+                try:
+                    tree.replace(relative, redacted.encode("utf-8"), max_bytes=SWEEP_MAX_BYTES)
+                except (ArtifactError, OSError) as exc:
+                    logger.error("failed to redact artifact: %s (%s)", relative, exc)
+                    continue
+                changed = True
+                logger.warning("artifact contained credentials and was redacted: %s", relative)
+        return changed
 
     # -- persistence ----------------------------------------------------------
 
-    def _finalize_record(
-        self,
-        execution: _Execution,
-        status: str,
-        stop_reason: str | None,
-        error: str | None,
-    ) -> None:
-        run_id = execution.record.run_id
-        previous = self.store.get(run_id) or execution.record
-        cleanup = execution.cleanup or CleanupReport(released=True)
-        finished_at = time.time()
-        terminal_type = (
-            events.RUN_FAILED
-            if status == FAILED
-            else events.RUN_CANCELLED
-            if status == CANCELLED
-            else events.RUN_FINISHED
-        )
-        try:
-            self._emit(
-                run_id,
-                terminal_type,
-                {
-                    "status": status,
-                    "stopReason": stop_reason,
-                    "error": self.redactor.redact(error) if error else None,
-                    "reportPath": str(execution.report_path) if execution.report_path else None,
-                    "reportStatus": execution.report_status,
-                    "modelStopReason": execution.model_stop_reason,
-                    "sessionId": previous.session_id,
-                    "sessionFile": previous.session_file,
-                    "usage": execution.usage_total or None,
-                    "durationSeconds": round(finished_at - previous.created_at, 3),
-                    "cleanup": {
-                        "released": cleanup.released,
-                        "failures": list(cleanup.failures),
-                        "external": dict(cleanup.external),
-                    },
-                    "artifactFailures": list(execution.artifact_failures),
-                },
-            )
-        except EventLogError as exc:
-            # The log is the replay fact source, so the frame is not published.
-            # The run record must still reach a terminal state: a failed append
-            # may not leave a finished run looking like it is still running.
-            logger.error("terminal event could not be persisted run=%s: %s", run_id, exc)
-            execution.artifact_failures.append(f"终帧未能写入事件日志: {exc}")
-            if error is None:
-                error = str(exc)
-        redacted_error = self.redactor.redact(error) if error else None
-        # The count is read back from the durable log after the terminal frame,
-        # so ``event_count`` always equals the lines a reader would see.
-        event_count = self.store.count_events(run_id)
-        changes: dict[str, Any] = {
-            "status": status,
-            "finished_at": finished_at,
-            "report_path": str(execution.report_path) if execution.report_path else None,
-            "error": redacted_error,
-            "stop_reason": stop_reason,
-            "usage": execution.usage_total or None,
-            "redacted": execution.redacted,
-            "model_stop_reason": execution.model_stop_reason,
-            "report_status": execution.report_status,
-            "cleanup": {
-                "released": cleanup.released,
-                "failures": list(cleanup.failures),
-                "external": dict(cleanup.external),
-            },
-            "event_count": event_count,
-        }
-        try:
-            self.store.update(run_id, **changes)
-        except Exception:  # noqa: BLE001 - retry with the minimum state
-            logger.exception("run record update failed run=%s; retrying", run_id)
-            try:
-                self.store.update(
-                    run_id,
-                    status=status,
-                    finished_at=finished_at,
-                    error=redacted_error,
-                    stop_reason=stop_reason,
-                    event_count=event_count,
-                )
-            except Exception:  # noqa: BLE001 - reported loudly, never hidden
-                logger.critical(
-                    "run record could not be finalised run=%s; status=%s",
-                    run_id,
-                    status,
-                )
-        finally:
-            self.bus.close(run_id)
-        logger.info(
-            "run finished run=%s status=%s stop=%s report=%s released=%s",
-            run_id,
-            status,
-            stop_reason,
-            execution.report_path or "<none>",
-            cleanup.released,
-        )
-
-    def _release_slot(self, run_id: str) -> None:
-        with self._lock:
-            self._executions.pop(run_id, None)
-            if self._active_run_id == run_id:
-                self._active_run_id = None
-
     def _emit(
-        self, run_id: str, event_type: str, payload: Mapping[str, Any] | None = None
+        self,
+        run_id: str,
+        event_type: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        terminal: bool = False,
     ) -> events.RunEvent:
         # Belt-and-braces: projection already redacts, but host-owned events
         # (run_finished, kernel_status, …) are built here, so the same boundary
-        # runs again on the way out. The frame is persisted before it is shown.
+        # runs again on the way out. The frame is committed before it is shown;
+        # the terminal frame is committed durably (see RunStore.commit_terminal).
         safe_payload = (
             self.redactor.redact_payload(dict(payload)) if payload is not None else None
         )
+        write = self.store.commit_terminal if terminal else self.store.append_event
         try:
             return self.bus.commit(
                 run_id,
                 event_type,
                 safe_payload,
-                persist=lambda event: self.store.append_event(
-                    run_id, event.as_dict()
-                ),
+                persist=lambda event: write(run_id, event.as_dict()),
             )
         except OSError as exc:
             raise EventLogError(

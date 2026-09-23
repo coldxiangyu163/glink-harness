@@ -43,11 +43,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from ..artifacts import (
-    ArtifactError,
-    read_regular_file,
-    replace_with_bytes,
-)
+from ..artifacts import ArtifactError, ArtifactTree
 from ..config import ConfigError, HostConfig
 from .agent_env import AgentRuntime
 from .framing import strip_trailing_cr
@@ -137,20 +133,26 @@ class E2BSandboxClient:
         sandbox.files.make_dir(SANDBOX_CONFIG)
         sandbox.files.make_dir(SANDBOX_WORKSPACE)
         sandbox.files.make_dir(SANDBOX_SESSIONS)
-        for relative, source, is_dir in _runtime_manifest(self.runtime.directory):
-            sandbox_path = f"{SANDBOX_CONFIG}/{relative}"
-            if is_dir:
-                sandbox.files.make_dir(sandbox_path)
-                continue
-            try:
-                data = read_regular_file(
-                    source, max_bytes=UPLOAD_MAX_BYTES, root=self.runtime.directory
-                )
-            except ArtifactError as exc:
-                raise SandboxError(f"配置交付失败: {relative}: {exc}") from exc
-            sandbox.files.write(sandbox_path, data)
-            self.uploaded.append(sandbox_path)
-            self.upload_manifest.append((relative, hashlib.sha256(data).hexdigest()))
+        manifest = _runtime_manifest(self.runtime.directory)
+        if not manifest:
+            return
+        try:
+            tree = ArtifactTree(self.runtime.directory)
+        except ArtifactError as exc:
+            raise SandboxError(f"配置交付失败: {exc}") from exc
+        with tree:
+            for relative, is_dir in manifest:
+                sandbox_path = f"{SANDBOX_CONFIG}/{relative}"
+                if is_dir:
+                    sandbox.files.make_dir(sandbox_path)
+                    continue
+                try:
+                    data = tree.read(relative, max_bytes=UPLOAD_MAX_BYTES)
+                except ArtifactError as exc:
+                    raise SandboxError(f"配置交付失败: {relative}: {exc}") from exc
+                sandbox.files.write(sandbox_path, data)
+                self.uploaded.append(sandbox_path)
+                self.upload_manifest.append((relative, hashlib.sha256(data).hexdigest()))
 
     def run_prompt(
         self,
@@ -212,40 +214,44 @@ class E2BSandboxClient:
         """
         sandbox = self._require_sandbox()
         destination.mkdir(parents=True, exist_ok=True)
-        files: list[Path] = []
-        failures: list[str] = []
         try:
             entries = sandbox.files.list(SANDBOX_WORKSPACE)
         except Exception as exc:  # noqa: BLE001 - surfaced to the caller
             return [], [f"无法列出沙箱工作区: {type(exc).__name__}: {exc}"]
-        for entry in entries:
-            name = str(getattr(entry, "name", None) or "")
-            path = str(getattr(entry, "path", None) or f"{SANDBOX_WORKSPACE}/{name}")
-            if not name:
-                continue
-            # Path semantics are checked before the hidden-file skip: a name that
-            # tries to escape ("../x") starts with a dot and must be reported,
-            # not silently ignored.
-            if "/" in name or "\\" in name or name in {".", ".."}:
-                failures.append(f"跳过非法产物名: {name!r}")
-                continue
-            if name.startswith("."):
-                continue
-            try:
-                content = sandbox.files.read(path)
-            except Exception:  # noqa: BLE001 - directories and unreadable entries
-                continue
-            data = content if isinstance(content, bytes) else str(content).encode("utf-8")
-            if len(data) > ARTIFACT_MAX_BYTES:
-                failures.append(f"产物超过上限: {name}")
-                continue
-            target = destination / name
-            try:
-                replace_with_bytes(target, data, max_bytes=ARTIFACT_MAX_BYTES)
-            except (ArtifactError, OSError) as exc:
-                failures.append(f"产物写入失败: {name}: {exc}")
-                continue
-            files.append(target)
+        try:
+            tree = ArtifactTree(destination)
+        except ArtifactError as exc:
+            return [], [f"宿主工作区不可用: {exc}"]
+        files: list[Path] = []
+        failures: list[str] = []
+        with tree:
+            for entry in entries:
+                name = str(getattr(entry, "name", None) or "")
+                path = str(getattr(entry, "path", None) or f"{SANDBOX_WORKSPACE}/{name}")
+                if not name:
+                    continue
+                # Path semantics are checked before the hidden-file skip: a name
+                # that tries to escape ("../x") starts with a dot and must be
+                # reported, not silently ignored.
+                if "/" in name or "\\" in name or name in {".", ".."}:
+                    failures.append(f"跳过非法产物名: {name!r}")
+                    continue
+                if name.startswith("."):
+                    continue
+                try:
+                    content = sandbox.files.read(path)
+                except Exception:  # noqa: BLE001 - directories and unreadable entries
+                    continue
+                data = content if isinstance(content, bytes) else str(content).encode("utf-8")
+                if len(data) > ARTIFACT_MAX_BYTES:
+                    failures.append(f"产物超过上限: {name}")
+                    continue
+                try:
+                    tree.replace(name, data, max_bytes=ARTIFACT_MAX_BYTES)
+                except (ArtifactError, OSError) as exc:
+                    failures.append(f"产物写入失败: {name}: {exc}")
+                    continue
+                files.append(destination / name)
         return files, failures
 
     def close(self) -> list[str]:
@@ -311,16 +317,19 @@ class E2BSandboxClient:
         return " && ".join(parts)
 
 
-def _runtime_manifest(runtime_dir: Path) -> list[tuple[str, Path, bool]]:
-    """Every file/directory to deliver, as ``(relative, absolute, is_dir)``."""
-    manifest: list[tuple[str, Path, bool]] = []
+def _runtime_manifest(runtime_dir: Path) -> list[tuple[str, bool]]:
+    """Every file/directory to deliver, as ``(relative, is_dir)``.
+
+    The runtime directory is host-rendered before the sandbox exists; the bytes
+    are still read through :class:`~pi_glink.artifacts.ArtifactTree`.
+    """
+    manifest: list[tuple[str, bool]] = []
     if not runtime_dir.is_dir():
         return manifest
     for child in sorted(runtime_dir.rglob("*")):
         if child.is_symlink():
             continue
-        relative = child.relative_to(runtime_dir).as_posix()
-        manifest.append((relative, child, child.is_dir()))
+        manifest.append((child.relative_to(runtime_dir).as_posix(), child.is_dir()))
     return manifest
 
 

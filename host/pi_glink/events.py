@@ -25,6 +25,10 @@ nowhere: the browser cannot show a frame that is missing from
 ``events.jsonl``, and no sequence number is burned for it. The durable log is
 the replay source of truth; the ring is only the window between "the reader
 reached the end of the file" and "the reader is attached to the live tail".
+Commits of one run are serialized by a per-run lock; the persist callback (which
+may wait for a disk sync) runs outside the bus-wide lock, so queries such as
+``is_open``/``last_seq`` and new subscriptions never wait on disk and only ever
+reflect frames whose persist already returned.
 
 **Bounded subscribers.** A subscriber queue has a firm capacity. A client that
 stops reading is disconnected (the stream ends, the browser reconnects with
@@ -137,6 +141,7 @@ class EventBus:
         self._history: dict[str, list[RunEvent]] = {}
         self._subscribers: dict[str, set[_Subscriber]] = {}
         self._closed: set[str] = set()
+        self._commit_locks: dict[str, threading.Lock] = {}
 
     # -- writing --------------------------------------------------------------
 
@@ -150,26 +155,32 @@ class EventBus:
     ) -> RunEvent:
         """Assign ``seq``, persist, then fan out.
 
-        ``persist`` runs inside the bus lock so sequence assignment, the durable
-        append and the live notification all see the same order. If it raises,
-        the sequence number is not consumed and nothing is published: the frame
-        is invisible everywhere rather than present in only one surface.
+        The run's commit lock keeps sequence assignment, the durable append and
+        the live notification in one order per run. ``persist`` runs outside the
+        bus-wide lock: until it returns, the frame is not counted, not in the
+        ring and not offered to anyone. If it raises, the sequence number is not
+        consumed and nothing is published: the frame is invisible everywhere
+        rather than present in only one surface.
         """
         with self._lock:
-            seq = self._counters.get(run_id, 0) + 1
+            commit_lock = self._commit_locks.setdefault(run_id, threading.Lock())
+        with commit_lock:
+            with self._lock:
+                seq = self._counters.get(run_id, 0) + 1
             event = RunEvent(
                 type=event_type, run_id=run_id, seq=seq, payload=dict(payload or {})
             )
             if persist is not None:
                 persist(event)
-            self._counters[run_id] = seq
-            history = self._history.setdefault(run_id, [])
-            history.append(event)
-            if len(history) > self._capacity:
-                del history[: len(history) - self._capacity]
-            subscribers = tuple(self._subscribers.get(run_id, ()))
-        for subscriber in subscribers:
-            subscriber.offer(event)
+            with self._lock:
+                self._counters[run_id] = seq
+                history = self._history.setdefault(run_id, [])
+                history.append(event)
+                if len(history) > self._capacity:
+                    del history[: len(history) - self._capacity]
+                subscribers = tuple(self._subscribers.get(run_id, ()))
+            for subscriber in subscribers:
+                subscriber.offer(event)
         return event
 
     def publish(
@@ -268,3 +279,4 @@ class EventBus:
             self._counters.pop(run_id, None)
             self._history.pop(run_id, None)
             self._closed.discard(run_id)
+            self._commit_locks.pop(run_id, None)

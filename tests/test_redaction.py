@@ -261,38 +261,150 @@ def test_stream_redactor_is_independent_per_thinking_and_text_channel() -> None:
     assert AUDIT_SECRET not in (thinking + text + flushed_thinking + flushed_text)
 
 
-def test_runner_delta_stream_never_persists_a_split_credential(tmp_path: Path) -> None:
-    """Real path: projection → runner stream state → durable event log."""
-    from pi_glink.kernel.runner import _Execution  # noqa: PLC0415 - private contract under test
+#: Credential structures that defeat a hold-the-tail-then-mask stream: a
+#: suffix equal to its own prefix (the R1 reproduction), periodic repeats, a
+#: value that is a prefix of another, and repeats of a short motif.
+STRUCTURED_SECRETS = ("abcdEFGHabcd", "abcabcabcabc", "aaaaaaaaaa", "xyxyxyxyZ", "abcdEFGHabcdQQ")
+STREAM_CORPUS = (
+    "前缀 abcdEFGHabcd 后缀",
+    "abcdEFGHabcdEFGHabcd",
+    "abcdEFGHabc 只差一个字符",
+    "abcdEFGHabcdX",
+    "abcabcabcabcabcabc end",
+    "xyxyxyxyxyxyZ and xyxyxyxyZ",
+    "abcdEFGHabcdQQ 比 abcdEFGHabcd 更长",
+    "环境检查：OPENAI_API_KEY=AUDIT_VALUE_0123456789abcdef 然后",
+    'config {"exaApiKey": "exa-value 0123456789"} done',
+    "token sk-a1b2c3d4e5f6g7h8i9j0K and tasks-a1b2c3d4e5f6g7h8i9j0 ok",
+    "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123 end",
+    "open the openai docs; OPENAI_API_KEY = 'quotedvalue123' fine",
+    "关键词 AUDIT 表示审计，不是凭据。",
+    'He said "hello" and "myToken": "zzzzzzzzzzzz"',
+)
 
-    config = make_config(tmp_path)
+
+def _stream_all(redactor: SecretRedactor, text: str, cuts: list[int]) -> str:
+    stream = redactor.stream()
+    emitted: list[str] = []
+    previous = 0
+    for cut in [*cuts, len(text)]:
+        emitted.append(stream.push("assistant_delta", text[previous:cut]))
+        previous = cut
+    emitted.append(stream.flush("assistant_delta"))
+    return "".join(emitted)
+
+
+@pytest.mark.parametrize("known", [(), STRUCTURED_SECRETS])
+def test_streamed_redaction_equals_whole_text_redaction_for_every_split(known) -> None:
+    """R1: the stream releases exactly what whole-text redaction would.
+
+    Every single split position, many random multi-frame splits and a
+    character-by-character stream of each corpus line must give the same text
+    as redacting the whole line at once — so no split can reassemble a value
+    the whole-text redaction masks, and legitimate neighbours are unchanged.
+    """
+    import random  # noqa: PLC0415
+
+    redactor = SecretRedactor(known)
+    rng = random.Random(20260923)
+    for text in STREAM_CORPUS:
+        expected = redactor.redact(text)
+        for split in range(1, len(text)):
+            assert _stream_all(redactor, text, [split]) == expected, (text, split)
+        for _ in range(200):
+            count = min(len(text) - 1, rng.randint(2, 7))
+            cuts = sorted(rng.sample(range(1, len(text)), count))
+            assert _stream_all(redactor, text, cuts) == expected, (text, cuts)
+        assert _stream_all(redactor, text, list(range(1, len(text)))) == expected, text
+
+
+def test_overlapping_repeats_are_masked_as_one_region() -> None:
+    """A repeat that overlaps a complete match must not leave its tail visible."""
+    secret = "abcdEFGHabcd"
+    redactor = SecretRedactor([secret])
+    assert redactor.redact(secret + "EFGHabcd") == REPLACEMENT
+    for split in range(1, len(secret)):
+        streamed = _stream_all(redactor, secret + "EFGHabcd", [split, len(secret)])
+        assert streamed == REPLACEMENT, split
+
+
+def test_projector_passes_raw_deltas_to_one_stream() -> None:
+    """Per-delta redaction must not hide the raw text the stream needs."""
+    from pi_glink.kernel.projection import Projector  # noqa: PLC0415
+
+    secret = "abcdEFGHabcd"
+    projector = Projector(SecretRedactor([secret]))
+    produced = []
+    for delta in (secret, "EFGHabcd", " 结束"):
+        produced += projector.project(
+            {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": delta}}
+        )
+    produced += projector.project({"type": "message_end", "message": {"role": "user"}})
+    text = "".join(payload["text"] for kind, payload in produced if kind == "assistant_delta")
+    assert text == f"{REPLACEMENT} 结束"
+
+
+def test_runner_stream_never_reassembles_a_structured_secret_on_any_surface(
+    tmp_path: Path,
+) -> None:
+    """R1 real path: fake pi deltas → projection → runner → log, bus and replay.
+
+    The secret's suffix equals its prefix. Every split position is streamed in
+    one run (plus a three-frame split and an overlapping continuation); the
+    durable log and the live bus must equal the whole-text redaction, and no
+    eight-character fragment of the secret may appear anywhere.
+    """
+    secret = "abcdEFGHabcd"
+    pieces = ["审计开始："]
+    for split in range(1, len(secret)):
+        pieces += [secret[:split], secret[split:] + f" 第{split}段 "]
+    pieces += [secret[:4], secret[4:8], secret[8:], "EFGHabcd", "（重叠续写）结束"]
+
+    config = make_config(tmp_path, OPENAI_API_KEY=secret)
     store = RunStore(config.data_root / "runs")
-    manager = RunManager(config, EventBus(), store)
-    record = store.create("流式脱敏", run_id="streamredact", workspace=tmp_path / "ws")
-    execution = _Execution(record=record, workspace=tmp_path / "ws")
-    execution.stream = manager.redactor.stream()
-    manager.bus.open_run(record.run_id)
+    bus = EventBus()
 
-    half = len(AUDIT_SECRET) // 2
-    frames = [
-        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": AUDIT_SECRET[:half]}},
-        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": AUDIT_SECRET[half:]}},
-        {"type": "agent_settled"},
-    ]
-    for frame in frames:
-        manager._on_frame(execution, frame)  # noqa: SLF001 - the real emit path
+    def factory(argv, *, cwd=None, env=None, on_event=None):
+        merged = dict(env or {})
+        merged["FAKE_PI_WRITE_REPORT"] = "1"
+        merged["FAKE_PI_TEXT_DELTAS"] = json.dumps(pieces, ensure_ascii=False)
+        return PiRpcClient(
+            [sys.executable, str(FAKE_PI), *argv[1:]], cwd=cwd, env=merged, on_event=on_event
+        )
 
-    log_text = store.events_path(record.run_id).read_text(encoding="utf-8")
-    assert AUDIT_SECRET not in log_text, "the durable log reassembled the credential"
-    assert REPLACEMENT in log_text
-    events = [json.loads(line) for line in log_text.splitlines() if line.strip()]
-    emitted = "".join(
-        event["payload"]["text"]
-        for event in events
-        if event["type"] == "assistant_delta"
+    manager = RunManager(config, bus, store, client_factory=factory)
+    record = manager.start("流式脱敏：结构化凭据")
+    live: list[dict] = []
+    subscriber = bus.subscribe(record.run_id)
+    collector = threading.Thread(
+        target=lambda: live.extend(event.as_dict() for event in subscriber), daemon=True
     )
-    assert AUDIT_SECRET not in emitted, "the emitted delta sequence reassembled the credential"
-    assert REPLACEMENT in emitted
+    collector.start()
+    final = manager.wait(record.run_id, timeout=30)
+    collector.join(timeout=10)
+
+    assert final.status == "finished"
+    persisted = [
+        json.loads(line)
+        for line in store.events_path(record.run_id).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    expected = SecretRedactor([secret]).redact("".join(pieces))
+    for frames in (persisted, [event for event in live]):
+        emitted = "".join(
+            event["payload"]["text"] for event in frames if event["type"] == "assistant_delta"
+        )
+        rendered = json.dumps(frames, ensure_ascii=False)
+        fragments = [
+            secret[start : start + length]
+            for length in range(8, len(secret) + 1)
+            for start in range(len(secret) - length + 1)
+        ]
+        assert not [fragment for fragment in fragments if fragment in rendered]
+        assert emitted == expected
+    assert [e["seq"] for e in persisted if e["type"] == "assistant_delta"] == [
+        e["seq"] for e in live if e["type"] == "assistant_delta"
+    ]
 
 
 # -- host-side artifacts ------------------------------------------------------
@@ -468,6 +580,41 @@ def test_workspace_sweep_never_writes_through_a_symlink(tmp_path: Path) -> None:
     assert (outside_dir / "nested.md").read_text(encoding="utf-8") == original
 
 
+def test_workspace_sweep_cannot_be_redirected_by_an_ancestor_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2 write path: the directory is swapped between the sweep's read and rewrite.
+
+    Re-resolving ``workspace/sub/notes.md`` by name after the swap followed the
+    new directory link and replaced a file outside the workspace.
+    """
+    config = make_config(tmp_path)
+    manager = RunManager(config, EventBus(), RunStore(config.data_root / "runs"))
+    workspace = tmp_path / "workspace"
+    (workspace / "sub").mkdir(parents=True)
+    (workspace / "sub" / "notes.md").write_text(f"OPENAI_API_KEY={AUDIT_SECRET}\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = outside / "notes.md"
+    external.write_text("外部原文，不应被改写\n", encoding="utf-8")
+    original_redact = manager.redactor.redact
+    swapped: list[bool] = []
+
+    def swapping_redact(text):
+        if AUDIT_SECRET in text and not swapped:
+            swapped.append(True)
+            (workspace / "sub").rename(workspace / "moved-sub")
+            (workspace / "sub").symlink_to(outside, target_is_directory=True)
+        return original_redact(text)
+
+    monkeypatch.setattr(manager.redactor, "redact", swapping_redact)
+    manager._sanitize_workspace(workspace)  # noqa: SLF001 - the sweep entry itself
+
+    assert swapped == [True]
+    assert external.read_text(encoding="utf-8") == "外部原文，不应被改写\n"
+    assert sorted(path.name for path in outside.iterdir()) == ["notes.md"]
+
+
 def test_run_error_in_metadata_is_redacted(tmp_path: Path) -> None:
     """A kernel error carrying a credential must not leak into meta.json."""
     config = make_config(tmp_path)
@@ -592,3 +739,171 @@ def test_config_repr_hides_all_credentials(tmp_path: Path) -> None:
     rendered = repr(config)
     for secret in (AUDIT_SECRET, "e2b-secret-key-1234567890", "exa-secret-key-1234567890"):
         assert secret not in rendered
+
+
+# -- the hold bound (PI-GLINK-STREAM-DURABILITY-20260923) ----------------------
+#
+# A stream holds undecided text only up to HOLD_CAP characters. The earlier
+# overflow branch released the whole window once the hold passed the bound,
+# so an accepted known value longer than the bound was emitted raw in two
+# pieces. The bound must never release undecided text: past it the stream
+# fails closed for the rest of the block (the authoritative assistant_message
+# still carries the whole-text-redacted answer).
+
+
+def _long_secret(length: int) -> str:
+    return "q" * (length - 1) + "Z"
+
+
+def _pushes(redactor: SecretRedactor, text: str, cuts: list[int]) -> tuple[str, int]:
+    """Stream ``text`` split at ``cuts``; return the output and the peak hold."""
+    from pi_glink.redaction import HOLD_CAP  # noqa: PLC0415
+
+    stream = redactor.stream()
+    emitted: list[str] = []
+    peak = 0
+    previous = 0
+    for cut in [*cuts, len(text)]:
+        emitted.append(stream.push("assistant_delta", text[previous:cut]))
+        previous = cut
+        held = sum(len(value) for value in stream._pending.values())  # noqa: SLF001
+        peak = max(peak, held)
+        assert held <= HOLD_CAP, "the stream may never hold more than its bound"
+    emitted.append(stream.flush("assistant_delta"))
+    return "".join(emitted), peak
+
+
+@pytest.mark.parametrize("length", [8192, 8193, 8194, 20000])
+def test_a_long_known_value_never_leaves_the_stream_raw(length: int) -> None:
+    from pi_glink.redaction import HOLD_CAP  # noqa: PLC0415
+    import random  # noqa: PLC0415
+
+    secret = _long_secret(length)
+    redactor = SecretRedactor([secret])
+    before, after = "前文，", "，后文"
+    text = before + secret + after
+    decidable = length - 1 <= HOLD_CAP  # the longest proper prefix fits the bound
+    rng = random.Random(length)
+    cut_sets = [
+        [len(before) + length - 1],  # the whole proper prefix, then the last character
+        [len(before), len(before) + length - 1],
+        [len(before) + 1, len(before) + length // 2, len(before) + length - 1],
+        *(sorted(rng.sample(range(1, len(text)), 5)) for _ in range(20)),
+    ]
+    for cuts in cut_sets:
+        output, peak = _pushes(redactor, text, cuts)
+        assert secret not in output, cuts
+        assert "q" * 64 not in output, "no long fragment of the value may be released"
+        assert output.startswith(before), "decided text before the value is kept"
+        if decidable:
+            assert output == redactor.redact(text), cuts
+        else:
+            assert REPLACEMENT in output
+        assert peak <= HOLD_CAP
+
+
+def test_an_overlapping_long_value_is_bounded_and_never_released() -> None:
+    """A self-overlapping value grows one merged span; the bound still holds."""
+    secret = "ab" * 4097  # 8194 characters, period two: every repeat overlaps
+    redactor = SecretRedactor([secret])
+    text = "开头 " + secret + "ab" * 50 + " 结尾"
+    for cuts in ([len(text) // 2], list(range(1000, len(text), 1000)), [5, 8199, 8200]):
+        output, _peak = _pushes(redactor, text, cuts)
+        assert secret not in output
+        assert "ab" * 32 not in output
+        assert output.startswith("开头 ")
+
+
+def test_the_stream_recovers_after_a_fail_closed_block() -> None:
+    """Failing closed is scoped to the block; the next block streams normally."""
+    secret = _long_secret(8194)
+    stream = SecretRedactor([secret]).stream()
+    first = stream.push("assistant_delta", "前文 " + secret[:-1])
+    first += stream.push("assistant_delta", secret[-1:] + " 同一段的后文")
+    first += stream.flush("assistant_delta")
+    assert first == "前文 " + REPLACEMENT
+    second = stream.push("assistant_delta", "下一段正常文字。") + stream.flush("assistant_delta")
+    assert second == "下一段正常文字。"
+
+
+@pytest.mark.parametrize("length", [8193, 8194])
+def test_runner_never_emits_a_long_known_value(tmp_path: Path, length: int) -> None:
+    """Real path: fake pi deltas → Projector → RunManager → events.jsonl, bus, SSE."""
+    from pi_glink.app import PiGlinkServer  # noqa: PLC0415
+    from pi_glink.static_files import WebAssets  # noqa: PLC0415
+
+    secret = _long_secret(length)
+    pieces = ["前文，", secret[:-1], secret[-1:], "，后文"]
+    config = make_config(tmp_path, OPENAI_API_KEY=secret, PI_GLINK_WEB_SEARCH_CONFIG=str(tmp_path / "absent.json"))
+    store = RunStore(config.data_root / "runs")
+    bus = EventBus()
+
+    def factory(argv, *, cwd=None, env=None, on_event=None):
+        merged = dict(env or {})
+        merged["FAKE_PI_WRITE_REPORT"] = "0"
+        merged["FAKE_PI_TEXT_DELTAS"] = json.dumps(pieces, ensure_ascii=False)
+        return PiRpcClient(
+            [sys.executable, str(FAKE_PI), *argv[1:]], cwd=cwd, env=merged, on_event=on_event
+        )
+
+    manager = RunManager(config, bus, store, client_factory=factory)
+    server = PiGlinkServer(config, bus, store, manager, WebAssets(config.web_root))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        record = manager.start("长凭据流式回显")
+        live: list[dict] = []
+        subscriber = bus.subscribe(record.run_id)
+        collector = threading.Thread(
+            target=lambda: live.extend(event.as_dict() for event in subscriber), daemon=True
+        )
+        collector.start()
+        final = manager.wait(record.run_id, timeout=60)
+        collector.join(timeout=10)
+        assert final.status == "finished"
+
+        persisted = [
+            json.loads(line)
+            for line in store.events_path(record.run_id).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        port = server.server_address[1]
+        request = urllib.request.Request(f"http://127.0.0.1:{port}/api/runs/{record.run_id}/events")
+        with urllib.request.urlopen(request, timeout=20) as response:
+            replay = [
+                json.loads(line[len("data: "):])
+                for line in response.read().decode("utf-8").splitlines()
+                if line.startswith("data: ")
+            ]
+        for frames in (persisted, live, replay):
+            rendered = json.dumps(frames, ensure_ascii=False)
+            assert secret not in rendered
+            assert "q" * 64 not in rendered
+            joined = "".join(e["payload"]["text"] for e in frames if e["type"] == "assistant_delta")
+            assert joined.startswith("前文，")
+            if length - 1 <= 8192:
+                assert joined == SecretRedactor([secret]).redact("".join(pieces))
+            else:
+                assert REPLACEMENT in joined
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_the_hold_and_the_output_stay_bounded_for_an_arbitrarily_long_value() -> None:
+    """Memory and output bound: a one-million-character value streamed in small
+    deltas never makes the stream hold more than HOLD_CAP, and once the block
+    failed closed nothing further is buffered or emitted."""
+    from pi_glink.redaction import HOLD_CAP  # noqa: PLC0415
+
+    secret = _long_secret(1_000_000)
+    stream = SecretRedactor([secret]).stream()
+    emitted: list[str] = []
+    for start in range(0, len(secret), 997):
+        emitted.append(stream.push("assistant_delta", secret[start : start + 997]))
+        assert sum(len(v) for v in stream._pending.values()) <= HOLD_CAP  # noqa: SLF001
+    emitted.append(stream.push("assistant_delta", " 同一段后续文字"))
+    emitted.append(stream.flush("assistant_delta"))
+    assert "".join(emitted) == REPLACEMENT
+    assert stream._pending == {} and stream._context == {}  # noqa: SLF001

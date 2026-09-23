@@ -198,3 +198,83 @@ test('a stale report response cannot overwrite the current run report', async ()
     globalThis.fetch = originalFetch;
   }
 });
+
+// -- stop answers (R5) and admission refusals (R4) -----------------------------
+
+async function openedHarness(stopRun) {
+  const h = harness();
+  h.api.stopRun = stopRun;
+  await h.workspace.init();
+  const pending = deferred();
+  h.pending.set('A', { promise: pending.promise });
+  const navigation = h.workspace.openRun('A');
+  pending.resolve({ run: runView('A') });
+  await navigation;
+  return h;
+}
+
+function toastText(h) {
+  return h.dom.document.getElementById('toast-text').textContent;
+}
+
+test('an accepted stop tells the reader the run is stopping', async () => {
+  const h = await openedHarness(async () => ({ requested: true, status: 'running' }));
+  await h.workspace.stopRun();
+  assert.equal(toastText(h), '正在停止，已完成的内容会保留。');
+});
+
+test('a stop past the commit point reports the finished run instead of failing', async () => {
+  const { ApiError } = await import('../../web/modules/api.mjs');
+  const refusal = (reason) => async () => {
+    throw new ApiError('run_not_cancellable', {
+      status: 409,
+      code: 'run_not_cancellable',
+      payload: { error: 'run_not_cancellable', requested: false, status: 'finished', reason },
+    });
+  };
+  const terminal = await openedHarness(refusal('terminal'));
+  await terminal.workspace.stopRun();
+  assert.equal(toastText(terminal), '这项研究已经结束，无需停止。');
+
+  const finalizing = await openedHarness(refusal('finalizing'));
+  await finalizing.workspace.stopRun();
+  assert.equal(toastText(finalizing), '这项研究正在收尾，已无法停止。');
+
+  const unknown = await openedHarness(async () => {
+    throw new ApiError('unknown_run', { status: 404, code: 'unknown_run' });
+  });
+  await unknown.workspace.stopRun();
+  assert.equal(toastText(unknown), '找不到这项研究，请刷新后重试。');
+});
+
+test('a stop answer that arrives after navigating away stays quiet', async () => {
+  const answer = deferred();
+  const h = await openedHarness(() => answer.promise);
+  const stopping = h.workspace.stopRun();
+  const next = deferred();
+  h.pending.set('B', { promise: next.promise });
+  const navigation = h.workspace.openRun('B');
+  next.resolve({ run: runView('B') });
+  await navigation;
+  answer.resolve({ requested: true, status: 'running' });
+  await stopping;
+  assert.equal(toastText(h), '');
+});
+
+test('a start refused for unreleased resources explains the hold', async () => {
+  const { ApiError } = await import('../../web/modules/api.mjs');
+  const h = harness();
+  h.api.startRun = async () => {
+    throw new ApiError('resources_unreleased', {
+      status: 409,
+      code: 'resources_unreleased',
+      payload: { error: 'resources_unreleased', runIds: ['old'] },
+    });
+  };
+  await h.workspace.init();
+  await h.workspace.startRun('新的研究');
+  assert.equal(
+    toastText(h),
+    '上一项研究的执行资源还没有确认释放，暂时不能开始新研究。请联系管理员核对。',
+  );
+});

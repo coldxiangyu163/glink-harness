@@ -30,8 +30,9 @@
 ```
 浏览器 ──HTTP/SSE──► host（Python，单进程）
                        │
+                       ├─ DataRootOwnership（data_root/host.lock 独占；先证明所有权再对账）
                        ├─ EventBus（每 run 单调 seq；先落盘再发布；有界实时队列）
-                       ├─ RunStore（meta.json / events.jsonl / artifacts）
+                       ├─ RunStore（meta.json / events.jsonl / artifacts；终帧即终态提交）
                        └─ KernelRunner ──┬─► inproc 适配器: pi 子进程（stdio RPC）
                                          ├─► docker 适配器: docker run -i（容器内 pi，stdio RPC）
                                          └─► e2b 适配器:    云沙箱内 pi --mode json（单向流）
@@ -71,12 +72,25 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 ### 3.1 提交先于发布
 
 `EventBus.commit` 是唯一写入路径：分配 `seq` → 调用持久化回调追加 `events.jsonl` →
-才写入内存环形窗口并通知实时订阅者。因此：
+才写入内存环形窗口并通知实时订阅者。同一 run 的提交由每 run 的提交锁串行；持久化回调
+（可能等待磁盘同步）不持有总线全局锁，所以 `is_open`/`last_seq` 与新订阅永远不等磁盘，
+且只反映持久化已经返回的帧。因此：
 
 * **已提交的持久事件是重放事实源**。写盘失败的那一帧在浏览器、SSE 与日志里都不存在，
   并且不消耗 `seq`（不会制造缺口）；运行会以 `event_log_failed` 诚实失败，而不是让
   浏览器看到一条日志里没有的帧。
-* `meta.json` 的 `event_count` 在终帧落盘后从日志实际行数回读，与读者看到的一致。
+* **读者只看已提交前缀**（`store.py::_CommitWatermarks`）：持有数据目录的宿主进程为每个它
+  追加的日志维护提交水位；水位之外的字节正在写入，对进程内所有读者（详情、列表、报告、
+  SSE 重放、重启对账）都不可见。普通帧整行写完后水位前移；写入失败截回原长度，崩溃留下的
+  半行先补换行再追加，读者不会看到半帧。重启后没有水位，文件本身就是已提交记录。
+* **终帧就是终态提交**：`RunStore.commit_terminal()` 先写入并 `fsync` 终帧，**成功之后**水位才
+  越过它，此时 run 才算终态，日志随即封存（终帧之后不能再追加）；写入或 `fsync` 失败则截回、
+  抛错，任何读者从未看到过该终帧，run 保持同一个未提交状态。普通帧不能经 `append_event`
+  写终帧。终帧载荷就是终态记录（结论、报告、清理结果）。`meta.json` 只保存受理与运行中事实，
+  终态字段是提交**之后**写入的落定副本。`RunStore.get()` 在 `meta.json` 仍为 `running` 时投影
+  已提交的终帧，因此详情、列表、报告下载与 SSE 重放在终帧发布的瞬间、落定副本写失败之后、
+  重启之后都读到同一个已提交事实，且不会先出现再撤回；`event_count` 取终帧 `seq`。
+  耐久性以日志文件的 `fsync` 为界（不额外做目录 `fsync` 或 macOS `F_FULLFSYNC`）。
 * 环形窗口只是「读完日志 → 挂上实时尾」之间的交接缓冲，不是历史来源；run 关闭时即释放，
   不会让所有 run 的历史常驻内存。用户历史（`events.jsonl`）不因任何 TTL 被删除。
 
@@ -92,13 +106,26 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 
 ### 3.3 流式凭据回显保护
 
-投影与 `_emit` 对每个载荷做值 + 形状脱敏，但**整值匹配对逐帧流式文本不够**：同一个 known
-secret 被模型分成两个 `assistant_delta` 时，两半都不会命中。因此跑批在 delta 通道上维护一个
-尾部暂存（`redaction.StreamRedactor`）：
+整值匹配对逐帧流式文本不够：同一个 known secret 被模型分成两个 `assistant_delta` 时，两半都
+不会命中。`redaction.py` 因此只有一个检测函数 `SecretRedactor.spans()`，给出需要遮盖的字符
+区间（已知值的**全部**出现位置，含重叠出现；`NAME=value` / JSON 凭据字段的值；形状令牌），
+重叠区间合并后各替换一次。流式与整段脱敏共用它：
 
-* 暂存「已知值的前缀、形状令牌未达最小长度的前缀、尚未闭合的 `NAME=value` / 引号值」；
-* 在 `turn_end` / `message_end` / `agent_end` / `agent_settled` 边界 flush，因此在流内
-  **任意分割位置**都不能拼回完整凭据，而合法相邻文本只是被推迟、不会被改写；
+* 每个检测器同时声明「开放形式」——末尾仍可能被后续文本补全或延长的起点（已知值的真前缀、
+  字面前缀、未达阈值或仍触及末尾的令牌、未闭合的赋值/引号值、未闭合的带引号标识符）；
+* `StreamRedactor` 对「暂存 + 新 delta」计算区间与最早开放起点，只释放其之前的文本；若该
+  起点落在某个完整命中内部，则退到该命中的起点，**从不切开一个完整命中**（R1 的前后缀重叠
+  凭据正是被旧的「先截尾再脱敏」切开的）；释放的文本按整段区间渲染，并保留一个字符的左侧
+  上下文，使词边界规则与整段一致；
+* 因而**流式释放的拼接等于整段脱敏的结果**（`tests/test_redaction.py` 对语料的所有单点分割、
+  随机多帧与逐字符分割逐一断言）；合法相邻文本只被推迟、不被改写；
+* `kernel/projection.py::Projector` 是每 run 的投影边界：delta 以**原文**进入同一个流，
+  其他载荷逐帧脱敏；在 `turn_end` / `message_end` / `agent_end` / `agent_settled` 边界及 run
+  收尾时释放暂存，使尾部归属原内容块；
+* 暂存有界且失败即闭合：任何时刻最多暂存 `HOLD_CAP`（8192 字符）未判定文本；若未判定
+  尾部将超过该界（超长已知值、重叠重复链、未终止的赋值或令牌），先释放已判定部分，未判定
+  部分只输出一个 `[REDACTED]`，该类通道在本内容块边界前不再输出。未判定文本**从不**以原文
+  释放；块末权威的 `assistant_message` 仍给出整段脱敏后的完整回答；
 * 这只是**回显保护**，不承诺阻止 base64、跨工具输出拆分或网络外传等任意编码外泄；
   它不是安全沙箱，也不能替代凭据最小化。
 
@@ -124,43 +151,63 @@ secret 被模型分成两个 `assistant_delta` 时，两半都不会命中。因
 
 ## 4. run 生命周期
 
-1. `POST /api/runs {prompt}` → 生成 `runId`，写 `meta.json`（status=running），占用唯一 run 槽；
+1. `POST /api/runs {prompt}` → 准入（见下）→ 生成 `runId`，写 `meta.json`（status=running）；
 2. 渲染**本 run 的**运行期配置目录与 session 目录（`runs/<id>/pi-agent`、会话根下的 `<id>/`），
    按 `LOCAL_WEB_EXECUTOR` 选择执行面（见 §5）；
 3. 事件投影 → `EventBus.commit`：先落 `events.jsonl`，再实时给 SSE（见 §3.1）；
 4. 执行面把冻结输入交给内核，等待「落定」或超时/取消/进程退出；
-5. 收尾分四步，互不覆盖：
+5. 收尾把四类事实分开，各有唯一 owner 与提交点（`kernel/runner.py`）：
 
-   1. **结果判定**：把执行面结果与最终模型结果合成 run 终态（见下）；
-   2. **产物回收**：先向执行面回收产物（E2B 从沙箱拉到工作区），再销毁执行面；随后把
-      `report.md` 经安全读取（拒绝符号链接/非普通文件/超限/越界）复制到宿主拥有的
-      `runs/<id>/artifacts/report.md` 并脱敏。拒绝的产物记为 `report_rejected` 并发出
-      `kernel_status` 警告，不伪造报告；缺失记为 `no_report`；
-   3. **凭据清扫**：工作区文本产物与会话文件各过一遍脱敏（符号链接一律跳过，改写用原子替换，
-      绝不写穿链接）；
-   4. **落定与释放**：写终帧、回读 `event_count`、关闭流、释放 run 槽；执行面的
-      `close()` 结果（`released`/`failures`）单独记录，清理失败不谎称已释放。
+   1. **执行事实**：执行面 outcome、最终模型结果、事件日志健康度，run 处于 open 阶段时收集；
+   2. **产物事实**：先向执行面回收产物（E2B 从沙箱拉到工作区），再 `close()` 执行面；随后经
+      目录句柄安全读取 `report.md`（见 §6.1），脱敏后写入宿主拥有的
+      `runs/<id>/artifacts/report.md`。拒绝的产物记为 `report_rejected` 并发出 `kernel_status`
+      警告，缺失记为 `no_report`；工作区与会话文件各过一遍脱敏；
+   3. **结论（verdict）**：在 run 锁内**一次性**由全部事实与取消标志判定，并立即以同步追加
+      终帧提交（§3.1，`fsync` 成功才可见）。这是 run 的**线性化点**：之前受理的取消必然体现为 `cancelled`；之后的
+      取消被拒绝并返回已提交状态；之后到达的内核帧被丢弃，终帧之后不再有任何帧；
+   4. **资源释放**：`close()` 的 `CleanupReport`（`released: true/false`，异常视为 `false`）写在
+      终态记录里。它独立于结论，也独立于线程是否结束（见下「准入与资源」）。
+
+   提交成功后写落定副本、关闭实时流、移出执行表。若终帧写入或 `fsync` 失败（如磁盘满、I/O 错误），**没有任何读面
+   显示终态**：run 保持 `running`、保留执行槽与实时流，停止请求返回 `finalizing`，
+   `shutdown()` 报告该 run，下次启动由新 owner 按中断收口。
 
 **终态判定**（`agent_settled` 不是成功信号）：
 
 | 事实 | 判定 |
 |---|---|
-| 用户取消 | `cancelled` / `stop_reason=abort` |
-| 执行超时、内核在接受指令后退出、协议/执行错误 | `failed`（`timeout` / `kernel_exit` / `execution_error`） |
+| 提交点之前受理的用户取消 | `cancelled` / `stop_reason=abort`（已回收的报告保留；事件日志错误记入 `error`） |
 | 事件日志写盘失败 | `failed` / `event_log_failed`（该帧不在任何读取面出现） |
+| 执行超时、内核在接受指令后退出、协议/执行错误 | `failed`（`timeout` / `kernel_exit` / `execution_error`） |
 | 最终 assistant `stopReason=error`（重试后仍失败） | `failed` / `model_error`，错误取自 `errorMessage`/`finalError` |
 | 最终 assistant `stopReason=aborted`（非用户取消） | `failed` / `aborted` |
 | 最终 assistant `stopReason=length` | `finished`，但 `model_stop_reason=length`、`stop_reason=length`，明确标注交付不完整 |
 | 中间一次错误后重试成功 | `finished`（只看最终消息，不把可恢复错误永久判失败） |
-| 正常结束但没有 `report.md` | `finished` / `stop_reason=no_report` |
+| 正常结束但没有 `report.md` | `finished` / `stop_reason=no_report`（被拒为 `report_rejected`） |
 
-**重启对账与关闭**：宿主启动时 `RunManager.reconcile()` 扫描遗留 `running` 记录（本进程不持有），
-追加 `run_failed(interrupted)` 终帧并写回元数据；容器的 `container_name` 与沙箱的 `sandbox_id`
-在拿到身份时即持久化，`orphaned_resources()` 供操作员做有界对账，**不自动操作真实遗留资源**。
-进程退出时 `RunManager.shutdown()` 取消并等待本进程 run，未在限时内释放的 run id 原样报告
-（进程返回码非零），不谎称已清理。
+**取消**：`POST /api/runs/{id}/stop` 与结论在同一把锁上裁决。受理返回 `200 {"requested": true}`，
+结论必为 `cancelled`（执行面自身的 cancel 只缩短等待，失败不改变受理）；已越过提交点返回
+`409 run_not_cancellable`，带已提交的 `status` 与 `reason`（`terminal`，或提交失败时的
+`finalizing`）；未知 run 返回 `404 unknown_run`。取消请求在 pi 尚未启动时也被受理。
 
-同一时间只允许一个 run（`409 run_busy`）；取消请求在 pi 尚未启动时也被受理。
+**准入与资源**：新 run 只在「本进程没有执行中的 run（否则 `409 run_busy`）」且「没有任何 run
+持有未确认释放的资源（否则 `409 resources_unreleased`，附 run id）」时受理。资源台账直接由持久
+记录导出：未终态的 run、`cleanup.released` 不为 `true`（`false` 为已知失败，`null` 为未知）且
+没有人工裁决的终态 run 都占用容量；早于资源跟踪的历史记录（无 `cleanup`）不参与。重启不会
+清空台账。释放容量只有两条路：执行面清理确认 `released: true`，或操作员在宿主**停止时**以
+`python -m pi_glink.app --mark-released <runId> --note "<核对说明>"` 记录裁决（`--unreleased`
+列出待核对项）；裁决只写入 `resource_adjudication`，保留原清理事实，不自动操作任何容器/沙箱。
+
+**所有权、重启对账与关闭**：宿主先取得 `data_root/host.lock` 的独占 `flock`（进程存活期间
+持有、退出即释放；同进程二次获取也被拒），**再**对账和绑定端口。同一 data_root 的第二个宿主
+——无论同端口还是不同端口——在读任何记录前以 `DataRootBusy` 退出，不改动活跃 owner 的 run。
+`RunManager.reconcile()` 要求持有所有权：遗留 `running` 记录若已有提交的终帧，只写落定副本；
+否则提交 `run_failed(interrupted)`，资源状态为 `released: null`（未知），并持续占用容量直至裁决。
+容器名/沙箱 id 在拿到时即持久化，`unreleased_resources()` 供操作员做有界对账，**不自动操作真实
+遗留资源**。进程退出时 `RunManager.shutdown()` 取消并等待本进程 run，返回所有「终态未提交或
+资源未确认释放」的 run id（包括更早遗留的持有），进程返回码非零。`flock` 只覆盖单机本地文件
+系统，不是多宿主租约（见 [多租户方案](multitenancy-plan.md) §3.2）。
 
 ## 5. 三种执行面对照
 
@@ -197,7 +244,7 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
   `wait(deadline)` 的适配器实现处理，返回 `timed_out` 而不是抛异常。
 * **产物回收与关闭**：`recover_artifacts` 先把该面的产物放到宿主工作区（inproc/Docker 本来就是
   宿主目录，是 no-op；E2B 从沙箱拉回，逐文件限幅并拒绝路径分隔符），然后 `close()` 才销毁
-  进程/容器/沙箱并报告 `CleanupReport(released, failures)`。清理失败会被记入 run 记录，不谎报已释放。
+  进程/容器/沙箱并报告 `CleanupReport(released, failures)`。清理失败会被记入 run 记录并继续占用容量（§4），不谎报已释放。
 * **持久执行身份**：`identity()` 给出容器名或沙箱 id，run 管理在拿到时即写入 `meta.json`，
   供重启对账（§4）使用；它也是唯一的资源归属凭据，不靠猜名字。
 
@@ -247,9 +294,15 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 |---|---|---|
 | 事件投影 | 载荷里每个字符串递归脱敏；delta 走尾部暂存（§3.3） | `kernel/projection.py::project_event(frame, redactor)`、`redaction.py::StreamRedactor` |
 | 事件总线 / `events.jsonl` | 提交（先落盘）前再脱敏一次 | `kernel/runner.py::_emit` |
-| 报告文件 | 安全读取、脱敏、复制到宿主拥有的 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `kernel/runner.py::_recover_report` |
+| 报告文件 | 经工作区目录句柄读取、脱敏、在 run 目录句柄内原子写入 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `kernel/runner.py::_recover_report` |
 | 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源 | `kernel/runner.py::_sanitize_session_file`、`docker_env.host_session_path` |
-| 报告下载 | 只服务 run 目录内校验过的普通文件，服务前再脱敏；响应头 `X-Redacted` 标明是否发生 | `app.py::_send_report`、`artifacts.py` |
+| 报告下载 | `report_path` 不是下载能力：只认两个固定位置——宿主产物 `runs/<id>/artifacts/report.md`，以及旧版本写下的本 run 工作区 `workspaces/<id>/report.md`（只读，从不改写历史）；其他路径一律视为无报告。服务前再脱敏，响应头 `X-Redacted` 标明是否发生；`hasReport` 用同一位置规则与同一拒绝条件计算 | `store.py::report_location`、`app.py::_send_report`、`artifacts.py` |
+
+**产物路径安全**（`artifacts.py::ArtifactTree`）：宿主从不「先 realpath 校验、再按路径打开」。
+每次操作持有 run 根目录的目录句柄（根的父目录是宿主配置，可信；根本身及其下每一级都以
+`O_NOFOLLOW` 逐级打开），叶子只接受普通文件（FIFO 以非阻塞方式打开后拒绝），打开前后身份须
+一致，打开后再从根重新核对每一级目录项；写入在已核对的父目录句柄内建临时文件并 `renameat`
+发布。任一祖先在校验与打开之间被换成链接，读写都会被拒绝，外部文件既不被读取也不被改写。
 
 检测同时覆盖**值**（宿主知道的 key）与**形状**（`sk-…`、`e2b_…`、`exa-…`、`NAME=value`、
 `Bearer …`），所以宿主从未见过的第三方 token 也会被掉包；跨 delta 的分割由 §3.3 的暂存覆盖。
@@ -279,16 +332,16 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 
 | 路径 | 属于 | 说明 |
 |---|---|---|
-| `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `static_files` / `app` |
+| `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `ownership` / `static_files` / `app` |
 | `host/pi_glink/kernel/` | 接入层 | `rpc` / `framing` / `projection` / `agent_env` / `execution` / `docker_env` / `e2b_env` / `runner` |
-| `host/pi_glink/artifacts.py` | 宿主 | 产物与内核返回文件的安全读取/写入（不跟随链接、限幅、原子替换） |
+| `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
 | `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`、扩展位 |
 | `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |
 | `docker/` | 执行面 | `Dockerfile.worker`（容器）、`e2b/Dockerfile.e2b`（模板） |
 | `scripts/` | 运维 | 启动、测试、真实 run 冒烟、E2B 模板构建 |
 | `docs/` | 文档与证据 | 架构、边界、集成笔记、`evidence/` |
 | `tests/` | 回归 | `test_*.py`（宿主/内核）、`web/*.test.mjs`（前端模型）、`browser/`（真实浏览器） |
-| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `runs/<id>/{meta.json,events.jsonl,pi-agent/,artifacts/}`、`sessions/<id>/`、`workspaces/<id>/` |
+| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/<id>/{meta.json,events.jsonl,pi-agent/,artifacts/}`、`sessions/<id>/`、`workspaces/<id>/` |
 
 运行期配置目录 `runs/<id>/pi-agent/` 是 pi 的 `PI_CODING_AGENT_DIR`：宿主在其中渲染
 `models.json` 与 `web-search.json`，复制 `agent/` 的可版本化配置，pi 自己往里写 `auth.json` /

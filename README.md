@@ -90,7 +90,14 @@ uv pip install -e ".[dev]"        # 首次：让 pi_glink 可导入并装上 pyt
 ```bash
 scripts/run-local-web.sh --port 7861     # 覆盖端口
 scripts/run-local-web.sh --print-config  # 打印生效配置（不含密钥）
+scripts/run-local-web.sh --unreleased    # 列出执行资源未确认释放的 run（需宿主已停止）
+scripts/run-local-web.sh --mark-released <runId> --note "已核对容器/沙箱不存在"   # 记录人工裁决
 ```
+
+一个数据目录同一时间只能被一个宿主进程持有（`<数据根>/host.lock`）；第二个宿主无论用哪个端口都会
+直接拒绝启动，不会改动正在运行的任务。执行面清理未确认成功（或宿主异常退出后资源状态未知）的 run
+会持续占用运行额度，新研究返回 `409 resources_unreleased`；核对真实资源后用 `--mark-released`
+记录裁决才会放行，宿主不会自动清理任何容器或沙箱。
 
 ## 运行一次真实研究
 
@@ -111,10 +118,10 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | GET | `/api/runs` | run 列表（含状态与报告标记） |
 | GET | `/api/runs/{id}` | run 详情 |
 | GET | `/api/runs/{id}/events` | 事件流（SSE，支持 `Last-Event-ID` 重放；重放事实源是持久事件日志） |
-| POST | `/api/runs/{id}/stop` | 请求取消 |
-| GET | `/api/runs/{id}/report` | 下载 `report.md` |
+| POST | `/api/runs/{id}/stop` | 请求取消：受理 `200 {"requested": true}`（终态必为 `cancelled`）；已结束 `409 run_not_cancellable`（带已提交 `status`）；未知 `404` |
+| GET | `/api/runs/{id}/report` | 下载 `report.md`（宿主产物副本；旧版本的 `workspaces/<id>/report.md` 只读下载） |
 
-本机执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id。
+本机执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
 
 ## 搜索
 
@@ -131,11 +138,14 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 ## 安全边界
 
 - **凭据不进产品面**：事件流、`events.jsonl`、报告文件与下载、pi 会话文件都经过
-  `host/pi_glink/redaction.py` 的脱敏（值 + 形状双重检测）；流式回答按 delta 尾部暂存，
-  同一凭据被拆到两帧也无法拼回；报告下载响应带 `X-Redacted` 头标明是否发生脱敏。
-- **产物路径不被链接利用**：`report.md` 只被当作「本 run 工作区里的普通文件」读取（拒绝符号链接、
-  非普通文件、超限与越界），脱敏后复制到宿主拥有的 `runs/<id>/artifacts/report.md` 再服务；
-  会话文件只允许写在本次 run 的会话子目录内，工作区清扫也绝不跟随链接。
+  `host/pi_glink/redaction.py` 的脱敏（值 + 形状双重检测）；流式回答只释放不可能再构成凭据的前缀、
+  从不切开完整命中，释放结果等于整段脱敏，同一凭据被拆到多帧（含前后缀重叠的凭据）也无法拼回；
+  暂存最多 8192 字符，超界时本段改输出 `[REDACTED]` 而不释放未判定原文；
+  报告下载响应带 `X-Redacted` 头标明是否发生脱敏。
+- **产物路径不被链接利用**：内核可达的文件只经 run 根目录的目录句柄逐级打开（任何一级是链接都拒绝，
+  打开后再复核，写入在已核对的目录内原子替换），因此祖先目录在校验与打开之间被替换也读不到、写不到
+  外部文件；`report.md` 脱敏后复制到宿主拥有的 `runs/<id>/artifacts/report.md` 再服务，会话文件只允许
+  写在本次 run 的会话子目录内，工作区清扫也绝不跟随链接。
 - **key 不进进程环境**：模型凭据写在 run 自己的运行期目录 `auth.json`（pi 官方凭据存储，权限 0600，
   仓库外），环境变量按白名单过滤——内核的 shell 工具跑 `env` 读不到它（三面真实 run 实测为 0）。
 - **残留风险**：工具仍可能用 `read` 打开 `auth.json` 并回显；出站脱敏会把它替换为 `[REDACTED]`，
@@ -153,7 +163,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | `web/` | 前端：按百鉴 UI 标准库逐值对齐的静态 ESM 资源（token 层 + 组件层 + 外壳） |
 | `docs/` | `architecture.md`（进程拓扑、事件契约、执行器契约）、`pi-boundary.md`（扩展点与禁止项）、`multitenancy-plan.md`（下一阶段设计与决策点） |
 | `tests/` | 宿主与内核的回归 |
-| `<数据根>`（默认 `~/.pi-glink`） | 运行态：`runs/<id>/{meta.json,events.jsonl,pi-agent/,artifacts/}`、`sessions/<id>/`、`workspaces/<id>/` |
+| `<数据根>`（默认 `~/.pi-glink`） | 运行态：`host.lock`、`runs/<id>/{meta.json,events.jsonl,pi-agent/,artifacts/}`、`sessions/<id>/`、`workspaces/<id>/` |
 
 ## 前端与 UI 标准库对齐
 

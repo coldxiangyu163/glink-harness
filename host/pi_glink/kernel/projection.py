@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 from .. import events
-from ..redaction import SecretRedactor
+from ..redaction import SecretRedactor, StreamRedactor
 
 #: Fail-closed default. Shape-based masking runs even when a caller forgets to
 #: pass the host redactor, so a credential-shaped value can never leave this
@@ -68,6 +68,54 @@ def project_event(
     return [
         (kind, active.redact_payload(payload) or payload) for kind, payload in produced
     ]
+
+
+#: Delta events whose split-credential protection needs stream state.
+STREAM_EVENTS = (events.THINKING_DELTA, events.ASSISTANT_DELTA)
+#: pi frames that end a streaming block; the withheld tail is released before
+#: the frame's own product events so it still belongs to the block it came from.
+STREAM_BOUNDARY_FRAMES = frozenset({"turn_end", "message_end", "agent_end", "agent_settled"})
+
+
+class Projector:
+    """Stateful projection of one run's frames: the run's redaction boundary.
+
+    :func:`project_event` redacts every payload on its own, which cannot see a
+    credential split across two deltas — and a per-delta redaction would also
+    hide the raw text a stream needs to recognise an overlapping repeat. Here
+    deltas bypass per-frame redaction and go through one
+    :class:`~pi_glink.redaction.StreamRedactor` as raw text; every other payload
+    is redacted exactly as in :func:`project_event`.
+    """
+
+    def __init__(self, redactor: SecretRedactor) -> None:
+        self._redactor = redactor
+        self._stream = StreamRedactor(redactor)
+
+    def project(self, frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+        produced: list[tuple[str, dict[str, Any]]] = []
+        if frame.get("type") in STREAM_BOUNDARY_FRAMES:
+            produced.extend(self.flush())
+        handler = _HANDLERS.get(frame.get("type"))
+        if handler is None:
+            return produced
+        for kind, payload in handler(frame):
+            if kind in STREAM_EVENTS:
+                text = self._stream.push(kind, payload["text"])
+                if text:
+                    produced.append((kind, {**payload, "text": text}))
+            else:
+                produced.append((kind, self._redactor.redact_payload(payload)))
+        return produced
+
+    def flush(self) -> list[tuple[str, dict[str, Any]]]:
+        """Release every withheld delta tail (stream boundary or run end)."""
+        released: list[tuple[str, dict[str, Any]]] = []
+        for kind in STREAM_EVENTS:
+            text = self._stream.flush(kind)
+            if text:
+                released.append((kind, {"text": text}))
+        return released
 
 
 def _agent_start(_frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
