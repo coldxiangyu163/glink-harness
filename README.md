@@ -1,6 +1,6 @@
 # pi-glink
 
-以 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 为执行内核的本地研究工作台。前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按 pi 的原生事件语义重写。
+以 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 为执行内核的研究工作台，目标是通过 Docker / E2B 独立执行环境支持多租户；本地 `inproc` 保留为单 Agent 调试入口。当前三种执行面仍共用单 run 限制，尚未实现多租户身份、授权和并发隔离，不能把“能在沙箱运行”当作多租户已经交付。方向与当前能力见 [架构](docs/architecture.md#产品方向与当前实现)。前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按 pi 的原生事件语义重写。
 
 **当前状态：本机 / Docker / E2B 三种执行面均已跑通真实 run**，验收记录见 [docs/acceptance.md](docs/acceptance.md)，证据在 `docs/evidence/`。除前端静态资源源自 Glink 工作台外，本仓库不引用 FrontierAgent 的任何运行模块。
 
@@ -9,7 +9,7 @@
 - **不 fork、不 patch、不 vendor pi 内核。** 只使用 pi 的官方 headless 协议与官方扩展点（extension / skill / package / custom provider / MCP）。
 - **不复制 FrontierAgent 的 runtime。** 本仓库自有宿主只做编排、事件投影与呈现；研究方法论通过 pi 的提示词与扩展表达。
 - 前端不解析终端文本，只消费结构化事件。
-- 详见 [docs/pi-boundary.md](docs/pi-boundary.md) 与 [docs/architecture.md](docs/architecture.md)。
+- 详见 [docs/pi-boundary.md](docs/pi-boundary.md) 与 [docs/architecture.md](docs/architecture.md)。开发本仓库先读 [AGENTS.md](AGENTS.md)，验证范围与交付要求见 [工程约束](docs/engineering.md)。
 
 ## 依赖与版本
 
@@ -172,12 +172,15 @@ node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 26 个角�
 
 ## 验证
 
+默认无模型交付检查（预先准备 Python ≥3.12、pytest 和 Node ≥24，不自动安装依赖）：
+
 ```bash
-.venv/bin/python -m pytest        # 或者：scripts/run-tests.sh
-node --test tests/web/*.test.mjs  # 前端事件层回归（Node，无浏览器）
+bash scripts/check.sh
 ```
 
-对齐与浏览器回归（需要宿主在跑）：
+该入口在临时 HOME 和清空继承环境的子进程中运行 Python（含仓库边界检查）和 Node 回归，原退出码决定成败；外部标准库逐值对齐明确记为 `SKIP`。不启动真实 pi、浏览器、Docker 或 E2B，也不读取真实 `.env` 或个人 pi 配置。它不是 OS 安全沙箱。定向命令和覆盖边界见 [验证矩阵](docs/engineering.md#验证矩阵)；`scripts/run-tests.sh` 保留为仅 Python 的低层入口，不代表全部交付检查。
+
+以下为**单独授权的浏览器/live 验收**：需要明确归属的目标宿主；`ui-features` 和 `run-smoke` 会提交真实研究、读取服务历史，以下脚本都会更新仓库证据文件。它们不接入默认检查，也不证明多租户已完成。
 
 ```bash
 node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 像素级对齐（需要标准库参考页）
