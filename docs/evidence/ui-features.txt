@@ -1,0 +1,39 @@
+pi-glink UI 全功能自检
+日期: 2026-09-23T01:56:54.784Z
+命令: node tests/browser/ui-features.mjs --base-url http://127.0.0.1:7861
+视口: 1512×900（断点档另测 1512 / 1250 / 1050 / 900 / 721 / 600）
+
+[ok]   外壳几何（8px 沟槽 / 240 导航 / 52 栏头） · {"sidebar":{"w":240,"h":884,"x":8},"surface":{"w":1248,"h":884,"x":256},"header":{"w":1248,"h":52,"x":256},"dock":{"w":0,"h":0,"x":0},"gap":"8px","padding":"8px","brand":"/logo-icon.svg","host":"执行面 inproc · pi 可用 · openai/gpt-5.6-sol","overflow":false}
+[ok]   品牌标识取自标准库资产 · /logo-icon.svg
+[ok]   宿主状态已渲染 · 执行面 inproc · pi 可用 · openai/gpt-5.6-sol
+[ok]   首页（标题 / 两卡 / 历史行 / 无选中 run） · {"title":"把问题交给 pi，过程与产物都留在本机","cards":2,"rows":39,"path":"新研究","current":0}
+[ok]   输入器：计数 + 发送键启用 · {"count":"11 / 32000","countHidden":false,"sendDisabled":false,"inputH":68,"composerH":120,"expectedCount":"11 / 32000"}
+[ok]   输入器：多行自增到 240 上限 · {"inputH":240,"overflow":"auto"}
+[ok]   输入器：清空后回落并禁用发送 · {"countHidden":true,"sendDisabled":true,"inputH":68}
+[ok]   输入器：激活态 1px 近黑描边 · rgb(23, 23, 23)
+[ok]   运行中：状态 / 状态条 / 停止键 / 事件项 · {"status":"running","bannerHidden":false,"bannerStatus":"running","stopVisible":true,"items":4,"streams":"事件流已连接","path":"先列出三条本地工作台的观察，再逐个展开成一段话，最后写入 report.md。用中文…","marked":1}
+[ok]   运行中：侧栏标记当前 run（且只标记一个） · 1
+[ok]   停止：终态 cancelled + 状态条收起 + 提示 · {"status":"cancelled","bannerHidden":true,"toast":"已请求停止，等待 pi 收尾","bannerGone":true}
+[ok]   历史重放：时间线完整且贴底 · {"id":"1ac8777fd709","score":32,"thinking":8,"tools":23,"texts":1,"status":"finished","reportButton":true,"distance":0}
+[ok]   思考折叠：可展开 / 有正文 / 保持贴底 / 可再收起 · {"before":{"open":false,"label":"思考 · 490 字"},"after":{"open":true,"chars":490,"distance":0},"closedAgain":false}
+[ok]   工具行：可展开看细节 / 可再收起 · {"before":{"open":false,"text":53},"after":{"open":true,"height":51,"label":"执行 · bash","state":"完成"},"closedHeight":28,"closedAgain":false}
+[ok]   报告右槽：开合 / 两栏 / 无横向溢出 · {"open":true,"columns":"733.922px 514.078px","rows":"884px","drawerH":884,"bodyScrollable":true,"bodyClient":832,"bodyScroll":11061,"dockInsidePane":true,"paneRight":990,"dockRight":990,"toggleExpanded":"true","overflow":false}
+[ok]   报告右槽：正文真的能滚动 · {"client":832,"scroll":11061}
+[ok]   报告右槽：输入器只占左栏（不压报告） · {"dockRight":990,"paneRight":990,"drawerH":884}
+[ok]   报告右槽 + 对话列：两条滚动都可驱动 · {"bodyAfter":500,"conversationAfter":200,"bodyMax":10229,"conversationMax":2411}
+[ok]   报告下载：落盘成功 · {"file":"1ac8777fd709-report.md","bytes":32377}
+[ok]   报告右槽：栏头开合键可收起（图标/aria 同步） · {"open":false,"hidden":true,"icon":"panel-expand-right","expanded":"false"}
+[ok]   侧栏：折叠到 64 图标条 + aria 两态 · {"width":64,"expanded":"false","label":"展开侧栏","navLabel":"none"}
+[ok]   侧栏：折叠状态刷新后保持 · {"width":64,"expanded":"false"}
+[ok]   侧栏：可再展开
+[ok]   断点：侧栏 240 / 212 / 64 逐档正确 · 1512:240 1250:240 1050:212 900:212 721:64 600:64
+[ok]   断点：六档均无横向溢出
+[ok]   断点：首页双列 → 单列
+[ok]   跳转链接：Tab 首个焦点且滑入可见 · {"active":"skip-link","visible":true,"text":"跳到主要内容"}
+[ok]   浏览器控制台无错误（注入失败前） · []
+[ok]   空运行列表：侧栏与首页都不留空块 · {"note":"还没有运行记录。","rows":0,"homeRows":0}
+[ok]   模块加载失败：恢复面 + 重试键（标准库样式） · {"role":"alert","title":"页面未能完整加载 / Page failed to load","buttonH":"40px","buttonBg":"rgb(23, 23, 23)"}
+[ok]   恢复后工作台可再次加载
+[ok]   注入失败只产生预期内的报错（不静默、不额外扩散） · {"before":0,"after":2}
+
+结果: 32/32 通过

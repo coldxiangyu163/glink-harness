@@ -151,7 +151,8 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 - token 数值抄自标准库 `src/styles/globals.css`（`:root` + `@theme inline`），
   组件形态抄自 `src/components/*.tsx` 与完整页面 Demo（`src/pages/agent-assistant-demo/`）；
 - 外壳照搬「8px 外围沟槽 + 左侧导航卡 + 右侧主工作区」与 52px 栏头、36px 导航行、
-  120px 输入器（含禁用态 `opacity-45` 口径）；
+  120px 输入器（含禁用态 `opacity-45` 口径）；首页输入器按参考页顺序落在正文流里，
+  品牌标识直接取标准库 `public/logo-icon.svg`（逐字节相同）；
 - 断点沿用标准库登记的档位（≤1250 / ≤1050 / ≤980 / ≤900 / ≤721 / ≤600）。
 
 ```bash
@@ -180,5 +181,6 @@ node --test tests/web/*.test.mjs  # 前端事件层回归（Node，无浏览器�
 
 ```bash
 node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 像素级对齐（需要标准库参考页）
+node tests/browser/ui-features.mjs --base-url http://127.0.0.1:7861 # 32 项全功能自检
 node tests/browser/run-smoke.mjs --base-url http://127.0.0.1:7861   # 真实 run 端到端 + 截图
 ```

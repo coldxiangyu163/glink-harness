@@ -565,6 +565,7 @@ b, strong { font-weight: 700; }
   border-radius: var(--corner-xl);
 }
 .pane {
+  position: relative; /* 输入器 dock 的定位锚点：只覆盖左栏，不跨到报告槽 */
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -721,6 +722,12 @@ b, strong { font-weight: 700; }
   font-weight: 700;
   color: var(--foreground);
 }
+.home-composer-slot {
+  /* 输入器在首页占正文流的一格（标准库助理首页的顺序：标题 → 输入器 → 双列卡片） */
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
 .home-hero p {
   max-width: 560px;
   margin: 0;
@@ -781,6 +788,12 @@ button.home-row:active { background: var(--hover-2); }
   white-space: nowrap;
 }
 .home-row-meta { color: var(--muted-foreground); font-size: var(--text-mini); line-height: var(--text-mini--line-height); }
+/* 状态色只染状态那一档（-text 档，不用基色） */
+.home-row[data-status="running"] .home-row-meta { color: var(--primary-link); }
+.home-row[data-status="failed"] .home-row-meta { color: var(--destructive-text); }
+.home-row[data-status="finished"] .home-row-meta { color: var(--success-text); }
+.home-row[data-status="cancelled"] .home-row-meta { color: var(--warning-text); }
+.home-row-time { flex: 0 0 auto; color: var(--ink-3); font-size: var(--text-mini); line-height: var(--text-mini--line-height); }
 /* 空列表提示：侧栏与首页卡片共用（标准库的 caption + --muted-foreground 一档） */
 .empty-note { margin: 0; padding: var(--space-6) var(--space-4); color: var(--muted-foreground); font-size: var(--text-caption); line-height: var(--text-caption--line-height); text-align: center; }
 
@@ -1159,6 +1172,36 @@ button.home-row:active { background: var(--hover-2); }
   font-weight: 500;
 }
 .prompt-tools-left { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+/* 键盘提示：Kbd 的形态抄自组件库 src/components/kbd.tsx（h-24 / 圆角 8 / 1px --border / 12-20 500） */
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--control-height-3xs);
+  min-width: var(--control-height-3xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--corner-md);
+  background: var(--card);
+  color: var(--muted-foreground);
+  font-family: var(--font-sans-base);
+  font-size: var(--text-caption);
+  line-height: 1;
+  font-weight: 500;
+  user-select: none;
+  pointer-events: none;
+}
+.prompt-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--muted-foreground);
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  font-weight: 400;
+  white-space: nowrap;
+}
+.prompt-hint:has(+ #prompt-count:not([hidden])) { display: none; }
 .prompt-tools-right { display: flex; align-items: center; flex-shrink: 0; gap: var(--space-1); margin-left: auto; }
 /* 发送键：36 圆形、近黑底白字（输入器里唯一的实心主行动）。
  * 禁用态不是换淡底，而是整颗降透明度 —— 与标准库 Button 的 disabled:opacity-45 同一档，
@@ -1192,7 +1235,15 @@ button.home-row:active { background: var(--hover-2); }
 /* ═══════════════════════════════════════════════════════════════════════════
  * 报告阅读栏：主工作区里的右槽（一条 1px 竖线 + 自己的 52px 栏头）
  * ═══════════════════════════════════════════════════════════════════════════ */
-.shell.preview-open .surface { display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, clamp(380px, 34vw, 620px)); }
+.shell.preview-open .surface {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(380px, clamp(380px, 34vw, 620px));
+  /* 行高必须钉住：只写列时隐式 auto 行按内容撑高，超出容器的部分被 .surface 的
+   * overflow:hidden 裁掉，两个滚动区就都滚不动了（实测报告正文 clientHeight == scrollHeight）。 */
+  grid-template-rows: minmax(0, 1fr);
+}
+/* 网格子项默认 min-height:auto，等于把内容的最小高度当下限 —— 同样会顶破容器。 */
+.shell.preview-open .surface > * { min-width: 0; min-height: 0; }
 .shell:not(.preview-open) .preview-drawer { display: none; }
 .preview-drawer {
   display: flex;

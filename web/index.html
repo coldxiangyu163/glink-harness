@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light">
-  <link rel="icon" href="/glink-mark.svg" type="image/svg+xml">
+  <!-- 品牌标识直接取标准库的 public/logo-icon.svg（同一份文件，逐字节相同） -->
+  <link rel="icon" href="/logo-icon.svg" type="image/svg+xml">
   <title>pi-glink · pi 内核研究工作台</title>
   <!-- 资源指纹在响应期替换；见 host/pi_glink/static_files.py -->
   <link rel="stylesheet" href="/styles.css?v=auto">
@@ -16,7 +17,7 @@
     <aside id="sidebar" class="sidebar" aria-label="运行导航">
       <div class="sidebar-head">
         <a class="brand" href="#home" aria-label="pi-glink 首页">
-          <img class="brand-mark" src="/glink-mark.svg" alt="">
+          <img class="brand-mark" src="/logo-icon.svg" alt="百融百鉴">
         </a>
         <div class="sidebar-head-actions">
           <button id="sidebar-toggle" class="glyph-button" type="button" aria-label="收起侧栏" aria-expanded="true" aria-controls="sidebar" data-tip="收起侧栏">
@@ -67,6 +68,7 @@
                 <h2>把问题交给 pi，过程与产物都留在本机</h2>
                 <p>宿主只做编排与呈现：检索、推理与写作由 pi 完成，报告写入 run 工作区并可直接下载。</p>
               </div>
+              <div id="home-composer-slot" class="home-composer-slot"></div>
               <div class="home-cards">
                 <section class="home-card">
                   <h3>最近运行</h3>
@@ -113,7 +115,7 @@
         </div>
 
         <div id="composer-dock" class="composer-dock">
-          <div class="composer-host">
+          <div id="composer-host" class="composer-host">
             <div id="run-banner" class="run-banner" hidden>
               <span class="pulse-dot" aria-hidden="true"></span>
               <p><strong id="run-banner-title">pi 正在本机运行</strong><small>事件与报告会持续保存，可以离开这一页。</small></p>
@@ -126,6 +128,10 @@
                   <textarea id="prompt-input" rows="1" maxlength="32000" placeholder="描述研究对象、范围与交付要求…"></textarea>
                   <div class="prompt-tools">
                     <div class="prompt-tools-left">
+                      <span id="prompt-shortcut" class="prompt-hint">
+                        <kbd id="prompt-modifier" class="kbd">⌘</kbd><kbd class="kbd">↵</kbd>
+                        <span>提交</span>
+                      </span>
                       <span id="stream-status" class="prompt-status"></span>
                       <span id="prompt-count" class="prompt-count" hidden>0 / 32000</span>
                     </div>

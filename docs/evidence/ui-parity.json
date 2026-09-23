@@ -118,6 +118,60 @@
             "width": "240px"
           }
         },
+        "brandMark": {
+          "status": "ok",
+          "diffs": [],
+          "reference": {
+            "_box": "24x24",
+            "display": "block",
+            "backgroundColor": "rgba(0, 0, 0, 0)",
+            "color": "rgb(23, 23, 23)",
+            "borderTopLeftRadius": "0px",
+            "borderTopWidth": "0px",
+            "borderTopColor": "rgb(235, 235, 235)",
+            "boxShadow": "none",
+            "paddingTop": "0px",
+            "paddingRight": "0px",
+            "paddingBottom": "0px",
+            "paddingLeft": "0px",
+            "gap": "normal",
+            "fontSize": "16px",
+            "lineHeight": "24px",
+            "fontWeight": "400",
+            "letterSpacing": "normal",
+            "height": "24px",
+            "minHeight": "0px",
+            "alignItems": "normal",
+            "justifyContent": "normal",
+            "flexDirection": "row",
+            "width": "24px"
+          },
+          "target": {
+            "_box": "24x24",
+            "display": "block",
+            "backgroundColor": "rgba(0, 0, 0, 0)",
+            "color": "rgb(23, 23, 23)",
+            "borderTopLeftRadius": "0px",
+            "borderTopWidth": "0px",
+            "borderTopColor": "rgb(235, 235, 235)",
+            "boxShadow": "none",
+            "paddingTop": "0px",
+            "paddingRight": "0px",
+            "paddingBottom": "0px",
+            "paddingLeft": "0px",
+            "gap": "normal",
+            "fontSize": "16px",
+            "lineHeight": "24px",
+            "fontWeight": "400",
+            "letterSpacing": "normal",
+            "height": "24px",
+            "minHeight": "0px",
+            "alignItems": "normal",
+            "justifyContent": "normal",
+            "flexDirection": "row",
+            "width": "24px"
+          }
+        },
         "newButton": {
           "status": "ok",
           "diffs": [],
@@ -633,7 +687,7 @@
             "width": "512px"
           },
           "target": {
-            "_box": "472x20",
+            "_box": "488x20",
             "display": "block",
             "backgroundColor": "rgba(0, 0, 0, 0)",
             "color": "rgb(23, 23, 23)",
@@ -655,7 +709,7 @@
             "alignItems": "normal",
             "justifyContent": "normal",
             "flexDirection": "row",
-            "width": "471.766px"
+            "width": "488px"
           }
         },
         "composer": {
@@ -855,7 +909,7 @@
             "maxWidth": "90%"
           },
           "target": {
-            "_box": "602x46",
+            "_box": "648x706",
             "display": "block",
             "backgroundColor": "rgb(243, 243, 243)",
             "color": "rgb(23, 23, 23)",
@@ -872,7 +926,7 @@
             "lineHeight": "22px",
             "fontWeight": "400",
             "letterSpacing": "normal",
-            "height": "46px",
+            "height": "706px",
             "minHeight": "auto",
             "alignItems": "normal",
             "justifyContent": "normal",
@@ -1026,7 +1080,7 @@
             "maxWidth": "none"
           },
           "target": {
-            "_box": "139x28",
+            "_box": "142x28",
             "display": "flex",
             "backgroundColor": "rgba(0, 0, 0, 0)",
             "color": "rgb(23, 23, 23)",
@@ -1080,7 +1134,7 @@
             "maxWidth": "none"
           },
           "target": {
-            "_box": "79x20",
+            "_box": "82x20",
             "display": "block",
             "backgroundColor": "rgba(0, 0, 0, 0)",
             "color": "rgb(104, 104, 104)",

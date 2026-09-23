@@ -56,6 +56,9 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   const previewClose = el('preview-close');
   const previewToggle = el('pane-preview-toggle');
   const paneTitle = el('pane-title');
+  const composerDock = el('composer-dock');
+  const composerHost = el('composer-host');
+  const homeComposerSlot = el('home-composer-slot');
   const paneHome = el('pane-home');
   const sidebarToggle = el('sidebar-toggle');
   const toast = el('toast');
@@ -105,6 +108,16 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     chatView.hidden = name !== 'chat';
     composer.hidden = false;
     shell.dataset.view = name;
+    /* The prompt input lives in the page flow on the landing view (title → input →
+     * cards, 标准库助理首页的顺序) and docks above the conversation otherwise.
+     * Move the whole host, not just the composer: the host owns the 680px measure. */
+    if (name === 'home' && homeComposerSlot) {
+      homeComposerSlot.append(composerHost);
+      composerDock.hidden = true;
+    } else {
+      composerDock.append(composerHost);
+      composerDock.hidden = false;
+    }
     if (name === 'chat') stick = true;
     if (name === 'home') {
       paneTitle.textContent = '新研究';
@@ -211,6 +224,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     button.type = 'button';
     button.className = 'home-row';
     button.dataset.runId = run.runId;
+    button.dataset.status = run.status;
 
     const icon = document.createElement('span');
     icon.className = 'icon';
@@ -224,15 +238,16 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     title.textContent = run.prompt;
     const meta = document.createElement('span');
     meta.className = 'home-row-meta';
-    meta.textContent = `${statusLabel(run.status)} · ${run.runId}`;
+    const duration = run.durationSeconds ? ` · ${Math.round(run.durationSeconds)}s` : '';
+    meta.textContent = `${statusLabel(run.status)}${duration}`;
     body.append(title, meta);
 
-    const badge = document.createElement('span');
-    badge.className = 'badge';
-    badge.dataset.variant = statusVariant(run.status);
-    badge.textContent = statusLabel(run.status);
+    // 右侧写相对时间（标准库历史行的右簇），状态留在第二行。
+    const time = document.createElement('span');
+    time.className = 'home-row-time';
+    time.textContent = relativeTime(run.createdAt);
 
-    button.append(icon, body, badge);
+    button.append(icon, body, time);
     button.addEventListener('click', () => openRun(run.runId));
     return button;
   }
@@ -479,6 +494,12 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   return {
     async init() {
       if (!shell) throw new Error('workbench shell is missing from the document');
+      // The shortcut hint must name the key the reader actually has: ⌘ on macOS,
+      // Ctrl elsewhere (the handler accepts either).
+      const modifier = el('prompt-modifier');
+      if (modifier && !/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)) {
+        modifier.textContent = 'Ctrl';
+      }
       let collapsed = false;
       try {
         collapsed = localStorage.getItem(SIDEBAR_KEY) === 'collapsed';
@@ -536,19 +557,18 @@ function statusLabel(status) {
   }
 }
 
-function statusVariant(status) {
-  switch (status) {
-    case 'running':
-      return 'default';
-    case 'finished':
-      return 'success';
-    case 'cancelled':
-      return 'warning';
-    case 'failed':
-      return 'destructive';
-    default:
-      return 'secondary';
-  }
+/** Relative time for list rows, same register as the standard library's 历史行. */
+function relativeTime(seconds) {
+  const stamp = Number(seconds);
+  if (!Number.isFinite(stamp) || stamp <= 0) return '';
+  const delta = Date.now() / 1000 - stamp;
+  if (delta < 60) return '刚刚';
+  if (delta < 3600) return `${Math.floor(delta / 60)} 分钟前`;
+  if (delta < 86400) return `${Math.floor(delta / 3600)} 小时前`;
+  if (delta < 172800) return '昨天';
+  if (delta < 2592000) return `${Math.floor(delta / 86400)} 天前`;
+  const date = new Date(stamp * 1000);
+  return `${date.getMonth() + 1} 月 ${date.getDate()} 日`;
 }
 
 function startErrorMessage(error) {

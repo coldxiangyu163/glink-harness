@@ -293,3 +293,29 @@ inproc `a6f67fde8e51` / docker `03be2909302e` / e2b `db6a9e83c0b7` 均为 **0**�
 2. **滚动条**不参与 `getComputedStyle` 比对；宽度 8px 与「滚动时才显色」的行为照抄。
 3. **暗色主题**未实现（前端是亮色单主题），标准库 `.dark` 段未复制；
    `scripts/check-ui-tokens.py` 只比亮色块，这一点在脚本与文档里都写明。
+
+
+### 返修（2026-09-23）：品牌标识 / 首页结构 / 报告栏两个缺陷 + 全功能自检
+
+用户复验意见：「仔细对照 5300 的 index.html；logo 也替换；进行浏览器全功能测试，不要遗漏；
+现在打开报告以后，实际正文无法滚动了」。
+
+| 项 | 处理 | 证据 |
+|---|---|---|
+| 品牌标识 | `web/logo-icon.svg` 与标准库 `public/logo-icon.svg` **逐字节相同**（SHA-256 `b5f3409b71ff14378e04d81adafc575b1045f92f1972d3c01026cf78089873c0`），favicon 与侧栏 24×24 同一份；旧的 `glink-mark.svg` 删除 | 对齐校验新增 `brandMark` 角色（盒 24×24 + 资产名），27 角色 0 处不一致 |
+| 首页结构 | 输入器从「贴底 dock」改为**落在正文流里**（标题 → 输入器 → 双列卡片），对话屏仍贴底；历史行右簇改相对时间、第二行写状态与耗时 | 对齐校验的 `composer` 角色在首页量到 680×120（与参考页同值） |
+| 输入器工具行 | 左侧补键盘提示 `⌘/Ctrl` + `↵` + 「提交」（Kbd 形态抄自 `src/components/kbd.tsx`，非 macOS 自动显示 `Ctrl`） | 功能自检「输入器」4 项通过 |
+| **报告正文滚不动** | 根因：`.shell.preview-open .surface` 只声明列不声明行，隐式 auto 行被内容撑高后被 `overflow:hidden` 裁掉 | 修复后 `preview-body scrollHeight 11061 / clientHeight 832`，`scrollTop` 可驱动；`ui-features` 两条断言 |
+| **输入器压在报告上** | 根因：`.composer-dock` 绝对定位而 `.pane` 无定位，包含块落到 `.surface` | 修复后 `dockRight == paneRight`（990 == 990）；`ui-features` 断言 |
+
+新增 `tests/browser/ui-features.mjs`（32 项全功能自检，Playwright，自带浏览器实例）：
+外壳几何 / 品牌资产 / 宿主状态 / 首页 / 输入器 4 项 / 运行中 2 项 / 停止 / 历史重放 /
+思考折叠 / 工具行 / 报告 6 项 / 侧栏 3 项 / 断点 3 项 / 跳转链接 / 控制台 / 空态 /
+模块加载失败恢复面 / 注入失败只产生预期内报错。
+
+实测：`ui-features` **32/32 通过**；`ui-parity` **27 角色 0 处不一致**（新增 brandMark）；
+`run-smoke` 真实 run 通过；pytest 102 项、Node 15 项、token 173 项、`check-no-secrets` 真实命中 0。
+
+证据：`docs/evidence/ui-features.txt` / `ui-features.json`、`ui-parity.txt` / `ui-parity.json`、
+`browser-run.png`，以及并排对照截图（`sbs-ref-home.png` / `sbs-mine-home.png` 等，按需重跑
+`node tests/browser/ui-parity.mjs` 与 `ui-features.mjs` 复现）。

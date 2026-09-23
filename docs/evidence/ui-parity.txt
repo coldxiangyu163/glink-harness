@@ -1,5 +1,5 @@
 pi-glink × 百鉴 UI 标准库 · 像素级对齐校验
-日期: 2026-09-22T14:25:04.822Z
+日期: 2026-09-23T01:57:10.192Z
 命令: node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861 --reference-url http://127.0.0.1:5300/index.html?full-page-demo=agent-assistant-interaction
 视口: 1512×900
 
@@ -12,6 +12,7 @@ disabled:opacity-45 口径，与按钮的 disabled 状态同源。
 ## app-shell  (reference #home)
   - shell: OK
   - sidebar: OK
+  - brandMark: OK
   - newButton: OK
   - navItem: OK
   - navLabel: OK
@@ -41,4 +42,4 @@ disabled:opacity-45 口径，与按钮的 disabled 状态同源。
   - composer: OK
   - composerSend: OK
 
-[done] 逐值比对通过：26 个角色，0 处不一致
+[done] 逐值比对通过：27 个角色，0 处不一致

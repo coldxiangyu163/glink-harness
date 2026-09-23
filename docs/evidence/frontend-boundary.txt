@@ -69,14 +69,15 @@
 ---------------------------------------------
 本轮按「像素级对齐百鉴 UI 标准库」重做前端表现层，行数随之变化：
 
-  web/styles.css                454 → 1327 行（token 层改成抄标准库 globals.css，
+  web/styles.css                454 → 1392 行（token 层改成抄标准库 globals.css，
                                  组件层按 src/components/*.tsx 的度量重写）
-  web/index.html                 87 →  167 行（8px 沟槽外壳 / 侧栏 / 52px 栏头 / 输入器 dock / 报告右槽）
-  web/modules/workspace.mjs     328 →  521 行（导航行、右槽开合、侧栏折叠、输入器自增高度）
+  web/index.html                 87 →  173 行（8px 沟槽外壳 / 侧栏 / 52px 栏头 / 输入器 dock / 报告右槽）
+  web/modules/workspace.mjs     328 →  578 行（导航行、右槽开合、侧栏折叠、输入器自增高度）
   web/modules/run-view.mjs      262 →  345 行（思考折叠与工具行改成标准库 Thinking / ToolChips 的形态）
   web/modules/markdown.mjs      256 行（未改）
   web/modules/ui.mjs             36 行（未改）
   web/icons/                   新增 22 个 SVG，直接取自标准库 public/icons/baijian/
+  web/logo-icon.svg            与标准库 public/logo-icon.svg 逐字节相同（旧 glink-mark.svg 已删）
 
 禁止 token 扫描在本轮后仍为 0 命中（web/ 全量，含新增的 CSS 与模块）：
   grep -rniE "citation|qualifier|renderChartFallback|report-chart|mermaid|flowchart|artifact|factlabel" web/ → 0

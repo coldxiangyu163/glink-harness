@@ -85,14 +85,16 @@ scripts/check-ui-tokens.py --print-diff
 
 | 项 | 偏离 | 理由 |
 |---|---|---|
-| 品牌标识 | 用 pi-glink 自己的 `glink-mark.svg`，不是百融百鉴 logo | 对齐的是**界面语言**，不是商标；标准库 §7.2 管的是百鉴自己的 logo 用法 |
+| 品牌标识 | **已按裁决换成标准库资产**：`web/logo-icon.svg` 与 `public/logo-icon.svg` 逐字节相同（SHA-256 `b5f3409b…`），favicon 与侧栏 24×24 同一份文件 | 对齐范围包含品牌标识；侧栏只画 24px mark，与参考页同尺寸同资产 |
 | 字体族 | 取标准库令牌 `--font-sans-base`（PingFang SC 优先） | 参考页在 `.baijian-demo` 作用域里把字体压成 `"Noto Sans SC", sans-serif`；没装 Noto 的机器上它会静默落到浏览器默认 sans（实测该页正文宽 872 / PingFang 877，即实际不是 Noto）。令牌才是数值事实源，故按令牌走，并把自托管的 Noto Sans SC 放在末位兜底非 Apple 平台 |
 | 暗色主题 | 未启用 | 仓库前端是亮色单主题；启用需同时补 `.dark` 段与切换入口，属新功能 |
 | 轨迹展开区宽度 | 行几何与标准库逐值一致；**展开后的机器原文**放宽到 640px | 标准库的 420/380 来自它自己的 420 宽助理列；本仓库的展开区是终端原文（长行、等宽），420 会碎行 |
 | 右槽内容 | 报告阅读器（标准库 Demo 的右槽装文件预览/进度） | 同一套「右栏＝槽位」规则，装的东西随产品功能走 |
-| 首页信息架构 | 「最近运行 / 工作方式」两卡 | 卡片、行、标签度量沿用标准库；条目按本项目的功能重排 |
+| 首页信息架构 | 「最近运行 / 工作方式」两卡；**输入器按参考页顺序落在正文流里**（标题 → 输入器 → 双列卡片），对话屏仍在贴底 dock | 结构照参考页；条目按本项目的功能重排 |
+| 输入器工具行 | 左侧是键盘提示（`⌘/Ctrl` + `↵` + 「提交」，Kbd 形态抄自 `src/components/kbd.tsx`），没有参考资料/创建/网络三颗药丸 | 本项目没有那三项能力，不画没有落点的控件；Kbd 是标准库组件，不是自造 |
 | 输入器能力 | 只有发送键；无 @ 引用 / 附件 / 网络 / 创建 | 本项目没有这些能力，不画没有落点的控件 |
 | 工具行尾状态字 | 多一枚 `text-mini` 状态（执行中/完成/失败…） | 运行态是本页的主要信息；字号与颜色取自标准库的 `-text` 档与 `--ink-3` |
+| 首页历史行右簇 | 写相对时间（刚刚 / N 分钟前 / 昨天…），状态与耗时在第二行 | 与参考页历史行「左两行 + 右时间」同版式；状态色只走 `-text` 档 |
 
 ## 6. 复现
 
@@ -108,12 +110,25 @@ scripts/check-ui-tokens.py
 node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861
 #   证据：docs/evidence/ui-parity.txt / docs/evidence/ui-parity.json
 
-# 3) 功能回归（真实 run：思考折叠 / 工具行 / 报告右槽 + 截图）
+# 3) 功能自检（32 项：外壳 / 首页 / 输入器 / 运行与停止 / 历史重放 / 折叠与工具行 /
+#    报告右槽可滚 + 输入器不跨栏 / 下载 / 侧栏折叠持久化 / 六档断点 / 跳转链接 /
+#    空态 / 模块加载失败恢复面 / 控制台）
+node tests/browser/ui-features.mjs --base-url http://127.0.0.1:7861
+#   证据：docs/evidence/ui-features.txt / ui-features.json
+
+# 4) 真实 run 端到端（思考折叠 / 工具行 / 报告右槽 + 截图）
 node tests/browser/run-smoke.mjs --base-url http://127.0.0.1:7861
 ```
 
 对齐校验需要标准库在场（`--library` 可指别处）。标准库不在时 token 校验**跳过**而不是假装通过：
 `tests/test_ui_tokens.py` 用 `pytest.skip` 表达这一点。
+
+## 6.1 修过的两个布局缺陷（本轮实测抓到）
+
+| 缺陷 | 根因 | 修复与判据 |
+|---|---|---|
+| 打开报告后正文无法滚动 | `.shell.preview-open .surface` 只声明了列、没声明行：隐式 `auto` 行被内容撑高，超出容器的部分被 `.surface{overflow:hidden}` 裁掉，两个滚动区的 `clientHeight` 等于 `scrollHeight` | 行钉成 `grid-template-rows: minmax(0, 1fr)` + 子项 `min-height: 0`；判据：报告正文 `scrollHeight 11061 / clientHeight 832`，两条滚动都能驱动（`ui-features` 的「报告右槽：正文真的能滚动」与「两条滚动都可驱动」） |
+| 报告栏打开时输入器横跨两栏、压在报告上 | `.composer-dock` 是 `position: absolute`，而 `.pane` 没有定位，包含块一路落到 `.surface` | `.pane { position: relative }`；判据：`dockRight == paneRight`（`ui-features` 的「输入器只占左栏」） |
 
 ## 7. 未纳入比对的部分
 

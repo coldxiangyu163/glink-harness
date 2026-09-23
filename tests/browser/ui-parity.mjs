@@ -53,6 +53,7 @@ function argValue(flag, fallback) {
 
 /** Properties compared for every role; role tables add or drop from here. */
 const BASE_PROPS = [
+  '_src', // asset basename for image roles (the brand mark), null for the rest
   'display', 'backgroundColor', 'color', 'borderTopLeftRadius', 'borderTopWidth', 'borderTopColor',
   'boxShadow', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'gap',
   'fontSize', 'lineHeight', 'fontWeight', 'letterSpacing', 'height', 'minHeight',
@@ -90,6 +91,9 @@ const measureRoles = (args) => {
         return q('#app-shell') || demo;
       case 'sidebar':
         return sidebar;
+      case 'brandMark':
+        // The mark is the library's own asset: same file name, same 24px box.
+        return q('#sidebar .brand-mark') || q('#demo-sidebar img');
       case 'newButton':
         return q('#new-research') || q('.demo-nav-new');
       case 'navItem': {
@@ -208,7 +212,10 @@ const measureRoles = (args) => {
     }
     const cs = getComputedStyle(node);
     const rect = node.getBoundingClientRect();
-    const record = { _box: `${Math.round(rect.width)}x${Math.round(rect.height)}` };
+    const record = {
+      _box: `${Math.round(rect.width)}x${Math.round(rect.height)}`,
+      _src: node.tagName === 'IMG' ? (node.getAttribute('src') || '').split('/').pop() : null,
+    };
     for (const prop of props) record[prop] = cs[prop];
     result[role] = record;
   }
@@ -221,7 +228,7 @@ const SCREENS = [
     name: 'app-shell',
     referenceHash: '#home',
     roles: [
-      'shell', 'sidebar', 'newButton', 'navItem', 'navLabel', 'paneHeader', 'panePathButton',
+      'shell', 'sidebar', 'brandMark', 'newButton', 'navItem', 'navLabel', 'paneHeader', 'panePathButton',
       'homeTitle', 'homeCard', 'homeCardLabel', 'homeRow', 'homeRowTitle', 'composer',
       'composerEditor', 'composerTools',
     ],
@@ -250,6 +257,7 @@ const SCREENS = [
 const BOX = {
   shell: 'both',
   sidebar: 'both',
+  brandMark: 'both',
   newButton: 'both',
   navItem: 'height',
   paneHeader: 'height',
@@ -283,6 +291,7 @@ const IGNORED = {
   homeCard: ['boxShadow', 'borderTopWidth', 'borderTopColor'],
   navItem: ['borderTopColor'],
   navLabel: ['borderTopColor', 'minHeight'],
+  brandMark: ['backgroundColor', 'boxShadow', 'borderTopColor'],
   homeCardLabel: ['borderTopColor'],
   homeTitle: ['borderTopColor'],
   homeRow: ['borderTopColor'],
