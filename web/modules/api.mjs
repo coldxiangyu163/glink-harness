@@ -52,7 +52,9 @@ export function createApi({ fetchImpl = globalThis.fetch } = {}) {
     config: () => call('/api/config', options),
     listRuns: () => call('/api/runs', options),
     getRun: (runId) => call(`/api/runs/${encodeURIComponent(runId)}`, options),
-    startRun: (prompt) => call('/api/runs', { ...options, method: 'POST', body: { prompt } }),
+    startRun: (prompt, parentRunId) => call('/api/runs', {
+      ...options, method: 'POST', body: { prompt, ...(parentRunId ? { parentRunId } : {}) },
+    }),
     stopRun: (runId) =>
       call(`/api/runs/${encodeURIComponent(runId)}/stop`, { ...options, method: 'POST' }),
     eventsUrl: (runId) => `/api/runs/${encodeURIComponent(runId)}/events`,

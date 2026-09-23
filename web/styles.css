@@ -840,7 +840,7 @@ h1, h2, h3, h4, p { margin: 0; }
 .home-row-time { flex: 0 0 auto; color: var(--ink-3); font-size: var(--text-mini); line-height: var(--text-mini--line-height); }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * 对话屏：720px 阅读列 + 贴底的输入器 dock
+ * 对话屏：过程随主栏伸缩，问答保持 720px 阅读列 + 贴底输入器 dock
  * ═══════════════════════════════════════════════════════════════════════════ */
 .chat-view { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .conversation-scroll {
@@ -855,18 +855,21 @@ h1, h2, h3, h4, p { margin: 0; }
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
-  width: var(--conversation-width);
-  max-width: 100%;
+  width: 100%;
   margin: 0 auto;
   /* 底部留白 = 输入器实测高度 + 56 渐隐带 + 24 间距（标准库 COMPOSER_DOCK_PADDING） */
-  padding: var(--space-6) 0 calc(var(--composer-dock) + 56px + var(--space-6));
+  padding: var(--space-6) var(--space-6) calc(var(--composer-dock) + 56px + var(--space-6));
 }
 
-/* 人说的话：右对齐气泡 */
+/* 历史轮次仍在同一对话里，各轮有独立过程与回答。 */
+.earlier-turns { display: flex; flex-direction: column; gap: var(--space-6); min-width: 0; }
+.earlier-turns:empty { display: none; }
+.pi-exchange { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.pi-exchange > .pi-question,
 #run-question {
   align-self: flex-end;
-  max-width: 90%;
-  margin: 0;
+  max-width: min(90%, var(--conversation-width));
+  margin: 0 max(0px, calc((100% - var(--conversation-width)) / 2)) 0 auto;
   padding: var(--space-3) var(--space-4);
   border-radius: var(--corner-2xl);
   background: var(--muted);
@@ -938,7 +941,7 @@ h1, h2, h3, h4, p { margin: 0; }
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  max-width: 432px;
+  max-width: 100%;
   min-height: var(--control-height-2xs);
   margin: 0 calc(-1 * var(--space-1_5));
   padding: var(--space-0_5) var(--space-1_5);
@@ -977,7 +980,7 @@ details[open] > summary .pi-row-chevron { transform: rotate(180deg); }
 .pi-thinking-body {
   margin: var(--space-1) 0 var(--space-1) var(--space-2);
   padding: 0 0 0 var(--space-3);
-  max-width: 640px;
+  max-width: 100%;
   max-height: 360px;
   overflow: auto;
   border-left: 1px solid var(--border);
@@ -1020,7 +1023,7 @@ details[open] > summary .pi-row-chevron { transform: rotate(180deg); }
   transition: grid-template-rows var(--dur-4) var(--ease-strong), opacity var(--dur-4) var(--ease-strong);
 }
 .pi-tool[open] > .pi-tool-detail { grid-template-rows: 1fr; opacity: 1; }
-.pi-tool-detail-wrap { min-height: 0; overflow: hidden; max-width: 640px; }
+.pi-tool-detail-wrap { min-height: 0; overflow: hidden; max-width: 100%; }
 .pi-tool-output,
 .pi-tool-result {
   margin: var(--space-1) 0;
@@ -1039,7 +1042,7 @@ details[open] > summary .pi-row-chevron { transform: rotate(180deg); }
 
 /* 过程里的旁白（非最终回答的中间文字）：caption + muted，不与回答抢层级 */
 .pi-text.pi-narration {
-  max-width: 640px;
+  max-width: 100%;
   margin: var(--space-1) 0;
   color: var(--muted-foreground);
   font-size: var(--text-caption);
@@ -1086,7 +1089,7 @@ details[open] > summary .pi-row-chevron { transform: rotate(180deg); }
 }
 
 /* ── 回答（待核验草稿外壳，标准库 AnswerFrame）── */
-.pi-answer { display: flex; flex-direction: column; }
+.pi-answer { display: flex; flex-direction: column; width: 100%; max-width: var(--conversation-width); margin-inline: auto; }
 .pi-answer-head { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-3); padding: var(--space-1); }
 .pi-answer-title { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
 .pi-answer-title > .icon { color: var(--muted-foreground); }

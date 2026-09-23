@@ -330,6 +330,13 @@ def _set_final_stop(events: list[dict], stop_reason: str, error_message: str | N
 
 
 def main() -> int:
+    persist_session = os.environ.get("FAKE_PI_PERSIST_SESSION") == "1"
+    session_dir = Path(os.environ.get("PI_CODING_AGENT_SESSION_DIR", "/tmp"))
+    session_file = session_dir / "fake-session.jsonl"
+    if "--session" in sys.argv:
+        session_file = Path(sys.argv[sys.argv.index("--session") + 1])
+        if persist_session and (not session_file.is_file() or not session_file.read_text(encoding="utf-8").strip()):
+            return 2
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -347,13 +354,17 @@ def main() -> int:
                     "thinkingLevel": "medium",
                     "isStreaming": False,
                     "isCompacting": False,
-                    "sessionId": "fake-session",
-                    "sessionFile": os.environ.get("FAKE_PI_SESSION_FILE", "/tmp/fake-session.jsonl"),
+                    "sessionId": os.environ.get("FAKE_PI_SESSION_ID", "fake-session"),
+                    "sessionFile": str(session_file) if persist_session else os.environ.get("FAKE_PI_SESSION_FILE", "/tmp/fake-session.jsonl"),
                     "messageCount": 0,
                 },
             )
         elif command == "prompt":
             message = str(request.get("message") or "")
+            if persist_session:
+                session_dir.mkdir(parents=True, exist_ok=True)
+                with session_file.open("a", encoding="utf-8") as log:
+                    log.write(json.dumps({"prompt": message}, ensure_ascii=False) + "\n")
             if "FAILSECRET" in message:
                 # Fail the command while echoing a credential, the way a
                 # rejected request or a kernel error could.

@@ -76,6 +76,8 @@ class RunRecord:
     status: str
     created_at: float
     workspace: str
+    #: Previous execution in the same research conversation; None for its first turn.
+    parent_run_id: str | None = None
     finished_at: float | None = None
     session_id: str | None = None
     session_file: str | None = None
@@ -218,6 +220,7 @@ class RunStore:
         *,
         run_id: str | None = None,
         workspace: Path | None = None,
+        parent_run_id: str | None = None,
     ) -> RunRecord:
         identifier = run_id or uuid.uuid4().hex[:12]
         directory = self.run_dir(identifier)
@@ -228,6 +231,7 @@ class RunStore:
             status=RUNNING,
             created_at=time.time(),
             workspace=str(workspace) if workspace is not None else str(directory / "workspace"),
+            parent_run_id=parent_run_id,
         )
         self._write(record)
         return record

@@ -40,8 +40,8 @@ const APP_NAME = '研究工作台';
 
 const PLACEHOLDERS = {
   home: '描述研究对象、范围与交付要求…',
-  idle: '发起一项新的研究…',
-  busy: '研究进行中，完成或停止后可以发起新的研究',
+  idle: '继续追问或提出修改要求…',
+  busy: '研究进行中，完成或停止后可以继续追问',
 };
 
 /* Only the two states that need the reader get a word in the sidebar. */
@@ -71,6 +71,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   const conversationScroll = el('conversation-scroll');
   const runHost = el('run-view');
   const question = el('run-question');
+  const earlierTurns = el('earlier-turns');
   const previewDrawer = el('preview-drawer');
   const previewBody = el('preview-body');
   const previewArticle = el('preview-article');
@@ -99,7 +100,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   /** Two columns need 560 + 1 + 360; below that the report floats over the conversation. */
   const isOverlay = () => shell.classList.contains('slot-overlay');
 
-  let current = null; // { runId, model, subscription, view, prompt, events }
+  let current = null; // { runId, model, subscription, view, prompt (root), history, events }
   let latestRuns = [];
   let slot = null; // null | 'report' | 'progress'
   let conversationCollapsed = false;
@@ -416,15 +417,37 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       homeReportList.append(emptyState({ title: '还没有报告', description: '研究完成后生成的报告会出现在这里' }));
       return;
     }
-    for (const run of runs) {
-      runList.append(navRow(run));
-      homeRunList.append(homeRow(run));
+    const children = new Set(runs.map((run) => run.parentRunId).filter(Boolean));
+    const byId = new Map(runs.map((run) => [run.runId, run]));
+    const nextByParent = new Map(runs.filter((run) => run.parentRunId)
+      .map((run) => [run.parentRunId, run.runId]));
+    const latestOf = (run) => {
+      const seen = new Set();
+      let leaf = run.runId;
+      while (nextByParent.has(leaf) && !seen.has(leaf)) {
+        seen.add(leaf);
+        leaf = nextByParent.get(leaf);
+      }
+      return leaf;
+    };
+    const titleOf = (run) => {
+      const seen = new Set();
+      let root = run;
+      while (root.parentRunId && byId.has(root.parentRunId) && !seen.has(root.runId)) {
+        seen.add(root.runId);
+        root = byId.get(root.parentRunId);
+      }
+      return root.prompt;
+    };
+    for (const run of runs.filter((item) => !children.has(item.runId))) {
+      runList.append(navRow(run, titleOf(run)));
+      homeRunList.append(homeRow(run, titleOf(run)));
     }
     const reports = runs.filter((run) => run.hasReport);
     if (!reports.length) {
       homeReportList.append(emptyState({ title: '还没有报告', description: '研究完成后生成的报告会出现在这里' }));
     }
-    for (const run of reports) homeReportList.append(reportRow(run));
+    for (const run of reports) homeReportList.append(reportRow(run, latestOf(run)));
   }
 
   function iconNode(name) {
@@ -442,23 +465,23 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     return node;
   }
 
-  function navRow(run) {
+  function navRow(run, title = run.prompt) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'nav-item';
     button.dataset.runId = run.runId;
     button.dataset.status = run.status;
-    button.dataset.tip = researchTitle(run.prompt, 40);
+    button.dataset.tip = researchTitle(title, 40);
     button.dataset.tipSide = 'right';
     button.dataset.tipWhen = 'collapsed';
     if (current?.runId === run.runId) button.setAttribute('aria-current', 'page');
-    button.append(iconNode('chat'), span('nav-title', researchTitle(run.prompt)));
+    button.append(iconNode('chat'), span('nav-title', researchTitle(title)));
     if (NAV_META[run.status]) button.append(span('nav-meta', NAV_META[run.status]));
     button.addEventListener('click', () => openRun(run.runId));
     return button;
   }
 
-  function homeRow(run) {
+  function homeRow(run, title = run.prompt) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'home-row';
@@ -467,7 +490,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     const body = span('home-row-body', '');
     const duration = formatDuration(run.durationSeconds);
     body.append(
-      span('home-row-title', researchTitle(run.prompt, 40)),
+      span('home-row-title', researchTitle(title, 40)),
       span('home-row-meta', duration ? `${statusLabel(run.status)} · ${duration}` : statusLabel(run.status)),
     );
     button.append(iconNode('history'), body, span('home-row-time', relativeTime(run.createdAt)));
@@ -475,7 +498,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     return button;
   }
 
-  function reportRow(run) {
+  function reportRow(run, conversationRunId = run.runId) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'home-row';
@@ -487,7 +510,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     const body = span('home-row-body', '');
     body.append(span('home-row-title', researchTitle(run.prompt, 40)), span('home-row-meta', 'report.md · 待核验草稿'));
     button.append(tile, body, span('home-row-time', relativeTime(run.finishedAt || run.createdAt)));
-    button.addEventListener('click', () => openRun(run.runId, { withReport: true }));
+    button.addEventListener('click', () => openRun(conversationRunId, { withReport: run.runId }));
     return button;
   }
 
@@ -513,7 +536,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     }
     setSending(true);
     try {
-      const { run } = await api.startRun(prompt);
+      const { run } = await api.startRun(prompt, promptOverride === undefined ? current?.runId : undefined);
       if (promptOverride === undefined) input.value = '';
       updatePromptCount();
       await openRun(run.runId);
@@ -528,7 +551,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
 
   function setSending(sending) {
     sendButton.disabled = sending || input.value.trim().length === 0;
-    const label = sending ? '正在提交' : '开始研究';
+    const label = sending ? '正在提交' : current ? '发送追问' : '开始研究';
     sendButton.setAttribute('aria-label', label);
     sendButton.dataset.tip = label;
   }
@@ -547,6 +570,23 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       return;
     }
     if (disposed || !nav.isCurrent(token)) return;
+    const ancestors = [];
+    const seen = new Set([runId]);
+    let parentId = run.parentRunId;
+    while (parentId && !seen.has(parentId) && ancestors.length < 100) {
+      seen.add(parentId);
+      try {
+        const { run: ancestor } = await api.getRun(parentId);
+        if (disposed || !nav.isCurrent(token)) return;
+        ancestors.unshift(ancestor);
+        parentId = ancestor.parentRunId;
+      } catch {
+        if (disposed || !nav.isCurrent(token)) return;
+        showToast('之前的对话暂时无法加载，请稍后刷新。', 'warning');
+        break;
+      }
+    }
+    if (disposed || !nav.isCurrent(token)) return;
     const model = createRunModel(run);
     // A view belongs to one run: `dispose()` is permanent.
     const view = createRunView({
@@ -559,13 +599,46 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       reportHref: (id) => api.reportUrl(id),
       reportDownloadName: (value) => reportFileName(value.prompt),
     });
-    current = { runId, model, subscription: null, view, prompt: run.prompt, events: 0 };
+    current = { runId, model, subscription: null, view,
+      prompt: ancestors[0]?.prompt ?? run.prompt, history: [], events: 0 };
+    earlierTurns.replaceChildren();
+    for (const ancestor of ancestors) {
+      const exchange = document.createElement('section');
+      exchange.className = 'pi-exchange';
+      const pastQuestion = document.createElement('article');
+      pastQuestion.className = 'pi-question message user-message';
+      pastQuestion.textContent = ancestor.prompt;
+      const pastRoot = document.createElement('div');
+      pastRoot.className = 'pi-run';
+      exchange.append(pastQuestion, pastRoot);
+      earlierTurns.append(exchange);
+      const past = { runId: ancestor.runId, model: createRunModel(ancestor), subscription: null,
+        view: createRunView({ root: pastRoot, renderMarkdown, onOpenReport: openReport,
+          onCopy: copyText, reportHref: api.reportUrl,
+          reportDownloadName: (value) => reportFileName(value.prompt) }) };
+      current.history.push(past);
+      past.view.render(past.model);
+      past.subscription = createRunSubscription({ runId: past.runId, eventsUrl: api.eventsUrl,
+        eventSourceFactory, onEvent: (event) => {
+          if (disposed || current?.runId !== runId) return;
+          past.model = applyEvent(past.model, event);
+          past.view.render(past.model);
+          if (TERMINAL_EVENT_TYPES.has(event.type)) past.subscription?.close();
+        }, onStatus: (status) => {
+          if (status === 'failed') past.subscription?.close();
+        } });
+    }
     question.textContent = run.prompt;
     showView('chat');
     view.render(model);
     syncSelection();
     afterModelChange();
-    if (withReport && model.hasReport) openReport(runId);
+    if (withReport) {
+      const reportRunId = withReport === true ? runId : withReport;
+      if (reportRunId === runId ? model.hasReport : ancestors.some((past) => past.runId === reportRunId && past.hasReport)) {
+        openReport(reportRunId);
+      }
+    }
 
     current.subscription = createRunSubscription({
       runId,
@@ -630,6 +703,11 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     clearTimeout(reconnectTimer);
     current?.subscription?.close();
     current?.view?.dispose();
+    for (const past of current?.history ?? []) {
+      past.subscription?.close();
+      past.view.dispose();
+    }
+    earlierTurns?.replaceChildren();
     current = null;
     lastStatus = null;
     lastHasReport = null;
@@ -697,11 +775,13 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       const response = await fetch(api.reportUrl(runId));
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const text = await response.text();
-      if (disposed || !nav.isCurrent(token) || current?.runId !== runId) return;
+      if (disposed || !nav.isCurrent(token) ||
+        (current?.runId !== runId && !current?.history?.some((past) => past.runId === runId))) return;
       previewTitle.textContent = 'report.md';
       previewTitle.title = 'report.md';
       previewDownload.href = api.reportUrl(runId);
-      previewDownload.setAttribute('download', reportFileName(current.prompt));
+      const source = current.history.find((past) => past.runId === runId);
+      previewDownload.setAttribute('download', reportFileName(source?.model.prompt ?? current.model.prompt));
       previewArticle.innerHTML = renderMarkdown(text);
       previewBody.scrollTop = 0;
       setSlot('report');
@@ -876,6 +956,8 @@ function startErrorMessage(error) {
     return '上一项研究的执行资源还没有确认释放，暂时不能开始新研究。请联系管理员核对。';
   }
   if (error?.code === 'not_configured') return '模型服务还没有配置，暂时无法发起研究。请联系管理员完成配置。';
+  if (error?.code === 'session_unavailable') return '此前的会话记录不可续接；请从“新建研究”重新开始。';
+  if (error?.code === 'stale_run') return '这项研究已有更新的追问，请刷新后在最新一轮继续。';
   if (error?.code === 'invalid_request') return '这个问题没能提交，请检查内容后重试。';
   return '研究没能开始，请稍后重试。';
 }

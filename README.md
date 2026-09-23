@@ -33,6 +33,10 @@
 
 三面共享同一套输入/事件/收尾契约（`kernel/execution.py` 的 `ExecutionAdapter`）：每个 run 拥有
 自己的运行期配置（`runs/<id>/pi-agent/`）、session 目录（会话根基目录下的 `<id>/`，默认 `<数据根>/sessions/<id>/`）与工作区；
+完成后在同一对话发送追问会提交 `POST /api/runs {"prompt":"…","parentRunId":"<上一轮 runId>"}`，
+返回新 run 的 `parentRunId`。它复制上一轮经安全校验的会话副本，通过 pi 官方 `--session` 续接，
+不会另起会话或改写旧 run；侧栏按研究汇总，旧报告仍可打开。会话记录不可续接时返回
+`409 session_unavailable`，从旧轮分叉返回 `409 stale_run`。
 收尾顺序固定为「产物回收 → 销毁执行面 → 安全校验并落盘报告 → 凭据清扫 → 终态与释放」。
 
 ### E2B 执行面

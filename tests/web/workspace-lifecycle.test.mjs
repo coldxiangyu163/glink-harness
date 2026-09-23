@@ -90,6 +90,42 @@ async function boot(harnessInstance) {
   return originalText;
 }
 
+test('a completed research accepts a follow-up in the same conversation', async () => {
+  const h = harness();
+  await h.workspace.init();
+  const started = [];
+  h.api.startRun = async (...args) => {
+    started.push(args);
+    return { run: { ...runView('B', '追问'), parentRunId: 'A' } };
+  };
+  const opening = h.workspace.openRun('A');
+  h.pending.get('A').resolve({ run: { ...runView('A', '初始问题'), status: 'finished' } });
+  await opening;
+  assert.match(h.dom.document.getElementById('prompt-input').placeholder, /追问|继续/);
+  h.pending.set('B', { promise: Promise.resolve({ run: { ...runView('B', '追问'), parentRunId: 'A' } }) });
+  h.dom.document.getElementById('prompt-input').value = '追问';
+  await h.workspace.startRun();
+  assert.deepEqual(started, [['追问', 'A']]);
+  assert.equal(h.workspace.runId, 'B');
+  assert.equal(h.dom.document.getElementById('earlier-turns').children.length, 1);
+  assert.match(h.subscriptions.at(-2).url, /\/A\/events$/);
+  assert.match(h.subscriptions.at(-1).url, /\/B\/events$/);
+});
+
+test('sidebar groups linked runs into one research while retaining both reports', async () => {
+  const h = harness();
+  h.api.listRuns = async () => ({ runs: [
+    { ...runView('B', '追问'), status: 'finished', parentRunId: 'A', hasReport: true },
+    { ...runView('A', '初始问题'), status: 'finished', hasReport: true },
+  ] });
+  await h.workspace.init();
+  const nav = h.dom.document.getElementById('run-list').children;
+  assert.equal(nav.length, 1);
+  assert.equal(nav[0].dataset.runId, 'B');
+  assert.equal(h.dom.document.getElementById('home-run-list').children.length, 1);
+  assert.equal(h.dom.document.getElementById('home-report-list').children.length, 2);
+});
+
 test('a slow navigation response cannot replace a newer run (A slow, B fast)', async () => {
   const h = harness();
   await h.workspace.init();

@@ -32,6 +32,7 @@ from .events import EventBus
 from .kernel.runner import (
     ClientFactory,
     REPORT_MAX_BYTES,
+    FollowupUnavailable,
     ResourcesUnreleased,
     RunBusy,
     RunManager,
@@ -215,8 +216,16 @@ class HostRequestHandler(BaseHTTPRequestHandler):
                 head_only=False,
             )
             return
+        parent_run_id = body.get("parentRunId")
+        if parent_run_id is not None and (not isinstance(parent_run_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", parent_run_id)):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request"}, head_only=False)
+            return
         try:
-            record = self.server.manager.start(prompt)
+            record = self.server.manager.start(prompt, parent_run_id=parent_run_id)
+        except FollowupUnavailable as exc:
+            self._send_json(HTTPStatus.CONFLICT if exc.code != "unknown_run" else HTTPStatus.NOT_FOUND,
+                            {"error": exc.code}, head_only=False)
+            return
         except RunBusy as busy:
             self._send_json(
                 HTTPStatus.CONFLICT,
@@ -538,6 +547,7 @@ def _run_view(
         "runId": record.run_id,
         "status": record.status,
         "prompt": record.prompt,
+        "parentRunId": record.parent_run_id,
         "createdAt": record.created_at,
         "finishedAt": record.finished_at,
         "durationSeconds": duration,

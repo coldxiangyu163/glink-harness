@@ -18,6 +18,7 @@ import hashlib
 import json
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +74,8 @@ class FakeFiles:
                 self.name = name
                 self.path = f"{path}/{name}"
 
-        return [Entry(name) for name in self._sandbox.workspace_files]
+        names = self._sandbox.session_files if path == "/home/user/sessions" else self._sandbox.workspace_files
+        return [Entry(name) for name in names]
 
 
 class _Result:
@@ -116,6 +118,7 @@ class FakeSandbox:
         self.written: dict[str, str] = {}
         self.readable: dict[str, Any] = {}
         self.workspace_files = workspace_files
+        self.session_files: tuple[str, ...] = ()
         self.command = ""
         self.command_envs: dict[str, str] = {}
         self.killed = False
@@ -202,6 +205,46 @@ def test_config_repr_hides_the_cloud_credential(tmp_path: Path) -> None:
 # -- configuration delivery ---------------------------------------------------
 
 
+def test_sandbox_followup_uploads_and_recovers_a_private_session(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    sandbox.session_files = ("continued.jsonl",)
+    sandbox.readable["/home/user/sessions/continued.jsonl"] = b'{"id":"same-session"}\n'
+    runtime.session_dir.mkdir(parents=True, exist_ok=True)
+    (runtime.session_dir / "continued.jsonl").write_bytes(b'{"id":"same-session"}\n')
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "report.md").write_text("# previous report", encoding="utf-8")
+    client = E2BSandboxClient(config, runtime, run_id="child", workspace=workspace,
+                              sandbox_factory=lambda **_: sandbox)
+    client.start()
+    client.upload_config()
+    client.upload_continuation("continued.jsonl", workspace)
+    assert sandbox.written["/home/user/sessions/continued.jsonl"] == '{"id":"same-session"}\n'
+    assert sandbox.written["/home/user/workspace/report.md"] == "# previous report"
+    command = client._command("追问", "", resume_session="continued.jsonl")
+    assert "--session /home/user/sessions/continued.jsonl" in command
+    saved, error = client.recover_session()
+    assert error is None
+    assert saved == runtime.session_dir / "continued.jsonl"
+    assert saved.read_bytes() == b'{"id":"same-session"}\n'
+
+
+def test_sandbox_session_recovery_rejects_a_path_escape(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    sandbox.session_files = ("../outside.jsonl",)
+    client = E2BSandboxClient(config, runtime, run_id="root", workspace=tmp_path / "ws",
+                              sandbox_factory=lambda **_: sandbox)
+    client.start()
+    path, error = client.recover_session()
+    assert path is None and error
+    assert not (tmp_path / "outside.jsonl").exists()
+
+
+
 def test_upload_config_delivers_the_runtime_directory_with_a_manifest(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     runtime = _prepare(config, tmp_path)
@@ -215,7 +258,13 @@ def test_upload_config_delivers_the_runtime_directory_with_a_manifest(tmp_path: 
     assert "/home/user/config/models.json" in sandbox.written
     assert "/home/user/config/settings.json" in sandbox.written
     assert "/home/user/config/auth.json" in sandbox.written
-    assert len(sandbox.dirs) == 3
+    expected_dirs = {
+        "/home/user/config", "/home/user/workspace", "/home/user/sessions",
+        *(f"/home/user/config/{entry.relative_to(runtime.directory).as_posix()}"
+          for entry in runtime.directory.rglob("*") if entry.is_dir()),
+    }
+    assert set(sandbox.dirs) == expected_dirs
+    assert len(sandbox.dirs) == len(expected_dirs)
 
     # The manifest names every delivered path with its content digest, so the
     # delivery is verifiable instead of "the directory happened to be empty".
@@ -288,6 +337,39 @@ def test_run_replays_frames_and_pulls_the_report(tmp_path: Path) -> None:
     assert "把结果写成 report.md" not in sandbox.command
     # The sandbox identity is durable for restart reconciliation.
     assert final.sandbox_id == "fake-sandbox"
+
+
+def test_sandbox_followup_through_runner_keeps_session_and_run_boundaries(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    first = FakeSandbox(events=[{"type": "session", "id": "same-session"}, *_FAKE_EVENTS])
+    first.session_files = ("research.jsonl",)
+    first.readable["/home/user/sessions/research.jsonl"] = b'{"id":"same-session","turn":1}\n'
+    second = FakeSandbox(events=[{"type": "session", "id": "same-session"}, *_FAKE_EVENTS])
+    second.session_files = ("continued.jsonl",)
+    second.readable["/home/user/sessions/continued.jsonl"] = b'{"id":"same-session","turn":2}\n'
+    sandboxes = iter([first, second])
+    storage = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store=storage, sandbox_factory=lambda **_: next(sandboxes))
+    parent = manager.start("初始问题")
+    original = manager.wait(parent.run_id, timeout=30)
+    assert original.status == "finished" and original.session_id == "same-session"
+    assert Path(original.session_file).read_bytes() == first.readable["/home/user/sessions/research.jsonl"]
+    deadline = time.monotonic() + 5
+    while manager.active_run_id is not None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert manager.active_run_id is None
+    child = manager.start("追问细节", parent_run_id=parent.run_id)
+    final = manager.wait(child.run_id, timeout=30)
+    assert final.status == "finished" and final.parent_run_id == parent.run_id
+    assert final.report_path is None, "an unchanged seeded report is not a new deliverable"
+    assert final.session_id == original.session_id
+    assert "--session /home/user/sessions/continued.jsonl" in second.command
+    assert second.written["/home/user/sessions/continued.jsonl"] == '{"id":"same-session","turn":1}\n'
+    assert second.written["/home/user/workspace/report.md"] == "# 报告\n\n来自沙箱。\n"
+    assert Path(original.session_file).read_bytes() == first.readable["/home/user/sessions/research.jsonl"]
+    assert Path(final.session_file).read_bytes() == second.readable["/home/user/sessions/continued.jsonl"]
+    assert _event_kinds(storage, parent.run_id)[-1] == "run_finished"
+    assert _event_kinds(storage, child.run_id)[-1] == "run_finished"
 
 
 def test_nonzero_exit_fails_the_run_even_with_a_report(tmp_path: Path) -> None:

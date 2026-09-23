@@ -29,6 +29,7 @@ terminal frame whose settled copy is missing is settled, never overwritten.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
@@ -109,6 +110,14 @@ class ResourcesUnreleased(RuntimeError):
         self.run_ids = list(run_ids)
 
 
+class FollowupUnavailable(RuntimeError):
+    """A parent run cannot safely supply a resumable session."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class EventLogError(RuntimeError):
     """The durable event log could not be written; the frame must stay hidden."""
 
@@ -144,6 +153,10 @@ class _Execution:
     #: The instruction as the user wrote it. ``record.prompt`` is the redacted
     #: copy that may be persisted and shown; the kernel receives this one.
     kernel_prompt: str = ""
+    #: Snapshot of the sanitized previous session. Never share a mutable session file.
+    session_seed: bytes | None = None
+    parent_run_id: str | None = None
+    seeded_report_digest: str | None = None
     #: Guards the phase, the cancellation flag and every frame commit.
     lock: threading.RLock = field(default_factory=threading.RLock)
     phase: str = _OPEN
@@ -206,7 +219,7 @@ class RunManager:
         with self._lock:
             return next(iter(self._executions), None)
 
-    def start(self, prompt: str) -> RunRecord:
+    def start(self, prompt: str, *, parent_run_id: str | None = None) -> RunRecord:
         """Admit a run and execute it in the background."""
         text = (prompt or "").strip()
         if not text:
@@ -222,16 +235,46 @@ class RunManager:
             holds = self._resource_holds()
             if holds:
                 raise ResourcesUnreleased(holds)
+            seed = None
+            if parent_run_id is not None:
+                parent = self.store.get(parent_run_id)
+                if parent is None:
+                    raise FollowupUnavailable("unknown_run")
+                if not parent.is_terminal:
+                    raise FollowupUnavailable("run_busy")
+                if any(item.parent_run_id == parent_run_id for item in self.store.list(limit=None)):
+                    raise FollowupUnavailable("stale_run")
+                # The recorded path is not a capability. It must be a direct file
+                # in that run's own session directory; ArtifactTree refuses links.
+                session_dir = Path(self.config.session_dir) / parent_run_id
+                path = Path(parent.session_file or "")
+                if path.parent != session_dir or path.suffix != ".jsonl":
+                    raise FollowupUnavailable("session_unavailable")
+                try:
+                    with ArtifactTree(session_dir) as tree:
+                        seed = tree.read(path.name, max_bytes=REPORT_MAX_BYTES)
+                except (ArtifactError, OSError) as exc:
+                    raise FollowupUnavailable("session_unavailable") from exc
+                if not seed.strip() or not parent.session_id:
+                    raise FollowupUnavailable("session_unavailable")
+                try:
+                    # Historical files may predate the latest redaction rules.
+                    # Never hand an unchecked copy to the next kernel.
+                    seed = self.redactor.redact(seed.decode("utf-8")).encode("utf-8")
+                except UnicodeError as exc:
+                    raise FollowupUnavailable("session_unavailable") from exc
             run_id = uuid.uuid4().hex[:12]
             workspace = self.config.workspace_root / run_id
             # A user can paste a credential into the prompt; the stored and
             # displayed copy is masked, while the kernel still receives the
             # original instruction.
             record = self.store.create(
-                self.redactor.redact(text), run_id=run_id, workspace=workspace
+                self.redactor.redact(text), run_id=run_id, workspace=workspace,
+                parent_run_id=parent_run_id,
             )
             execution = _Execution(
-                record=record, workspace=workspace, kernel_prompt=text
+                record=record, workspace=workspace, kernel_prompt=text,
+                session_seed=seed, parent_run_id=parent_run_id,
             )
             self._executions[run_id] = execution
             # Register the run before the caller gets the id back: a browser
@@ -461,6 +504,7 @@ class RunManager:
         run_id = execution.record.run_id
         try:
             execution.workspace.mkdir(parents=True, exist_ok=True)
+            self._seed_report(execution)
             self._emit_open(execution, events.RUN_STARTED, {"prompt": execution.record.prompt})
 
             runtime = self._prepare_runtime(execution)
@@ -470,6 +514,10 @@ class RunManager:
             self._store_external_identity(execution, adapter)
 
             session = adapter.session_info()
+            if execution.parent_run_id and self.config.executor != "e2b":
+                parent = self.store.get(execution.parent_run_id)
+                if not session or not parent or session.session_id != parent.session_id:
+                    raise FollowupUnavailable("session_unavailable")
             if session is not None:
                 self._publish_session_ready(execution, session)
 
@@ -518,6 +566,10 @@ class RunManager:
             try:
                 recovery = adapter.recover_artifacts(execution.workspace)
                 execution.artifact_failures.extend(recovery.failures)
+                if self.config.executor == "e2b":
+                    recovered_session = adapter.session_info()
+                    if recovered_session and recovered_session.session_file:
+                        self._publish_session_ready(execution, recovered_session)
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 execution.artifact_failures.append(
                     f"产物回收失败: {type(exc).__name__}: {exc}"
@@ -670,6 +722,23 @@ class RunManager:
 
     # -- pi configuration -----------------------------------------------------
 
+    def _seed_report(self, execution: _Execution) -> None:
+        """Put the previous deliverable in this run's private workspace for revisions."""
+        if not execution.parent_run_id:
+            return
+        parent = self.store.get(execution.parent_run_id)
+        location = self.store.report_location(parent) if parent else None
+        if location is None:
+            return
+        try:
+            with ArtifactTree(location.root) as source:
+                content = source.read(location.relative, max_bytes=REPORT_MAX_BYTES)
+            with ArtifactTree(execution.workspace) as destination:
+                destination.replace(REPORT_FILENAME, content, max_bytes=REPORT_MAX_BYTES)
+            execution.seeded_report_digest = hashlib.sha256(content).hexdigest()
+        except (ArtifactError, OSError) as exc:
+            raise FollowupUnavailable("report_unavailable") from exc
+
     def _prepare_runtime(self, execution: _Execution) -> AgentRuntime:
         """Render the run's own pi configuration and session directory.
 
@@ -688,6 +757,10 @@ class RunManager:
             session_dir=Path(self.config.session_dir) / run_id,
         )
         execution.runtime = runtime
+        if execution.session_seed is not None:
+            with ArtifactTree(runtime.session_dir) as tree:
+                tree.replace("continued.jsonl", execution.session_seed, max_bytes=REPORT_MAX_BYTES)
+            execution.session_seed = None
         # The search credential only exists in the rendered file, so it is
         # learned here (never logged, never returned).
         self.redactor.add_from_file(runtime.directory / "web-search.json")
@@ -709,6 +782,9 @@ class RunManager:
             workspace=execution.workspace,
             timeout_seconds=self.config.task_timeout_seconds,
             extra_argv=tuple(self._extra_argv(run_id)),
+            resume_session="continued.jsonl" if execution.parent_run_id else None,
+            expected_session_id=(self.store.get(execution.parent_run_id).session_id
+                                 if execution.parent_run_id else None),
         )
         return build_adapter(
             spec,
@@ -725,7 +801,10 @@ class RunManager:
         self, spec: ExecutionSpec
     ) -> tuple[list[str], dict[str, str], Path | None]:
         return (
-            build_pi_argv(spec.config, spec.runtime, extra=list(spec.extra_argv)),
+            build_pi_argv(spec.config, spec.runtime, extra=[
+                *spec.extra_argv,
+                *(["--session", str(spec.runtime.session_dir / spec.resume_session)] if spec.resume_session else []),
+            ]),
             build_pi_env(spec.config, spec.runtime),
             spec.workspace,
         )
@@ -743,7 +822,7 @@ class RunManager:
             run_id=spec.run_id,
             workspace=spec.workspace,
             session_dir=spec.runtime.session_dir,
-            extra=list(spec.extra_argv),
+            extra=[*spec.extra_argv, *(["--session", f"/sessions/{spec.resume_session}"] if spec.resume_session else [])],
         )
         return plan.argv, plan.env, plan.container_name
 
@@ -946,6 +1025,10 @@ class RunManager:
             execution.report_status = "rejected"
             execution.report_path = None
             self._report_warning(execution, f"report.md 未通过安全校验，已拒绝：{exc}")
+            return
+        if execution.seeded_report_digest is not None and execution.seeded_report_digest == hashlib.sha256(data).hexdigest():
+            # The previous deliverable is context, not a newly generated file.
+            execution.report_status = "missing"
             return
         original = data.decode("utf-8", errors="replace")
         redacted = self.redactor.redact(original)

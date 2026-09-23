@@ -151,7 +151,7 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 
 ## 4. run 生命周期
 
-1. `POST /api/runs {prompt}` → 准入（见下）→ 生成 `runId`，写 `meta.json`（status=running）；
+1. `POST /api/runs {prompt, parentRunId?}` → 准入（见下）→ 生成 `runId`，写 `meta.json`（status=running）。`parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。前端按父链展示连续对话，侧栏只列最新一轮；
 2. 渲染**本 run 的**运行期配置目录与 session 目录（`runs/<id>/pi-agent`、会话根下的 `<id>/`），
    按 `LOCAL_WEB_EXECUTOR` 选择执行面（见 §5）；
 3. 事件投影 → `EventBus.commit`：先落 `events.jsonl`，再实时给 SSE（见 §3.1）；
@@ -219,7 +219,7 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 | 运行时来源 | 宿主安装的 Node v24.16.0 / pi | 镜像自包含（`pi-glink-worker:latest`，node v24.21.0 + pi 0.86.1；镜像名在启动时冻结） | 模板自包含（`pi-glink-worker`，node v24.21.0 + pi 0.86.1） |
 | 运行期配置 | `runs/<id>/pi-agent`（本 run 独占） | 同目录挂到 `/config` | 同一目录整棵上传到沙箱 `/home/user/config` |
 | 工作区 | `<data>/workspaces/<runId>` | 同左（挂到 `/workspace`） | 沙箱内 `/home/user/workspace`，结束后拉回宿主 |
-| 会话文件 | 会话根下的 `<id>/`（宿主可查） | 该目录挂到 `/sessions`；宿主按挂载映射回本 run 目录后脱敏 | 沙箱内，随沙箱销毁（`session_id` 为空） |
+| 会话文件 | 会话根下的 `<id>/`（宿主可查） | 该目录挂到 `/sessions`；宿主按挂载映射回本 run 目录后脱敏 | 销毁前回收单个有界会话文件到本 run 目录，供下一轮使用；多文件或回收失败不可续接 |
 | 模型凭据 | 本 run 的 `auth.json`（0600，不进进程环境） | 随 `/config` 挂载 | 随运行期配置上传（不进沙箱进程环境） |
 | 搜索凭据 | 本 run 的 `web-search.json`（600） | 随 `/config` 挂载 | 上传到沙箱 `/config`（随沙箱消失） |
 | 隔离强度 | 进程级 | 容器级 | 云端沙箱级 |
@@ -264,6 +264,8 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 渲染每个模板条目都是「先删再拷」，并且每次渲染都会重建（或删除）`auth.json` /
 `web-search.json`；因此上一 run 的扩展、skill 或凭据不会因增量拷贝而残留。共享项只限于
 仓库 `agent/` 模板目录（只读输入）和 `data_root` 本身。
+
+**多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
 
 **已知差异（如实记录）**：E2B SDK 2.x 的 `commands.run(background=True, on_stdout=…)`
 回调实测不触发，因此沙箱把事件写入 `/home/user/events.jsonl`，宿主在 run 结束后一次性
