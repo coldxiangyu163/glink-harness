@@ -75,18 +75,26 @@ def _auth_key(directory: Path) -> str:
 class FakeAdapter:
     """Synthetic execution face: records rendered credentials, then settles."""
 
-    def __init__(self, spec, *, on_frame, settle=True, release=True, frames=()):
+    def __init__(
+        self, spec, *, on_frame, settle=True, release=True, frames=(), write_report=False
+    ):
         self.spec = spec
         self._on_frame = on_frame
         self._settle = settle
         self._release = release
         self._frames = tuple(frames)
+        self._write_report = write_report
         self._cancelled = False
         self.runtime_dir = spec.runtime.directory
         self.auth_key = _auth_key(spec.runtime.directory)
         self.web_search_present = (spec.runtime.directory / "web-search.json").is_file()
 
     def start(self) -> None:
+        if self._write_report:
+            self.spec.workspace.mkdir(parents=True, exist_ok=True)
+            (self.spec.workspace / "report.md").write_text(
+                "# 合成报告\n\n来自 fake 执行面。\n", encoding="utf-8"
+            )
         for frame in self._frames:
             self._on_frame(frame)
 
@@ -125,6 +133,7 @@ class AdapterBehavior:
         self.settle = True
         self.release = True
         self.frames: tuple[dict, ...] = ()
+        self.write_report = False
         self.created: list[FakeAdapter] = []
 
 
@@ -139,6 +148,7 @@ def adapters(monkeypatch: pytest.MonkeyPatch) -> AdapterBehavior:
             settle=behavior.settle,
             release=behavior.release,
             frames=behavior.frames,
+            write_report=behavior.write_report,
         )
         behavior.created.append(adapter)
         return adapter
@@ -453,6 +463,58 @@ def test_stop_requires_the_creator_or_a_tenant_admin(
     )
     assert status == 200
     assert wait_for_terminal(server, second["runId"], creator)["status"] == "cancelled"
+
+
+def test_same_tenant_members_share_read_access(
+    server: PiGlinkServer, adapters: AdapterBehavior
+) -> None:
+    """A member of the run's tenant may read detail, SSE and the report."""
+    adapters.write_report = True
+    creator = assertion("tenant-alpha", "user-a")
+    peer = assertion("tenant-alpha", "user-b")
+    run = start_run(server, "成员可读", token=creator)
+    assert wait_for_terminal(server, run["runId"], creator)["status"] == "finished"
+
+    detail = json.loads(request(server, f"/api/runs/{run['runId']}", token=peer)[2])["run"]
+    assert detail["runId"] == run["runId"] and detail["hasReport"] is True
+    status, _headers, body = request(server, f"/api/runs/{run['runId']}/report", token=peer)
+    assert status == 200 and "合成报告" in body.decode("utf-8")
+
+    stream_status, content_type, stream = read_stream(
+        server, f"/api/runs/{run['runId']}/events", token=peer
+    )
+    assert stream_status == 200 and content_type.startswith("text/event-stream")
+    assert b"event: run_started" in stream and b"event: run_finished" in stream
+
+
+def test_sse_reconnect_resumes_after_the_cursor(
+    server: PiGlinkServer, adapters: AdapterBehavior
+) -> None:
+    """A dropped reader reconnects with ``Last-Event-ID`` and loses nothing."""
+    adapters.settle = False
+    alpha = assertion("tenant-alpha", "user-a")
+    run = start_run(server, "断线重连", token=alpha)
+    path = f"/api/runs/{run['runId']}/events"
+    status, _content_type, _head = read_stream(server, path, token=alpha, head_bytes=64)
+    assert status == 200
+
+    connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=15)
+    try:
+        connection.request(
+            "GET", path, headers={ASSERTION_HEADER: alpha, "Last-Event-ID": "1"}
+        )
+        response = connection.getresponse()
+        assert response.status == 200
+        # Ending the run closes the resumed stream so the read below returns.
+        assert (
+            request(server, f"/api/runs/{run['runId']}/stop", method="POST", token=alpha)[0]
+            == 200
+        )
+        body = response.read()
+    finally:
+        connection.close()
+    assert b"event: run_started" not in body, "游标之前不重发"
+    assert b"event: run_cancelled" in body
 
 
 def test_legacy_ownerless_records_are_invisible_to_every_tenant(
