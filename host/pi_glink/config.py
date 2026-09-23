@@ -13,6 +13,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import urlsplit
 
 from .dotenv import parse_env_file
 
@@ -20,6 +21,10 @@ EXECUTORS = ("inproc", "docker", "e2b")
 #: ``local`` keeps the single-user surface; ``multitenant`` requires the
 #: gateway-asserted identity material and a container/sandbox execution face.
 TENANCY_MODES = ("local", "multitenant")
+#: Multi-tenant identity entry points. ``gateway`` keeps the signed-assertion
+#: contract (default); ``accounts`` adds the in-app invitation/login surface
+#: with server-side sessions. Both end in the same server-side TenantContext.
+AUTH_MODES = ("gateway", "accounts")
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _DEFAULT_PORT = 7860
 _DEFAULT_MAX_GLOBAL_RUNS = 4
@@ -69,8 +74,36 @@ class HostConfig:
     web_search_config_path: Path | None = None
     #: ``local`` (single user) or ``multitenant`` (gateway-asserted identity).
     tenancy_mode: str = "local"
-    #: Gateway assertion signing key; required and owner-only in multi-tenant mode.
+    #: Multi-tenant identity entry: ``gateway`` (signed assertion, default) or
+    #: ``accounts`` (in-app invitation registration + login + server sessions).
+    auth_mode: str = "gateway"
+    #: Gateway assertion signing key; required and owner-only in gateway mode.
     gateway_secret_file: Path | None = None
+    #: Accounts database; default ``<data_root>/accounts.db``, must stay outside
+    #: the repository. Only read in ``accounts`` mode.
+    accounts_db: Path | None = None
+    #: External HTTPS origin of the deployment, when the host sits behind a TLS
+    #: terminating proxy. Frozen, trusted configuration: used for Origin checks
+    #: instead of trusting ``X-Forwarded-*`` headers.
+    public_origin: str = ""
+    #: ``Secure`` attribute on the session cookie. Production is HTTPS-only;
+    #: only a loopback HTTP debug run may switch it off explicitly.
+    session_cookie_secure: bool = True
+    session_absolute_seconds: int = 43200
+    session_idle_seconds: int = 7200
+    invite_ttl_seconds: int = 172800
+    login_max_attempts: int = 5
+    login_window_seconds: int = 300
+    #: Login attempts per socket peer (the TLS proxy, when one is in front).
+    #: ``X-Forwarded-For`` is deliberately not consulted, so this is a global
+    #: budget for a proxied deployment; it bounds the password-hash work a
+    #: client can trigger by rotating e-mail addresses.
+    login_peer_max_attempts: int = 120
+    login_peer_window_seconds: int = 60
+    register_max_attempts: int = 10
+    register_window_seconds: int = 900
+    invite_check_max_attempts: int = 60
+    invite_check_window_seconds: int = 300
     #: Per-tenant credential file; required and owner-only in multi-tenant mode.
     tenant_config_file: Path | None = None
     tenancy_audience: str = ""
@@ -91,6 +124,15 @@ class HostConfig:
     def multi_tenant(self) -> bool:
         """True when the host runs the explicit multi-tenant surface."""
         return self.tenancy_mode == "multitenant"
+
+    @property
+    def identity_mode(self) -> str:
+        """The effective identity entry: ``local``, ``gateway`` or ``accounts``."""
+        return self.auth_mode if self.multi_tenant else "local"
+
+    @property
+    def accounts_enabled(self) -> bool:
+        return self.multi_tenant and self.auth_mode == "accounts"
 
     @property
     def has_openai_key(self) -> bool:
@@ -120,6 +162,7 @@ class HostConfig:
             "model": self.openai_model,
             "baseUrl": self.openai_base_url,
             "multiTenant": self.multi_tenant,
+            "authMode": self.identity_mode,
             "configured": {
                 "model": self.has_openai_key and bool(self.openai_model),
                 "e2b": self.has_e2b_key and self.executor == "e2b",
@@ -157,6 +200,7 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     port = _integer(values, "LOCAL_WEB_PORT", _DEFAULT_PORT)
     executor = _text(values, "LOCAL_WEB_EXECUTOR", "inproc").lower()
     tenancy_mode = _text(values, "PI_GLINK_TENANCY", "local").lower()
+    auth_mode = _text(values, "PI_GLINK_AUTH_MODE", "gateway").lower()
 
     if executor not in EXECUTORS:
         raise ConfigError(
@@ -165,6 +209,16 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     if tenancy_mode not in TENANCY_MODES:
         raise ConfigError(
             f"PI_GLINK_TENANCY must be one of {', '.join(TENANCY_MODES)}; got {tenancy_mode!r}"
+        )
+    if auth_mode not in AUTH_MODES:
+        raise ConfigError(
+            f"PI_GLINK_AUTH_MODE must be one of {', '.join(AUTH_MODES)}; got {auth_mode!r}"
+        )
+    if auth_mode == "accounts" and tenancy_mode != "multitenant":
+        # Never a silent downgrade to the unauthenticated local surface: the
+        # in-app accounts mode only exists as a multi-tenant identity entry.
+        raise ConfigError(
+            "PI_GLINK_AUTH_MODE=accounts 需要 PI_GLINK_TENANCY=multitenant"
         )
     if host not in _LOOPBACK_HOSTS:
         # One behaviour migration: an unauthenticated host may no longer be
@@ -176,7 +230,7 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
             "远端访问必须由本机认证网关反代（PI_GLINK_TENANCY=multitenant）"
         )
     if tenancy_mode == "multitenant":
-        _require_multitenant(values, executor)
+        _require_multitenant(values, executor, auth_mode)
 
     api_key = _text(values, "OPENAI_API_KEY", "")
     e2b_key = _text(values, "E2B_API_KEY", "")
@@ -184,6 +238,12 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     agent_config_dir = _path(
         values, "PI_CODING_AGENT_DIR", repo_root / "agent"
     )
+    accounts_db = _optional_path(
+        values, "PI_GLINK_ACCOUNTS_DB", data_root / "accounts.db"
+    )
+    if auth_mode == "accounts" and accounts_db is not None:
+        _require_accounts_db(accounts_db, data_root, repo_root)
+    public_origin = _origin(values, "PI_GLINK_PUBLIC_ORIGIN", "")
 
     return HostConfig(
         repo_root=repo_root,
@@ -217,7 +277,22 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
             _default_web_search_config(),
         ),
         tenancy_mode=tenancy_mode,
+        auth_mode=auth_mode,
         gateway_secret_file=_optional_path(values, "PI_GLINK_GATEWAY_SECRET_FILE", None),
+        accounts_db=accounts_db,
+        public_origin=public_origin,
+        session_cookie_secure=_flag(values, "PI_GLINK_COOKIE_SECURE", True),
+        session_absolute_seconds=_integer(values, "PI_GLINK_SESSION_ABSOLUTE_SECONDS", 43200),
+        session_idle_seconds=_integer(values, "PI_GLINK_SESSION_IDLE_SECONDS", 7200),
+        invite_ttl_seconds=_integer(values, "PI_GLINK_INVITE_TTL_SECONDS", 172800),
+        login_max_attempts=_integer(values, "PI_GLINK_LOGIN_MAX_ATTEMPTS", 5),
+        login_window_seconds=_integer(values, "PI_GLINK_LOGIN_WINDOW_SECONDS", 300),
+        login_peer_max_attempts=_integer(values, "PI_GLINK_LOGIN_PEER_MAX_ATTEMPTS", 120),
+        login_peer_window_seconds=_integer(values, "PI_GLINK_LOGIN_PEER_WINDOW_SECONDS", 60),
+        register_max_attempts=_integer(values, "PI_GLINK_REGISTER_MAX_ATTEMPTS", 10),
+        register_window_seconds=_integer(values, "PI_GLINK_REGISTER_WINDOW_SECONDS", 900),
+        invite_check_max_attempts=_integer(values, "PI_GLINK_INVITE_CHECK_MAX_ATTEMPTS", 60),
+        invite_check_window_seconds=_integer(values, "PI_GLINK_INVITE_CHECK_WINDOW_SECONDS", 300),
         tenant_config_file=_optional_path(values, "PI_GLINK_TENANT_CONFIG_FILE", None),
         tenancy_audience=_text(values, "PI_GLINK_TENANCY_AUDIENCE", ""),
         assertion_max_lifetime_seconds=_integer(
@@ -235,26 +310,26 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     )
 
 
-def _require_multitenant(values: Mapping[str, str], executor: str) -> None:
+def _require_multitenant(values: Mapping[str, str], executor: str, auth_mode: str) -> None:
     """Reject a multi-tenant configuration that cannot be safe.
 
     The host only ever binds loopback (the local gateway proxies to it) and the
     execution face must be a container/sandbox (the in-process face shares the
-    host's filesystem and is a single-user debug entry), and the identity /
-    credential files must be configured. Missing material is a startup refusal,
-    never a fallback to the unauthenticated local surface; the files themselves
-    are loaded and permission-checked by :func:`pi_glink.tenancy.build_tenancy`
+    host's filesystem and is a single-user debug entry), and the credential
+    file must be configured. Gateway mode additionally needs the assertion
+    audience and signing key. Missing material is a startup refusal, never a
+    fallback to the unauthenticated local surface; the files themselves are
+    loaded and permission-checked by :func:`pi_glink.tenancy.build_tenancy`
     before the host binds a port.
     """
     if executor == "inproc":
         raise ConfigError(
             "PI_GLINK_TENANCY=multitenant 要求 Docker/E2B 执行面；inproc 仅用于本地单用户调试"
         )
-    for key in (
-        "PI_GLINK_GATEWAY_SECRET_FILE",
-        "PI_GLINK_TENANT_CONFIG_FILE",
-        "PI_GLINK_TENANCY_AUDIENCE",
-    ):
+    required = ["PI_GLINK_TENANT_CONFIG_FILE"]
+    if auth_mode == "gateway":
+        required += ["PI_GLINK_GATEWAY_SECRET_FILE", "PI_GLINK_TENANCY_AUDIENCE"]
+    for key in required:
         if not _text(values, key, ""):
             raise ConfigError(f"{key} 在 PI_GLINK_TENANCY=multitenant 时必须配置")
 
@@ -295,6 +370,53 @@ def _optional_path(values: Mapping[str, str], key: str, default: Path | None) ->
     if raw:
         return Path(raw).expanduser()
     return default
+
+
+def _flag(values: Mapping[str, str], key: str, default: bool) -> bool:
+    raw = _text(values, key, "1" if default else "0").lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"{key} must be a boolean; got {raw!r}")
+
+
+def _origin(values: Mapping[str, str], key: str, default: str) -> str:
+    """Freeze the external HTTPS origin (scheme + host), or refuse the value."""
+    raw = _text(values, key, default)
+    if not raw:
+        return ""
+    parts = urlsplit(raw)
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        raise ConfigError(f"{key} 必须是 http(s) 源（如 https://glink.example.com）: {raw!r}")
+    if parts.path not in {"", "/"} or parts.query or parts.fragment:
+        raise ConfigError(f"{key} 只接受源，不接受路径/查询/片段: {raw!r}")
+    return f"{parts.scheme}://{parts.netloc.lower()}"
+
+
+def _require_outside_repository(path: Path, repo_root: Path, key: str) -> None:
+    repository = Path(os.path.realpath(repo_root))
+    resolved = Path(os.path.realpath(path))
+    if resolved == repository or resolved.is_relative_to(repository):
+        raise ConfigError(f"{key} 必须放在仓库之外: {path}")
+
+
+def _require_accounts_db(accounts_db: Path, data_root: Path, repo_root: Path) -> None:
+    """The account database belongs to one data root, outside the repository.
+
+    Single-host exclusivity is a lock on ``data_root``; an account database
+    elsewhere could be written by two hosts that each own a different root, so
+    "inside this data root" is part of the ownership contract, not a layout
+    preference. Paths are compared after ``realpath``, so a symlink inside the
+    root cannot point the database at a shared file.
+    """
+    _require_outside_repository(accounts_db, repo_root, "PI_GLINK_ACCOUNTS_DB")
+    root = Path(os.path.realpath(data_root))
+    resolved = Path(os.path.realpath(accounts_db))
+    if resolved == root or not resolved.is_relative_to(root):
+        raise ConfigError(
+            f"PI_GLINK_ACCOUNTS_DB 必须位于 LOCAL_WEB_DATA_ROOT 之内: {accounts_db}"
+        )
 
 
 def _default_web_search_config() -> Path | None:

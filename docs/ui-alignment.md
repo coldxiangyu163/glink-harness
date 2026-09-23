@@ -56,6 +56,9 @@
 | Tooltip | 圆角 8 / bg `--foreground` / px-12 py-6 / 12/20 / 300ms | 同（挂在 body 上定位，不被滚动容器裁掉） |
 | 空态 | EmptyState + 显式 variant + `role="status"` | 同（`no-data` 插画取自标准库） |
 | 焦点 | 自身可聚焦控件画 2px `--ring`、外偏 2；被容器包裹的输入由容器画、内层认领 `data-focus-ring-managed` | 同 |
+| 未登录入口（GLINK-AUTH-01） | 单列 400px 卡片；单行输入 `--control-height-sm`(36px)/全圆角/`--input` 描边、hover 与聚焦同为 1px 近黑；主操作近黑胶囊钮；字段错误在字段旁（`--destructive-text`） | 同（`web/modules/auth.mjs` + `.auth-*`）；登录/邀请注册/网关说明/服务不可达四种面孔由服务端 `/api/me` 的 mode 决定 |
+| 账号区（侧栏底部） | Demo 侧栏底部的 28px 首字母头像 + 姓名；账号菜单承载账号信息与退出 | 同（`web/modules/account.mjs`）；组织/姓名/邮箱来自 `/api/me`，gateway 模式只展示、不画站内注销；管理员菜单多一项「邀请成员」 |
+| 邀请对话框 | 对话框 420px、card 面、`--elev-overlay`、动作右对齐；一次性邀请码用只读输入 + 复制 | 同（`.dialog-*`、`.invite-link-row`） |
 
 ## 4. 断点
 
@@ -66,7 +69,7 @@
 | <1250 | 首页双列间距收紧；进度浮层 340 → 308 |
 | <1050 | 侧栏 240 → 212；首页双列 → 单列；起始页留白 104 → 64；进度浮层改覆盖 |
 | 主区 < 921 | 报告槽改覆盖浮层（宽 `min(620px, 100%)`），竖线与对话栏开合键隐藏 |
-| <721 | 侧栏 → 64 图标条；起始页留白 → 48；栏头与输入器贴边 |
+| <721 | 侧栏 → 64 图标条；起始页留白 → 48；栏头与输入器贴边；账号区只留 28px 头像，菜单贴栏外右侧展开 |
 | <600 | 输入器工具行可换行 |
 
 ## 5. 暴露面收口（界面上不说什么）
@@ -112,10 +115,12 @@ python3 -m http.server 5300 --bind 127.0.0.1 &        # 在标准库 dist/ 里�
 scripts/run-local-web.sh --port 7861 &
 
 scripts/check-ui-tokens.py                                              # token 逐值
-node --test tests/web/*.test.mjs                                        # 用词与事件模型（无浏览器）
-node tests/browser/ui-parity.mjs   --base-url http://127.0.0.1:7861     # 30 角色逐值
-node tests/browser/ui-features.mjs --base-url http://127.0.0.1:7861     # 54 项交互自检
-node tests/browser/run-smoke.mjs   --base-url http://127.0.0.1:7861     # 真实 run 端到端
+node --test tests/web/*.test.mjs                                        # 用词、事件模型与会话生命周期（无浏览器）
+node tests/browser/ui-parity.mjs   --base-url http://127.0.0.1:7861     # 30 角色逐值（历史脚本，会写 docs/evidence）
+node tests/browser/ui-features.mjs --base-url http://127.0.0.1:7861     # 54 项交互自检（同上）
+node tests/browser/run-smoke.mjs   --base-url http://127.0.0.1:7861     # 真实 run 端到端（同上）
+# 账号模式：隔离 fixture（临时账号库 + fake 执行面）上的人工浏览器验收，
+# 详见 docs/engineering.md 的浏览器段；没有使用 npx 缓存猜版本的自动脚本。
 ```
 
 ⚠ 按 [工程约束](engineering.md#浏览器与-live-验收)：`ui-features` 与 `run-smoke` 会向目标服务**提交真实研究**
@@ -127,3 +132,7 @@ node tests/browser/run-smoke.mjs   --base-url http://127.0.0.1:7861     # 真实
   `ui-features` 断言 Tooltip 的圆角 / 字号 / 底色。
 - **滚动条**：不参与 `getComputedStyle` 比对；宽度 8px 与「滚动时才显色」照抄组件库口径（完整页面 Demo 的侧栏滚动条常显，未跟）。
 - **动效曲线**：时长与缓动取 token，未逐帧比对。
+- **未登录入口与账号区**：`auth-view` / `account-area` / 邀请对话框不在 `ui-parity` 的 30 个角色里
+  （参考页没有这两页）。它们是按上表逐值落地、在隔离 fixture 上人工用 ego-browser 量过几何
+  （输入 36px、主按钮 40px、近黑胶囊、头像 28px），`tests/web/*.test.mjs` 断言行为；
+  没有把它们写进自动逐值比对，也不声称已经过像素门禁。

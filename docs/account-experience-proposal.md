@@ -1,6 +1,19 @@
-# 多租户账号与前端入口（待批准的设计提案）
+# 多租户账号与前端入口（已批准的设计与实现状态）
 
-**状态：仅设计，未实现账号注册、登录或会话存储。** 当前 `PI_GLINK_TENANCY=multitenant` 只接受认证网关注入的签名身份断言；默认 `local` 模式没有账号。不能只加两张表单就声称有多租户认证，也不能让浏览器自行提交 `tenantId` 冒充身份。
+**状态：设计已批准并落地（GLINK-AUTH-01）。** `PI_GLINK_TENANCY=multitenant` 下身份入口显式二选一：
+`PI_GLINK_AUTH_MODE=gateway`（默认，仍只接受认证网关注入的签名断言）或
+`PI_GLINK_AUTH_MODE=accounts`（站内邀请注册 + 登录 + 服务端会话）。默认 `local` 模式没有账号，也不
+显示任何登录或组织界面。浏览器仍不能提交 `tenantId` 冒充身份：两种入口都只在服务端生成
+`TenantContext`。
+
+实现与证据：`host/pi_glink/accounts.py`（SQLite/WAL 的租户/用户/邀请/会话与限速）、
+`host/pi_glink/auth.py`（登录/注册/注销、cookie 与 CSRF）、`host/pi_glink/app.py`（`/api/me`、
+`/api/auth/*`、邀请接口、离线 `--create-invite`）、`web/modules/{auth,account}.mjs` 与
+`web/index.html`/`styles.css`（登录/邀请注册、28px 头像账号区、管理员邀请对话框）。
+回归：`tests/test_accounts.py`、`tests/test_accounts_api.py`、`tests/web/{auth-view,account-menu,
+workspace-session,api-client}.test.mjs`；隔离 fixture（临时账号库 + fake 执行面）上的真实浏览器
+人工验收见 `docs/engineering.md` 的浏览器段。**仍未验证**：真实网关与密钥轮换、真实 HTTPS/TLS 代理、
+邮件交付、密码重置、租户停用运维入口、Docker/E2B live 与生产数据；合成矩阵不等于生产安全验收。
 
 ## 选择与范围
 
@@ -27,6 +40,6 @@
 
 ## 接口、兼容与验收
 
-建议新增 `GET /api/me`、`POST /api/auth/login|register|logout`、管理员发邀请接口；`GET /api/me` 只回当前用户、组织的展示字段与权限，不回签名密钥、模型凭据或其他用户。所有 run/list/detail/SSE/report/stop/follow-up 继续使用现有 owner 校验，不从新页面另造授权路径。默认 `local` 行为不变；`gateway` 模式现有断言也能提供 `/api/me` 用于身份展示，登录/注册入口应由网关提供或隐藏，不展示无后端的站内表单。
+已新增 `GET /api/me`、`POST /api/auth/login|register|logout`、`GET /api/invitations/check` 与管理员发邀请接口 `POST /api/admin/invitations`；`GET /api/me` 只回当前用户、组织的展示字段、角色与（accounts 模式）CSRF 令牌，不回签名密钥、模型凭据或其他用户。所有 run/list/detail/SSE/report/stop/follow-up 继续使用现有 owner 校验，不从新页面另造授权路径。默认 `local` 行为不变；`gateway` 模式现有断言也能提供 `/api/me` 用于身份展示，登录/注册入口应由网关提供或隐藏，不展示无后端的站内表单。
 
 隔离验收：两租户注册与登录、跨租户列表/详情/报告/SSE/取消/follow-up 拒绝；受邀邮箱与组织绑定、重复/过期/伪造邀请码、弱密码、登录限速、会话过期/停用/退出、CSRF、浏览器刷新与身份切换无历史串显；独立 fake pi/临时数据库/随机 loopback 端口下实际浏览器走完整流程。真实网关、邮件交付、Docker/E2B live、已有用户数据迁移与部署另验收。本提案获批前不修改真实配置、数据、服务或生产凭据。

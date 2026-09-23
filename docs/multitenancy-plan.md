@@ -10,7 +10,8 @@
 
 | 能力 | 现状 | 实现位置 |
 |---|---|---|
-| 租户身份 | 本机认证网关注入 `X-Pi-Glink-Identity` 短时效 HMAC-SHA256 断言；宿主验签（constant-time）、校验 audience/过期/寿命 | `host/pi_glink/tenancy.py`、`app.py` |
+| 租户身份（gateway） | 本机认证网关注入 `X-Pi-Glink-Identity` 短时效 HMAC-SHA256 断言；宿主验签（constant-time）、校验 audience/过期/寿命 | `host/pi_glink/tenancy.py`、`app.py` |
+| 租户身份（accounts） | 邀请注册 + 站内登录 + SQLite 会话（只存摘要），cookie `HttpOnly`/`SameSite`，CSRF 头，停用/注销/过期即时失效；`/api/me` 与账号界面 | `host/pi_glink/accounts.py`、`auth.py`、`app.py`、`web/modules/{auth,account}.mjs` |
 | 请求授权 | 多租户下除健康探测外所有 `/api/*` 验签；未认证 401、权限不足 403、未知/异租户/legacy 同形 404；SSE 在响应头之前验权并在断言过期时结束 | `app.py::HostRequestHandler` |
 | run 归属 | 受理时原子写 `tenant_id`/`creator_user_id`；`get_for`/`list_for` 按租户过滤；同租户 creator/admin 才能取消 | `store.py`、`kernel/runner.py` |
 | 并发准入 | 仅多租户 Docker/E2B 并发，默认全局 4 / 单租户 2，原子检查与预留，超额 429，无队列；资源台账全局 fail-closed | `kernel/runner.py::RunManager._check_admission` |
@@ -24,7 +25,10 @@
 
 ## 2. 身份与授权（已实现的关键决定）
 
-- **形式**：D1 选择 (a) —— 网关完成登录，宿主只信任注入断言；不实现内置登录、OIDC 或会话存储。
+- **形式**：D1 选择 (a) —— 网关完成登录，宿主只信任注入断言；D1 的扩展（用户批准
+  `docs/account-experience-proposal.md`）允许显式切换 `PI_GLINK_AUTH_MODE=accounts`，由宿主内的
+  邀请注册 + 登录 + 服务端会话承担同一职责。两者互斥、只在服务端生成 `TenantContext`，客户端自报
+  owner 在两种模式下都不被接受；账号登录失败不会回退到断言或本地模式。OIDC 仍不在范围内。
 - **断言**：`v1.<base64url(payload)>.<base64url(hmac)>`，payload 至少 `tenantId`、`userId`、`role`、
   `audience`、`iat`、`exp`，role ∈ {member, admin}；密钥只来自仓库外 0600 文件（≥32 字节），
   寿命上限默认 300 秒、容忍时钟偏移默认 30 秒（可配置）。`exp` 一到即拒绝（不存在宽限窗口），
@@ -45,9 +49,16 @@
 
 ### 3.1 单机事务存储（当前）
 
-本期明确**不**切 SQLite/Postgres/outbox，也不引入多宿主租约：继续使用 `meta.json` 原子替换、
-`events.jsonl` 追加与终帧提交协议；owner 过滤与原子准入都落在现有模块内部。旧记录保持原样，
-不写真实历史。
+本期明确**不**把 run/events 存储切到 SQLite/Postgres/outbox，也不引入多宿主租约：继续使用
+`meta.json` 原子替换、`events.jsonl` 追加与终帧提交协议；owner 过滤与原子准入都落在现有模块内部。
+旧记录保持原样，不写真实历史。
+
+`accounts` 身份入口另有一个**独立**的 SQLite 库（`<data_root>/accounts.db`，stdlib + WAL）：
+它只存租户/用户/邀请/会话，与 run 存储互不迁移、互不共享，也不改变上述 run 事务协议；停用账号
+不会改写或删除任何 run 记录。该库必须位于同一个 data_root 内（`realpath` 判定），并且只在宿主
+取得 `host.lock` **之后**才创建/迁移/打开：库文件与 WAL 侧车都是 data-root 写入，第二宿主必须
+在写任何字节之前就被拒绝；`--print-config` 不打开账号库。多宿主演进时，这个库与 run 存储一样需要
+单独的选型与迁移窗口。
 
 ### 3.2 多宿主演进（未实现）
 
@@ -89,15 +100,19 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
 
 - **迁移**：任何模式都不再允许绑定非 loopback：无认证公网模式被移除，历史的 `LOCAL_WEB_ALLOW_REMOTE`
   不再生效；远端访问必须经过本机认证网关注入身份（`PI_GLINK_TENANCY=multitenant`）。
-- **回退**：关闭 `PI_GLINK_TENANCY` 回到单用户模式；新旧记录都保留，不需要删除、迁移或改写；
-  多租户密钥文件也不再被读取。
-- **配置范例**：见 `.env.example`，全部使用虚构占位符。
+- **回退**：关闭 `PI_GLINK_TENANCY` 回到单用户模式，或把 `PI_GLINK_AUTH_MODE` 从 `accounts`
+  切回 `gateway`；新旧 run 记录都保留，账号库保留只读、不自动改写历史、不降低 owner 校验；
+  多租户密钥文件/账号库在切回后不再被读取。
+- **配置范例**：见 `.env.example`，全部使用虚构占位符（含 `accounts` 模式的开关、会话/限速参数与
+  离线签发首位管理员邀请的命令）。
 
 ## 8. 仍需裁决的问题
 
 - **D3 存储**：何时引入 SQLite/Postgres 与对象存储；是否允许历史导入写回。
 - **D4 凭据增强**：是否建设短期凭据代理/STS；轮换、吊销、额度与告警；是否支持 BYOK。
-- **D6 开通流程**：租户如何创建与停用；停用后的事件流、运行中 run 与产物处置口径。
+- **D6 开通流程**：首位管理员的离线签发与后续管理员邀请已经落地（`--create-invite` /
+  `POST /api/admin/invitations`）；**仍未裁决**：租户本身的创建/停用运维入口（当前停用通过账号库
+  状态位生效，没有 HTTP 管理接口）、停用后的事件流与运行中 run 处置口径、邮件交付与密码重置。
 - **D7 审计与合规**：审计事件保留期与导出格式；数据驻留与删除请求支持。
 - **多宿主**：租约、心跳、接管语义与共享存储选型（见 §3）。
 - **真实环境验收**：网关实现与密钥轮换演练、Docker/E2B live 资源上限与隔离强度。
@@ -121,5 +136,20 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
    `unknown_run`，不建立新 run、不创建会话目录、不改写父会话；legacy/未知父 run 同理；同租户
    追问保持 owner、私有会话副本与报告种子，旧轮分叉返回 `stale_run`。
 
-**未覆盖的真实环境验收**：真实网关注入与密钥轮换、Docker/E2B live 资源上限执行、N 租户 × M 并发
-负载、生产数据扫描与上线演练。合成矩阵通过不等于多租户已经安全上线。
+**账号模式（`PI_GLINK_AUTH_MODE=accounts`）另有合成矩阵**（`tests/test_accounts.py`、
+`tests/test_accounts_api.py`，以及隔离 fixture 上的手动真实浏览器验收）：
+
+1. **存储与会话**：口令用 scrypt 参数逐行记录、恒时校验；邀请码与会话令牌只存摘要、一次性、过期
+   拒绝、并发竞争只成功一次；邮箱全局唯一、角色/输入边界、停用用户/租户立即失效、空闲与绝对过期。
+2. **HTTP 边界**：未登录统一 401（带 mode）；未知账号与错误密码同形；按账号与按 socket peer
+   两层登录限速（peer 拒绝发生在 scrypt 之前，轮换邮箱不能放大 CPU）；限速 429；跨站 Origin/
+   Sec-Fetch-Site 与错误 Content-Type 拒绝；会话 POST 无 CSRF 头 403；`/api/me` 不回任何密钥。
+3. **跨租户与回退**：两租户登录后的列表/详情/报告/SSE/停止/追问矩阵与 legacy 不可见；accounts 模式
+   忽略断言头、gateway 模式忽略会话 cookie；登录失败不回退；缺本租户模型 key 仍拒绝准入。
+4. **实时失效**：注销/停用/绝对过期发生在 SSE 流动期间时，流在轮询间隔内结束，而 run 本身不被取消。
+5. **浏览器**：隔离 fixture（临时账号库 + fake 执行面）上人工用 ego-browser 走过登录/邀请注册/账号
+   菜单/运行与报告/跨租户 404/窄栏与注销，证据为用户临时目录中的截图（见 engineering.md 的浏览器段）。
+
+**未覆盖的真实环境验收**：真实网关注入与密钥轮换、真实 HTTPS/TLS 代理与外部 Origin、邮件交付、
+Docker/E2B live 资源上限执行、N 租户 × M 并发负载、生产数据扫描与上线演练。合成矩阵通过不等于
+多租户已经安全上线。

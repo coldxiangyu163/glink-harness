@@ -34,7 +34,12 @@ function makeClassList() {
   };
 }
 
-export function createDomStub({ width = 1280, height = 900 } = {}) {
+export function createDomStub({
+  width = 1280,
+  height = 900,
+  location: initialLocation = { pathname: '/', search: '', origin: 'http://127.0.0.1:43210' },
+  hidden = false,
+} = {}) {
   const byId = new Map();
   const observers = [];
   const documentListeners = new Map();
@@ -190,11 +195,42 @@ export function createDomStub({ width = 1280, height = 900 } = {}) {
 
   const body = makeElement('body');
   const documentElement = makeElement('html');
+  const location = {
+    pathname: initialLocation.pathname ?? '/',
+    search: initialLocation.search ?? '',
+    origin: initialLocation.origin ?? 'http://127.0.0.1:43210',
+    reloaded: false,
+    reload() {
+      location.reloaded = true;
+    },
+    assign() {},
+  };
+  const applyUrl = (url) => {
+    try {
+      const parsed = new URL(url, location.origin);
+      location.pathname = parsed.pathname;
+      location.search = parsed.search;
+    } catch {
+      /* the stub keeps the previous URL on unparseable input */
+    }
+  };
+  const history = {
+    state: null,
+    replaceState(state, _title, url) {
+      history.state = state;
+      if (typeof url === 'string' && url) applyUrl(url);
+    },
+    pushState(state, _title, url) {
+      history.state = state;
+      if (typeof url === 'string' && url) applyUrl(url);
+    },
+  };
   const document = {
     body,
     documentElement,
     title: '',
-    hidden: false,
+    hidden,
+    location,
     createElement: (tag) => makeElement(tag),
     createTextNode: (text) => ({ nodeType: 3, textContent: String(text) }),
     getElementById,
@@ -239,6 +275,8 @@ export function createDomStub({ width = 1280, height = 900 } = {}) {
   const globals = {
     document,
     window,
+    location,
+    history,
     navigator: { clipboard: { writeText: async () => {} } },
     localStorage: window.localStorage,
     performance: { now: () => Date.now() },
@@ -282,6 +320,8 @@ export function createDomStub({ width = 1280, height = 900 } = {}) {
     document,
     window,
     body,
+    location,
+    history,
     observers,
     raf,
     getElement(id) {

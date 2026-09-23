@@ -423,6 +423,10 @@ h1, h2, h3, h4, p { margin: 0; }
 
 /* ── 左侧导航 ── */
 .sidebar {
+  /* 侧栏是独立栏位：账号菜单在收起/窄栏态会伸到栏外，必须压在对话栏之上
+   * （composer dock 在对话栏里有自己的 z-index 5），否则菜单会被输入器遮住。 */
+  position: relative;
+  z-index: 6;
   display: flex;
   flex-direction: column;
   width: 240px;
@@ -1685,4 +1689,214 @@ details[open] > summary .pi-row-chevron { transform: rotate(180deg); }
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 未登录入口与账号区（GLINK-AUTH-01）
+ *
+ * 组件口径取自百鉴标准库：单行输入 36px / 全圆角 / 1px 近黑聚焦描边，
+ * 主操作是近黑胶囊按钮，字段错误写在字段旁（FieldError 用 destructive-text）。
+ * 页面材质与外壳一致：--background 上放 --card 单卡，宽度约 400px。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+.auth-view {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6) var(--space-4);
+  overflow: auto;
+  background: var(--background);
+}
+.auth-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  width: min(400px, 100%);
+  padding: var(--space-8) var(--space-6);
+  border: 1px solid var(--border);
+  border-radius: var(--corner-xl);
+  background: var(--card);
+  box-shadow: var(--elev-surface);
+}
+.auth-mark { width: 32px; height: 32px; }
+.auth-title { font-size: var(--text-h1); line-height: var(--text-h1--line-height); font-weight: 600; }
+.auth-notice {
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--corner-lg);
+  background: var(--muted);
+  color: var(--foreground);
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+}
+.auth-form { display: flex; flex-direction: column; gap: var(--space-4); }
+.auth-field { display: flex; flex-direction: column; gap: var(--space-2); }
+.auth-label { color: var(--foreground); font-size: var(--text-body); line-height: var(--text-body--line-height); font-weight: 500; }
+/* 单行输入：36px、全圆角、极淡描边；hover 与激活都是 1px 近黑（库 Input 同一取舍） */
+.auth-input {
+  width: 100%;
+  height: var(--control-height-sm);
+  padding: 0 var(--space-4);
+  border: 1px solid var(--input);
+  border-radius: var(--corner-full);
+  background: var(--card);
+  color: var(--foreground);
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+  transition: border-color var(--dur-2) var(--ease-soft), background-color var(--dur-2) var(--ease-soft);
+}
+.auth-input:hover { border-color: var(--foreground); }
+.auth-input:focus { border-color: var(--foreground); }
+.auth-input[readonly] { background: var(--muted); color: var(--muted-foreground); }
+.auth-input[readonly]:hover { border-color: var(--input); }
+.auth-input[aria-invalid="true"] { border-color: var(--destructive); }
+.auth-select { appearance: none; padding-right: var(--space-4); }
+.auth-readonly {
+  display: flex;
+  align-items: center;
+  height: var(--control-height-sm);
+  padding: 0 var(--space-4);
+  border-radius: var(--corner-full);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+}
+.auth-hint { color: var(--muted-foreground); font-size: var(--text-mini); line-height: var(--text-mini--line-height); }
+.auth-error { color: var(--destructive-text); font-size: var(--text-caption); line-height: var(--text-caption--line-height); }
+.auth-submit { width: 100%; }
+.auth-foot { color: var(--muted-foreground); font-size: var(--text-caption); line-height: var(--text-caption--line-height); }
+.auth-foot a { color: var(--primary-link); }
+.auth-foot a:hover { text-decoration: underline; }
+.auth-missing {
+  padding: var(--space-3);
+  border: 1px solid var(--warning-border);
+  border-radius: var(--corner-lg);
+  background: var(--warning-soft);
+  color: var(--warning-text);
+  font-size: var(--text-caption);
+  line-height: var(--text-caption--line-height);
+}
+
+/* ── 侧栏账号区：28px 首字母头像 + 真实组织/姓名（库 Demo 同一形态） ── */
+.account-area { position: relative; flex-shrink: 0; padding: var(--space-4); }
+.account-button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--corner-lg);
+  text-align: left;
+  transition: background-color var(--dur-1) var(--ease-soft);
+}
+.account-button:hover { background: var(--muted); }
+.account-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: var(--control-height-2xs);
+  height: var(--control-height-2xs);
+  border-radius: var(--corner-full);
+  background: var(--muted-foreground);
+  color: var(--primary-foreground);
+  font-size: var(--text-mini);
+  line-height: var(--text-mini--line-height);
+  font-weight: 500;
+}
+.account-lines { display: flex; flex-direction: column; min-width: 0; }
+.account-org {
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: var(--text-body);
+  line-height: var(--text-body--line-height);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-name {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: var(--text-mini);
+  line-height: var(--text-mini--line-height);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-menu {
+  position: absolute;
+  left: var(--space-4);
+  right: var(--space-4);
+  bottom: calc(100% - var(--space-2));
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-0_5);
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--corner-lg);
+  background: var(--popover);
+  box-shadow: var(--elev-floating);
+}
+.account-menu-info {
+  padding: var(--space-1) var(--space-3);
+  overflow-wrap: anywhere;
+  color: var(--muted-foreground);
+  font-size: var(--text-mini);
+  line-height: var(--text-mini--line-height);
+}
+.account-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border-radius: var(--corner-md);
+  color: var(--foreground);
+  font-size: var(--text-body);
+  line-height: var(--text-body--line-height);
+  text-align: left;
+  transition: background-color var(--dur-1) var(--ease-soft);
+}
+.account-menu-item:hover { background: var(--muted); }
+.account-menu-item:active { background: var(--hover-2); }
+
+/* 收起态/窄栏：只留 28px 头像，菜单贴到栏外右侧 */
+.shell[data-sidebar="collapsed"] .account-area { display: flex; justify-content: center; padding: var(--space-4) 0; }
+.shell[data-sidebar="collapsed"] .account-button { width: auto; padding: var(--space-2); }
+.shell[data-sidebar="collapsed"] .account-lines { display: none; }
+.shell[data-sidebar="collapsed"] .account-menu {
+  left: calc(100% + var(--space-2));
+  right: auto;
+  bottom: var(--space-2);
+  width: 220px;
+}
+
+/* ── 邀请成员对话框 ── */
+.dialog-layer { position: fixed; inset: 0; z-index: 150; display: grid; place-items: center; padding: var(--space-6) var(--space-4); }
+.dialog-scrim { position: absolute; inset: 0; background: var(--overlay-scrim); }
+.dialog-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: min(420px, 100%);
+  padding: var(--space-6);
+  border: 1px solid var(--border);
+  border-radius: var(--corner-xl);
+  background: var(--card);
+  box-shadow: var(--elev-overlay);
+}
+.dialog-title { font-size: var(--text-title-lg); line-height: var(--text-title-lg--line-height); font-weight: 600; }
+.dialog-note { color: var(--muted-foreground); font-size: var(--text-caption); line-height: var(--text-caption--line-height); }
+.dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
+.invite-link-row { display: flex; align-items: center; gap: var(--space-2); }
+
+@media (width < 721px) {
+  .account-area { display: flex; justify-content: center; padding: var(--space-4) 0; }
+  .account-button { width: auto; padding: var(--space-2); }
+  .account-lines { display: none; }
+  .account-menu { left: calc(100% + var(--space-2)); right: auto; bottom: var(--space-2); width: 220px; }
+  .auth-card { padding: var(--space-6) var(--space-4); }
 }

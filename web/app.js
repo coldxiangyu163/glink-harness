@@ -40,8 +40,17 @@ async function start() {
   if (starting) return;
   starting = true;
   try {
-    const { createWorkspace } = await import('./modules/workspace.mjs');
-    const workspace = createWorkspace();
+    const [{ createWorkspace }, { createAuthView }, { createApi }] = await Promise.all([
+      import('./modules/workspace.mjs'),
+      import('./modules/auth.mjs'),
+      import('./modules/api.mjs'),
+    ]);
+    const api = createApi();
+    const auth = createAuthView({ api });
+    const workspace = createWorkspace({ api, auth });
+    // A successful login hands the session back to the workspace, which reveals
+    // the shell only after `GET /api/me` has answered for that identity.
+    auth.onSession((me) => workspace.enterSession(me));
     await workspace.init();
     // Exposed for the browser regression (tests/browser/*.mjs) and for manual
     // inspection; nothing in production code reads it back.

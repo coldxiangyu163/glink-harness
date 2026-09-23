@@ -7,7 +7,7 @@
 
 ## 产品方向与当前实现
 
-产品的既定方向是多租户研究工作台：通过 Docker / E2B 为研究 run 提供独立执行环境，本地 `inproc` 保留为单 Agent 开发与调试入口。默认 `PI_GLINK_TENANCY=local` 仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用单宿主多租户实现（§10）：本机认证网关注入短时效签名身份、宿主验签，run 带租户归属，每租户使用自己的模型凭据，Docker/E2B 可并发。该实现目前只有**合成验证**（临时密钥文件、自签断言、fake 执行面、临时数据根）；真实网关、Docker/E2B live 与生产数据验收未覆盖，不能由单 run smoke 替代。
+产品的既定方向是多租户研究工作台：通过 Docker / E2B 为研究 run 提供独立执行环境，本地 `inproc` 保留为单 Agent 开发与调试入口。默认 `PI_GLINK_TENANCY=local` 仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用单宿主多租户实现（§10）：身份入口二选一——本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`PI_GLINK_AUTH_MODE=accounts`，§10.6）；两者都只在服务端生成 `TenantContext`，run 带租户归属，每租户使用自己的模型凭据，Docker/E2B 可并发。该实现目前只有**合成验证**（临时密钥/账号库、自签断言、fake 执行面、临时数据根）；真实网关、真实 HTTPS 终止、邮件交付、Docker/E2B live 与生产数据验收未覆盖，不能由单 run smoke 替代。
 
 多租户实现已覆盖服务端可信身份、run/事件/报告/取消的归属过滤、每 run 凭据交付与脱敏边界、显式并发准入与全局 fail-closed 资源台账；仍未覆盖多宿主租约、共享存储、真实网关与云环境的资源上限执行。单独容器/沙箱提供执行隔离，但不自动解决宿主 API 授权、存储隔离或凭据访问，也不构成本仓库对容器/沙箱实际隔离强度的保证。
 
@@ -377,10 +377,16 @@ LOCAL_WEB_EXECUTOR=e2b scripts/run-local-web.sh        # 云沙箱执行面
 
 ## 10. 单宿主多租户（已实现，合成验证）
 
-默认 `PI_GLINK_TENANCY=local`；宿主任一模式都只绑定 loopback（见 §10.5 的行为迁移），开启
-`multitenant` 后部署在本机认证网关之后，由网关注入身份断言，宿主不实现登录、OIDC 或用户体系。
+默认 `PI_GLINK_TENANCY=local`；宿主任一模式都只绑定 loopback（见 §10.5 的行为迁移）。开启
+`multitenant` 后身份入口由 `PI_GLINK_AUTH_MODE` 选择：`gateway`（默认）部署在本机认证网关之后，
+由网关注入身份断言；`accounts`（§10.6）在宿主内完成邀请注册、登录与服务端会话。`local` 模式没有
+身份入口，行为完全不变。
 
 ### 10.1 身份与请求授权
+
+两种身份入口（gateway / accounts）都只从服务端事实推导 `TenantContext`，下游的
+owner 校验、配额、凭据与脱敏边界完全共用；客户端在任一模式下都不能用请求体、查询参数或自造
+请求头指定租户。
 
 - 断言：`X-Pi-Glink-Identity: v1.<base64url(payload)>.<base64url(hmac-sha256)>`，payload 至少含
   `tenantId`、`userId`、`role`、`audience`、`iat`、`exp`；宿主用仓库外 0600 密钥文件做 constant-time
@@ -440,3 +446,42 @@ Docker 面的每个容器实例额外带 `--cpus` / `--memory` / `--pids-limit`�
   多租户密钥文件也不再被读取。
 - **未覆盖**：真实网关注入、密钥轮换与撤销；真实 Docker/E2B live 资源上限、沙箱模板的实际隔离强度；
   多宿主租约与共享存储；BYOK、短期凭据代理、计费与上线运维。合成矩阵通过不等于多租户已经安全上线。
+
+### 10.6 站内账号身份入口（`PI_GLINK_AUTH_MODE=accounts`）
+
+与网关模式并存但互斥：多租户部署显式选择 `gateway`（默认，语义不变）或 `accounts`。账号模式在
+宿主内完成邀请注册与登录，仍只监听 loopback（生产由 TLS 终止代理提供 HTTPS），并且**只在服务端**
+生成 `TenantContext`：
+
+- **存储**：`<data_root>/accounts.db`（SQLite，stdlib；WAL、`BEGIN IMMEDIATE` 事务、单连接加锁），
+  表只有 `tenants` / `users` / `invitations` / `sessions`。账号数据与 run/events 文件存储分离，互不
+  迁移、互不共享；历史 run 不因账号模式而改变归属。邮箱全局唯一（canonical 唯一索引），一个用户
+  只属于一个租户，角色为 `member` / `admin`。文件必须在仓库外，并且**必须位于本 data_root 之内**
+  （`realpath` 判定，符号链接不能指向共享库）：单宿主独占性是 `data_root` 上的锁，库在别处会让两个
+  各自持有不同锁的宿主写同一份账号数据。
+- **初始化顺序**：账号库的创建、建表迁移与 WAL 切换都是 data-root 写入，因此
+  `create_server` 与 `--create-invite` 一律**先取得 `host.lock`，再打开账号库，最后才绑定端口**；
+  第二宿主在打开库之前就被 `DataRootBusy` 拒绝，`accounts.db` 及其 `-wal`/`-shm` 字节不会被改写。
+  `--print-config` 只做材料校验，不打开、不创建账号库。
+- **口令与会话**：口令用 `hashlib.scrypt`（随机盐、逐行记录 `n/r/p/dklen`、`hmac.compare_digest`
+  校验）；未知账号与错误密码执行同量的散列工作并返回同一个 401。登录成功后签发高熵会话令牌，
+  数据库只存摘要；浏览器只持 `HttpOnly` + `SameSite=Lax`（HTTPS 下 `Secure`）cookie。会话同时有绝对
+  有效期与空闲有效期，登录/注册/邀请校验都有固定窗口限速。登录有两层限速：**先**按 socket peer
+  （`client_address`，绝不读 `X-Forwarded-For`）计一个全局预算，**再**按规范化邮箱计账号预算；前者
+  保证轮换邮箱也不能无限触发口令散列（拒绝发生在 `scrypt` 之前）。经 TLS 反代时所有用户共享代理
+  这一个 peer，该预算实际是全部署的登录上限（默认 120 次/60 秒，可配置）——这是为了保护单机 CPU
+  的可用性取舍，不表示能识别真实用户来源。
+- **失效**：每个受权请求都从服务端记录重新解析用户与租户状态，停用用户/租户、注销、过期立即生效。
+  SSE 在重放与实时两个阶段都按轮询检查会话（撤销/停用/空闲/绝对过期），失效即干净结束该流，
+  但不会取消正在运行的 run：取消仍按原归属规则单独受理。
+- **邀请**：邀请码只存摘要、短期一次性、绑定租户+邮箱+角色；注册只创建账号，不创建租户、不授予
+  模型凭据，也不静默下发会话（注册成功后回到登录）。首位管理员由操作员在宿主停止时以
+  `python -m pi_glink.app --create-invite …` 离线签发（要求该租户已有模型凭据）；后续管理员通过
+  `POST /api/admin/invitations` 只给本租户签发，邀请码原文只在成功响应里出现一次。
+- **请求防护**：状态变更 POST 要求 `application/json`、同源 `Origin`/`Referer`/`Sec-Fetch-Site`；
+  已登录会话还必须携带与 cookie 绑定的 `X-Pi-Glink-CSRF`（`GET /api/me` 下发，只存在页面内存）。
+  `gateway` 模式忽略会话 cookie，`accounts` 模式忽略断言头，登录失败不会回退到 gateway/local；
+  缺本租户模型 key 仍拒绝启动 run（§10.3）。
+- **未验证**：真实 HTTPS/TLS 代理与外部 Origin、邮件交付、密码重置、账号/租户停用运维入口、生产
+  数据迁移与多宿主。合成矩阵（临时账号库、随机 loopback 端口、fake 执行面、真实浏览器手动验收）
+  不等于账号模式已通过生产安全验收。

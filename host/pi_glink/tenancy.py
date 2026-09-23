@@ -45,10 +45,11 @@ import os
 import re
 import stat
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
+from .accounts import AccountsStore
 from .config import ConfigError, HostConfig
 
 logger = logging.getLogger("pi_glink.tenancy")
@@ -80,7 +81,12 @@ class TenantNotConfigured(TenantForbidden):
 
 @dataclass(frozen=True, slots=True)
 class TenantContext:
-    """The request's identity, derived only from a verified gateway assertion."""
+    """The request's identity, derived only from a verified identity source.
+
+    Gateway mode derives it from a signed assertion; accounts mode derives it
+    from a server-side session record. Both modes only ever carry server-side
+    facts: a client cannot label itself in either one.
+    """
 
     tenant_id: str
     user_id: str
@@ -88,6 +94,15 @@ class TenantContext:
     audience: str
     expires_at: float
     request_id: str | None = None
+    #: ``gateway`` or ``accounts`` — which entry point authenticated the request.
+    auth_mode: str = "gateway"
+    #: Accounts mode: the session digest this context came from (never the token).
+    session_digest: str | None = None
+    #: Accounts mode: the session's CSRF double-submit token (never logged).
+    csrf_token: str | None = field(default=None, repr=False, compare=False)
+    #: Accounts mode: a cheap liveness probe (revocation, disable, idle timeout)
+    #: evaluated between SSE polls. It must not write and must be bounded.
+    validator: "Callable[[], bool] | None" = field(default=None, repr=False, compare=False)
 
     @property
     def is_admin(self) -> bool:
@@ -95,6 +110,14 @@ class TenantContext:
 
     def expired(self, now: float | None = None) -> bool:
         return (time.time() if now is None else now) >= self.expires_at
+
+    def stale(self, now: float | None = None) -> bool:
+        """True when this identity may no longer act (expiry or server-side invalidation)."""
+        if self.expired(now):
+            return True
+        if self.validator is not None:
+            return not self.validator()
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,17 +413,36 @@ class TenantCredentialStore:
 
 @dataclass(frozen=True, slots=True)
 class Tenancy:
-    """Everything the multi-tenant mode freezes at startup."""
+    """Everything the multi-tenant mode freezes at startup.
 
-    authenticator: GatewayAuthenticator
+    ``mode`` names the identity entry: ``gateway`` carries the assertion
+    authenticator, ``accounts`` carries the SQLite account store. Tenant run
+    credentials are needed by both.
+    """
+
     credentials: TenantCredentialStore
+    authenticator: GatewayAuthenticator | None = None
+    mode: str = "gateway"
+    accounts: "AccountsStore | None" = None
 
     def require_run_credentials(self, tenant_id: str) -> TenantCredentials:
         return self.credentials.require(tenant_id)
 
+    def close(self) -> None:
+        if self.accounts is not None:
+            self.accounts.close()
 
-def build_tenancy(config: HostConfig) -> Tenancy | None:
-    """Load the multi-tenant trust material, or return ``None`` in local mode.
+
+def load_identity_material(config: HostConfig) -> Tenancy | None:
+    """Load and validate the identity trust material **without** opening the
+    account database.
+
+    Reading the credential/secret files has no data-root side effect, so this is
+    safe to call for validation alone (``--print-config``). The accounts SQLite
+    store is opened by :func:`build_tenancy`, which must only run while this
+    process owns ``config.data_root``: creating the file, running the schema
+    migration and switching on WAL are data-root writes (see
+    :func:`pi_glink.app.create_server`).
 
     Raises :class:`ConfigError` when the mode is enabled but any required file
     is missing, unreadable, over-permissive or inside the repository. The
@@ -409,10 +451,17 @@ def build_tenancy(config: HostConfig) -> Tenancy | None:
     """
     if not config.multi_tenant:
         return None
-    if config.gateway_secret_file is None:
-        raise ConfigError("PI_GLINK_GATEWAY_SECRET_FILE 在 PI_GLINK_TENANCY=multitenant 时必须配置")
     if config.tenant_config_file is None:
         raise ConfigError("PI_GLINK_TENANT_CONFIG_FILE 在 PI_GLINK_TENANCY=multitenant 时必须配置")
+    credentials = TenantCredentialStore.from_file(
+        config.tenant_config_file, repo_root=config.repo_root
+    )
+    if config.auth_mode == "accounts":
+        if config.accounts_db is None:
+            raise ConfigError("PI_GLINK_AUTH_MODE=accounts 需要 PI_GLINK_ACCOUNTS_DB")
+        return Tenancy(credentials=credentials, mode="accounts")
+    if config.gateway_secret_file is None:
+        raise ConfigError("PI_GLINK_GATEWAY_SECRET_FILE 在 PI_GLINK_TENANCY=multitenant 时必须配置")
     authenticator = GatewayAuthenticator.from_secret_file(
         config.gateway_secret_file,
         repo_root=config.repo_root,
@@ -420,13 +469,36 @@ def build_tenancy(config: HostConfig) -> Tenancy | None:
         max_lifetime_seconds=config.assertion_max_lifetime_seconds,
         clock_skew_seconds=config.assertion_clock_skew_seconds,
     )
-    credentials = TenantCredentialStore.from_file(
-        config.tenant_config_file, repo_root=config.repo_root
-    )
     logger.info(
         "多租户模式已启用：audience=%s，已配置租户=%d", config.tenancy_audience, len(credentials.tenant_ids())
     )
-    return Tenancy(authenticator=authenticator, credentials=credentials)
+    return Tenancy(
+        credentials=credentials, authenticator=authenticator, mode="gateway"
+    )
+
+
+def build_tenancy(config: HostConfig) -> Tenancy | None:
+    """Resolve the identity material, opening the account database when needed.
+
+    **Ownership prerequisite**: in ``accounts`` mode this creates
+    ``accounts.db`` (and its WAL sidecars) and runs the schema migration. That
+    is a data-root write, so callers must hold the exclusive
+    :class:`~pi_glink.ownership.DataRootOwnership` for ``config.data_root``
+    first — otherwise a second host on the same data root would modify the
+    account database before its ownership check could refuse it.
+    """
+    tenancy = load_identity_material(config)
+    if tenancy is None or tenancy.mode != "accounts":
+        return tenancy
+    if config.accounts_db is None:  # defensive: load_identity_material checked it
+        raise ConfigError("PI_GLINK_AUTH_MODE=accounts 需要 PI_GLINK_ACCOUNTS_DB")
+    store = AccountsStore(config.accounts_db)
+    logger.info(
+        "账号模式已启用：账号库=%s，已配置租户=%d",
+        config.accounts_db,
+        len(tenancy.credentials.tenant_ids()),
+    )
+    return replace(tenancy, accounts=store)
 
 
 def read_restricted_file(

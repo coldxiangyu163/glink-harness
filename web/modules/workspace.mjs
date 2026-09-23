@@ -17,7 +17,8 @@
  *     each column collapsible from its own outer edge (S-04).
  */
 
-import { createApi } from './api.mjs';
+import { createApi, ApiError, setCsrfToken } from './api.mjs';
+import { createAccountArea } from './account.mjs';
 import { createNavGuard } from './nav-guard.mjs';
 import { applyEvent, createRunModel, createRunSubscription, TERMINAL_EVENT_TYPES } from './run-stream.mjs';
 import { createRunView } from './run-view.mjs';
@@ -49,7 +50,7 @@ const NAV_META = { running: '进行中', failed: '未完成' };
 
 const TOAST_ICONS = { success: 'check-circle', info: 'check-circle', warning: 'alert-circle', error: 'alert-circle' };
 
-export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) {
+export function createWorkspace({ api = createApi(), eventSourceFactory, auth = null } = {}) {
   const el = (id) => document.getElementById(id);
 
   const shell = el('app-shell');
@@ -109,6 +110,10 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
   let reconnectTimer = null;
   let progressFrame = null;
   let disposed = false;
+  /** The identity behind the workbench (null before login / after expiry). */
+  let identity = null;
+  /** True once the workbench shell has been revealed for a session. */
+  let entered = false;
   /* A navigation may finish after a newer one started (or after dispose); the
    * token decides whether its response still owns the screen. */
   const nav = createNavGuard();
@@ -117,6 +122,14 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
 
   const progress = createProgressPanel({ root: el('progress-panel'), onOpenReport: (runId) => openReport(runId) });
   const tooltips = installTooltips({ isRail: () => shell.dataset.sidebar === 'collapsed' || rail.matches });
+  /* The account area owns the sidebar identity menu and the admin invitation
+   * dialog; its logout button calls back into this module because only here can
+   * the session be revoked and the screen cleared. */
+  const account = createAccountArea({
+    api,
+    onLogout: () => logout(),
+    onNotice: (message, level) => showToast(message, level),
+  });
 
   /* Bottom anchoring (标准库用 use-stick-to-bottom 做同一件事)：the conversation
    * follows new frames only while the reader is already at the tail. */
@@ -372,9 +385,14 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     try {
       const [health, config] = await Promise.all([api.health(), api.config()]);
       modelName = config?.model ?? '';
+      // ``config`` is the authenticated view: in multi-tenant mode it answers
+      // for this caller's own tenant credential. The unauthenticated health
+      // probe only knows the host-level key, so using it here would tell a
+      // tenant with a configured key that no model is configured.
       if (!health?.pi?.available) message = '研究引擎暂时不可用，暂时无法发起研究。请联系管理员。';
-      else if (!health?.configured?.model) message = '模型服务还没有配置，暂时无法发起研究。请联系管理员完成配置。';
-    } catch {
+      else if (!config?.configured?.model) message = '模型服务还没有配置，暂时无法发起研究。请联系管理员完成配置。';
+    } catch (error) {
+      if (handleSessionFailure(error)) return;
       message = '服务暂时连不上。请确认服务在运行，然后刷新页面。';
     }
     serviceAlertText.textContent = message;
@@ -519,7 +537,8 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       const { runs } = await api.listRuns();
       renderRunList(runs);
       return runs;
-    } catch {
+    } catch (error) {
+      if (handleSessionFailure(error)) return [];
       showToast('研究记录暂时读取失败，请稍后刷新。', 'error');
       return [];
     }
@@ -542,6 +561,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       await openRun(run.runId);
       await refreshRuns();
     } catch (error) {
+      if (handleSessionFailure(error)) return;
       const refusal = error?.code === 'run_busy' || error?.code === 'resources_unreleased';
       showToast(startErrorMessage(error), refusal ? 'warning' : 'error');
     } finally {
@@ -564,7 +584,8 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     let run;
     try {
       ({ run } = await api.getRun(runId));
-    } catch {
+    } catch (error) {
+      if (handleSessionFailure(error)) return;
       if (disposed || !nav.isCurrent(token)) return; // stale failure: stay quiet
       showToast('这项研究暂时打不开，请稍后重试。', 'error');
       return;
@@ -580,7 +601,8 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
         if (disposed || !nav.isCurrent(token)) return;
         ancestors.unshift(ancestor);
         parentId = ancestor.parentRunId;
-      } catch {
+      } catch (error) {
+        if (handleSessionFailure(error)) return;
         if (disposed || !nav.isCurrent(token)) return;
         showToast('之前的对话暂时无法加载，请稍后刷新。', 'warning');
         break;
@@ -677,6 +699,10 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     } else if (status === 'failed') {
       current?.subscription?.close();
       setConnection('unavailable');
+      // In accounts mode a stream that dies can mean the server ended it because
+      // the session was revoked, disabled or expired; verify before trusting the
+      // screen with the old identity's data.
+      if (identity?.mode === 'accounts') verifySession();
     }
   }
 
@@ -731,6 +757,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       await api.stopRun(runId);
       if (current?.runId === runId) showToast('正在停止，已完成的内容会保留。', 'info');
     } catch (error) {
+      if (handleSessionFailure(error)) return;
       // The host decides a stop at the run's commit point: past it, the run's
       // committed outcome stands and arrives on the stream as its terminal frame.
       if (current?.runId === runId) {
@@ -785,7 +812,8 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
       previewArticle.innerHTML = renderMarkdown(text);
       previewBody.scrollTop = 0;
       setSlot('report');
-    } catch {
+    } catch (error) {
+      if (handleSessionFailure(error)) return;
       showToast('报告暂时打不开，请稍后重试。', 'error');
     }
   }
@@ -899,9 +927,167 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     disposers.push(() => observer.disconnect());
   } else window.addEventListener('resize', syncSlotMode);
 
+  // -- session lifecycle -----------------------------------------------------
+
+  /** Handle a 401 from any API call: the session is over, clear the screen. */
+  function handleSessionFailure(error) {
+    if (!(error instanceof ApiError) || error.status !== 401) return false;
+    if (identity || entered) sessionExpired('登录状态已过期，请重新登录。');
+    else showAuthFace(error.payload?.mode);
+    return true;
+  }
+
+  /** Show the right unauthenticated face for the identity mode the host uses. */
+  function showAuthFace(mode, { notice = '', invite = '' } = {}) {
+    if (!auth) return;
+    if (mode === 'gateway') {
+      auth.show({ mode: 'gateway', notice });
+      return;
+    }
+    if (mode === 'accounts') {
+      const wantsRegister =
+        typeof location !== 'undefined' && String(location.pathname || '').startsWith('/register');
+      auth.show({
+        mode: wantsRegister ? 'register' : 'login',
+        invite: invite || inviteFromUrl(),
+        notice,
+      });
+      return;
+    }
+    auth.show({ mode: 'login', notice });
+  }
+
+  function inviteFromUrl() {
+    try {
+      if (typeof location === 'undefined' || !location.search) return '';
+      return new URLSearchParams(location.search).get('invite') || '';
+    } catch {
+      return '';
+    }
+  }
+
+  /** Ask the server who we are before revealing anything about the workbench. */
+  async function refreshSession() {
+    let me;
+    try {
+      me = await api.me();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        showAuthFace(error.payload?.mode);
+      } else if (auth) {
+        auth.show({ mode: 'unavailable', notice: '服务暂时连不上，无法确认登录状态。请稍后重试。' });
+      }
+      return;
+    }
+    await enterSession(me);
+  }
+
+  /** Reveal the workbench for an authenticated (or local) identity. */
+  async function enterSession(me) {
+    if (disposed) return;
+    identity = me ?? null;
+    setCsrfToken(me?.csrfToken ?? null);
+    account.setIdentity(identity);
+    if (auth) auth.hide();
+    setSkipTarget(false);
+    if (
+      typeof history !== 'undefined' &&
+      typeof history.replaceState === 'function' &&
+      typeof location !== 'undefined' &&
+      location.pathname !== '/'
+    ) {
+      history.replaceState({}, '', '/');
+    }
+    await refreshService();
+    await refreshRuns();
+    showView('home');
+    shell.hidden = false;
+    entered = true;
+    updatePromptCount();
+  }
+
+  /** Drop the identity and everything derived from it, then show login again. */
+  function sessionExpired(notice) {
+    closeCurrent();
+    latestRuns = [];
+    renderRunList([]);
+    setSlot(null);
+    earlierTurns.replaceChildren();
+    previewArticle.replaceChildren();
+    account.setIdentity(null);
+    setCsrfToken(null);
+    identity = null;
+    entered = false;
+    shell.hidden = true;
+    setSkipTarget(true);
+    if (typeof history !== 'undefined' && typeof history.replaceState === 'function') {
+      history.replaceState({}, '', '/login');
+    }
+    if (auth) {
+      auth.show({
+        mode: 'login',
+        notice: notice ?? '登录状态已过期，请重新登录。',
+      });
+    }
+  }
+
+  /** Re-check the session (visibility change, dead SSE stream). */
+  async function verifySession() {
+    if (!identity || disposed) return;
+    try {
+      const me = await api.me();
+      if (disposed) return;
+      setCsrfToken(me?.csrfToken ?? null);
+      identity = me;
+      account.setIdentity(me);
+    } catch (error) {
+      if (!disposed && error instanceof ApiError && error.status === 401) {
+        sessionExpired('登录状态已过期，请重新登录。');
+      }
+    }
+  }
+
+  /** Revoke the server session, then clear the screen. Never hides UI only. */
+  async function logout() {
+    if (!identity) return;
+    try {
+      await api.logout();
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 401)) {
+        // A refused or unreachable logout must not pretend the session ended.
+        showToast(
+          error instanceof ApiError && error.status === 403
+            ? '退出请求被拒绝，请刷新页面后重试。'
+            : '退出没有成功，请稍后重试。',
+          'error'
+        );
+        return;
+      }
+    }
+    sessionExpired('已退出登录。');
+  }
+
+  function setSkipTarget(toAuth) {
+    const skip = el('skip-link');
+    if (skip && typeof skip.setAttribute === 'function') {
+      skip.setAttribute('href', toAuth ? '#auth-view' : '#main-content');
+    }
+  }
+
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('visibilitychange', () => {
+      if (disposed || !entered || identity?.mode !== 'accounts') return;
+      if (document.hidden === true) return;
+      verifySession();
+    });
+  }
+
   return {
     async init() {
       if (!shell) throw new Error('workbench shell is missing from the document');
+      // Hide the shell before the identity probe, whatever the markup said: the
+      // previous identity's runs must never flash while /api/me is in flight.
+      shell.hidden = true;
       input.setAttribute('data-focus-ring-managed', '');
       let collapsed = false;
       try {
@@ -910,12 +1096,11 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
         /* private mode — fall back to expanded */
       }
       setSidebar(collapsed, { persist: false });
-      await refreshService();
-      await refreshRuns();
-      showView('home');
-      shell.hidden = false;
-      updatePromptCount();
+      await refreshSession();
     },
+    enterSession,
+    sessionExpired,
+    logout,
     startRun,
     stopRun,
     openRun,
@@ -929,6 +1114,9 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
     },
     get runs() {
       return latestRuns;
+    },
+    get identity() {
+      return identity;
     },
     dispose() {
       disposed = true;
@@ -946,6 +1134,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory } = {}) 
         }
       }
       tooltips.dispose();
+      account.dispose?.();
     },
   };
 }

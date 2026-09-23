@@ -22,11 +22,14 @@ import sys
 import threading
 from dataclasses import replace
 from http import HTTPStatus
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from .accounts import AccountsError, AccountsStore
 from .artifacts import ArtifactError, ArtifactTree
+from .auth import CSRF_HEADER, SESSION_COOKIE, AccountsAuth, AuthError
 from .config import ConfigError, HostConfig, load_config
 from .events import EventBus, IDLE_POLL
 from .kernel.runner import (
@@ -49,6 +52,7 @@ from .tenancy import (
     TenantContext,
     TenantNotConfigured,
     build_tenancy,
+    load_identity_material,
 )
 
 logger = logging.getLogger("pi_glink.host")
@@ -59,6 +63,12 @@ _RUN_REPORT_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/report$
 _RUN_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})$")
 _MAX_REQUEST_BYTES = 64 * 1024
 _HEARTBEAT_SECONDS = 15.0
+#: Login/register/logout and admin invitations: the accounts-mode POST surface.
+#: Every one of them enforces the same origin, Content-Type and (where a session
+#: exists) CSRF rules as the run endpoints.
+_AUTH_POST_PATHS = frozenset(
+    {"/api/auth/login", "/api/auth/register", "/api/auth/logout", "/api/admin/invitations"}
+)
 
 
 class PiGlinkServer(ThreadingHTTPServer):
@@ -85,6 +95,7 @@ class PiGlinkServer(ThreadingHTTPServer):
         *,
         ownership: DataRootOwnership | None = None,
         tenancy: Tenancy | None = None,
+        auth: AccountsAuth | None = None,
     ) -> None:
         self.config = config
         self.bus = bus
@@ -94,6 +105,11 @@ class PiGlinkServer(ThreadingHTTPServer):
         self.ownership = ownership
         #: Frozen multi-tenant trust material; ``None`` in local mode.
         self.tenancy = tenancy
+        #: Identity backend for accounts mode; ``None`` in gateway and local mode.
+        self.auth = auth
+        #: The account store, when accounts mode is active (tests and operator
+        #: tooling read it through the server that owns it).
+        self.accounts: AccountsStore | None = auth.store if auth is not None else None
         self.stopping = threading.Event()
         super().__init__((config.host, config.port), HostRequestHandler)
 
@@ -101,6 +117,8 @@ class PiGlinkServer(ThreadingHTTPServer):
         try:
             super().server_close()
         finally:
+            if self.tenancy is not None:
+                self.tenancy.close()
             if self.ownership is not None:
                 self.ownership.release()
 
@@ -122,16 +140,27 @@ class HostRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - http.server contract
         parts = urlsplit(self.path)
         path = unquote(parts.path)
+        # A handler that never reads the request body (stop, logout) would leave
+        # those bytes in the socket; with HTTP/1.1 keep-alive the next request on
+        # the same connection then starts with the leftover body — the server
+        # parses it as a malformed request line and answers 501. The finally
+        # block below drains whatever a handler did not consume.
+        self._body_consumed = False
         try:
-            # Multi-tenant POSTs carry the gateway-injected identity, and a
-            # browser can be made to send one cross-site; refuse requests whose
-            # own origin metadata says they came from another site.
+            # Multi-tenant POSTs carry a server-derived identity (an injected
+            # assertion or a session cookie), and a browser can be made to send
+            # one cross-site; refuse requests whose own origin metadata says
+            # they came from another site. This runs before any credential is
+            # checked — including login and registration.
             if self.server.tenancy is not None and not self._request_origin_allowed():
                 self._send_json(
                     HTTPStatus.FORBIDDEN,
                     {"error": "forbidden", "message": "cross-site request refused"},
                     head_only=False,
                 )
+                return
+            if path in _AUTH_POST_PATHS:
+                self._handle_auth_post(path)
                 return
             if path == "/api/runs":
                 self._start_run()
@@ -152,6 +181,31 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             self._send_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal_error"}, head_only=False
             )
+        finally:
+            if not getattr(self, "_body_consumed", True):
+                self._drain_body()
+
+    def _drain_body(self) -> None:
+        """Read and discard an unconsumed request body.
+
+        Keeps an HTTP/1.1 keep-alive connection in sync when a route ignores the
+        body (``stop``, ``logout``). The read is bounded by the declared length
+        and by :data:`_MAX_REQUEST_BYTES`; an oversized body closes the
+        connection instead of being drained.
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            length = 0
+        if length > _MAX_REQUEST_BYTES:
+            self.close_connection = True
+            return
+        remaining = max(0, length)
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
 
     def _dispatch(self, *, head_only: bool) -> None:
         parts = urlsplit(self.path)
@@ -175,15 +229,25 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         # The health probe stays reachable without an identity (a gateway or
         # process supervisor may poll it), but in multi-tenant mode it never
         # reports another tenant's active run. Every other /api route requires a
-        # verified assertion before it reads or reveals anything.
+        # verified identity before it reads or reveals anything.
         if path == "/api/health":
             self._send_json(HTTPStatus.OK, self._health_payload(), head_only=head_only)
+            return
+        # ``/api/me`` answers for every mode: local mode reports the single-user
+        # surface, gateway and accounts modes report the authenticated identity
+        # (and answer 401 with the mode when there is none). The browser needs
+        # this before it can decide whether to show a login form at all.
+        if path == "/api/me":
+            self._handle_me(head_only=head_only)
+            return
+        if path == "/api/invitations/check":
+            self._check_invitation(query, head_only=head_only)
             return
         context = self._authenticate()
         if self.server.tenancy is not None and context is None:
             self._send_json(
                 HTTPStatus.UNAUTHORIZED,
-                {"error": "unauthenticated"},
+                self._unauthenticated_payload(),
                 head_only=head_only,
             )
             return
@@ -226,14 +290,19 @@ class HostRequestHandler(BaseHTTPRequestHandler):
     # -- identity -------------------------------------------------------------
 
     def _authenticate(self) -> TenantContext | None:
-        """Verify the gateway assertion, or ``None`` in the local mode.
+        """Resolve the request's server-side identity, or ``None``.
 
-        The assertion is read from exactly one header value; duplicate headers
-        are refused instead of choosing one. Nothing from the body, the query
-        string or any other header can label the request.
+        Accounts mode reads exactly one ``pi_glink_session`` cookie and checks
+        it against the account store; the gateway assertion header is ignored
+        entirely. Gateway mode is the opposite: the signed header is the only
+        source and cookies are ignored. There is no fallback between the two,
+        and local mode has no identity at all.
         """
+        auth = self.server.auth
+        if auth is not None:
+            return auth.authenticate(self._session_token())
         tenancy = self.server.tenancy
-        if tenancy is None:
+        if tenancy is None or tenancy.authenticator is None:
             return None
         try:
             return tenancy.authenticator.authenticate(self.headers.get_all(ASSERTION_HEADER))
@@ -247,20 +316,250 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             logger.warning("assertion verification failed: %s", type(exc).__name__)
             return None
 
+    def _session_token(self) -> str | None:
+        """The single session cookie value, or ``None`` when absent/malformed."""
+        raw = self.headers.get("Cookie")
+        if not raw:
+            return None
+        try:
+            jar = SimpleCookie()
+            jar.load(raw)
+        except CookieError:
+            return None
+        morsel = jar.get(SESSION_COOKIE)
+        if morsel is None:
+            return None
+        value = morsel.value
+        return value if isinstance(value, str) and value else None
+
+    def _unauthenticated_payload(self) -> dict[str, Any]:
+        """The uniform 401 body.
+
+        Accounts mode always names its mode so the browser knows to show the
+        in-app login form. Gateway mode keeps the historical body for every
+        route but ``/api/me`` (whose caller needs to know a gateway is in front
+        of the host instead of a login page).
+        """
+        payload: dict[str, Any] = {"error": "unauthenticated"}
+        if self.server.auth is not None:
+            payload["mode"] = self.server.config.identity_mode
+        return payload
+
+    def _require_csrf(self, context: TenantContext | None) -> bool:
+        """Enforce the session-bound CSRF token for accounts-mode mutations."""
+        auth = self.server.auth
+        if auth is None or context is None:
+            return True
+        if auth.csrf_ok(context, self.headers.get(CSRF_HEADER)):
+            return True
+        self._send_json(HTTPStatus.FORBIDDEN, {"error": "csrf_invalid"}, head_only=False)
+        return False
+
+    def _client_ip(self) -> str:
+        """The socket peer address.
+
+        Deliberately not ``X-Forwarded-For``: a TLS-terminating proxy makes
+        every request look like loopback, and a client-supplied header must
+        never label a request (it would hand an attacker a free rate-limit
+        bypass). Limits behind a proxy therefore act as a global throttle, and
+        the per-account login limit is the primary protection.
+        """
+        return str(self.client_address[0]) if self.client_address else "unknown"
+
+    # -- accounts endpoints ---------------------------------------------------
+
+    def _handle_auth_post(self, path: str) -> None:
+        auth = self.server.auth
+        if auth is None:
+            # Gateway and local modes have no in-app login: the gateway owns
+            # them, and the workbench must not grow a form with no backend.
+            self._send_json(
+                HTTPStatus.NOT_FOUND, {"error": "unknown_endpoint", "path": path}, head_only=False
+            )
+            return
+        if not self._expects_json():
+            self._send_json(
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                {"error": "unsupported_media_type", "message": "Content-Type 必须是 application/json"},
+                head_only=False,
+            )
+            return
+        if path == "/api/auth/login":
+            self._login()
+            return
+        if path == "/api/auth/register":
+            self._register()
+            return
+        if path == "/api/auth/logout":
+            self._logout()
+            return
+        if path == "/api/admin/invitations":
+            self._create_invitation()
+            return
+        self._send_json(
+            HTTPStatus.NOT_FOUND, {"error": "unknown_endpoint", "path": path}, head_only=False
+        )
+
+    def _expects_json(self) -> bool:
+        raw = self.headers.get("Content-Type", "")
+        return raw.split(";", 1)[0].strip().lower() == "application/json"
+
+    def _login(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            result = self.server.auth.login(
+                body.get("email"),
+                body.get("password"),
+                client_ip=self._client_ip(),
+                user_agent=self.headers.get("User-Agent", ""),
+            )
+        except AuthError as exc:
+            self._send_auth_error(exc)
+            return
+        self._send_json(
+            HTTPStatus.OK,
+            result.identity,
+            head_only=False,
+            extra_headers={"Set-Cookie": self.server.auth.cookie_header(result.token)},
+        )
+
+    def _register(self) -> None:
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            payload = self.server.auth.register(
+                token=body.get("invite"),
+                email=body.get("email"),
+                name=body.get("name"),
+                password=body.get("password"),
+                client_ip=self._client_ip(),
+            )
+        except AuthError as exc:
+            self._send_auth_error(exc)
+            return
+        # Registration deliberately does not issue a session: the contract is
+        # "register, then log in", never a silently granted identity.
+        self._send_json(HTTPStatus.CREATED, payload, head_only=False)
+
+    def _logout(self) -> None:
+        context = self._authenticate()
+        if context is not None and not self._require_csrf(context):
+            return
+        self.server.auth.logout(self._session_token())
+        self._send_json(
+            HTTPStatus.OK,
+            {"ok": True},
+            head_only=False,
+            extra_headers={"Set-Cookie": self.server.auth.clear_cookie_header()},
+        )
+
+    def _create_invitation(self) -> None:
+        context = self._authenticate()
+        if context is None:
+            self._send_json(HTTPStatus.UNAUTHORIZED, self._unauthenticated_payload(), head_only=False)
+            return
+        if not self._require_csrf(context):
+            return
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            payload = self.server.auth.create_invitation(
+                context, email=body.get("email"), role=body.get("role")
+            )
+        except AuthError as exc:
+            self._send_auth_error(exc)
+            return
+        self._send_json(HTTPStatus.CREATED, payload, head_only=False)
+
+    def _handle_me(self, *, head_only: bool) -> None:
+        context = self._authenticate()
+        mode = self.server.config.identity_mode
+        if mode == "local":
+            self._send_json(
+                HTTPStatus.OK, {"mode": "local", "authenticated": False}, head_only=head_only
+            )
+            return
+        if context is None:
+            payload = self._unauthenticated_payload()
+            payload["mode"] = mode
+            self._send_json(HTTPStatus.UNAUTHORIZED, payload, head_only=head_only)
+            return
+        if self.server.auth is not None:
+            try:
+                payload = self.server.auth.me_payload(context)
+            except AuthError as exc:
+                self._send_auth_error(exc)
+                return
+            self._send_json(HTTPStatus.OK, payload, head_only=head_only)
+            return
+        # Gateway mode: the assertion carries ids and a role; there is no
+        # display name to invent, so the organisation shows as its tenant id.
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "mode": "gateway",
+                "authenticated": True,
+                "user": {"id": context.user_id, "name": context.user_id, "role": context.role},
+                "tenant": {"id": context.tenant_id, "name": context.tenant_id},
+                "csrfToken": None,
+                "roles": ["member", "admin"] if context.is_admin else ["member"],
+            },
+            head_only=head_only,
+        )
+
+    def _check_invitation(self, query: str, *, head_only: bool) -> None:
+        auth = self.server.auth
+        if auth is None:
+            self._send_json(
+                HTTPStatus.NOT_FOUND,
+                {"error": "unknown_endpoint", "path": "/api/invitations/check"},
+                head_only=head_only,
+            )
+            return
+        token = (parse_qs(query).get("token") or [""])[0]
+        try:
+            payload = auth.check_invitation(token, client_ip=self._client_ip())
+        except AuthError as exc:
+            self._send_auth_error(exc)
+            return
+        self._send_json(HTTPStatus.OK, payload, head_only=head_only)
+
+    def _send_auth_error(self, error: AuthError) -> None:
+        payload: dict[str, Any] = {"error": error.code}
+        if error.message:
+            payload["message"] = error.message
+        headers = {}
+        if error.code == "rate_limited" and error.retry_after > 0:
+            headers["Retry-After"] = str(int(error.retry_after) + 1)
+        self._send_json(
+            HTTPStatus(error.status), payload, head_only=False, extra_headers=headers
+        )
+
     def _request_origin_allowed(self) -> bool:
         """Refuse a browser request whose own metadata says it is cross-site.
 
         A non-browser client (the gateway, curl, a smoke script) sends none of
         these headers, and cannot be tricked by a website into carrying the
         gateway's identity header. Any header that is present must agree that
-        the request came from this origin.
+        the request came from this origin — either the host the request was
+        addressed to, or the frozen ``PI_GLINK_PUBLIC_ORIGIN`` when a TLS
+        terminating proxy presents a different external origin. Client-supplied
+        ``X-Forwarded-*`` headers are never consulted.
         """
         host = self.headers.get("Host", "")
+        expected = [host] if host else []
+        public = self.server.config.public_origin
+        if public:
+            expected.append(public)
         origin = self.headers.get("Origin")
-        if origin is not None and not _same_origin(origin, host):
+        if origin is not None and not any(_same_origin(origin, candidate) for candidate in expected):
             return False
         referer = self.headers.get("Referer")
-        if referer is not None and not _same_origin(referer, host):
+        if referer is not None and not any(_same_origin(referer, candidate) for candidate in expected):
             return False
         site = self.headers.get("Sec-Fetch-Site")
         if site is not None and site not in {"same-origin", "none"}:
@@ -316,8 +615,10 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         context = self._authenticate()
         if self.server.tenancy is not None and context is None:
             self._send_json(
-                HTTPStatus.UNAUTHORIZED, {"error": "unauthenticated"}, head_only=False
+                HTTPStatus.UNAUTHORIZED, self._unauthenticated_payload(), head_only=False
             )
+            return
+        if not self._require_csrf(context):
             return
         body = self._read_json_body()
         if body is None:
@@ -410,8 +711,10 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         context = self._authenticate()
         if self.server.tenancy is not None and context is None:
             self._send_json(
-                HTTPStatus.UNAUTHORIZED, {"error": "unauthenticated"}, head_only=False
+                HTTPStatus.UNAUTHORIZED, self._unauthenticated_payload(), head_only=False
             )
+            return
+        if not self._require_csrf(context):
             return
         decision = self.server.manager.stop(run_id, context)
         if decision.accepted:
@@ -548,11 +851,18 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _read_json_body(self) -> dict[str, Any] | None:
+        # Mark the body as handled: this method either consumes it or closes the
+        # connection, and ``do_POST`` must not drain it a second time.
+        self._body_consumed = True
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = 0
         if length <= 0 or length > _MAX_REQUEST_BYTES:
+            if length > _MAX_REQUEST_BYTES:
+                # Never reuse a connection whose unread body we are not willing
+                # to drain; the client must reconnect cleanly.
+                self.close_connection = True
             self._send_json(
                 HTTPStatus.BAD_REQUEST,
                 {"error": "invalid_request", "message": "missing or oversized body"},
@@ -581,13 +891,20 @@ class HostRequestHandler(BaseHTTPRequestHandler):
     # -- responses ------------------------------------------------------------
 
     def _send_json(
-        self, status: HTTPStatus, payload: dict[str, Any], *, head_only: bool
+        self,
+        status: HTTPStatus,
+        payload: dict[str, Any],
+        *,
+        head_only: bool,
+        extra_headers: Mapping[str, str] | None = None,
     ) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         if not head_only:
             self.wfile.write(body)
@@ -774,26 +1091,32 @@ def _run_view(
 
 
 def _assertion_expired(context: TenantContext | None) -> bool:
-    """True when a verified identity has passed its expiration.
+    """True when a verified identity may no longer act.
 
-    Local mode (``context is None``) carries no assertion, so nothing expires.
+    Covers both a gateway assertion past its ``exp`` and an accounts session
+    that was revoked, disabled, or idle/absolute-expired. Local mode
+    (``context is None``) carries no identity, so nothing expires.
     """
-    return context is not None and context.expired()
+    return context is not None and context.stale()
 
 
-def _same_origin(url: str, host: str) -> bool:
-    """True when a browser-supplied Origin/Referer names this exact host.
+def _same_origin(url: str, expected: str) -> bool:
+    """True when a browser-supplied Origin/Referer names this exact place.
 
-    Parsed with :func:`urlsplit`; anything unparseable, a non-HTTP scheme or a
-    mismatched netloc is refused. ``null`` origins (sandboxed iframes, file://)
-    are refused as well.
+    ``expected`` is either the ``Host`` header (``host[:port]``) or the frozen
+    public origin (``scheme://host[:port]``). Parsed with :func:`urlsplit`;
+    anything unparseable, a non-HTTP scheme or a mismatched netloc is refused.
+    ``null`` origins (sandboxed iframes, file://) are refused as well.
     """
-    if not host:
+    if not expected:
         return False
     parts = urlsplit(url)
     if parts.scheme not in {"http", "https"}:
         return False
-    return parts.netloc.lower() == host.lower()
+    if "://" in expected:
+        wanted = urlsplit(expected)
+        return parts.netloc.lower() == wanted.netloc.lower() and parts.scheme == wanted.scheme
+    return parts.netloc.lower() == expected.lower()
 
 
 def _resume_offset(last_event_id: str | None, query: str) -> int:
@@ -817,17 +1140,32 @@ def create_server(
 
     ``client_factory`` exists for tests: production always talks to the real
     ``pi`` binary through :class:`~pi_glink.kernel.rpc.PiRpcClient`.
+
+    Ordering is part of the safety contract:
+
+    1. the data-root lock is acquired **first**, before any read or write under
+       the data root — including account-database creation and migration;
+    2. identity material is loaded (a missing or over-permissive key file
+       refuses to start instead of falling back to the unauthenticated local
+       surface);
+    3. the run store is reconciled and the port is bound last.
     """
-    # Multi-tenant material is loaded before anything is bound or written: a
-    # missing or over-permissive key file refuses to start instead of falling
-    # back to the unauthenticated local surface.
-    tenancy = build_tenancy(config)
     # Ownership comes first: only a process that holds the data root may
-    # conclude that a ``running`` record has no live owner. A second host on
-    # the same data root (same or another port) stops here, before touching
-    # any record.
+    # conclude that a ``running`` record has no live owner, or create/rewrite
+    # the account database. A second host on the same data root (same or
+    # another port) stops here, before touching any record.
     ownership = DataRootOwnership.acquire(config.data_root)
+    tenancy: Tenancy | None = None
     try:
+        # Accounts mode opens/creates/migrates the SQLite database here, under
+        # the lock; gateway mode only reads files.
+        tenancy = build_tenancy(config)
+        if config.accounts_enabled and (tenancy is None or tenancy.accounts is None):
+            # Defensive: never serve accounts mode without its store.
+            raise ConfigError("PI_GLINK_AUTH_MODE=accounts 账号库初始化失败")
+        # Accounts mode gets its session backend here; gateway and local mode
+        # have no in-app login at all.
+        auth = AccountsAuth(config, tenancy.accounts) if config.accounts_enabled else None
         bus = EventBus()
         store = RunStore(config.data_root / "runs")
         manager = RunManager(
@@ -850,8 +1188,11 @@ def create_server(
             WebAssets(config.web_root),
             ownership=ownership,
             tenancy=tenancy,
+            auth=auth,
         )
     except BaseException:
+        if tenancy is not None:
+            tenancy.close()
         ownership.release()
         raise
 
@@ -879,9 +1220,39 @@ def main(argv: list[str] | None = None) -> int:
         help="记录人工裁决：已核对该 run 的执行资源已释放（需宿主未运行，须配合 --note）",
     )
     parser.add_argument("--note", help="人工裁决的核对说明")
+    # -- operator onboarding (accounts mode) ---------------------------------
+    parser.add_argument(
+        "--create-invite",
+        action="store_true",
+        help="为已配置凭据的租户签发一份一次性管理员/成员邀请（需宿主未运行）",
+    )
+    parser.add_argument("--tenant", help="--create-invite：租户 id（必须已有模型凭据）")
+    parser.add_argument("--tenant-name", help="--create-invite：组织显示名（默认沿用已有名称）")
+    parser.add_argument("--email", help="--create-invite：受邀邮箱")
+    parser.add_argument("--name", help="--create-invite：受邀人姓名（仅用于提示）")
+    parser.add_argument(
+        "--role",
+        choices=("admin", "member"),
+        default="admin",
+        help="--create-invite：受邀角色（默认 admin）",
+    )
+    parser.add_argument(
+        "--invite-ttl-seconds",
+        type=int,
+        default=None,
+        help="--create-invite：邀请有效期秒数（默认使用配置值）",
+    )
     args = parser.parse_args(argv)
     if args.mark_released and not (args.note or "").strip():
         parser.error("--mark-released 需要 --note 说明如何核对了资源释放")
+    if args.create_invite:
+        missing = [
+            name
+            for name in ("tenant", "email")
+            if not (getattr(args, name) or "").strip()
+        ]
+        if missing:
+            parser.error("--create-invite 需要 " + "、".join(f"--{name}" for name in missing))
 
     try:
         config = load_config()
@@ -901,7 +1272,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.print_config:
         try:
-            build_tenancy(config)
+            # Validation only: never open the account database here. Creating or
+            # migrating it is a data-root write that requires the host lock.
+            load_identity_material(config)
         except ConfigError as exc:
             print(f"配置错误 / configuration error: {exc}", file=sys.stderr)
             return 2
@@ -909,6 +1282,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.unreleased or args.mark_released:
         return _resource_command(config, args.mark_released, args.note)
+    if args.create_invite:
+        return _create_invite_command(config, args)
 
     try:
         server = create_server(config)
@@ -947,6 +1322,78 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     return 0
+
+
+def _create_invite_command(config: HostConfig, args: argparse.Namespace) -> int:
+    """Operator onboarding: mint one invitation for a credentialed tenant.
+
+    Runs offline with the same exclusive data-root ownership as the host (so it
+    cannot race a live host) and never creates a tenant credential, never
+    contacts the network, and never sends mail. The invitation code is printed
+    exactly once so the operator can deliver it through a channel they trust.
+    """
+    if not config.accounts_enabled:
+        print(
+            "配置错误 / configuration error: 需要 PI_GLINK_TENANCY=multitenant 且 "
+            "PI_GLINK_AUTH_MODE=accounts 才能创建站内邀请",
+            file=sys.stderr,
+        )
+        return 2
+    # The data root comes first for the same reason as the host: opening the
+    # account database creates/migrates it, which must never race a live host.
+    try:
+        ownership = DataRootOwnership.acquire(config.data_root)
+    except DataRootBusy as exc:
+        print(f"{exc}；请先停止宿主再创建邀请", file=sys.stderr)
+        return 2
+    tenancy: Tenancy | None = None
+    try:
+        try:
+            tenancy = build_tenancy(config)
+        except ConfigError as exc:
+            print(f"配置错误 / configuration error: {exc}", file=sys.stderr)
+            return 2
+        if tenancy is None or tenancy.accounts is None:
+            print("配置错误 / configuration error: 账号库不可用", file=sys.stderr)
+            return 2
+        tenant = (args.tenant or "").strip()
+        try:
+            credentials = tenancy.credentials.require(tenant)
+        except TenantNotConfigured as exc:
+            print(f"拒绝创建邀请: {exc}", file=sys.stderr)
+            return 2
+        assert credentials is not None
+        existing = tenancy.accounts.get_tenant(tenant)
+        display = (args.tenant_name or "").strip() or (existing.name if existing else tenant)
+        tenancy.accounts.upsert_tenant(tenant, display)
+        ttl = args.invite_ttl_seconds or config.invite_ttl_seconds
+        try:
+            record, code = tenancy.accounts.create_invitation(
+                tenant_id=tenant,
+                email=args.email,
+                role=args.role,
+                created_by="operator-cli",
+                ttl_seconds=ttl,
+            )
+        except AccountsError as exc:
+            print(f"拒绝创建邀请: {exc.message}", file=sys.stderr)
+            return 2
+        register_path = f"/register?invite={code}"
+        print("邀请已创建（仅本次显示，请通过安全渠道传递；不要在普通日志或工单里留存）：")
+        print(f"  组织: {display} ({record.tenant_id})")
+        print(f"  邮箱: {record.email}")
+        print(f"  角色: {record.role}")
+        print(f"  有效期至: {record.expires_at:.0f}（约 {ttl // 3600} 小时）")
+        if args.name:
+            print(f"  受邀人: {args.name}")
+        print(f"  注册入口: {register_path}")
+        if config.public_origin:
+            print(f"  完整链接: {config.public_origin}{register_path}")
+        return 0
+    finally:
+        if tenancy is not None:
+            tenancy.close()
+        ownership.release()
 
 
 def _resource_command(config: HostConfig, run_id: str | None, note: str | None) -> int:

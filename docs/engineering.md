@@ -61,9 +61,11 @@ bash scripts/check.sh
 | 宿主所有权 | `python -m pytest tests/test_ownership.py` | 同端口/不同端口/跨进程的第二宿主在对账前被拒绝，活跃 owner 的记录字节不变；无所有权的对账被拒绝；`flock` 只证明单机本地文件系统 |
 | 事件提交与重放 | `python -m pytest tests/test_event_replay.py` | 先落盘再发布、写盘失败不产生幻影帧、超环容量重放、活跃→结束接续、`Last-Event-ID`、重启对账与慢消费者断开；终帧发布瞬间详情/列表/报告已可读；在终帧已写入、`fsync` 未返回处阻塞时 HTTP 与 Store 均看不到终态，`fsync` 成功后单调可见、失败后从未可见（含重启对账与半行修复）；落定副本写失败、终帧写失败、报告副本写失败及重启后各读面一致 |
 | 三面执行接口 | `python -m pytest tests/test_kernel_execution.py tests/test_kernel_docker_env.py tests/test_kernel_e2b_env.py` | 适配器协议调用顺序、三面事件与终态一致、LF 分帧共享语料、配置上传清单、shell 输入安全；Docker 资源上限/降权参数与 E2B 生命周期上限只在命令契约层验证；mock SDK/进程行为不是真实隔离或云端质量证明 |
-| 多租户身份、归属与并发 | `python -m pytest tests/test_tenancy.py tests/test_multitenant_api.py` | 合成密钥文件（可含非法权限/仓库内路径）、自签断言（伪造/过期/超长寿命/错误 audience/重复头/类型畸形 payload）、跨租户列表/详情/SSE/报告/取消矩阵、legacy 不可见、每租户凭据渲染与每 run 脱敏边界、全局/租户配额与九请求竞争、资源未释放挡准入、断言过期终止 SSE（重放+实时）、CSRF 来源拒绝、追问父 run 的租户门禁（异租户/未知/legacy 不读取不复制，同租户正例与 stale 相邻输入）；不包含真实网关注入、Docker/E2B live 或多宿主 |
+| 多租户身份、归属与并发（gateway） | `python -m pytest tests/test_tenancy.py tests/test_multitenant_api.py` | 合成密钥文件（可含非法权限/仓库内路径）、自签断言（伪造/过期/超长寿命/错误 audience/重复头/类型畸形 payload）、跨租户列表/详情/SSE/报告/取消矩阵、legacy 不可见、每租户凭据渲染与每 run 脱敏边界、全局/租户配额与九请求竞争、资源未释放挡准入、断言过期终止 SSE（重放+实时）、CSRF 来源拒绝、追问父 run 的租户门禁（异租户/未知/legacy 不读取不复制，同租户正例与 stale 相邻输入）、POST 忽略请求体后的 keep-alive 边界；不包含真实网关注入、Docker/E2B live 或多宿主 |
+| 账号库所有权与放置 | `python -m pytest tests/test_accounts_ownership.py` | 同进程与**跨进程**第二宿主在同一 data_root 被 `DataRootBusy` 拒绝，`accounts.db` 及 `-wal`/`-shm` 字节逐文件哈希不变；首次合法初始化仍可建库/建表/写账号；绑定端口失败时账号连接被关闭且锁被释放（下一次启动可写）；`--print-config` 不创建也不改写账号库（含已有库字节不变）；自定义 `PI_GLINK_ACCOUNTS_DB` 必须位于 data_root 内，越界路径与符号链接逃逸被拒；不包含真实并发宿主压力测试 |
+| 站内账号（`accounts`）存储与 HTTP 边界 | `python -m pytest tests/test_accounts.py tests/test_accounts_api.py` | 临时账号库：scrypt 逐行参数与恒时校验、未知账号与错误密码同量工作、邀请码/会话令牌只存摘要、一次性与并发竞争、过期、邮箱全局唯一、角色/输入边界、空闲/绝对过期、注销与停用即时失效、限速窗口；HTTP：统一 401（带 mode）、同形登录失败、429（含同 peer 轮换邮箱的登录预算：限额后不再执行 scrypt、窗口后恢复）、跨站与 Content-Type 拒绝、会话 POST 的 CSRF、`/api/me` 无密钥、accounts 忽略断言头 / gateway 忽略 cookie、两租户列表/详情/报告/SSE/停止/追问矩阵、legacy 不可见、缺模型 key 仍拒绝、注销/停用/过期在 SSE 流动中结束该流、离线 `--create-invite`（只打印一次、未配置租户/宿主运行中/gateway 模式拒绝）；不包含真实 HTTPS 代理、邮件交付或生产数据 |
 | 存储与 HTTP | `python -m pytest tests/test_store.py tests/test_host_app.py tests/test_runs_api.py` | 真实临时 HTTP/文件路径，拒绝与错误状态；历史格式变化需单独兼容决定 |
-| 前端状态与呈现逻辑 | `node --test tests/web/*.test.mjs` | 累计快照、权威终帧、取消/失败、重复帧、缺口；导航竞态/dispose（stub DOM）；工具参数数组跨层语料；不证明 DOM 布局 |
+| 前端状态与呈现逻辑 | `node --test tests/web/*.test.mjs` | 累计快照、权威终帧、取消/失败、重复帧、缺口；导航竞态/dispose（stub DOM）；工具参数数组跨层语料；登录/邀请注册/恢复面、账号菜单与邀请对话框、会话生命周期（`/api/me` 前不揭示外壳、401 清屏回登录、退出只在服务端废止后生效）、HTTP 客户端请求形状（JSON/CSRF/same-origin）；不证明 DOM 布局 |
 | UI 布局与交互 | Node 回归及 [UI 对齐文档](ui-alignment.md)的对应浏览器步骤 | 现有浏览器脚本有下述副作用，默认检查不自动执行 |
 | 文档 | 对照实现检查命令、链接、作用域与验收口径 | 纯文档修改不默认跑真实研究或三面 smoke |
 
@@ -71,9 +73,21 @@ bash scripts/check.sh
 
 ### 浏览器与 live 验收
 
-当前 `tests/browser/run-smoke.mjs` 和 `ui-features.mjs` 会向目标服务提交真实研究、读取其历史，并写入 `docs/evidence/`；`ui-parity.mjs` 依赖目标服务和外部标准库参考页，也会刷新证据。它们不是无副作用的默认测试，运行前须明确服务归属、模型/云端授权和证据覆盖范围。不得借用固定端口上的未知服务或停止不属于本任务的 run。
+当前 `tests/browser/run-smoke.mjs`、`ui-features.mjs` 和 `ui-parity.mjs` 仍是**历史脚本**：它们会向目标服务提交真实研究、读取历史或扫描个人 npx 缓存，并写入 `docs/evidence/`。它们不在默认检查内，运行前须明确服务归属、模型/云端授权和证据覆盖范围。不得借用固定端口上的未知服务或停止不属于本任务的 run。
 
-后续浏览器自动门禁应复用 `tests/fixtures/fake_pi.py` 和 `create_server(..., client_factory=...)`：只替换外部 pi，保留真实 Runner、存储、投影、HTTP/SSE 和生产前端；服务绑定 OS 分配的 loopback 端口，报告与历史由本次合成生成，结束时等待自己的子进程退出。浏览器开发依赖需锁定，不能从个人 npx 缓存猜版本。这套隔离浏览器入口目前尚未实现，不声明为默认检查覆盖。
+**隔离浏览器入口（账号模式，人工验收）**：`tests/fixtures/accounts_server.py` 启动一个真实宿主
+（真实 Runner/存储/事件总线/HTTP/SSE/生产前端）在 OS 分配的 loopback 端口上，使用临时 data root 与
+临时 SQLite 账号库，只把执行面替换为进程内 fake adapter（`pi_glink.kernel.runner.build_adapter`，
+与 Python 回归同一机制）；它只读合成凭据、不发邮件、不接触真实 `.env`/`~/.pi`/既有服务，退出时由
+调用者按**记录的 PID** 终止（不要用宽匹配 `pkill`）。它不接入 `scripts/check.sh`，也不声明为自动
+门禁。2026-09-23 的账号浏览器验收用 ego-browser（用户已登录的 Chromium，不启动第二个浏览器、不
+读取个人 npx 缓存）在该 fixture 上人工执行，覆盖：登录/邀请注册/账号菜单与邀请对话框/运行与报告/
+跨租户 404/窄栏账号区/注销后无历史闪现；截图与状态保存在会话临时目录，未写入 `docs/evidence/`。
+
+**仍待实现（需先取得锁定依赖的决定）**：可自动重复、可进默认检查的真实浏览器门禁。它必须使用
+project-local、lockfile 锁定的浏览器依赖（不得扫描 `~/.npm/_npx` 或猜版本），并复用上面的隔离
+fixture；在取得该决定与依赖之前，账号 UI 的浏览器层只有人工验收 + Node DOM 回归，不能把它写成
+自动化已覆盖。
 
 真实 pi / Docker / E2B 验收单独记录版本、执行面、目标服务与资源范围。模板构建、切换及云端付费调用不因一次本地测试授权自动获准。多租户上线还需要架构中列出的跨租户拒绝与隔离证据，不能由单 run smoke 替代；合成矩阵（临时密钥、自签断言、fake 执行面）只证明宿主侧授权、归属、凭据与准入逻辑，不证明真实网关、镜像/模板隔离强度或云沙箱资源限制。
 

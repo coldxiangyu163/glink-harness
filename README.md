@@ -1,6 +1,6 @@
 # pi-glink
 
-以 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 为执行内核的研究工作台：本机 / Docker / E2B 三种执行面共享同一套 run 生命周期。默认 `local` 模式仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用**单宿主多租户**—— 本机认证网关注入短时效签名身份、宿主验签，Docker/E2B 可并发（默认全局 4 / 单租户 2），每租户只使用自己的模型凭据。多租户目前只经过**合成验证**（临时密钥文件、自签断言、fake 执行面、临时数据根），没有真实网关、Docker/E2B live 或生产数据验收，不能把“合成矩阵通过”当作多租户已经安全上线。方向、当前实现与尚未覆盖的边界见 [架构](docs/architecture.md) 与 [多租户方案](docs/multitenancy-plan.md)；前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按 pi 的原生事件语义重写。
+以 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 为执行内核的研究工作台：本机 / Docker / E2B 三种执行面共享同一套 run 生命周期。默认 `local` 模式仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用**单宿主多租户**—— 身份入口二选一：本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`PI_GLINK_AUTH_MODE=accounts`）；两者都只在可信服务端生成租户上下文，Docker/E2B 可并发（默认全局 4 / 单租户 2），每租户只使用自己的模型凭据。多租户目前只经过**合成验证**（临时密钥文件、自签断言、fake 执行面、临时数据根），没有真实网关、Docker/E2B live 或生产数据验收，不能把“合成矩阵通过”当作多租户已经安全上线。方向、当前实现与尚未覆盖的边界见 [架构](docs/architecture.md) 与 [多租户方案](docs/multitenancy-plan.md)；前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按 pi 的原生事件语义重写。
 
 **当前状态：本机 / Docker / E2B 三种执行面均已跑通真实 run**，验收记录见 [docs/acceptance.md](docs/acceptance.md)，证据在 `docs/evidence/`。除前端静态资源源自 Glink 工作台外，本仓库不引用 FrontierAgent 的任何运行模块。
 
@@ -126,12 +126,22 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | GET | `/api/runs/{id}/events` | 事件流（SSE，支持 `Last-Event-ID` 重放；重放事实源是持久事件日志） |
 | POST | `/api/runs/{id}/stop` | 请求取消：受理 `200 {"requested": true}`（终态必为 `cancelled`）；已结束 `409 run_not_cancellable`（带已提交 `status`）；未知 `404` |
 | GET | `/api/runs/{id}/report` | 下载 `report.md`（宿主产物副本；旧版本的 `workspaces/<id>/report.md` 只读下载） |
+| GET | `/api/me` | 当前身份：local 报 `{"mode":"local","authenticated":false}`；gateway/accounts 回展示字段与角色（accounts 另回 `csrfToken`），未认证 `401` 且带 `mode` |
+| POST | `/api/auth/login` | accounts 模式登录：邮箱+密码，成功设置 `HttpOnly` 会话 cookie 并回身份 |
+| POST | `/api/auth/register` | accounts 模式邀请注册：只接受绑定到邀请的邮箱，创建账号后回到登录（不静默授予会话） |
+| POST | `/api/auth/logout` | accounts 模式注销：服务端废止会话并清 cookie |
+| GET | `/api/invitations/check?token=…` | 校验邀请可用性（限速；无效与已用同形返回 `{"valid":false}`） |
+| POST | `/api/admin/invitations` | 管理员为**本租户**签发一次性邀请（需要 CSRF；响应只在这一次返回邀请码原文） |
 
 本机（`local`）执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
 
-多租户模式（`PI_GLINK_TENANCY=multitenant`）下所有 `/api/*`（健康的存活性探测除外）都要求网关身份断言：未认证 `401`，权限不足 `403`，未知/异租户/legacy 记录统一 `404`，超过并发上限 `429 quota_exceeded`。下一节说明完整语义。
+多租户模式（`PI_GLINK_TENANCY=multitenant`）下所有 `/api/*`（健康的存活性探测除外）都要求可信身份——网关断言或站内会话：未认证 `401`，权限不足 `403`，未知/异租户/legacy 记录统一 `404`，超过并发上限 `429 quota_exceeded`。下一节说明完整语义。
 
 ## 多租户（单宿主，`PI_GLINK_TENANCY=multitenant`）
+
+身份入口由 `PI_GLINK_AUTH_MODE` 显式选择，默认 `gateway` 保持原语义；`accounts` 增加站内邀请注册、登录与服务端会话。两种模式都只在服务端生成 `TenantContext`，run/list/详情/报告/SSE/取消/追问走同一套 owner 与配额校验；`local` 完全保持旧行为，不显示任何登录或组织界面。
+
+### 身份入口 A：网关断言（默认，`PI_GLINK_AUTH_MODE=gateway`）
 
 本模式只支持一个宿主进程部署在本机认证网关之后：网关完成登录，并在每个请求注入
 `X-Pi-Glink-Identity: v1.<base64url(payload)>.<base64url(hmac-sha256)>`。宿主只信任这枚断言，
@@ -168,9 +178,34 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   `LOCAL_WEB_ALLOW_REMOTE` 不再生效；远端访问必须由本机认证网关反代（本模式）。回退方式是关闭
   `PI_GLINK_TENANCY`（恢复单用户单 run），新旧 run 记录都保留，不删除任何历史。
 
+### 身份入口 B：站内账号（`PI_GLINK_AUTH_MODE=accounts`）
+
+邀请制注册 + 站内登录，保留网关模式的全部 owner/配额语义，但身份来自服务端会话而不是断言：
+
+- **配置**：`PI_GLINK_TENANCY=multitenant`、`PI_GLINK_AUTH_MODE=accounts`、`PI_GLINK_TENANT_CONFIG_FILE`
+  必需；不再需要网关签名密钥。账号库默认 `<LOCAL_WEB_DATA_ROOT>/accounts.db`（仓库外，SQLite WAL），
+  与 run/events 文件存储分离，互不迁移。宿主仍只监听 loopback，生产必须由 TLS 终止代理提供 HTTPS。
+- **引导**：首位管理员由操作员在**宿主停止**时离线签发（取得 data-root ownership 后）：
+  `python -m pi_glink.app --create-invite --tenant tenant-alpha --tenant-name 组织甲 --email admin@example.com --role admin`。
+  命令要求该租户已在 `tenants.json` 里配置模型密钥（缺 key 拒绝），邀请码只打印一次、数据库只存摘要。
+  注册**只创建账号，不创建租户、不授予模型凭据**；后续管理员登录后在账号菜单里给本租户邮箱发一次性邀请。
+- **会话**：`hashlib.scrypt`（随机盐、逐行记录参数、恒时比较）保存口令；登录成功后服务端签发高熵令牌，
+  数据库只存摘要，浏览器只拿 `HttpOnly` + `SameSite=Lax`（HTTPS 下 `Secure`）cookie。会话有绝对有效期
+  与空闲有效期，停用用户/租户、注销立即失效；SSE 长连接在每次轮询都重新校验，失效即断开。
+- **请求防护**：登录/注册/邀请校验都有固定窗口限速。登录先按 socket peer（绝不读
+  `X-Forwarded-For`）计全局预算、再按邮箱计账号预算：轮换邮箱无法无限触发口令散列，限额后的请求
+  在执行 `scrypt` 之前就被拒绝；反代部署下所有用户共享代理这一个 peer，该预算即全部署登录上限
+  （默认 120 次/60 秒，可配置），是保护单机 CPU 的可用性取舍。登录失败对“账号不存在”与“密码错误”
+  返回同一个 401。所有状态变更 POST 都要求 `application/json`、同源 `Origin`/`Referer`/`Sec-Fetch-Site`，已登录
+  会话还必须携带与 cookie 绑定的 `X-Pi-Glink-CSRF`；客户端伪造的断言头、query/body `tenantId` 一律
+  忽略，登录失败也不会回退到 gateway/local。
+- **回退**：切回 `PI_GLINK_AUTH_MODE=gateway`（或关闭多租户）即可；账号库保留只读，不自动改写 run
+  历史，也不降低 owner 校验。
+
 > 隔离范围：宿主 API 授权、run 归属、凭据交付与 redaction 在宿主侧完成；容器/沙箱提供执行环境
-> 隔离，但不构成对宿主 API 或存储的替代边界。本仓库没有真实网关、真实 Docker/E2B live 或生产
-> 数据验证，上线前仍需按 [多租户方案](docs/multitenancy-plan.md) §9 逐项验收。
+> 隔离，但不构成对宿主 API 或存储的替代边界。合成验收覆盖账号存储/会话/CSRF/跨租户与 fake 执行面；
+> 真实网关、真实 HTTPS/TLS 代理、邮件交付、Docker/E2B live 与生产数据仍未验证，上线前仍需按
+> [多租户方案](docs/multitenancy-plan.md) §9 逐项验收。
 
 ## 搜索
 
@@ -201,8 +236,10 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   但脱敏只是回显保护，不是编码级/网络级隔离。需要更强隔离时用 Docker / E2B 执行面，并给内核配
   专用、限额的凭据（完整多租户方案见 [docs/multitenancy-plan.md](docs/multitenancy-plan.md)）。
 - **自检**：`scripts/check-no-secrets.py` 扫描运行态产物（真实命中即失败；文档占位符单独计数）。
-- **多租户信任边界**：多租户模式默认只从本机认证网关注入的 HMAC 断言取身份，签名密钥与租户凭据
-  只能来自仓库外 0600 文件；宿主不提供登录页、不存会话，也不接受客户端自报 owner。这里的“隔离”
+- **多租户信任边界**：多租户模式的身份只来自服务端：网关模式下是验签后的 HMAC 断言，账号模式下是
+  数据库里的会话记录（cookie 只存摘要，原文仅单次下发）；签名密钥、账号库与租户凭据都在仓库外。
+  客户端自报 owner（请求体/query/头）在两种模式下都不被接受，账号登录失败也不会回退到网关或本地。
+  这里的“隔离”
   指宿主 API 的租户授权与每 run 凭据/脱敏边界；容器/沙箱的实际隔离强度（镜像、内核、网络）不在
   本仓库的合成验证范围内，不能由此推断为生产级隔离。
 

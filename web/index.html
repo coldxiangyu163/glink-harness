@@ -11,7 +11,68 @@
   <link rel="stylesheet" href="/styles.css?v=auto">
 </head>
 <body>
-  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  <a id="skip-link" class="skip-link" href="#main-content">跳到主要内容</a>
+
+  <!-- 未登录入口：只有 /api/me 返回 200 后才隐藏，工作台外壳在此之前始终 hidden。
+       网关模式没有站内表单，这里只说明需要从统一入口访问。 -->
+  <div id="auth-view" class="auth-view" hidden>
+    <main class="auth-card" aria-labelledby="auth-title">
+      <img class="auth-mark" src="/logo-icon.svg" alt="">
+      <h1 id="auth-title" class="auth-title">登录研究工作台</h1>
+      <p id="auth-notice" class="auth-notice" role="status" hidden></p>
+
+      <form id="login-form" class="auth-form" novalidate>
+        <div class="auth-field">
+          <label class="auth-label" for="login-email">邮箱</label>
+          <input id="login-email" class="auth-input" type="email" name="email" autocomplete="username" maxlength="254" placeholder="you@example.com" data-focus-ring-managed>
+        </div>
+        <div class="auth-field">
+          <label class="auth-label" for="login-password">密码</label>
+          <input id="login-password" class="auth-input" type="password" name="password" autocomplete="current-password" maxlength="200" data-focus-ring-managed>
+        </div>
+        <p id="login-error" class="auth-error" role="alert" hidden></p>
+        <button id="login-submit" class="btn primary auth-submit" type="submit">登录</button>
+      </form>
+      <p id="login-foot" class="auth-foot">收到邀请？<a id="to-register" href="/register">创建账号</a></p>
+
+      <div id="register-missing" class="auth-missing" hidden>
+        <p class="auth-missing-text">需要邀请才能创建账号。请联系组织管理员获取邀请链接，再打开该链接继续。</p>
+      </div>
+
+      <form id="register-form" class="auth-form" novalidate hidden>
+        <div class="auth-field">
+          <span class="auth-label">组织</span>
+          <p id="register-org" class="auth-readonly">—</p>
+        </div>
+        <div class="auth-field">
+          <label class="auth-label" for="register-email">受邀邮箱</label>
+          <input id="register-email" class="auth-input" type="email" name="email" readonly aria-readonly="true" data-focus-ring-managed>
+        </div>
+        <div class="auth-field">
+          <label class="auth-label" for="register-name">姓名</label>
+          <input id="register-name" class="auth-input" type="text" name="name" autocomplete="name" maxlength="64" data-focus-ring-managed>
+        </div>
+        <div class="auth-field">
+          <label class="auth-label" for="register-password">设置密码</label>
+          <input id="register-password" class="auth-input" type="password" name="new-password" autocomplete="new-password" maxlength="200" aria-describedby="register-hint" data-focus-ring-managed>
+          <p id="register-hint" class="auth-hint">至少 10 个字符，可用中英文、数字与符号。</p>
+        </div>
+        <div class="auth-field">
+          <label class="auth-label" for="register-confirm">确认密码</label>
+          <input id="register-confirm" class="auth-input" type="password" name="confirm-password" autocomplete="new-password" maxlength="200" data-focus-ring-managed>
+        </div>
+        <p id="register-error" class="auth-error" role="alert" hidden></p>
+        <button id="register-submit" class="btn primary auth-submit" type="submit">创建账号</button>
+      </form>
+      <p id="register-foot" class="auth-foot" hidden>已有账号？<a id="to-login" href="/login">返回登录</a></p>
+
+      <p id="gateway-note" class="auth-foot" hidden>本站通过组织的认证网关访问。请从统一入口登录后重试；站内不提供登录表单。</p>
+      <div id="unavailable-note" class="auth-missing" hidden>
+        <p class="auth-missing-text">服务暂时连不上，无法确认登录状态。请稍后重试。</p>
+      </div>
+      <button id="auth-retry" class="btn outline" type="button" hidden>重试</button>
+    </main>
+  </div>
 
   <div id="app-shell" class="shell" data-sidebar="expanded" hidden>
     <aside id="sidebar" class="sidebar" aria-label="研究导航">
@@ -42,6 +103,23 @@
         <div id="service-alert" class="service-alert" role="status" data-tip-side="right" data-tip-when="collapsed">
           <span class="icon" data-icon="alert-circle" aria-hidden="true" style="--icon-size:16px"></span>
           <p id="service-alert-text"></p>
+        </div>
+      </div>
+
+      <div id="account-area" class="account-area" hidden>
+        <button id="account-button" class="account-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="account-menu" data-tip-side="right" data-tip-when="collapsed">
+          <span id="account-avatar" class="account-avatar" aria-hidden="true"></span>
+          <span class="account-lines">
+            <span id="account-org" class="account-org"></span>
+            <span id="account-name" class="account-name"></span>
+          </span>
+        </button>
+        <div id="account-menu" class="account-menu" role="menu" aria-labelledby="account-button" hidden>
+          <p id="account-menu-org" class="account-menu-info"></p>
+          <p id="account-menu-email" class="account-menu-info"></p>
+          <p id="account-menu-role" class="account-menu-info"></p>
+          <button id="account-invite" class="account-menu-item" type="button" role="menuitem" hidden>邀请成员</button>
+          <button id="account-logout" class="account-menu-item" type="button" role="menuitem" hidden>退出登录</button>
         </div>
       </div>
     </aside>
@@ -161,6 +239,43 @@
         </div>
       </aside>
     </main>
+  </div>
+
+  <div id="invite-dialog" class="dialog-layer" hidden data-open="false" inert>
+    <div id="invite-scrim" class="dialog-scrim" aria-hidden="true"></div>
+    <section class="dialog-card" role="dialog" aria-modal="true" aria-labelledby="invite-title">
+      <h2 id="invite-title" class="dialog-title">邀请成员</h2>
+      <p class="dialog-note">受邀人用自己的邮箱注册；邀请码一次性有效，生成后请通过安全渠道发送。</p>
+      <form id="invite-form" class="auth-form" novalidate>
+        <div class="auth-field">
+          <label class="auth-label" for="invite-email">受邀邮箱</label>
+          <input id="invite-email" class="auth-input" type="email" name="email" maxlength="254" placeholder="member@example.com" data-focus-ring-managed>
+        </div>
+        <div class="auth-field">
+          <label class="auth-label" for="invite-role">角色</label>
+          <select id="invite-role" class="auth-input auth-select" name="role">
+            <option value="member">成员</option>
+            <option value="admin">管理员</option>
+          </select>
+        </div>
+        <p id="invite-error" class="auth-error" role="alert" hidden></p>
+        <div class="dialog-actions">
+          <button id="invite-cancel" class="btn outline" type="button">取消</button>
+          <button id="invite-submit" class="btn primary" type="submit">生成邀请</button>
+        </div>
+      </form>
+      <div id="invite-result" hidden>
+        <p id="invite-result-email" class="dialog-note"></p>
+        <div class="invite-link-row">
+          <label class="sr-only" for="invite-link">邀请链接</label>
+          <input id="invite-link" class="auth-input" type="text" readonly data-focus-ring-managed>
+          <button id="invite-copy" class="btn outline" type="button">复制</button>
+        </div>
+        <div class="dialog-actions">
+          <button id="invite-done" class="btn primary" type="button">完成</button>
+        </div>
+      </div>
+    </section>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden>

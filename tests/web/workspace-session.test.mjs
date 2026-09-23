@@ -1,0 +1,328 @@
+/**
+ * Session lifecycle at the workbench boundary:
+ *   · nothing is revealed until `GET /api/me` answers 200;
+ *   · each identity mode gets its own unauthenticated face;
+ *   · a 401 mid-session closes the stream, clears the screen and returns to login;
+ *   · logout revokes the server session before the screen changes.
+ *
+ * The DOM is the stub (no layout), the API is controllable, and the auth view is
+ * a recording double — `auth-view.test.mjs` covers the view itself.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { createWorkspace } from '../../web/modules/workspace.mjs';
+import { ApiError, getCsrfToken, setCsrfToken } from '../../web/modules/api.mjs';
+import { createDomStub } from './dom-stub.mjs';
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function runView(runId, prompt = runId) {
+  return {
+    runId,
+    status: 'finished',
+    prompt,
+    createdAt: 1,
+    finishedAt: 2,
+    durationSeconds: 1,
+    sessionId: null,
+    hasReport: false,
+    stopReason: null,
+    error: null,
+    usage: null,
+    eventCount: 0,
+  };
+}
+
+const ACCOUNTS_ME = {
+  mode: 'accounts',
+  authenticated: true,
+  user: { id: 'u1', name: '张明', email: 'admin@example.test', role: 'admin' },
+  tenant: { id: 'tenant-alpha', name: '组织甲' },
+  csrfToken: 'csrf-token-value',
+};
+
+function authStub() {
+  const shown = [];
+  let handler = null;
+  return {
+    shown,
+    show(options) {
+      shown.push(options);
+    },
+    hide() {
+      shown.push({ mode: 'hide' });
+    },
+    onSession(fn) {
+      handler = fn;
+    },
+    async deliver(me) {
+      if (handler) await handler(me);
+    },
+  };
+}
+
+function harness({
+  me = async () => ({ mode: 'local', authenticated: false }),
+  api = {},
+  location,
+  eventSourceFactory,
+} = {}) {
+  const dom = createDomStub(location ? { location } : {});
+  dom.install();
+  let meCalls = 0;
+  const calls = { logout: 0 };
+  const base = {
+    me: async () => {
+      meCalls += 1;
+      return me();
+    },
+    health: async () => ({ pi: { available: true }, configured: { model: true } }),
+    config: async () => ({ model: 'test-model' }),
+    listRuns: async () => ({ runs: [] }),
+    getRun: async (runId) => ({ run: runView(runId) }),
+    startRun: async (prompt) => ({ run: runView('new-run', prompt) }),
+    stopRun: async () => ({ requested: true }),
+    logout: async () => {
+      calls.logout += 1;
+      return { ok: true };
+    },
+    createInvitation: async (email, role) => ({ invitation: { code: 'c', email, role } }),
+    eventsUrl: (runId) => `/api/runs/${runId}/events`,
+    reportUrl: (runId) => `/api/runs/${runId}/report`,
+    ...api,
+  };
+  const auth = authStub();
+  setCsrfToken(null);
+  const workspace = createWorkspace({ api: base, auth, eventSourceFactory });
+  auth.onSession((session) => workspace.enterSession(session));
+  return {
+    dom,
+    api: base,
+    auth,
+    workspace,
+    calls,
+    get meCalls() {
+      return meCalls;
+    },
+  };
+}
+
+function unauthorized(mode) {
+  return new ApiError('unauthenticated', { status: 401, code: 'unauthenticated', payload: { error: 'unauthenticated', mode } });
+}
+
+test('local mode enters the workbench without any login face', async (t) => {
+  const h = harness();
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  assert.equal(h.dom.getElement('app-shell').hidden, false);
+  assert.deepEqual(h.auth.shown.filter((entry) => entry.mode !== 'hide'), []);
+  assert.equal(h.workspace.identity.mode, 'local');
+  assert.equal(h.dom.getElement('account-area').hidden, true);
+});
+
+test('a 401 in accounts mode shows the login face and keeps the shell hidden', async (t) => {
+  const h = harness({
+    me: async () => {
+      throw unauthorized('accounts');
+    },
+  });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  assert.equal(h.dom.getElement('app-shell').hidden, true);
+  assert.equal(h.auth.shown.length, 1);
+  assert.equal(h.auth.shown[0].mode, 'login');
+});
+
+test('a /register?invite URL goes straight to the invitation registration face', async (t) => {
+  const h = harness({
+    me: async () => {
+      throw unauthorized('accounts');
+    },
+    location: { pathname: '/register', search: '?invite=invite-token', origin: 'http://127.0.0.1:43210' },
+  });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  assert.equal(h.auth.shown.length, 1);
+  assert.equal(h.auth.shown[0].mode, 'register');
+  assert.equal(h.auth.shown[0].invite, 'invite-token');
+});
+
+test('gateway mode gets a gateway explanation, never a login form', async (t) => {
+  const h = harness({
+    me: async () => {
+      throw unauthorized('gateway');
+    },
+  });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  assert.equal(h.auth.shown.length, 1);
+  assert.equal(h.auth.shown[0].mode, 'gateway');
+});
+
+test('an unreachable host shows the retry face instead of guessing a session', async (t) => {
+  const h = harness({
+    me: async () => {
+      throw Object.assign(new Error('network down'), { status: 0 });
+    },
+  });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  assert.equal(h.auth.shown.length, 1);
+  assert.equal(h.auth.shown[0].mode, 'unavailable');
+});
+
+test('entering with a session records the CSRF token and the real identity', async (t) => {
+  const h = harness({ me: async () => ({ ...ACCOUNTS_ME }) });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  assert.equal(h.dom.getElement('app-shell').hidden, false);
+  assert.equal(getCsrfToken(), 'csrf-token-value');
+  assert.equal(h.dom.getElement('account-area').hidden, false);
+  assert.equal(h.dom.getElement('account-org').textContent, '组织甲');
+  assert.equal(h.dom.getElement('account-name').textContent, '张明');
+  assert.equal(h.dom.getElement('account-logout').hidden, false);
+  assert.equal(h.dom.getElement('account-invite').hidden, false);
+  assert.equal(h.auth.shown.at(-1).mode, 'hide');
+});
+
+test('a 401 while reading history closes the stream, clears the screen and returns to login', async (t) => {
+  let fail = false;
+  const h = harness({
+    me: async () => ({ ...ACCOUNTS_ME }),
+    api: {
+      listRuns: async () => {
+        if (fail) throw unauthorized('accounts');
+        return { runs: [runView('run-1', '已有研究')] };
+      },
+    },
+  });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  assert.equal(h.workspace.runs.length, 1);
+  assert.equal(h.dom.getElement('run-list').children.length > 0, true);
+
+  fail = true;
+  await h.workspace.refreshRuns();
+  assert.equal(h.dom.getElement('app-shell').hidden, true);
+  assert.equal(getCsrfToken(), null);
+  assert.equal(h.workspace.identity, null);
+  assert.deepEqual(h.workspace.runs, []);
+  assert.equal(h.dom.getElement('account-area').hidden, true);
+  assert.equal(h.auth.shown.at(-1).mode, 'login');
+  assert.match(h.auth.shown.at(-1).notice, /过期/);
+  assert.equal(h.dom.location.pathname, '/login');
+});
+
+test('a session that ends during a run closes the stream and clears the run view', async (t) => {
+  let expired = false;
+  const sources = [];
+  const h = harness({
+    me: async () => ({ ...ACCOUNTS_ME }),
+    api: {
+      listRuns: async () => {
+        if (expired) throw unauthorized('accounts');
+        return { runs: [runView('run-1', '进行中的研究')] };
+      },
+      getRun: async (runId) => ({ run: { ...runView(runId, '进行中的研究'), status: 'running' } }),
+    },
+    eventSourceFactory: (url) => {
+      const source = {
+        url,
+        readyState: 0,
+        closed: false,
+        addEventListener() {},
+        close() {
+          this.closed = true;
+          this.readyState = 2;
+        },
+      };
+      sources.push(source);
+      return source;
+    },
+  });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  await h.workspace.openRun('run-1');
+  assert.equal(sources.length, 1, 'the run view must attach one stream');
+  assert.equal(h.dom.getElement('chat-view').hidden, false);
+
+  expired = true;
+  await h.workspace.refreshRuns();
+  assert.equal(sources[0].closed, true, 'the live stream must be closed with the session');
+  assert.equal(h.dom.getElement('app-shell').hidden, true);
+  assert.equal(h.dom.getElement('run-view').children.length, 0, 'the in-screen run must be cleared');
+  assert.equal(h.workspace.runId, null);
+  assert.equal(h.auth.shown.at(-1).mode, 'login');
+});
+
+test('logout revokes the server session, then returns to login', async (t) => {
+  const h = harness({ me: async () => ({ ...ACCOUNTS_ME }) });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  await h.workspace.logout();
+  assert.equal(h.calls.logout, 1);
+  assert.equal(h.dom.getElement('app-shell').hidden, true);
+  assert.equal(h.auth.shown.at(-1).mode, 'login');
+  assert.match(h.auth.shown.at(-1).notice, /已退出登录/);
+});
+
+test('a failed logout keeps the session and the screen (no pretending)', async (t) => {
+  const h = harness({
+    me: async () => ({ ...ACCOUNTS_ME }),
+    api: {
+      logout: async () => {
+        throw Object.assign(new Error('nope'), { status: 503 });
+      },
+    },
+  });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  await h.workspace.logout();
+  assert.equal(h.dom.getElement('app-shell').hidden, false);
+  assert.equal(h.workspace.identity.mode, 'accounts');
+});
+
+test('returning to the tab re-checks an accounts session', async (t) => {
+  const h = harness({ me: async () => ({ ...ACCOUNTS_ME }) });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  const before = h.meCalls;
+  h.dom.document.dispatch('visibilitychange', {});
+  await tick();
+  assert.equal(h.meCalls, before + 1);
+});
+
+test('the service alert follows the tenant-aware /api/config, not the host-level health probe', async (t) => {
+  // A tenant whose own credential is configured, on a host with no global key:
+  // health reports no host model, config reports this caller's model. The
+  // sidebar must stay silent — otherwise a working tenant is told it is not
+  // configured.
+  const configuredTenant = harness({
+    me: async () => ({ ...ACCOUNTS_ME }),
+    api: {
+      health: async () => ({ pi: { available: true }, configured: { model: false } }),
+      config: async () => ({ model: 'tenant-model', configured: { model: true } }),
+    },
+  });
+  t.after(() => configuredTenant.dom.restore());
+  await configuredTenant.workspace.init();
+  assert.equal(configuredTenant.dom.getElement('sidebar-foot').hidden, true);
+  assert.equal(configuredTenant.dom.getElement('service-alert-text').textContent, '');
+
+  const unconfiguredTenant = harness({
+    me: async () => ({ ...ACCOUNTS_ME }),
+    api: {
+      health: async () => ({ pi: { available: true }, configured: { model: true } }),
+      config: async () => ({ model: 'tenant-model', configured: { model: false } }),
+    },
+  });
+  await unconfiguredTenant.workspace.init();
+  assert.match(
+    unconfiguredTenant.dom.getElement('service-alert-text').textContent,
+    /模型服务还没有配置/
+  );
+  assert.equal(unconfiguredTenant.dom.getElement('sidebar-foot').hidden, false);
+});

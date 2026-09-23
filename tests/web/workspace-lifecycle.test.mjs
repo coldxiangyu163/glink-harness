@@ -50,6 +50,7 @@ function harness() {
   const subscriptions = [];
   const toasts = [];
   const api = {
+    me: async () => ({ mode: 'local', authenticated: false }),
     health: async () => ({ pi: { available: true }, configured: { model: true } }),
     config: async () => ({ model: 'test-model' }),
     listRuns: async () => ({ runs: [] }),
