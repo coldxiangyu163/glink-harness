@@ -169,6 +169,13 @@ def test_fonts_are_long_cached() -> None:
     assert "immutable" in font.cache_control
 
 
+def test_file_type_tiles_are_served_as_png() -> None:
+    assets = WebAssets(REPO_ROOT / "web")
+    tile = assets.resolve("/icons/markdown-32.png")
+    assert tile is not None
+    assert tile.content_type == "image/png"
+
+
 # -- event bus ----------------------------------------------------------------
 
 

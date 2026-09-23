@@ -132,7 +132,8 @@ const measureRoles = (args) => {
           )
         );
       case 'thinkingToggle': {
-        if (q('.pi-thinking > summary')) return q('.pi-thinking > summary');
+        // The library's Thinking button is the process fold's toggle on our side.
+        if (q('.pi-process-toggle')) return q('.pi-process-toggle');
         const labelled = [...main.querySelectorAll('button[aria-expanded]')].find((node) =>
           /已完成|正在|思考|个工作步骤|步骤/.test(node.textContent),
         );
@@ -143,8 +144,8 @@ const measureRoles = (args) => {
         return box ? box.querySelector('button') : null;
       }
       case 'thinkingLabel': {
+        if (q('.pi-process-label')) return q('.pi-process-label');
         const toggle =
-          q('.pi-thinking > summary') ||
           [...main.querySelectorAll('button[aria-expanded]')].find((node) =>
             /已完成|正在|思考|步骤/.test(node.textContent),
           );
@@ -196,7 +197,19 @@ const measureRoles = (args) => {
             : null)
         );
       case 'composerSend':
-        return q('.prompt-send') || q('form button[type="submit"]');
+        return q('#send-button') || q('form button[type="submit"]');
+      case 'paneToggle': {
+        // 栏头开合键（PANEL_TOGGLE）：28 方、圆角 8、未选中态
+        if (q('#header-new')) return q('#header-new');
+        const header = main.querySelector('header');
+        return header
+          ? bySize(header, 28, 8).find((node) => getComputedStyle(node).backgroundColor === 'rgba(0, 0, 0, 0)') ?? null
+          : null;
+      }
+      case 'answerAction':
+        return q('.pi-answer-actions .icon-key') || q('.demo-answer-actions button');
+      case 'outputCard':
+        return q('.pi-output') || q('.demo-output-card');
       default:
         return null;
     }
@@ -245,7 +258,7 @@ const SCREENS = [
   {
     name: 'conversation',
     referenceHash: '#progress',
-    roles: ['paneHeader', 'userBubble', 'thinkingToggle', 'thinkingLabel', 'toolRow', 'toolLabel', 'toolChip', 'composer', 'composerSend'],
+    roles: ['paneHeader', 'paneToggle', 'userBubble', 'thinkingToggle', 'thinkingLabel', 'toolRow', 'toolLabel', 'toolChip', 'outputCard', 'answerAction', 'composer', 'composerSend'],
     props: [...BASE_PROPS, 'maxWidth'],
   },
 ];
@@ -279,6 +292,9 @@ const BOX = {
   panePathButton: 'height',
   thinkingLabel: 'height',
   toolLabel: 'height',
+  paneToggle: 'both',
+  answerAction: 'both',
+  outputCard: 'none',
 };
 
 /**
@@ -307,6 +323,9 @@ const IGNORED = {
   thinkingLabel: ['borderTopColor'],
   thinkingToggle: ['borderTopColor'],
   userBubble: ['borderTopColor'],
+  outputCard: ['display', 'flexDirection', 'alignItems', 'justifyContent', 'gap'],
+  paneToggle: ['borderTopColor'],
+  answerAction: ['borderTopColor'],
   infoCard: ['display', 'backgroundColor', 'color', 'borderTopColor', 'gap', 'alignItems', 'height', 'marginBottom'],
 };
 
@@ -400,7 +419,7 @@ try {
   await targetPage.waitForSelector('#app-shell:not([hidden])', { timeout: 15_000 });
 
   let run = null;
-  for (const candidate of candidates.slice(0, 4)) {
+  for (const candidate of candidates.filter((item) => item.hasReport).slice(0, 4)) {
     await targetPage.click(`#run-list [data-run-id="${candidate.runId}"]`);
     await targetPage.waitForTimeout(2000);
     const probe = await targetPage.evaluate(() => ({
@@ -430,6 +449,13 @@ try {
       // the 720 column when the workbench is actually showing a conversation.
       await targetPage.click(`#run-list [data-run-id="${run.runId}"]`).catch(() => {});
       await targetPage.waitForTimeout(1500);
+      // The process fold closes itself when a run ends; the reference renders its
+      // steps expanded, so open ours before measuring the rows inside it.
+      await targetPage.evaluate(() => {
+        const toggle = document.querySelector('.pi-process-toggle');
+        if (toggle?.getAttribute('aria-expanded') === 'false') toggle.click();
+      });
+      await targetPage.waitForTimeout(700);
     }
 
     // Hover and focus are states, not styles: park the pointer and drop focus

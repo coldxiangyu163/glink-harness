@@ -213,6 +213,59 @@ def test_missing_credential_is_reported_as_not_configured(tmp_path: Path) -> Non
         thread.join(timeout=5)
 
 
+def test_event_stream_replays_runs_from_an_earlier_host_process(tmp_path: Path) -> None:
+    """History replay must survive a host restart.
+
+    The in-memory bus only knows runs this process started; a run from an
+    earlier process is replayed from its persisted events.jsonl instead of
+    answering 404 (which left the browser with an empty timeline).
+    """
+    first = create_server(make_config(tmp_path), client_factory=fake_factory())
+    thread = threading.Thread(target=first.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _status, _headers, raw = request(first, "/api/runs", method="POST", body={"prompt": "重启后重放"})
+        run_id = json.loads(raw)["run"]["runId"]
+        wait_for_terminal(first, run_id)
+    finally:
+        first.shutdown()
+        first.server_close()
+        thread.join(timeout=5)
+
+    second = create_server(make_config(tmp_path), client_factory=fake_factory())
+    thread = threading.Thread(target=second.serve_forever, daemon=True)
+    thread.start()
+    try:
+        assert not second.bus.is_open(run_id)
+        connection = HTTPConnection("127.0.0.1", second.server_address[1], timeout=10)
+        try:
+            connection.request("GET", f"/api/runs/{run_id}/events")
+            response = connection.getresponse()
+            assert response.status == 200
+            assert response.getheader("Content-Type").startswith("text/event-stream")
+            body = response.read().decode("utf-8")
+        finally:
+            connection.close()
+        assert "event: run_started" in body
+        assert "event: run_finished" in body
+        # Resume offsets still apply to persisted frames.
+        connection = HTTPConnection("127.0.0.1", second.server_address[1], timeout=10)
+        try:
+            connection.request("GET", f"/api/runs/{run_id}/events", headers={"Last-Event-ID": "1"})
+            resumed = connection.getresponse().read().decode("utf-8")
+        finally:
+            connection.close()
+        assert "event: run_started" not in resumed
+        assert "event: run_finished" in resumed
+
+        status, _headers, _raw = request(second, "/api/runs/does-not-exist/events")
+        assert status == 404
+    finally:
+        second.shutdown()
+        second.server_close()
+        thread.join(timeout=5)
+
+
 def test_event_stream_replays_finished_runs(server: PiGlinkServer) -> None:
     _status, _headers, raw = request(server, "/api/runs", method="POST", body={"prompt": "流"})
     run_id = json.loads(raw)["run"]["runId"]

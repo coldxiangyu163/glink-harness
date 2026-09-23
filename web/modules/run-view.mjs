@@ -1,66 +1,205 @@
 /**
  * DOM rendering for one run.
  *
- * Rendering is incremental: each item in the run model owns a node, and only
- * items whose value changed since the last frame are touched. Streaming text
- * is shown as plain text while it grows and re-rendered as Markdown once the
- * block closes, so a long answer never re-parses on every delta.
+ * Shape follows the standard library's AI execution surfaces:
+ *
+ *   ┌ 过程折叠（Thinking · steps）  正在检索 / 已完成 · N 个步骤 · 用时 …
+ *   │   思考过程 ⌄            ← one compact row per thinking block
+ *   │   检索  跨境资金监管 ⌄  ← one compact row per tool call (ToolChips)
+ *   └   …
+ *   研究助理 [待核验草稿]      ← the answer frame (规范 6.1)
+ *   回答正文
+ *   已生成 1 个文件 · report.md
+ *   复制 · 下载 · 重新研究
+ *
+ * The process fold follows the library's contract: open while the run works,
+ * folds itself when the run ends, and the reader's own choice wins from then on.
+ * Rendering is incremental — each model item owns one node that is only touched
+ * when its value changes; the final answer block is the one node that moves
+ * between the fold and the answer frame.
  *
  * The view reads nothing but the model it is given: no fetch, no timers that
- * outlive `dispose`, no knowledge of pi.
- *
- * Shape follows the standard library's AI execution surfaces: thinking folds
- * (`Thinking`) keep a timeline rule and a steps vocabulary, tool calls render
- * as compact rows (`ToolChips`) — one row per call, the target on a chip, the
- * detail one level down. Class names stay `pi-*` because the browser
- * regression (tests/browser/run-smoke.mjs) asserts on them.
+ * outlive `dispose`. Every word it prints comes from `present.mjs`, so engine
+ * vocabulary (tool names, stage codes, host paths) never reaches the screen.
+ * Class names stay `pi-*` because the browser regressions assert on them.
  */
 
-const TOOL_ARG_KEYS = ['command', 'path', 'file_path', 'pattern', 'query', 'url'];
+import {
+  describeTool,
+  displayPath,
+  formatDuration,
+  noticeText,
+  stageText,
+  toolStateLabel,
+} from './present.mjs';
 
-/** Tool name → (icon, action label). Mirrors 百鉴 ToolChips `ICONS` + 动作名. */
-const TOOL_KINDS = [
-  [/bash|shell|terminal|exec/i, 'terminal', '执行'],
-  [/read|view|open_file|cat/i, 'file-text', '读取'],
-  [/write|edit|create|apply|patch|multi_edit/i, 'new-chat', '修改'],
-  [/search|grep|find|glob/i, 'search', '检索'],
-  [/fetch|http|browse|webfetch|web_search/i, 'globe', '检索'],
-  [/todos?|todo_write|plan|update_plan/i, 'checklist', '计划'],
-];
+let viewCounter = 0;
 
-export function createRunView({ root, renderMarkdown = (text) => text, onOpenReport = null }) {
-  const header = document.createElement('div');
-  header.className = 'pi-run-head';
-  const timeline = document.createElement('div');
-  timeline.className = 'pi-run-timeline';
-  root.replaceChildren(header, timeline);
+function icon(name, size) {
+  const node = document.createElement('span');
+  node.className = 'icon';
+  node.dataset.icon = name;
+  node.setAttribute('aria-hidden', 'true');
+  if (size) node.style.setProperty('--icon-size', `${size}px`);
+  return node;
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+export function createRunView({
+  root,
+  renderMarkdown = (text) => text,
+  onOpenReport = null,
+  onRerun = null,
+  onRetry = null,
+  onCopy = null,
+  reportHref = () => '#',
+  reportDownloadName = () => 'report.md',
+}) {
+  const uid = `run-view-${(viewCounter += 1)}`;
+
+  // ── process fold ─────────────────────────────────────────────────────────
+  const process = el('section', 'pi-process');
+  process.setAttribute('aria-label', '研究过程');
+  const toggle = el('button', 'pi-process-toggle trace-toggle');
+  toggle.type = 'button';
+  toggle.setAttribute('aria-controls', `${uid}-process`);
+  const toggleIcon = icon('sparkles', 16);
+  toggleIcon.classList.add('pi-process-icon');
+  const toggleLabel = el('span', 'pi-process-label');
+  toggleLabel.setAttribute('role', 'status');
+  toggleLabel.setAttribute('aria-live', 'polite');
+  const toggleChevron = icon('chevron-down', 14);
+  toggleChevron.classList.add('pi-process-chevron');
+  toggle.append(toggleIcon, toggleLabel, toggleChevron);
+  const body = el('div', 'pi-process-body');
+  body.id = `${uid}-process`;
+  // body (0fr ↔ 1fr) › inner (overflow clip, no box) › track (timeline rule + padding):
+  // any padding on the clipped child itself would survive a 0fr track.
+  const inner = el('div', 'pi-process-inner');
+  const track = el('div', 'pi-process-track');
+  const list = el('div', 'pi-process-list');
+  const pending = el('div', 'pi-pending');
+  pending.append(el('span', 'pi-pending-dot'), el('span', 'pi-pending-label'));
+  pending.hidden = true;
+  track.append(list, pending);
+  inner.append(track);
+  body.append(inner);
+  process.append(toggle, body);
+
+  // ── answer frame ─────────────────────────────────────────────────────────
+  const answer = el('div', 'pi-answer');
+  const answerHead = el('header', 'pi-answer-head');
+  answerHead.hidden = true;
+  const headRow = el('div', 'pi-answer-title');
+  headRow.append(icon('agent', 20), el('h3', '', '研究助理'));
+  const draftBadge = el('span', 'badge', '待核验草稿');
+  draftBadge.dataset.variant = 'warning';
+  headRow.append(draftBadge);
+  const disclaimer = el(
+    'p',
+    'pi-answer-note',
+    'AI 生成，未经人工核验：可作为起草参考，不能直接对外发送或据此下判断。',
+  );
+  answerHead.append(headRow, disclaimer);
+  const answerBody = el('div', 'pi-answer-body');
+
+  const output = el('section', 'pi-output');
+  output.setAttribute('aria-label', '生成的文件');
+  output.hidden = true;
+  const outputTitle = el('p', 'pi-output-title', '已生成 1 个文件');
+  const outputRow = el('div', 'pi-output-row');
+  const outputOpen = el('button', 'pi-output-open pi-report-button');
+  outputOpen.type = 'button';
+  outputOpen.setAttribute('aria-label', '在右侧打开 report.md');
+  const fileTile = document.createElement('img');
+  fileTile.className = 'pi-file-tile';
+  fileTile.src = '/icons/markdown-32.png';
+  fileTile.alt = '';
+  fileTile.width = 32;
+  fileTile.height = 32;
+  const fileText = el('span', 'pi-output-text');
+  fileText.append(el('span', 'pi-output-name', 'report.md'), el('span', 'pi-output-meta', 'Markdown 文档 · 待核验草稿'));
+  outputOpen.append(fileTile, fileText);
+  outputOpen.addEventListener('click', () => {
+    if (latest?.hasReport && onOpenReport) onOpenReport(latest.runId);
+  });
+  const outputDownload = el('a', 'icon-key');
+  outputDownload.setAttribute('aria-label', '下载 report.md');
+  outputDownload.dataset.tip = '下载';
+  outputDownload.append(icon('download', 16));
+  outputRow.append(outputOpen, outputDownload);
+  output.append(outputTitle, outputRow);
+
+  const outcome = el('section', 'pi-outcome');
+  outcome.hidden = true;
+
+  const actions = el('div', 'pi-answer-actions');
+  actions.setAttribute('role', 'group');
+  actions.setAttribute('aria-label', '回答操作');
+  actions.hidden = true;
+  const copyButton = el('button', 'icon-key');
+  copyButton.type = 'button';
+  copyButton.setAttribute('aria-label', '复制回答');
+  copyButton.dataset.tip = '复制回答';
+  copyButton.append(icon('copy', 16));
+  copyButton.addEventListener('click', () => onCopy?.(finalText()));
+  const downloadButton = el('a', 'icon-key');
+  downloadButton.setAttribute('aria-label', '下载报告');
+  downloadButton.dataset.tip = '下载报告';
+  downloadButton.append(icon('download', 16));
+  const rerunButton = el('button', 'icon-key');
+  rerunButton.type = 'button';
+  rerunButton.setAttribute('aria-label', '用同一个问题重新研究');
+  rerunButton.dataset.tip = '重新研究';
+  rerunButton.append(icon('refresh', 16));
+  rerunButton.addEventListener('click', () => onRerun?.(latest?.prompt ?? ''));
+  actions.append(copyButton, downloadButton, rerunButton);
+
+  answer.append(answerHead, answerBody, output, outcome, actions);
+  root.replaceChildren(process, answer);
+
+  // Answers often point at the report by its relative name ("见 report.md"); the
+  // browser would navigate to a host path that does not exist. Open the slot instead.
+  answer.addEventListener('click', (event) => {
+    const link = event.target.closest?.('a[href]');
+    if (!link || !answerBody.contains(link)) return;
+    const href = link.getAttribute('href') ?? '';
+    if (/^(?:\.\/)?report\.md$/i.test(href) && latest?.hasReport) {
+      event.preventDefault();
+      onOpenReport?.(latest.runId);
+    }
+  });
 
   /** @type {Array<{item: object, node: HTMLElement}>} */
   let rendered = [];
+  let answerIndex = -1;
+  let manualOpen = null;
+  let connection = null;
+  let outcomeKey = '';
   let frame = null;
   let latest = null;
   let disposed = false;
 
-  const reportLink = document.createElement('button');
-  reportLink.type = 'button';
-  reportLink.className = 'btn outline sm pi-report-button';
-  reportLink.textContent = '查看报告';
-  reportLink.hidden = true;
-  reportLink.addEventListener('click', () => {
-    if (latest?.hasReport && onOpenReport) onOpenReport(latest.runId);
+  toggle.addEventListener('click', () => {
+    manualOpen = !isOpen();
+    syncFold();
   });
 
-  const statusLine = document.createElement('p');
-  statusLine.className = 'pi-run-status';
-  const statusIcon = document.createElement('span');
-  statusIcon.className = 'icon';
-  statusIcon.dataset.icon = 'time';
-  statusIcon.setAttribute('aria-hidden', 'true');
-  const statusText = document.createElement('span');
-  statusLine.append(statusIcon, statusText);
-  const metaLine = document.createElement('p');
-  metaLine.className = 'pi-run-meta';
-  header.append(statusLine, metaLine, reportLink);
+  function isOpen() {
+    return manualOpen ?? latest?.status === 'running';
+  }
+
+  function syncFold() {
+    const open = isOpen();
+    toggle.setAttribute('aria-expanded', String(open));
+    process.dataset.open = String(open);
+  }
 
   function schedule(model) {
     latest = model;
@@ -72,31 +211,60 @@ export function createRunView({ root, renderMarkdown = (text) => text, onOpenRep
   }
 
   function draw(model) {
-    drawHeader(model);
+    root.dataset.status = model.status;
     drawItems(model);
+    drawProcessHead(model);
+    drawAnswer(model);
+    syncFold();
   }
 
-  function drawHeader(model) {
-    const statuses = {
-      running: ['运行中', 'time'],
-      finished: ['已完成', 'check-circle'],
-      cancelled: ['已取消', 'close'],
-      failed: ['已失败', 'alert-circle'],
-    };
-    const [label, icon] = statuses[model.status] ?? [model.status, 'time'];
-    statusLine.dataset.status = model.status;
-    statusIcon.dataset.icon = icon;
-    statusText.textContent = `${label}${model.durationSeconds ? ` · ${model.durationSeconds}s` : ''}`;
+  // ── process ──────────────────────────────────────────────────────────────
 
-    const bits = [];
-    if (model.model) bits.push(model.model);
-    if (model.sessionId) bits.push(`session ${model.sessionId.slice(0, 8)}`);
-    if (model.usage?.totalTokens) bits.push(`${model.usage.totalTokens} tokens`);
-    if (model.gaps) bits.push(`事件缺口 ${model.gaps}`);
-    if (model.error) bits.push(model.error);
-    metaLine.textContent = bits.join(' · ');
-    metaLine.hidden = bits.length === 0;
-    reportLink.hidden = !model.hasReport;
+  function stepCount(model) {
+    return model.items.filter((item) => item.kind === 'tool' || item.kind === 'thinking').length;
+  }
+
+  function activity(model) {
+    const last = [...model.items].reverse().find((item) => item.kind !== 'turn' && item.kind !== 'stage');
+    if (!last) return { label: '正在准备研究', live: false };
+    if (last.kind === 'tool' && last.status === 'running') {
+      return { label: describeTool(last.name, last.args).active, live: true };
+    }
+    if (last.kind === 'thinking' && !last.closed) return { label: '正在思考', live: true };
+    if (last.kind === 'text' && !last.closed) return { label: '正在撰写回答', live: true };
+    return { label: '正在处理', live: false };
+  }
+
+  function drawProcessHead(model) {
+    const steps = stepCount(model);
+    const running = model.status === 'running';
+    process.dataset.status = model.status;
+    process.hidden = !running && steps === 0;
+    let label;
+    if (running) {
+      label = activity(model).label;
+    } else {
+      const parts = [{ finished: '已完成', cancelled: '已停止', failed: '未完成' }[model.status] ?? '已结束'];
+      if (steps) parts.push(`${steps} 个步骤`);
+      const duration = formatDuration(model.durationSeconds);
+      if (duration && model.status === 'finished') parts.push(`用时 ${duration}`);
+      label = parts.join(' · ');
+    }
+    if (toggleLabel.textContent !== label) toggleLabel.textContent = label;
+    toggle.setAttribute('aria-label', `研究过程：${label}`);
+
+    const act = running ? activity(model) : null;
+    pending.hidden = !running || act.live;
+    if (!pending.hidden) pending.querySelector('.pi-pending-label').textContent = act.label;
+  }
+
+  function finalAnswerIndex(items) {
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      if (item.kind === 'tool' || item.kind === 'thinking') return -1;
+      if (item.kind === 'text' && item.text.trim()) return index;
+    }
+    return -1;
   }
 
   function drawItems(model) {
@@ -106,13 +274,14 @@ export function createRunView({ root, renderMarkdown = (text) => text, onOpenRep
       for (const { node } of rendered.slice(items.length)) node.remove();
       rendered = rendered.slice(0, items.length);
     }
+    const nextAnswer = finalAnswerIndex(items);
     items.forEach((item, index) => {
       const entry = rendered[index];
       if (!entry) {
         const node = createNode(item);
-        timeline.append(node);
         rendered[index] = { item, node };
         update(node, item);
+        (index === nextAnswer ? answerBody : list).append(node);
         return;
       }
       if (entry.item !== item) {
@@ -120,135 +289,117 @@ export function createRunView({ root, renderMarkdown = (text) => text, onOpenRep
         update(entry.node, item);
       }
     });
+    if (nextAnswer !== answerIndex) {
+      // The final-answer role moved (a later step arrived, or a new last block
+      // appeared): re-seat the nodes in stream order. Rare, so a full pass is fine.
+      rendered.forEach(({ node }, index) => {
+        if (index !== nextAnswer) list.append(node);
+      });
+      if (nextAnswer >= 0) answerBody.append(rendered[nextAnswer].node);
+      answerIndex = nextAnswer;
+    }
+    rendered.forEach(({ node }, index) => {
+      if (node.classList.contains('pi-text')) node.classList.toggle('pi-narration', index !== answerIndex);
+    });
   }
 
   function createNode(item) {
     switch (item.kind) {
       case 'thinking': {
-        const details = document.createElement('details');
-        details.className = 'pi-thinking';
-        const summary = document.createElement('summary');
-        summary.className = 'trace-toggle';
-        const icon = document.createElement('span');
-        icon.className = 'icon';
-        icon.dataset.icon = 'sparkles';
-        icon.setAttribute('aria-hidden', 'true');
-        const label = document.createElement('span');
-        label.className = 'pi-thinking-label';
-        const chevron = document.createElement('span');
-        chevron.className = 'icon';
-        chevron.dataset.icon = 'chevron-down';
-        chevron.setAttribute('aria-hidden', 'true');
-        summary.append(icon, label, chevron);
-        const body = document.createElement('div');
-        body.className = 'pi-thinking-body';
-        details.append(summary, body);
+        const details = el('details', 'pi-thinking');
+        const summary = el('summary', 'pi-step-row trace-toggle');
+        summary.append(icon('sparkles', 14), el('span', 'pi-thinking-label'), chevron());
+        details.append(summary, el('div', 'pi-thinking-body'));
         return details;
       }
       case 'tool': {
-        // One row per call, the target on a chip, the detail one level down
-        // (百鉴 ToolChips). `<details>` gives keyboard/AT semantics for free.
-        const card = document.createElement('details');
-        card.className = 'pi-tool';
-        const head = document.createElement('summary');
-        head.className = 'pi-tool-head trace-toggle';
-        const icon = document.createElement('span');
-        icon.className = 'icon';
-        icon.dataset.icon = 'wrench';
-        icon.setAttribute('aria-hidden', 'true');
-        const title = document.createElement('span');
-        title.className = 'pi-tool-name';
-        const args = document.createElement('span');
-        args.className = 'pi-tool-args';
-        const state = document.createElement('span');
-        state.className = 'pi-tool-state';
-        const chevron = document.createElement('span');
-        chevron.className = 'icon pi-tool-chevron';
-        chevron.dataset.icon = 'chevron-down';
-        chevron.setAttribute('aria-hidden', 'true');
-        head.append(icon, title, args, state, chevron);
-        head.addEventListener('click', () => {
-          // The user's own choice outranks the streaming default from now on.
+        const card = el('details', 'pi-tool');
+        const head = el('summary', 'pi-tool-head pi-step-row trace-toggle');
+        const args = el('span', 'pi-tool-args');
+        head.append(icon('wrench', 14), el('span', 'pi-tool-name'), args, el('span', 'pi-tool-state'), chevron('pi-tool-chevron'));
+        head.addEventListener('click', (event) => {
+          if (card.dataset.hasDetail !== 'true') {
+            event.preventDefault();
+            return;
+          }
+          // The reader's own choice outranks the streaming default from now on.
           card.dataset.touched = 'true';
         });
-        const detail = document.createElement('div');
-        detail.className = 'pi-tool-detail';
-        const wrap = document.createElement('div');
-        wrap.className = 'pi-tool-detail-wrap';
-        const output = document.createElement('pre');
-        output.className = 'pi-tool-output scroll-area';
-        const result = document.createElement('div');
-        result.className = 'pi-tool-result';
-        wrap.append(output, result);
+        const detail = el('div', 'pi-tool-detail');
+        const wrap = el('div', 'pi-tool-detail-wrap');
+        wrap.append(el('pre', 'pi-tool-output scroll-area'), el('div', 'pi-tool-result'));
         detail.append(wrap);
         card.append(head, detail);
         return card;
       }
-      case 'text': {
-        const block = document.createElement('div');
-        block.className = 'pi-text';
-        return block;
-      }
-      case 'turn': {
-        const turn = document.createElement('div');
-        turn.className = 'pi-turn';
-        return turn;
-      }
+      case 'text':
+        return el('div', 'pi-text');
       case 'notice': {
-        const notice = document.createElement('div');
-        notice.className = 'pi-notice';
-        const icon = document.createElement('span');
-        icon.className = 'icon';
-        icon.dataset.icon = 'alert-circle';
-        icon.setAttribute('aria-hidden', 'true');
-        icon.style.setProperty('--icon-size', '14px');
-        const text = document.createElement('span');
-        notice.append(icon, text);
+        const notice = el('details', 'pi-notice');
+        const summary = el('summary', 'pi-step-row trace-toggle');
+        summary.append(icon('alert-circle', 14), el('span', 'pi-notice-text'), chevron());
+        summary.addEventListener('click', (event) => {
+          if (notice.dataset.hasDetail !== 'true') event.preventDefault();
+        });
+        notice.append(summary, el('div', 'pi-notice-detail'));
         return notice;
       }
-      case 'stage':
-      default: {
-        const stage = document.createElement('div');
-        stage.className = 'pi-stage';
+      case 'stage': {
+        const stage = el('div', 'pi-stage pi-step-row');
+        stage.append(icon('refresh', 14), el('span', 'pi-stage-text'));
         return stage;
       }
+      case 'turn':
+      default: {
+        // Turns are bookkeeping; the node exists only to keep index ↔ item aligned.
+        const turn = el('div', 'pi-turn');
+        turn.hidden = true;
+        return turn;
+      }
     }
+  }
+
+  function chevron(extra = '') {
+    const node = icon('chevron-down', 12);
+    node.classList.add('pi-row-chevron');
+    if (extra) node.classList.add(extra);
+    return node;
   }
 
   function update(node, item) {
     switch (item.kind) {
       case 'thinking': {
-        const label = node.querySelector('.pi-thinking-label');
-        const body = node.querySelector('.pi-thinking-body');
-        const chars = item.text.length;
         node.dataset.status = item.closed ? 'done' : 'running';
-        const next = item.closed ? `思考 · ${chars} 字` : `思考中 · ${chars} 字`;
+        const label = node.querySelector('.pi-thinking-label');
+        const next = item.closed ? '思考过程' : '正在思考';
         if (label.textContent !== next) label.textContent = next;
-        if (body.textContent !== item.text) body.textContent = item.text;
+        const text = node.querySelector('.pi-thinking-body');
+        if (text.textContent !== item.text) text.textContent = item.text;
         return;
       }
       case 'tool': {
         node.dataset.status = item.status;
-        const [icon, action] = toolKind(item.name);
+        const described = describeTool(item.name, item.args);
         const iconNode = node.querySelector('.pi-tool-head .icon');
-        if (iconNode.dataset.icon !== icon) iconNode.dataset.icon = icon;
+        if (iconNode.dataset.icon !== described.icon) iconNode.dataset.icon = described.icon;
         const nameNode = node.querySelector('.pi-tool-name');
-        const nextName = `${action}${action === item.name ? '' : ` · ${item.name}`}`;
-        if (nameNode.textContent !== nextName) nameNode.textContent = nextName;
-        node.querySelector('.pi-tool-state').textContent = toolStateLabel(item);
-        const argsText = summarizeArgs(item.args);
+        if (nameNode.textContent !== described.action) nameNode.textContent = described.action;
         const argsNode = node.querySelector('.pi-tool-args');
-        if (argsNode.textContent !== argsText) argsNode.textContent = argsText;
+        if (argsNode.textContent !== described.object) argsNode.textContent = described.object;
+        argsNode.classList.toggle('is-mono', described.mono);
+        node.querySelector('.pi-tool-state').textContent = toolStateLabel(item);
         const outputNode = node.querySelector('.pi-tool-output');
-        if (outputNode.textContent !== item.output) outputNode.textContent = item.output;
-        outputNode.hidden = item.output === '';
+        const outputText = displayPath(item.output);
+        if (outputNode.textContent !== outputText) outputNode.textContent = outputText;
+        outputNode.hidden = outputText === '';
         const resultNode = node.querySelector('.pi-tool-result');
-        const resultText = item.result || '';
+        const resultText = displayPath(item.result || '');
         resultNode.hidden = resultText === '';
         if (resultNode.textContent !== resultText) resultNode.textContent = resultText;
         // Live output is the point while a call runs; once it settles the row goes
         // back to a chip — unless the reader opened it themselves.
-        const hasDetail = item.output !== '' || resultText !== '';
+        const hasDetail = outputText !== '' || resultText !== '';
+        node.dataset.hasDetail = String(hasDetail);
         node.querySelector('.pi-tool-chevron').hidden = !hasDetail;
         if (!hasDetail) node.open = false;
         else if (node.dataset.touched !== 'true') node.open = item.status === 'running';
@@ -256,43 +407,174 @@ export function createRunView({ root, renderMarkdown = (text) => text, onOpenRep
       }
       case 'text': {
         if (item.closed) {
-          const html = renderMarkdown(item.text);
           if (node.dataset.mode !== 'markdown' || node.dataset.text !== item.text) {
-            node.innerHTML = html;
+            node.innerHTML = renderMarkdown(item.text);
             node.dataset.mode = 'markdown';
             node.dataset.text = item.text;
           }
-        } else {
-          if (node.dataset.mode !== 'stream' || node.textContent !== item.text) {
-            node.textContent = item.text;
-            node.dataset.mode = 'stream';
-            delete node.dataset.text;
-          }
+        } else if (node.dataset.mode !== 'stream' || node.textContent !== item.text) {
+          node.textContent = item.text;
+          node.dataset.mode = 'stream';
+          delete node.dataset.text;
         }
-        return;
-      }
-      case 'turn': {
-        const label = `第 ${item.index} 轮`;
-        if (node.textContent !== label) node.textContent = label;
         return;
       }
       case 'notice': {
         node.dataset.level = item.level;
-        const text = node.querySelector('span:last-child');
-        const label = item.detail ? `${item.message} · ${item.detail}` : item.message;
-        if (text.textContent !== label) text.textContent = label;
+        const text = noticeText(item);
+        const label = node.querySelector('.pi-notice-text');
+        if (label.textContent !== text) label.textContent = text;
+        const detail = displayPath(item.detail || '');
+        node.querySelector('.pi-notice-detail').textContent = detail;
+        node.dataset.hasDetail = String(detail !== '');
+        node.querySelector('.pi-row-chevron').hidden = !detail;
         return;
       }
-      case 'stage':
-      default: {
-        const label = item.label ?? item.stage ?? '';
-        if (node.textContent !== label) node.textContent = label;
+      case 'stage': {
+        const text = stageText(item);
+        node.hidden = text === null;
+        const label = node.querySelector('.pi-stage-text');
+        if (text !== null && label.textContent !== text) label.textContent = text;
+        return;
       }
+      default:
     }
+  }
+
+  // ── answer frame ─────────────────────────────────────────────────────────
+
+  function finalText() {
+    if (answerIndex < 0 || !latest) return '';
+    return latest.items[answerIndex]?.text ?? '';
+  }
+
+  function drawAnswer(model) {
+    const terminal = model.status !== 'running';
+    const hasAnswer = answerIndex >= 0;
+    const unavailable = connection === 'unavailable';
+    answerHead.hidden = !(terminal && (hasAnswer || model.hasReport)) || unavailable;
+
+    output.hidden = !model.hasReport;
+    if (model.hasReport) {
+      const href = reportHref(model.runId);
+      outputDownload.href = href;
+      outputDownload.setAttribute('download', reportDownloadName(model));
+      downloadButton.href = href;
+      downloadButton.setAttribute('download', reportDownloadName(model));
+    }
+
+    actions.hidden = !(model.status === 'finished' && (hasAnswer || model.hasReport)) || unavailable;
+    copyButton.hidden = !hasAnswer;
+    downloadButton.hidden = !model.hasReport;
+
+    drawOutcome(model);
+  }
+
+  /* Connection & outcome states (标准库 ConnectionState)：每一态都凑齐四件 ——
+   * 图标 + 标题 + 说明 + 可执行的下一步。停止是中性（不是错误，不用 ×），
+   * 只有真正的失败用 destructive，网络慢用 warning。 */
+  function outcomeSpec(model) {
+    if (connection === 'unavailable') {
+      return {
+        key: 'unavailable', tone: 'failed', icon: 'alert-circle', live: 'alert',
+        title: '过程记录暂时读不到',
+        text: model.hasReport
+          ? '这项研究的过程记录没能加载，生成的报告不受影响，可以直接打开。'
+          : '这项研究的过程记录没能加载。可以重试一次。',
+        actions: [['重试', 'retry'], ...(model.hasReport ? [['打开报告', 'report']] : [])],
+      };
+    }
+    if (connection === 'reconnecting' && model.status === 'running') {
+      return {
+        key: 'slow', tone: 'slow', icon: 'alert-circle', live: 'status',
+        title: '连接中断，正在重连',
+        text: '研究仍在后台进行，重新连上后会补齐这段时间的过程。',
+        actions: [],
+      };
+    }
+    if (model.status === 'cancelled') {
+      return {
+        key: 'stopped', tone: 'stopped', icon: 'dashed-circle', live: 'status',
+        title: '已停止研究',
+        text: '这不是错误。已完成的步骤和内容都保留在上面，可以用同一个问题重新开始。',
+        actions: [['重新开始', 'rerun']],
+      };
+    }
+    if (model.status === 'failed') {
+      return {
+        key: `failed:${model.error ?? ''}`, tone: 'failed', icon: 'alert-circle', live: 'alert',
+        title: '这次研究没有完成',
+        text: '服务没有返回完整结果。已经生成的部分保留在上面，重试不会覆盖它。',
+        actions: [['重试', 'rerun']],
+        detail: model.error ? displayPath(model.error) : '',
+      };
+    }
+    return null;
+  }
+
+  function drawOutcome(model) {
+    const spec = outcomeSpec(model);
+    const key = spec?.key ?? '';
+    if (key === outcomeKey) return;
+    outcomeKey = key;
+    outcome.replaceChildren();
+    outcome.hidden = !spec;
+    if (!spec) return;
+    outcome.dataset.tone = spec.tone;
+    outcome.setAttribute('role', spec.live);
+    outcome.setAttribute('aria-live', spec.live === 'alert' ? 'assertive' : 'polite');
+    const tile = el('span', 'pi-outcome-icon');
+    tile.setAttribute('aria-hidden', 'true');
+    tile.append(icon(spec.icon, 16));
+    const text = el('div', 'pi-outcome-text');
+    const heading = el('h3', 'pi-outcome-title', spec.title);
+    heading.id = `${uid}-outcome-title`;
+    outcome.setAttribute('aria-labelledby', heading.id);
+    text.append(heading, el('p', 'pi-outcome-desc', spec.text));
+    if (spec.actions.length || spec.detail) {
+      const row = el('div', 'pi-outcome-actions');
+      for (const [label, action] of spec.actions) {
+        const button = el('button', 'btn outline sm');
+        button.type = 'button';
+        if (action !== 'report') button.append(icon('refresh', 16));
+        button.append(document.createTextNode(label));
+        button.addEventListener('click', () => {
+          if (action === 'rerun') onRerun?.(latest?.prompt ?? '');
+          if (action === 'retry') onRetry?.(latest?.runId);
+          if (action === 'report') onOpenReport?.(latest?.runId);
+        });
+        row.append(button);
+      }
+      let detailBlock = null;
+      if (spec.detail) {
+        const more = el('button', 'btn ghost sm pi-outcome-more');
+        more.type = 'button';
+        more.setAttribute('aria-expanded', 'false');
+        more.setAttribute('aria-controls', `${uid}-outcome-detail`);
+        more.append(document.createTextNode('查看详情'), icon('chevron-down', 16));
+        detailBlock = el('pre', 'pi-outcome-detail', spec.detail);
+        detailBlock.id = `${uid}-outcome-detail`;
+        detailBlock.hidden = true;
+        more.addEventListener('click', () => {
+          const open = more.getAttribute('aria-expanded') !== 'true';
+          more.setAttribute('aria-expanded', String(open));
+          detailBlock.hidden = !open;
+        });
+        row.append(more);
+      }
+      text.append(row);
+      if (detailBlock) text.append(detailBlock);
+    }
+    outcome.append(tile, text);
   }
 
   return {
     render: schedule,
+    /** live | reconnecting | unavailable | null — drives the connection card. */
+    setConnection(state) {
+      connection = state;
+      if (latest) schedule(latest);
+    },
     dispose() {
       disposed = true;
       if (frame !== null) cancelAnimationFrame(frame);
@@ -300,46 +582,7 @@ export function createRunView({ root, renderMarkdown = (text) => text, onOpenRep
       latest = null;
       rendered = [];
       root.replaceChildren();
+      delete root.dataset.status;
     },
   };
-}
-
-//: Human labels for every tool state the model can hold. A tool that never
-//: saw its own terminal frame follows the run's outcome instead of claiming
-//: success: failed runs leave it `interrupted`, cancelled runs `cancelled`.
-const TOOL_STATE_LABELS = {
-  running: '执行中',
-  done: '完成',
-  error: '失败',
-  cancelled: '已取消',
-  interrupted: '已中断',
-};
-
-function toolStateLabel(item) {
-  if (item.status === 'error' || item.isError) return TOOL_STATE_LABELS.error;
-  return TOOL_STATE_LABELS[item.status] ?? TOOL_STATE_LABELS.done;
-}
-
-/** Map a pi tool name onto the standard library's (icon, action) vocabulary. */
-function toolKind(name) {
-  const text = String(name ?? '');
-  for (const [pattern, icon, action] of TOOL_KINDS) {
-    if (pattern.test(text)) return [icon, action];
-  }
-  return ['wrench', text || '工具'];
-}
-
-export function summarizeArgs(args) {
-  if (!args || typeof args !== 'object') return '';
-  const keys = Object.keys(args);
-  if (!keys.length) return '';
-  const ordered = [...TOOL_ARG_KEYS.filter((key) => key in args), ...keys.filter((key) => !TOOL_ARG_KEYS.includes(key))];
-  const parts = [];
-  for (const key of ordered.slice(0, 3)) {
-    const value = args[key];
-    const text = typeof value === 'string' ? value : JSON.stringify(value);
-    if (text === undefined) continue;
-    parts.push(`${key}: ${text.length > 90 ? `${text.slice(0, 90)}…` : text}`);
-  }
-  return parts.join('  ·  ');
 }

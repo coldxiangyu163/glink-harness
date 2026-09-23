@@ -5,10 +5,9 @@
 // Shown only when the module graph itself fails to load. The copy stays
 // hard-coded because no module (and no translator) is available on this path.
 const BOOT_FAILURE = Object.freeze({
-  title: '页面未能完整加载 / Page failed to load',
-  detail:
-    '核心脚本未能加载。请确认本地服务在运行，然后重试。 / Core scripts did not load. Check that the local service is running, then retry.',
-  retry: '重试 / Retry',
+  title: '页面没有加载完整',
+  detail: '页面的核心部分没能加载。请确认服务正在运行，然后重试。',
+  retry: '重试',
 });
 
 function showBootFailure() {
@@ -48,7 +47,7 @@ async function start() {
     // inspection; nothing in production code reads it back.
     globalThis.__piGlink = workspace;
   } catch (error) {
-    console.error('[pi-glink] bootstrap failed', error);
+    console.error('[workbench] bootstrap failed', error);
     showBootFailure();
   } finally {
     starting = false;

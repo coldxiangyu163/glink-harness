@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <!-- 品牌标识直接取标准库的 public/logo-icon.svg（同一份文件，逐字节相同） -->
   <link rel="icon" href="/logo-icon.svg" type="image/svg+xml">
-  <title>pi-glink · pi 内核研究工作台</title>
+  <title>研究工作台</title>
   <!-- 资源指纹在响应期替换；见 host/pi_glink/static_files.py -->
   <link rel="stylesheet" href="/styles.css?v=auto">
 </head>
@@ -14,49 +14,58 @@
   <a class="skip-link" href="#main-content">跳到主要内容</a>
 
   <div id="app-shell" class="shell" data-sidebar="expanded" hidden>
-    <aside id="sidebar" class="sidebar" aria-label="运行导航">
+    <aside id="sidebar" class="sidebar" aria-label="研究导航">
       <div class="sidebar-head">
-        <a class="brand" href="#home" aria-label="pi-glink 首页">
-          <img class="brand-mark" src="/logo-icon.svg" alt="百融百鉴">
+        <a id="brand-home" class="brand" href="/" aria-label="研究工作台首页">
+          <img class="brand-mark" src="/logo-icon.svg" alt="">
         </a>
         <div class="sidebar-head-actions">
-          <button id="sidebar-toggle" class="glyph-button" type="button" aria-label="收起侧栏" aria-expanded="true" aria-controls="sidebar" data-tip="收起侧栏">
+          <button id="sidebar-toggle" class="glyph-button" type="button" aria-label="收起侧栏" aria-expanded="true" aria-controls="sidebar" data-tip="收起侧栏" data-tip-side="right">
             <span class="icon" data-icon="sidebar" aria-hidden="true" style="--icon-size:16px"></span>
           </button>
         </div>
       </div>
 
-      <button id="new-research" class="nav-new" type="button">
+      <button id="new-research" class="nav-new" type="button" data-tip="新建研究" data-tip-side="right" data-tip-when="collapsed">
         <span class="icon" data-icon="plus" aria-hidden="true" style="--icon-size:16px"></span>
-        <span>新建研究</span>
+        <span class="nav-new-label">新建研究</span>
       </button>
 
       <div id="nav-scroll" class="nav-scroll scroll-area" data-nav-scroller>
         <div class="nav-group">
-          <p class="nav-label">运行历史</p>
+          <p id="run-list-label" class="nav-label">研究记录</p>
           <div id="run-list" class="nav-list"></div>
         </div>
       </div>
 
-      <div class="sidebar-foot">
-        <div id="host-status-card" class="info-card" data-ready="false">
-          <span class="icon" data-icon="plan" aria-hidden="true" style="--icon-size:14px"></span>
-          <p id="host-status" class="muted">正在读取宿主状态…</p>
+      <div id="sidebar-foot" class="sidebar-foot" hidden>
+        <div id="service-alert" class="service-alert" role="status" data-tip-side="right" data-tip-when="collapsed">
+          <span class="icon" data-icon="alert-circle" aria-hidden="true" style="--icon-size:16px"></span>
+          <p id="service-alert-text"></p>
         </div>
       </div>
     </aside>
 
     <main id="main-content" class="surface">
-      <section class="pane">
+      <section id="conversation-pane" class="pane" aria-label="研究对话">
         <header class="pane-header">
           <div class="pane-path">
-            <button id="pane-home" type="button">pi-glink</button>
+            <button id="pane-home" type="button" title="研究工作台">研究工作台</button>
             <span class="pane-sep" aria-hidden="true">/</span>
             <span id="pane-title" class="pane-current" aria-current="page">新研究</span>
           </div>
-          <div class="pane-actions">
-            <button id="pane-preview-toggle" class="icon-button" type="button" aria-label="展开报告栏" aria-expanded="false" data-tip="报告栏" hidden>
-              <span class="icon" data-icon="panel-expand-right" aria-hidden="true" style="--icon-size:16px"></span>
+          <div id="pane-actions" class="pane-actions">
+            <button id="header-new" class="pane-toggle" type="button" aria-label="新建研究" data-tip="新建研究" hidden>
+              <span class="icon" data-icon="new-chat" aria-hidden="true"></span>
+            </button>
+            <button id="progress-toggle" class="pane-toggle" type="button" aria-label="展开进度与上下文" aria-expanded="false" aria-controls="progress-panel" data-tip="进度与上下文" hidden>
+              <span class="icon" data-icon="bullet-list" aria-hidden="true"></span>
+            </button>
+            <button id="pane-preview-toggle" class="pane-toggle" type="button" aria-label="展开报告" aria-expanded="false" aria-controls="preview-drawer" data-tip="展开报告" hidden>
+              <span class="icon" data-icon="panel-expand-right" aria-hidden="true"></span>
+            </button>
+            <button id="conversation-collapse" class="pane-toggle is-on" type="button" aria-label="收起对话" aria-expanded="true" aria-controls="conversation-pane" data-tip="收起对话" hidden>
+              <span class="icon" data-icon="chevrons-left" aria-hidden="true"></span>
             </button>
           </div>
         </header>
@@ -64,41 +73,19 @@
         <div class="pane-body">
           <section id="home-view" class="home-view view">
             <div class="home-inner">
-              <div class="home-hero">
-                <h2>把问题交给 pi，过程与产物都留在本机</h2>
-                <p>宿主只做编排与呈现：检索、推理与写作由 pi 完成，报告写入 run 工作区并可直接下载。</p>
+              <h2 class="home-title">今天要研究什么？</h2>
+              <div class="home-composer">
+                <div id="home-composer-slot" class="home-composer-slot"></div>
+                <p class="composer-note">研究过程和生成的报告会保存在研究记录里，离开页面也不会中断。</p>
               </div>
-              <div id="home-composer-slot" class="home-composer-slot"></div>
               <div class="home-cards">
-                <section class="home-card">
-                  <h3>最近运行</h3>
+                <section class="home-card" aria-labelledby="home-recent-title">
+                  <h3 id="home-recent-title">最近研究</h3>
                   <div id="home-run-list" class="home-card-list"></div>
                 </section>
-                <section class="home-card">
-                  <h3>工作方式</h3>
-                  <div class="home-card-list">
-                    <div class="home-row">
-                      <span class="icon" data-icon="plan" aria-hidden="true"></span>
-                      <span class="home-row-body">
-                        <span class="home-row-title">一次 run 一个工作区</span>
-                        <span class="home-row-meta">产物落在 run 自己的工作区，报告可直接下载</span>
-                      </span>
-                    </div>
-                    <div class="home-row">
-                      <span class="icon" data-icon="globe" aria-hidden="true"></span>
-                      <span class="home-row-body">
-                        <span class="home-row-title">检索由 pi-web-access 提供</span>
-                        <span class="home-row-meta">没有外网凭据时回退到无密钥检索</span>
-                      </span>
-                    </div>
-                    <div class="home-row">
-                      <span class="icon" data-icon="history" aria-hidden="true"></span>
-                      <span class="home-row-body">
-                        <span class="home-row-title">事件流可重放</span>
-                        <span class="home-row-meta">离开页面不会中断 run，回到历史记录继续看</span>
-                      </span>
-                    </div>
-                  </div>
+                <section class="home-card" aria-labelledby="home-report-title">
+                  <h3 id="home-report-title">最近报告</h3>
+                  <div id="home-report-list" class="home-card-list"></div>
                 </section>
               </div>
             </div>
@@ -108,36 +95,34 @@
             <div id="conversation-scroll" class="conversation-scroll scroll-area">
               <div id="conversation" class="conversation">
                 <article id="run-question" class="message user-message"></article>
-                <div id="run-view" class="pi-run scroll-area"></div>
+                <div id="run-view" class="pi-run"></div>
               </div>
             </div>
           </section>
         </div>
 
+        <div id="progress-layer" class="progress-layer" data-open="false" inert>
+          <aside id="progress-panel" class="progress-panel scroll-area" aria-label="进度与上下文"></aside>
+        </div>
+
         <div id="composer-dock" class="composer-dock">
-          <div id="composer-host" class="composer-host">
-            <div id="run-banner" class="run-banner" hidden>
-              <span class="pulse-dot" aria-hidden="true"></span>
-              <p><strong id="run-banner-title">pi 正在本机运行</strong><small>事件与报告会持续保存，可以离开这一页。</small></p>
-              <button id="stop-run" class="btn outline sm" type="button">停止</button>
-            </div>
-            <div id="composer" class="composer" hidden>
-              <div class="composer-form">
+          <div class="composer-fade" aria-hidden="true"></div>
+          <div id="composer-dock-body" class="composer-dock-body">
+            <div id="composer-host" class="composer-host">
+              <div id="composer" class="composer">
                 <div class="prompt-input">
-                  <label class="sr-only" for="prompt-input">提问</label>
+                  <label class="sr-only" for="prompt-input">研究问题</label>
                   <textarea id="prompt-input" rows="1" maxlength="32000" placeholder="描述研究对象、范围与交付要求…"></textarea>
                   <div class="prompt-tools">
                     <div class="prompt-tools-left">
-                      <span id="prompt-shortcut" class="prompt-hint">
-                        <kbd id="prompt-modifier" class="kbd">⌘</kbd><kbd class="kbd">↵</kbd>
-                        <span>提交</span>
-                      </span>
-                      <span id="stream-status" class="prompt-status"></span>
-                      <span id="prompt-count" class="prompt-count" hidden>0 / 32000</span>
+                      <span id="prompt-count" class="prompt-count" hidden></span>
                     </div>
                     <div class="prompt-tools-right">
-                      <button id="send-button" class="prompt-send" type="button" aria-label="开始研究" disabled>
+                      <button id="send-button" class="prompt-send" type="button" aria-label="开始研究" data-tip="开始研究" disabled>
                         <span class="icon" data-icon="arrow-up" aria-hidden="true"></span>
+                      </button>
+                      <button id="stop-run" class="prompt-send prompt-stop" type="button" aria-label="停止研究" data-tip="停止研究" hidden>
+                        <span class="stop-mark" aria-hidden="true"></span>
                       </button>
                     </div>
                   </div>
@@ -148,25 +133,42 @@
         </div>
       </section>
 
+      <div id="split-handle" class="split-handle" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整对话与报告的宽度" aria-controls="conversation-pane" hidden></div>
+
       <aside id="preview-drawer" class="preview-drawer" hidden aria-label="报告">
         <header class="pane-header">
-          <div class="preview-title-row"><strong id="preview-title">报告</strong></div>
+          <button id="conversation-expand" class="pane-toggle" type="button" aria-label="展开对话" aria-expanded="false" aria-controls="conversation-pane" data-tip="展开对话" hidden>
+            <span class="icon" data-icon="chevrons-left" aria-hidden="true" style="transform: rotate(180deg)"></span>
+          </button>
+          <div class="preview-name">
+            <span id="preview-title" class="preview-title">report.md</span>
+            <span class="badge" data-variant="warning">待核验草稿</span>
+          </div>
           <div class="preview-actions">
             <a id="preview-download" class="btn outline sm" href="#" download>
               <span class="icon" data-icon="download" aria-hidden="true"></span>
               <span>下载</span>
             </a>
-            <button id="preview-close" class="icon-button" type="button" aria-label="收起报告栏" data-tip="收起报告栏">
-              <span class="icon" data-icon="close" aria-hidden="true" style="--icon-size:16px"></span>
+            <button id="preview-close" class="pane-toggle is-on" type="button" aria-label="收起报告" data-tip="收起报告" data-tip-side="left">
+              <span class="icon" data-icon="chevrons-left" aria-hidden="true" style="transform: rotate(180deg)"></span>
             </button>
           </div>
         </header>
-        <div id="preview-body" class="preview-body scroll-area"></div>
+        <div id="preview-body" class="preview-body scroll-area">
+          <p class="preview-note">AI 生成，未经人工核验：可作为起草参考，不能直接对外发送或据此下判断。</p>
+          <article id="preview-article" class="doc-article" aria-label="报告正文"></article>
+        </div>
       </aside>
     </main>
   </div>
 
-  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden>
+    <span id="toast-icon" class="icon toast-icon" data-icon="check-circle" aria-hidden="true"></span>
+    <p id="toast-text" class="toast-text"></p>
+    <button id="toast-close" class="toast-close" type="button" aria-label="关闭通知">
+      <span class="icon" data-icon="close" aria-hidden="true"></span>
+    </button>
+  </div>
 
   <script src="/app.js?v=auto" defer></script>
 </body>

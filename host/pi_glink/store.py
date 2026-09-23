@@ -20,7 +20,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 #: Run states. ``running`` is the only non-terminal one.
 RUNNING = "running"
@@ -133,6 +133,30 @@ class RunStore:
                 records.append(record)
         records.sort(key=lambda item: item.created_at, reverse=True)
         return records[:limit]
+
+    def iter_events(self, run_id: str, after: int = 0) -> Iterator[dict[str, Any]]:
+        """Yield persisted events with ``seq > after``, in file order.
+
+        The in-memory bus only knows runs started by the current host process;
+        after a restart this file is the only record of a run's timeline, so
+        history replay reads it. Malformed lines are skipped, not fatal: a torn
+        last line from a crash must not hide the rest of the timeline.
+        """
+        path = self.events_path(run_id)
+        if not path.is_file():
+            return
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+                    continue
+                seq = event.get("seq")
+                if isinstance(seq, int) and seq <= after:
+                    continue
+                yield event
 
     def append_event(self, run_id: str, event: Mapping[str, Any]) -> None:
         path = self.events_path(run_id)

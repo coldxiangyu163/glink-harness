@@ -1,7 +1,7 @@
 {
   "baseUrl": "http://127.0.0.1:7861",
   "prompt": "先在本工作区创建 notes.md，写入三行关于 pi-glink 的事实，然后基于它写出 report.md。",
-  "status": "已完成 · 33.466s",
+  "status": "已完成 · 4 个步骤 · 用时 20 秒",
   "counts": {
     "thinking": 1,
     "thinkingOpen": 0,
@@ -10,16 +10,18 @@
     "toolsWithText": 3,
     "toolsRenderingTextTwice": 0,
     "texts": 1,
-    "textChars": 75,
+    "textChars": 90,
     "turns": 4,
     "stages": 3,
+    "answer": 1,
+    "draftBadge": true,
     "reportButton": true,
-    "bannerHidden": true,
-    "runListEntries": 34
+    "stopHidden": true,
+    "runListEntries": 43
   },
   "drawer": {
     "previewOpen": true,
-    "previewWidth": 435,
+    "previewWidth": 455,
     "scrollWidth": 1280,
     "clientWidth": 1280
   },
@@ -27,8 +29,9 @@
     "items": 12,
     "tools": 3,
     "texts": 1,
-    "status": "finished"
+    "status": "finished",
+    "unavailable": false
   },
-  "previewTitle": "pi-glink 运行环境简报",
+  "previewTitle": "pi-glink 工作区报告",
   "consoleErrors": []
 }

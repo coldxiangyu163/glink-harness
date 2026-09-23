@@ -65,16 +65,23 @@ let exitCode = 1;
 try {
   await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#app-shell:not([hidden])', { timeout: 15_000 });
-  const hostStatus = await page.textContent('#host-status');
-  console.log(`[ok] 工作台已加载 · ${hostStatus?.trim()}`);
+  const serviceAlert = await page.evaluate(() => (document.querySelector('#sidebar-foot')?.hidden ? '' : document.querySelector('#service-alert-text')?.textContent));
+  if (serviceAlert) throw new Error(`服务告警：${serviceAlert}`);
+  console.log('[ok] 工作台已加载（无服务告警）');
 
   await page.fill('#prompt-input', prompt);
   await page.click('#send-button');
-  console.log('[ok] 已提交 run，等待 pi 执行…');
+  console.log('[ok] 已提交 run，等待执行…');
 
-  await page.waitForSelector('.pi-run-status[data-status="finished"]', { timeout: TERMINAL_TIMEOUT });
-  const status = (await page.textContent('.pi-run-status'))?.trim();
+  await page.waitForSelector('#run-view[data-status="finished"]', { timeout: TERMINAL_TIMEOUT });
+  await page.waitForTimeout(400);
+  const status = (await page.textContent('.pi-process-label'))?.trim();
   console.log(`[ok] run 收尾：${status}`);
+  // 过程折叠在收尾后自动收起；展开它再统计（标准库 Thinking：跑完收起、永远可再展开）。
+  if ((await page.getAttribute('.pi-process-toggle', 'aria-expanded')) !== 'true') {
+    await page.click('.pi-process-toggle');
+    await page.waitForTimeout(600);
+  }
 
   const counts = await page.evaluate(() => ({
     thinking: document.querySelectorAll('.pi-thinking').length,
@@ -97,8 +104,10 @@ try {
     textChars: [...document.querySelectorAll('.pi-text')].reduce((total, node) => total + node.textContent.length, 0),
     turns: document.querySelectorAll('.pi-turn').length,
     stages: document.querySelectorAll('.pi-stage').length,
-    reportButton: !document.querySelector('.pi-report-button')?.hidden,
-    bannerHidden: document.querySelector('#run-banner')?.hidden,
+    answer: document.querySelectorAll('.pi-answer-body .pi-text').length,
+    draftBadge: !document.querySelector('.pi-answer-head')?.hidden,
+    reportButton: !document.querySelector('.pi-output')?.hidden,
+    stopHidden: document.querySelector('#stop-run')?.hidden,
     runListEntries: document.querySelectorAll('#run-list [data-run-id]').length,
   }));
   console.log('[ok] DOM 统计', JSON.stringify(counts));
@@ -112,8 +121,8 @@ try {
 
   if (!counts.reportButton) throw new Error('报告按钮不可见');
   await page.click('.pi-report-button');
-  await page.waitForSelector('#preview-body h1', { timeout: 15_000 });
-  const previewTitle = (await page.textContent('#preview-body h1'))?.trim();
+  await page.waitForSelector('#preview-article h1', { timeout: 15_000 });
+  const previewTitle = (await page.textContent('#preview-article h1'))?.trim();
   console.log(`[ok] 报告预览已打开：${previewTitle}`);
 
   // 预览抽屉必须真的占据第三列（缺失 preview-open 时列宽为 0 并横向溢出）。
@@ -140,13 +149,14 @@ try {
   const historyIds = await page.evaluate(() => [...document.querySelectorAll('#run-list [data-run-id]')].map((n) => n.dataset.runId));
   if (!historyIds.length) throw new Error('没有历史 run 可验证重放');
   await page.click('#run-list [data-run-id]');
-  await page.waitForSelector('.pi-run-status[data-status="finished"]', { timeout: 30_000 });
+  await page.waitForSelector('#run-view[data-status="finished"]', { timeout: 30_000 });
   await page.waitForTimeout(1500); // 等重放把剩余帧画完
   const replay = await page.evaluate(() => ({
-    items: document.querySelectorAll('.pi-run-timeline > *').length,
+    items: document.querySelectorAll('.pi-process-list > *, .pi-answer-body > *').length,
     tools: document.querySelectorAll('.pi-tool').length,
     texts: document.querySelectorAll('.pi-text').length,
-    status: document.querySelector('.pi-run-status')?.dataset.status,
+    status: document.querySelector('#run-view')?.dataset.status,
+    unavailable: document.querySelector('.pi-outcome')?.hidden === false && /读不到/.test(document.querySelector('.pi-outcome')?.textContent ?? ''),
   }));
   console.log('[ok] 历史 run 重放', JSON.stringify(replay));
   if (replay.items < 2) throw new Error(`历史重放时间线不完整: ${replay.items} 项`);
@@ -170,7 +180,10 @@ try {
     counts.toolsRenderingTextTwice === 0 &&
     counts.texts > 0 &&
     counts.reportButton &&
-    counts.bannerHidden === true &&
+    counts.answer === 1 &&
+    counts.draftBadge === true &&
+    counts.stopHidden === true &&
+    !replay.unavailable &&
     drawer.previewOpen &&
     drawer.previewWidth >= 300 &&
     drawer.scrollWidth <= drawer.clientWidth + 1 &&

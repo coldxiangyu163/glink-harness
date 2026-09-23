@@ -23,7 +23,7 @@ from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .config import ConfigError, HostConfig, load_config
@@ -358,7 +358,12 @@ class HostRequestHandler(BaseHTTPRequestHandler):
 
     def _stream_run_events(self, run_id: str, query: str) -> None:
         bus = self.server.bus
-        if not bus.is_open(run_id):
+        live = bus.is_open(run_id)
+        # The bus only knows runs started by this host process. A run from an
+        # earlier process is still replayable from its persisted events.jsonl —
+        # otherwise every history entry would 404 after a restart.
+        persisted = not live and self.server.store.events_path(run_id).is_file()
+        if not live and not persisted:
             self._send_json(
                 HTTPStatus.NOT_FOUND, {"error": "unknown_run", "runId": run_id},
                 head_only=False,
@@ -369,13 +374,20 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Accel-Buffering", "no")
+        # The body below is written as HTTP/1.1 chunks (_write_event); without this
+        # header a client reads the chunk-size lines as part of the event stream.
+        self.send_header("Transfer-Encoding", "chunked")
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
-        logger.info("event stream attached run=%s after=%s", run_id, after)
+        logger.info("event stream attached run=%s after=%s persisted=%s", run_id, after, persisted)
         try:
-            for event in bus.subscribe(run_id, after=after):
-                self._write_event(event.to_sse())
+            if live:
+                for event in bus.subscribe(run_id, after=after):
+                    self._write_event(event.to_sse())
+            else:
+                for event in self.server.store.iter_events(run_id, after=after):
+                    self._write_event(_persisted_sse(event))
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
@@ -400,6 +412,12 @@ class HostRequestHandler(BaseHTTPRequestHandler):
 
     def log_error(self, format: str, *args: Any) -> None:  # noqa: A002
         logger.warning("%s - %s", self.address_string(), format % args)
+
+
+def _persisted_sse(event: Mapping[str, Any]) -> str:
+    """SSE frame for an event read back from events.jsonl (same shape as live frames)."""
+    body = json.dumps(event, ensure_ascii=False)
+    return f"id: {event.get('seq', '')}\nevent: {event['type']}\ndata: {body}\n\n"
 
 
 def _run_view(record: RunRecord, *, live_event_count: int | None = None) -> dict[str, Any]:

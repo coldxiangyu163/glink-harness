@@ -1,5 +1,5 @@
 pi-glink × 百鉴 UI 标准库 · 像素级对齐校验
-日期: 2026-09-23T01:57:10.192Z
+日期: 2026-09-23T03:25:43.244Z
 命令: node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861 --reference-url http://127.0.0.1:5300/index.html?full-page-demo=agent-assistant-interaction
 视口: 1512×900
 
@@ -33,13 +33,16 @@ disabled:opacity-45 口径，与按钮的 disabled 状态同源。
 
 ## conversation  (reference #progress)
   - paneHeader: OK
+  - paneToggle: OK
   - userBubble: SKIPPED (not on reference screen)
   - thinkingToggle: OK
   - thinkingLabel: OK
   - toolRow: OK
   - toolLabel: OK
   - toolChip: OK
+  - outputCard: OK
+  - answerAction: OK
   - composer: OK
   - composerSend: OK
 
-[done] 逐值比对通过：27 个角色，0 处不一致
+[done] 逐值比对通过：30 个角色，0 处不一致

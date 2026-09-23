@@ -16,7 +16,6 @@ import {
   createRunModel,
   runSummary,
 } from '../../web/modules/run-stream.mjs';
-import { summarizeArgs } from '../../web/modules/run-view.mjs';
 import { renderMarkdown } from '../../web/modules/markdown.mjs';
 
 const frame = (seq, type, payload = {}) => ({ seq, type, runId: 'r1', payload });
@@ -225,14 +224,6 @@ test('unknown event types are ignored, not rendered as noise', () => {
   model = applyEvents(model, [frame(1, 'future_event_type', { anything: 1 })]);
   assert.equal(model.items.length, before);
   assert.equal(model.lastSeq, 1);
-});
-
-test('tool argument summaries prefer the interesting keys and stay bounded', () => {
-  const summary = summarizeArgs({ content: 'x'.repeat(200), command: 'ls -la', cwd: '/tmp' });
-  assert.match(summary, /command: ls -la/);
-  assert.ok(summary.length < 400, 'summary must stay short');
-  assert.equal(summarizeArgs({}), '');
-  assert.equal(summarizeArgs(null), '');
 });
 
 test('the front-end carries no Glink-specific report layer', () => {

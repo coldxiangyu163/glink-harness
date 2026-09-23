@@ -29,9 +29,11 @@ export const TERMINAL_STATUSES = new Set(['finished', 'failed', 'cancelled']);
  */
 export const TERMINAL_EVENT_TYPES = new Set(['run_finished', 'run_failed', 'run_cancelled']);
 
+//: Stage codes → readable labels. The view decides which stages the reader
+//: actually sees (present.mjs `stageText`); lifecycle bookkeeping stays hidden.
 const STAGE_LABELS = {
-  agent_start: 'pi 开始处理',
-  agent_end: '本轮 agent 结束',
+  agent_start: '开始处理',
+  agent_end: '本轮处理结束',
   compaction_start: '上下文压缩开始',
   compaction_end: '上下文压缩结束',
   auto_retry_start: '自动重试',
@@ -105,12 +107,17 @@ export function applyEvent(model, event) {
     case 'tool_finished':
       return finishTool(next, payload);
     case 'run_stage':
-      return appendItem(next, { kind: 'stage', stage: payload.stage, label: stageLabel(payload) });
+      return appendItem(next, {
+        kind: 'stage',
+        stage: payload.stage,
+        attempt: payload.attempt ?? null,
+        label: stageLabel(payload),
+      });
     case 'kernel_status':
       return appendItem(next, {
         kind: 'notice',
         level: payload.level ?? 'info',
-        message: payload.message ?? 'kernel status',
+        message: payload.message ?? 'notice',
         detail: payload.detail ?? '',
       });
     case 'usage_reported':
@@ -153,7 +160,10 @@ export function createRunSubscription({
     report('connecting');
     source = eventSourceFactory(eventsUrl(runId));
     source.onopen = () => report('live');
-    source.onerror = () => report('reconnecting');
+    // EventSource retries network drops by itself (readyState CONNECTING), but a
+    // non-200 answer — an unknown or purged run — closes it for good. Only the
+    // first is "reconnecting"; the second must not spin forever.
+    source.onerror = () => report(source?.readyState === 2 ? 'failed' : 'reconnecting');
     source.onmessage = (message) => {
       try {
         const event = JSON.parse(message.data);
