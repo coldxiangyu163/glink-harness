@@ -1,8 +1,17 @@
-"""Prepare the pi configuration directory for a run.
+"""Prepare the pi configuration directory for one run.
 
 pi reads its configuration from ``PI_CODING_AGENT_DIR``. The repository ships a
 template directory (``agent/``) for the parts that should be reviewed and
 versioned: settings, AGENTS.md, extensions, skills, prompts.
+
+**The runtime directory belongs to one run.** It is rendered into the run's own
+directory (``<data_root>/runs/<run_id>/pi-agent``) together with the run's
+session directory, so two runs can never share a configuration file, a
+credential seed or pi's own mutable state (``auth.json``, ``models-store.json``,
+``npm/``). The repository template is input only; it is copied, never written
+to. Rendering replaces each template entry instead of merging into an existing
+directory, so a removed extension or credential does not survive as a stale
+file.
 
 Operator-provided values cannot live in those files. pi resolves environment
 interpolation for ``apiKey`` and ``headers`` only — not for ``baseUrl`` and not
@@ -10,7 +19,7 @@ for model ids (verified against pi 0.86.1: a ``$OPENAI_BASE_URL`` baseUrl
 reaches the provider as a literal string and every request fails with
 ``Invalid URL``). So the host renders a small runtime directory:
 
-    <data_root>/pi-agent/
+    <run_dir>/pi-agent/
     ├── models.json          generated: literal baseUrl + literal model id
     ├── auth.json            generated: model credential in pi's own store (0600)
     ├── web-search.json      generated: pi-web-access credential (0600), if configured
@@ -19,10 +28,14 @@ reaches the provider as a literal string and every request fails with
 **The model credential lives in ``auth.json``, not in the process environment.**
 That is pi's official credential store — the same file ``/login`` writes — and
 using it keeps the key out of the kernel's environment, where its shell tool
-would otherwise read it with ``env``. The file sits in the runtime directory
-(outside the repository) with mode 0600 and is rewritten on every run. The same
-reasoning applies to the pi-web-access credential, which the plugin can only read
-from a file anyway.
+would otherwise read it with ``env``. The file sits in the run's runtime
+directory (outside the repository) with mode 0600 and is rewritten on every run.
+The same reasoning applies to the pi-web-access credential, which the plugin can
+only read from a file anyway.
+
+No model price table is rendered: this host does not know the operator's rates,
+and inventing ``cost: 0`` would make pi report a fabricated price. Usage is
+reported as the provider's own counters (see ``runner.py``).
 """
 
 from __future__ import annotations
@@ -46,7 +59,10 @@ PROVIDER_ID = "frontier"
 #: openrouter.ai/api/v1: with this format the same model returns reasoning.
 THINKING_FORMAT = "openrouter"
 #: Template entries copied verbatim into the runtime directory.
-_TEMPLATE_ENTRIES = ("settings.json", "AGENTS.md", "extensions", "skills", "prompts")
+TEMPLATE_ENTRIES = ("settings.json", "AGENTS.md", "extensions", "skills", "prompts")
+#: Backwards-compatible private alias (the list is part of the module contract
+#: for the E2B upload manifest, so it is exported under a public name).
+_TEMPLATE_ENTRIES = TEMPLATE_ENTRIES
 
 #: Environment names handed to the pi process verbatim.
 #:
@@ -75,12 +91,14 @@ WEB_SEARCH_ENV_PROVIDER_KEY = "exaApiKey"
 
 @dataclass(frozen=True, slots=True)
 class AgentRuntime:
-    """Where pi will read its configuration for this host, and which model."""
+    """Where pi will read its configuration for one run, and which model."""
 
     directory: Path
     provider_id: str
     model_id: str
     models_path: Path
+    #: The run's own pi session directory (never a shared host directory).
+    session_dir: Path
 
     @property
     def model_ref(self) -> str:
@@ -88,16 +106,27 @@ class AgentRuntime:
 
 
 def prepare_agent_dir(
-    config: HostConfig, *, runtime_dir: Path | None = None
+    config: HostConfig,
+    *,
+    runtime_dir: Path,
+    session_dir: Path | None = None,
 ) -> AgentRuntime:
-    """Render the runtime pi configuration directory and return its handle."""
+    """Render the per-run pi configuration directory and return its handle.
+
+    ``runtime_dir`` is required: it must be the run's own directory. Rendering
+    into a shared directory would let concurrent runs overwrite each other's
+    credentials and extensions. ``session_dir`` defaults to a sibling
+    ``sessions`` directory; the host always passes the run's own path.
+    """
     if not config.openai_base_url:
         raise ConfigError("OPENAI_BASE_URL is required to launch the pi kernel")
     if not config.openai_model:
         raise ConfigError("OPENAI_MODEL is required to launch the pi kernel")
 
-    directory = runtime_dir if runtime_dir is not None else config.data_root / "pi-agent"
+    directory = Path(runtime_dir)
+    sessions = Path(session_dir) if session_dir is not None else directory.parent / "sessions"
     directory.mkdir(parents=True, exist_ok=True)
+    sessions.mkdir(parents=True, exist_ok=True)
     _sync_template(config.agent_config_dir, directory)
     _seed_web_search_config(config, directory)
     _write_auth_json(config, directory)
@@ -107,12 +136,41 @@ def prepare_agent_dir(
         json.dumps(_models_document(config), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    models_path.chmod(0o600)
     return AgentRuntime(
         directory=directory,
         provider_id=PROVIDER_ID,
         model_id=config.openai_model,
         models_path=models_path,
+        session_dir=sessions,
     )
+
+
+def template_manifest(template_dir: Path) -> list[tuple[str, Path, bool]]:
+    """Every reviewable template entry as ``(relative, absolute, is_dir)``.
+
+    Symlinks are never listed: the runtime configuration must be a copy of
+    reviewed repository content, not a path into the operator's filesystem. The
+    manifest is shared by the local faces (which copy the entries) and the E2B
+    face (which uploads them), so all three deliver the same configuration.
+    """
+    manifest: list[tuple[str, Path, bool]] = []
+    if not template_dir.is_dir():
+        return manifest
+    for entry in TEMPLATE_ENTRIES:
+        source = template_dir / entry
+        if source.is_symlink() or not source.exists():
+            continue
+        if source.is_dir():
+            manifest.append((entry, source, True))
+            for child in sorted(source.rglob("*")):
+                if child.is_symlink():
+                    continue
+                relative = f"{entry}/{child.relative_to(source).as_posix()}"
+                manifest.append((relative, child, child.is_dir()))
+        else:
+            manifest.append((entry, source, False))
+    return manifest
 
 
 def build_pi_argv(
@@ -150,7 +208,7 @@ def build_pi_env(
     source = dict(base_env) if base_env is not None else dict(os.environ)
     env = {name: source[name] for name in PASSTHROUGH_ENV if name in source}
     env["PI_CODING_AGENT_DIR"] = str(runtime.directory)
-    env["PI_CODING_AGENT_SESSION_DIR"] = str(config.session_dir)
+    env["PI_CODING_AGENT_SESSION_DIR"] = str(runtime.session_dir)
     env["PI_SKIP_VERSION_CHECK"] = "1"
     env["PI_TELEMETRY"] = "0"
     return env
@@ -178,12 +236,10 @@ def _models_document(config: HostConfig) -> dict[str, Any]:
                             "thinkingFormat": THINKING_FORMAT,
                             "supportsReasoningEffort": True,
                         },
-                        "cost": {
-                            "input": 0,
-                            "output": 0,
-                            "cacheRead": 0,
-                            "cacheWrite": 0,
-                        },
+                        # No `cost` block: the host does not know the operator's
+                        # rates. A zero table would make pi report a fabricated
+                        # price; without it pi reports only the provider's
+                        # token counters, which is what the run record sums.
                     }
                 ],
             }
@@ -195,18 +251,21 @@ def _write_auth_json(config: HostConfig, directory: Path) -> Path | None:
     """Store the model credential the way pi itself stores it.
 
     ``auth.json`` is pi's official credential store — the same file ``/login``
-    writes, mode 0600, inside the runtime config directory (which lives outside
-    the repository). Using it instead of an environment variable is what keeps
-    the key **out of the kernel's process environment**, and therefore out of
-    reach of its shell tool: the objective allows "environment variables or pi's
-    official credential mechanism", and this is the narrower one.
+    writes, mode 0600, inside the run's runtime config directory (which lives
+    outside the repository). Using it instead of an environment variable is what
+    keeps the key **out of the kernel's process environment**, and therefore out
+    of reach of its shell tool: the objective allows "environment variables or
+    pi's official credential mechanism", and this is the narrower one.
 
-    The file is rewritten on every run, so a credential pi might clear while
-    rotating its own state is always restored before the next kernel start.
+    The file is rewritten on every render, so a credential pi might clear while
+    rotating its own state is always restored before the next kernel start, and
+    a credential removed from the configuration is removed from the directory
+    rather than left behind.
     """
-    if not config.openai_api_key:
-        return None
     target = directory / AUTH_FILENAME
+    if not config.openai_api_key:
+        target.unlink(missing_ok=True)
+        return None
     payload = {PROVIDER_ID: {"type": "api_key", "key": config.openai_api_key}}
     target.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -216,17 +275,36 @@ def _write_auth_json(config: HostConfig, directory: Path) -> Path | None:
 
 
 def _sync_template(template_dir: Path, target_dir: Path) -> None:
-    """Copy reviewable template entries next to the generated models.json."""
-    if not template_dir.is_dir():
-        return
-    for entry in _TEMPLATE_ENTRIES:
-        source = template_dir / entry
-        if not source.exists():
+    """Replace every template entry in the runtime directory.
+
+    Replacement (not merge) is the point: a run must not inherit an extension,
+    skill or prompt that a previous render left in the same directory. Each
+    top-level entry is removed and re-copied; files inside template directories
+    are copied individually so symlinks cannot smuggle content in.
+    """
+    manifest = template_manifest(template_dir)
+    present = {entry.split("/", 1)[0] for entry, _source, _is_dir in manifest}
+    for name in TEMPLATE_ENTRIES:
+        target = target_dir / name
+        if target.is_symlink() or (target.exists() and not target.is_dir()):
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
+        if name not in present:
+            continue
+        source = template_dir / name
+        if source.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            shutil.copy2(source, target)
+    for entry, source, is_dir in manifest:
+        if "/" not in entry:
             continue
         target = target_dir / entry
-        if source.is_dir():
-            shutil.copytree(source, target, dirs_exist_ok=True)
+        if is_dir:
+            target.mkdir(parents=True, exist_ok=True)
         else:
+            target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
 
 
@@ -244,6 +322,8 @@ def _seed_web_search_config(config: HostConfig, directory: Path) -> Path | None:
 
     Having no credential at all is a supported state: pi-web-access still works
     through keyless Exa MCP search, and the run contract does not require a key.
+    The target is removed when no source has a credential, so a per-run
+    directory can never keep a previous credential behind.
     """
     target = directory / WEB_SEARCH_FILENAME
     if config.web_search_key:
@@ -258,4 +338,5 @@ def _seed_web_search_config(config: HostConfig, directory: Path) -> Path | None:
         shutil.copy2(source, target)
         target.chmod(0o600)
         return target
+    target.unlink(missing_ok=True)
     return None

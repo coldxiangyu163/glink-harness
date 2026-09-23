@@ -83,7 +83,7 @@ export function installTooltips({ isRail = () => false } = {}) {
     timer = setTimeout(() => show(node), delay);
   }
 
-  document.addEventListener('pointerover', (event) => {
+  function onPointerOver(event) {
     const node = event.target.closest?.('[data-tip]');
     if (node === target) return;
     if (!node) {
@@ -91,24 +91,46 @@ export function installTooltips({ isRail = () => false } = {}) {
       return;
     }
     schedule(node, SHOW_DELAY);
-  });
-  document.addEventListener('pointerout', (event) => {
+  }
+
+  function onPointerOut(event) {
     const node = event.target.closest?.('[data-tip]');
     if (node && !node.contains(event.relatedTarget)) hide();
-  });
-  document.addEventListener('focusin', (event) => {
+  }
+
+  function onFocusIn(event) {
     const node = event.target.closest?.('[data-tip]');
     // Keyboard focus shows the name at once; a mouse click must not pin a bubble.
     if (node && node.matches(':focus-visible')) schedule(node, 0);
     else hide();
-  });
+  }
+
+  function onKeydown(event) {
+    if (event.key === 'Escape') hide();
+  }
+
+  document.addEventListener('pointerover', onPointerOver);
+  document.addEventListener('pointerout', onPointerOut);
+  document.addEventListener('focusin', onFocusIn);
   document.addEventListener('focusout', hide);
   document.addEventListener('pointerdown', hide, true);
-  document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') hide();
-  });
+  document.addEventListener('keydown', onKeydown);
   window.addEventListener('scroll', hide, true);
   window.addEventListener('resize', hide);
 
-  return { hide };
+  /** Remove every listener and the bubble. `dispose()` on the shell calls this. */
+  function dispose() {
+    document.removeEventListener('pointerover', onPointerOver);
+    document.removeEventListener('pointerout', onPointerOut);
+    document.removeEventListener('focusin', onFocusIn);
+    document.removeEventListener('focusout', hide);
+    document.removeEventListener('pointerdown', hide, true);
+    document.removeEventListener('keydown', onKeydown);
+    window.removeEventListener('scroll', hide, true);
+    window.removeEventListener('resize', hide);
+    hide();
+    bubble.remove();
+  }
+
+  return { hide, dispose };
 }

@@ -26,9 +26,10 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from .artifacts import ArtifactError, read_regular_file
 from .config import ConfigError, HostConfig, load_config
 from .events import EventBus
-from .kernel.runner import ClientFactory, RunBusy, RunManager
+from .kernel.runner import ClientFactory, REPORT_MAX_BYTES, RunBusy, RunManager
 from .kernel.rpc import PiRpcClient
 from .static_files import Asset, WebAssets
 from .store import RunRecord, RunStore
@@ -232,11 +233,16 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         """Run view with the live event count while the run is still open.
 
         ``meta.json`` is only rewritten at state transitions, so the persisted
-        count is stale during a run; the bus knows the real number and the
-        browser uses it to show progress.
+        count is stale during a run; an open run's count comes from the bus.
+        Once the run is closed the persisted count is authoritative (the bus
+        drops its per-run window at close).
         """
-        live = self.server.bus.last_seq(record.run_id)
-        return _run_view(record, live_event_count=max(live, record.event_count))
+        live = (
+            self.server.bus.last_seq(record.run_id)
+            if self.server.bus.is_open(record.run_id)
+            else None
+        )
+        return _run_view(record, live_event_count=live)
 
     def _send_run(self, run_id: str, *, head_only: bool) -> None:
         record = self.server.store.get(run_id)
@@ -260,8 +266,23 @@ class HostRequestHandler(BaseHTTPRequestHandler):
                 head_only=head_only,
             )
             return
-        path = Path(record.report_path)
-        if not path.is_file():
+        # The served file must be the host-owned artifact inside this run's own
+        # directory, read without following links. The kernel-produced path is
+        # never a download capability: a symlink, a non-regular file, an
+        # oversized file or a path outside the run is refused as "no report".
+        try:
+            data = read_regular_file(
+                record.report_path,
+                max_bytes=REPORT_MAX_BYTES,
+                root=self.server.store.run_dir(run_id),
+            )
+        except (ArtifactError, OSError) as exc:
+            logger.warning(
+                "report artifact refused run=%s path=%s: %s",
+                run_id,
+                record.report_path,
+                exc,
+            )
             self._send_json(
                 HTTPStatus.NOT_FOUND,
                 {"error": "no_report", "runId": run_id},
@@ -270,7 +291,7 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             return
         # The report is a product surface too: a credential the model echoed into
         # it must not reach the browser. The header records whether it happened.
-        original = path.read_text(encoding="utf-8", errors="replace")
+        original = data.decode("utf-8", errors="replace")
         redactor = self.server.manager.redactor
         redacted = redactor.redact(original)
         self._send_bytes(
@@ -358,11 +379,13 @@ class HostRequestHandler(BaseHTTPRequestHandler):
 
     def _stream_run_events(self, run_id: str, query: str) -> None:
         bus = self.server.bus
+        store = self.server.store
         live = bus.is_open(run_id)
-        # The bus only knows runs started by this host process. A run from an
-        # earlier process is still replayable from its persisted events.jsonl —
-        # otherwise every history entry would 404 after a restart.
-        persisted = not live and self.server.store.events_path(run_id).is_file()
+        # The durable log is the replay source of truth; the bus only knows runs
+        # started by this host process and is used for the live tail. A run from
+        # an earlier process is replayed from events.jsonl — otherwise every
+        # history entry would 404 after a restart.
+        persisted = store.events_path(run_id).is_file()
         if not live and not persisted:
             self._send_json(
                 HTTPStatus.NOT_FOUND, {"error": "unknown_run", "runId": run_id},
@@ -380,17 +403,32 @@ class HostRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
-        logger.info("event stream attached run=%s after=%s persisted=%s", run_id, after, persisted)
+        logger.info("event stream attached run=%s after=%s live=%s", run_id, after, live)
+        # Subscribe *before* reading the log: the subscriber captures the live
+        # tail from this moment, and the log read captures everything already
+        # committed. Frames that fall in both are deduplicated by sequence, and
+        # a run that closes during the read still has its frames on disk.
+        subscription = bus.subscribe(run_id, after=after) if live else None
         try:
-            if live:
-                for event in bus.subscribe(run_id, after=after):
+            last = after
+            for event in store.iter_events(run_id, after=after):
+                seq = event.get("seq")
+                if isinstance(seq, int):
+                    if seq <= last:
+                        continue
+                    last = seq
+                self._write_event(_persisted_sse(event))
+            if subscription is not None:
+                for event in subscription:
+                    if event.seq <= last:
+                        continue
+                    last = event.seq
                     self._write_event(event.to_sse())
-            else:
-                for event in self.server.store.iter_events(run_id, after=after):
-                    self._write_event(_persisted_sse(event))
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
+            if subscription is not None:
+                subscription.close()
             logger.info("event stream detached run=%s", run_id)
             self._write_end_of_stream()
 
@@ -469,6 +507,10 @@ def create_server(
     manager = RunManager(
         config, bus, store, client_factory=client_factory or PiRpcClient
     )
+    # Runs left ``running`` by a previous process cannot continue; close them
+    # out honestly before the host serves history. External leftovers are not
+    # touched here — their identity is recorded for an operator decision.
+    manager.reconcile()
     return PiGlinkServer(config, bus, store, manager, WebAssets(config.web_root))
 
 
@@ -523,7 +565,17 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\n收到中断，正在退出 / interrupted, shutting down")
     finally:
+        # Cancel and reap this process's runs before the HTTP server disappears;
+        # a run that does not release in time is reported, not hidden.
+        unreleased = server.manager.shutdown(timeout=15.0)
         server.server_close()
+    if unreleased:
+        print(
+            "警告：以下 run 未在限时内释放，需要人工对账："
+            + ", ".join(unreleased),
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

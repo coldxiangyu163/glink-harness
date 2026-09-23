@@ -185,10 +185,20 @@ def test_bus_assigns_monotonic_sequence_and_replays_after_cursor() -> None:
     bus.publish("run-1", RUN_STARTED, {"prompt": "hi"})
     bus.publish("run-1", "assistant_delta", {"text": "a"})
     bus.publish("run-1", "assistant_delta", {"text": "b"})
-    bus.close("run-1")
 
-    replayed = [event.seq for event in bus.subscribe("run-1", after=1)]
-    assert replayed == [2, 3]
+    # A live subscriber resumes after its cursor and then follows the tail.
+    subscriber = bus.subscribe("run-1", after=1)
+    first = next(subscriber)
+    assert first.seq == 2
+    bus.publish("run-1", "assistant_delta", {"text": "c"})
+    assert [next(subscriber).seq for _ in range(2)] == [3, 4]
+    subscriber.close()
+
+    # The ring is released when the run closes; replay after that belongs to
+    # the durable log (`RunStore.iter_events`), which is the fact source.
+    bus.close("run-1")
+    assert bus.is_open("run-1") is False
+    assert [event.seq for event in bus.subscribe("run-1", after=0)] == []
 
 
 def test_unknown_run_is_not_open() -> None:

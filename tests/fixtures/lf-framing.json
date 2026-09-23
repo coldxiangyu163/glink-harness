@@ -1,0 +1,47 @@
+{
+  "description": "LF-only JSONL corpus shared by the RPC (byte stream) and E2B (decoded file) framing regressions. Writers may use LF or CRLF; U+2028/U+2029 are content.",
+  "frames": [
+    {
+      "type": "turn_start"
+    },
+    {
+      "type": "message_update",
+      "assistantMessageEvent": {
+        "type": "text_delta",
+        "delta": "line\u2028separator"
+      }
+    },
+    {
+      "type": "message_update",
+      "assistantMessageEvent": {
+        "type": "text_delta",
+        "delta": "para\u2029separator"
+      }
+    },
+    {
+      "type": "message_end",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "escaped \" quote and \\ backslash"
+          }
+        ],
+        "stopReason": "stop"
+      }
+    },
+    {
+      "type": "turn_end",
+      "message": {
+        "role": "assistant",
+        "usage": {
+          "input": 5,
+          "output": 7,
+          "totalTokens": 12
+        }
+      },
+      "toolResults": []
+    }
+  ]
+}

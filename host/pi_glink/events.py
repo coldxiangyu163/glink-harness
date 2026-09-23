@@ -17,16 +17,33 @@ already consumes::
 
 ``seq`` is per run and monotonic, so a reconnecting client can resume with
 ``Last-Event-ID`` without replaying or skipping work.
+
+**Commit before publish.** ``commit`` assigns the sequence number, runs the
+caller's persist callback, and only then stores the frame in the ring and hands
+it to live subscribers. A frame that could not be persisted therefore exists
+nowhere: the browser cannot show a frame that is missing from
+``events.jsonl``, and no sequence number is burned for it. The durable log is
+the replay source of truth; the ring is only the window between "the reader
+reached the end of the file" and "the reader is attached to the live tail".
+
+**Bounded subscribers.** A subscriber queue has a firm capacity. A client that
+stops reading is disconnected (the stream ends, the browser reconnects with
+``Last-Event-ID`` and replays from the log) instead of growing an unbounded
+queue. The per-run ring is dropped when the run closes; run counters are a few
+bytes per run and are the last thing to go.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
+
+logger = logging.getLogger("pi_glink.events")
 
 # Run lifecycle (host-owned)
 RUN_STARTED = "run_started"
@@ -50,8 +67,15 @@ KERNEL_STATUS = "kernel_status"
 
 TERMINAL_EVENT_TYPES = frozenset({RUN_FINISHED, RUN_FAILED, RUN_CANCELLED})
 
-#: Upper bound on frames a single run keeps for late subscribers.
+#: Upper bound on frames a single run keeps for the replay-to-live handover.
 _RING_CAPACITY = 4000
+#: Upper bound on frames queued for one live subscriber before it is dropped.
+#: The client then reconnects and replays from the durable log, so the bound
+#: never loses committed history — it only ends a connection that stopped
+#: reading.
+_SUBSCRIBER_CAPACITY = 2000
+
+PersistCallback = Callable[["RunEvent"], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,81 +102,149 @@ class RunEvent:
         return f"id: {self.seq}\nevent: {self.type}\ndata: {body}\n\n"
 
 
-class EventBus:
-    """Per-run fan-out with replay for reconnecting subscribers.
+class _Subscriber:
+    """One live subscriber with a firm queue bound."""
 
-    A run keeps its recent frames in a bounded ring. Subscribers created before
-    the run ends keep a live queue; late subscribers replay the ring and then
-    switch to the live tail, which is what makes ``Last-Event-ID`` recovery
-    correct without a persistence layer in front of it.
+    __slots__ = ("overflowed", "queue")
+
+    def __init__(self, capacity: int) -> None:
+        self.queue: queue.Queue[RunEvent | None] = queue.Queue(maxsize=capacity)
+        self.overflowed = False
+
+    def offer(self, item: RunEvent | None) -> None:
+        if self.overflowed:
+            return
+        try:
+            self.queue.put_nowait(item)
+        except queue.Full:
+            # The consumer stopped reading. Mark it so the generator ends the
+            # stream; dropping frames silently would fake continuity.
+            self.overflowed = True
+
+
+class EventBus:
+    """Per-run fan-out with a bounded replay window and a bounded live tail.
+
+    ``commit`` is the only writer used by the runner: it persists first, then
+    publishes. ``publish`` remains for callers that own no durable log (tests,
+    host-only frames) and is exactly ``commit`` without a persist callback.
     """
 
     def __init__(self, capacity: int = _RING_CAPACITY) -> None:
         self._capacity = capacity
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._counters: dict[str, int] = {}
         self._history: dict[str, list[RunEvent]] = {}
-        self._subscribers: dict[str, set[queue.Queue[RunEvent | None]]] = {}
+        self._subscribers: dict[str, set[_Subscriber]] = {}
         self._closed: set[str] = set()
 
-    def publish(
-        self, run_id: str, event_type: str, payload: Mapping[str, Any] | None = None
+    # -- writing --------------------------------------------------------------
+
+    def commit(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        persist: PersistCallback | None = None,
     ) -> RunEvent:
+        """Assign ``seq``, persist, then fan out.
+
+        ``persist`` runs inside the bus lock so sequence assignment, the durable
+        append and the live notification all see the same order. If it raises,
+        the sequence number is not consumed and nothing is published: the frame
+        is invisible everywhere rather than present in only one surface.
+        """
         with self._lock:
             seq = self._counters.get(run_id, 0) + 1
-            self._counters[run_id] = seq
             event = RunEvent(
                 type=event_type, run_id=run_id, seq=seq, payload=dict(payload or {})
             )
+            if persist is not None:
+                persist(event)
+            self._counters[run_id] = seq
             history = self._history.setdefault(run_id, [])
             history.append(event)
             if len(history) > self._capacity:
                 del history[: len(history) - self._capacity]
             subscribers = tuple(self._subscribers.get(run_id, ()))
         for subscriber in subscribers:
-            subscriber.put(event)
+            subscriber.offer(event)
         return event
 
+    def publish(
+        self, run_id: str, event_type: str, payload: Mapping[str, Any] | None = None
+    ) -> RunEvent:
+        """Publish without a durable log (host-only or test frames)."""
+        return self.commit(run_id, event_type, payload)
+
     def close(self, run_id: str) -> None:
-        """Mark end-of-stream and wake live subscribers.
+        """Mark end-of-stream, wake live subscribers and drop the ring.
 
         The closed flag also ends later subscriptions: a client that connects
-        after the run finished must replay the history and then get EOF, not
-        block forever on a queue nobody will write to again.
+        after the run finished replays from ``events.jsonl`` instead of waiting
+        on a queue nobody will write to again. The ring exists only for the
+        replay→live handover, so it is released here; the durable log is not
+        touched.
         """
         with self._lock:
             self._closed.add(run_id)
             subscribers = tuple(self._subscribers.get(run_id, ()))
+            self._history.pop(run_id, None)
         for subscriber in subscribers:
-            subscriber.put(None)
+            subscriber.offer(None)
 
     def subscribe(self, run_id: str, after: int = 0) -> Iterator[RunEvent]:
-        """Yield frames with ``seq > after``, then any frame published later."""
+        """Yield frames with ``seq > after``, then any frame published later.
+
+        Registration happens when this method is called, not when iteration
+        starts: a frame published between ``subscribe`` and the first ``next``
+        is queued rather than racing the caller. The generator ends when the run
+        closes, when the subscriber falls too far behind
+        (:attr:`_Subscriber.overflowed`), or when the caller stops iterating.
+        Callers that need the whole history read the durable log first and pass
+        the last persisted sequence as ``after``.
+        """
         with self._lock:
-            pending = [event for event in self._history.get(run_id, ()) if event.seq > after]
-            subscriber: queue.Queue[RunEvent | None] | None = (
-                queue.Queue() if run_id not in self._closed else None
-            )
-            if subscriber is not None:
+            pending = [
+                event for event in self._history.get(run_id, ()) if event.seq > after
+            ]
+            subscriber: _Subscriber | None = None
+            if run_id in self._counters and run_id not in self._closed:
+                subscriber = _Subscriber(_SUBSCRIBER_CAPACITY)
                 self._subscribers.setdefault(run_id, set()).add(subscriber)
-        try:
-            for event in pending:
-                yield event
-            if subscriber is None:
-                return
-            while True:
-                item = subscriber.get()
-                if item is None:
+
+        def _iterate() -> Iterator[RunEvent]:
+            try:
+                yield from pending
+                if subscriber is None:
                     return
-                yield item
-        finally:
-            if subscriber is not None:
-                with self._lock:
-                    listeners = self._subscribers.get(run_id)
-                    if listeners is not None:
-                        listeners.discard(subscriber)
-                        if not listeners:
-                            self._subscribers.pop(run_id, None)
+                while True:
+                    if subscriber.overflowed:
+                        logger.warning(
+                            "subscriber for run=%s fell behind and was disconnected",
+                            run_id,
+                        )
+                        return
+                    try:
+                        item = subscriber.queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if item is None:
+                        return
+                    yield item
+            finally:
+                if subscriber is not None:
+                    with self._lock:
+                        listeners = self._subscribers.get(run_id)
+                        if listeners is not None:
+                            listeners.discard(subscriber)
+                            if not listeners:
+                                self._subscribers.pop(run_id, None)
+
+        return _iterate()
+
+    # -- queries --------------------------------------------------------------
 
     def last_seq(self, run_id: str) -> int:
         with self._lock:
@@ -166,11 +258,12 @@ class EventBus:
             self._closed.discard(run_id)
 
     def is_open(self, run_id: str) -> bool:
+        """True only while this process still owns the run's live stream."""
         with self._lock:
-            return run_id in self._counters
+            return run_id in self._counters and run_id not in self._closed
 
     def forget(self, run_id: str) -> None:
-        """Drop a finished run's history once nothing can reconnect to it."""
+        """Drop a finished run's counters, history and closed marker."""
         with self._lock:
             self._counters.pop(run_id, None)
             self._history.pop(run_id, None)

@@ -183,6 +183,118 @@ def test_runner_redacts_a_tool_echo_before_the_log_and_the_bus(tmp_path: Path) -
     assert AUDIT_SECRET not in stream_text, "SSE payload leaked the model credential"
 
 
+# -- streaming (delta) boundary -------------------------------------------------
+
+
+def test_stream_redactor_catches_every_split_position_of_a_known_secret() -> None:
+    """Audit regression: two deltas that each contain half a known secret.
+
+    Redaction used to run per delta, so neither half matched and the browser
+    could reconstruct the value by concatenating the frames it received.
+    """
+    secret = AUDIT_SECRET
+    prefix, suffix = "审计记录：", "。引用结束"
+    for split in range(1, len(secret)):
+        stream = SecretRedactor([secret]).stream()
+        emitted = [
+            stream.push("assistant_delta", prefix + secret[:split]),
+            stream.push("assistant_delta", secret[split:] + suffix),
+            stream.flush("assistant_delta"),
+        ]
+        combined = "".join(emitted)
+        assert secret not in combined, f"split at {split} leaked the credential"
+        assert REPLACEMENT in combined, f"split at {split} was not masked"
+        assert combined.startswith(prefix) and combined.endswith(suffix), (
+            f"split at {split} changed the surrounding text"
+        )
+
+
+def test_stream_redactor_catches_a_split_credential_shape() -> None:
+    """A shape-only token (the host never knew the value) split across deltas."""
+    token = "sk-" + "a1b2c3d4e5f6g7h8i9j0"
+    for split in range(1, len(token)):
+        stream = SecretRedactor().stream()
+        combined = "".join(
+            [
+                stream.push("assistant_delta", token[:split]),
+                stream.push("assistant_delta", token[split:]),
+                stream.flush("assistant_delta"),
+            ]
+        )
+        assert token not in combined, f"split at {split} leaked the token"
+
+
+def test_stream_redactor_holds_an_incomplete_assignment_value() -> None:
+    """``NAME=value`` may be split anywhere; the value is masked as a whole."""
+    value = "AUDIT_VALUE_0123456789abcdef"
+    text = f"环境检查：OPENAI_API_KEY={value}"
+    for split in range(1, len(text)):
+        stream = SecretRedactor().stream()
+        combined = "".join(
+            [
+                stream.push("assistant_delta", text[:split]),
+                stream.push("assistant_delta", text[split:]),
+                stream.flush("assistant_delta"),
+            ]
+        )
+        assert value not in combined, f"split at {split} leaked the value"
+        assert "OPENAI_API_KEY=[REDACTED]" in combined
+
+
+def test_stream_redactor_preserves_legitimate_text_sharing_a_prefix() -> None:
+    """Holding a prefix must delay text, never alter it."""
+    stream = SecretRedactor([AUDIT_SECRET]).stream()
+    emitted = [
+        stream.push("assistant_delta", "关键词 AUDIT"),
+        stream.push("assistant_delta", " 表示审计，不是凭据。"),
+        stream.flush("assistant_delta"),
+    ]
+    assert "".join(emitted) == "关键词 AUDIT 表示审计，不是凭据。"
+
+
+def test_stream_redactor_is_independent_per_thinking_and_text_channel() -> None:
+    stream = SecretRedactor([AUDIT_SECRET]).stream()
+    thinking = stream.push("thinking_delta", AUDIT_SECRET[:20])
+    text = stream.push("assistant_delta", AUDIT_SECRET[20:])
+    flushed_thinking = stream.flush("thinking_delta")
+    flushed_text = stream.flush("assistant_delta")
+    assert AUDIT_SECRET not in (thinking + text + flushed_thinking + flushed_text)
+
+
+def test_runner_delta_stream_never_persists_a_split_credential(tmp_path: Path) -> None:
+    """Real path: projection → runner stream state → durable event log."""
+    from pi_glink.kernel.runner import _Execution  # noqa: PLC0415 - private contract under test
+
+    config = make_config(tmp_path)
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    record = store.create("流式脱敏", run_id="streamredact", workspace=tmp_path / "ws")
+    execution = _Execution(record=record, workspace=tmp_path / "ws")
+    execution.stream = manager.redactor.stream()
+    manager.bus.open_run(record.run_id)
+
+    half = len(AUDIT_SECRET) // 2
+    frames = [
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": AUDIT_SECRET[:half]}},
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": AUDIT_SECRET[half:]}},
+        {"type": "agent_settled"},
+    ]
+    for frame in frames:
+        manager._on_frame(execution, frame)  # noqa: SLF001 - the real emit path
+
+    log_text = store.events_path(record.run_id).read_text(encoding="utf-8")
+    assert AUDIT_SECRET not in log_text, "the durable log reassembled the credential"
+    assert REPLACEMENT in log_text
+    events = [json.loads(line) for line in log_text.splitlines() if line.strip()]
+    emitted = "".join(
+        event["payload"]["text"]
+        for event in events
+        if event["type"] == "assistant_delta"
+    )
+    assert AUDIT_SECRET not in emitted, "the emitted delta sequence reassembled the credential"
+    assert REPLACEMENT in emitted
+
+
 # -- host-side artifacts ------------------------------------------------------
 
 
@@ -207,14 +319,17 @@ def test_session_file_is_redacted_on_the_way_out(tmp_path: Path) -> None:
     """pi writes its own session log; the host masks credentials there too."""
     config = make_config(tmp_path)
     manager = RunManager(config, EventBus(), RunStore(config.data_root / "runs"))
-    session = tmp_path / "session.jsonl"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    session = session_dir / "session.jsonl"
     session.write_text(
         json.dumps({"type": "message", "text": f"OPENAI_API_KEY={AUDIT_SECRET}"}) + "\n",
         encoding="utf-8",
     )
 
-    manager._sanitize_session_file(str(session))  # noqa: SLF001 - the boundary unit itself
+    changed = manager._sanitize_session_file(str(session), root=session_dir)  # noqa: SLF001
 
+    assert changed is True
     text = session.read_text(encoding="utf-8")
     assert AUDIT_SECRET not in text
     assert REPLACEMENT in text
@@ -222,13 +337,32 @@ def test_session_file_is_redacted_on_the_way_out(tmp_path: Path) -> None:
     assert json.loads(text.splitlines()[0])["text"].endswith(REPLACEMENT)
 
 
+def test_session_file_outside_the_run_directory_is_refused(tmp_path: Path) -> None:
+    """A kernel-reported path elsewhere on the host is never rewritten."""
+    config = make_config(tmp_path)
+    manager = RunManager(config, EventBus(), RunStore(config.data_root / "runs"))
+    outside = tmp_path / "elsewhere.jsonl"
+    original = f'OPENAI_API_KEY={AUDIT_SECRET}\n'
+    outside.write_text(original, encoding="utf-8")
+    allowed = tmp_path / "sessions"
+    allowed.mkdir()
+    linked = allowed / "link.jsonl"
+    linked.symlink_to(outside)
+
+    assert manager._sanitize_session_file(str(outside), root=allowed) is False  # noqa: SLF001
+    assert manager._sanitize_session_file(str(linked), root=allowed) is False  # noqa: SLF001
+    assert outside.read_text(encoding="utf-8") == original, "the target bytes must not change"
+
+
 def test_session_file_without_secrets_is_left_untouched(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     manager = RunManager(config, EventBus(), RunStore(config.data_root / "runs"))
-    session = tmp_path / "clean.jsonl"
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    session = session_dir / "clean.jsonl"
     original = json.dumps({"type": "message", "text": "普通内容"}) + "\n"
     session.write_text(original, encoding="utf-8")
-    manager._sanitize_session_file(str(session))  # noqa: SLF001
+    assert manager._sanitize_session_file(str(session), root=session_dir) is False  # noqa: SLF001
     assert session.read_text(encoding="utf-8") == original
 
 
@@ -242,7 +376,11 @@ def test_minimal_child_environment_does_not_inherit_host_credentials(
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-host-secret-0123456789")
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     config = make_config(tmp_path)
-    runtime = agent_env.prepare_agent_dir(config)
+    runtime = agent_env.prepare_agent_dir(
+        config,
+        runtime_dir=tmp_path / "runtime",
+        session_dir=tmp_path / "sessions",
+    )
     env = agent_env.build_pi_env(config, runtime)
 
     assert "ANTHROPIC_API_KEY" not in env
@@ -298,14 +436,36 @@ def test_workspace_artifacts_are_swept_for_credentials(tmp_path: Path) -> None:
     binary = workspace / "image.bin"
     binary.write_bytes(b"\x00\x01\x02binary")
 
-    manager._sanitize_workspace(workspace)  # noqa: SLF001 - the boundary unit itself
+    changed = manager._sanitize_workspace(workspace)  # noqa: SLF001 - the boundary unit itself
 
+    assert changed is True
     dirty_text = dirty.read_text(encoding="utf-8")
     assert AUDIT_SECRET not in dirty_text
     assert REPLACEMENT in dirty_text
     assert clean.read_text(encoding="utf-8") == "普通内容\n"
     assert binary.read_bytes() == b"\x00\x01\x02binary"
-    assert manager._report_redacted is True  # noqa: SLF001
+
+
+def test_workspace_sweep_never_writes_through_a_symlink(tmp_path: Path) -> None:
+    """Audit regression: a linked artifact must not rewrite its external target."""
+    config = make_config(tmp_path)
+    manager = RunManager(config, EventBus(), RunStore(config.data_root / "runs"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    original = f"OPENAI_API_KEY={AUDIT_SECRET}\n"
+    outside.write_text(original, encoding="utf-8")
+    (workspace / "linked.md").symlink_to(outside)
+    outside_dir = tmp_path / "outside-dir"
+    outside_dir.mkdir()
+    (outside_dir / "nested.md").write_text(original, encoding="utf-8")
+    (workspace / "linked-dir").symlink_to(outside_dir, target_is_directory=True)
+
+    changed = manager._sanitize_workspace(workspace)  # noqa: SLF001
+
+    assert changed is False, "nothing readable through a link may be swept"
+    assert outside.read_text(encoding="utf-8") == original
+    assert (outside_dir / "nested.md").read_text(encoding="utf-8") == original
 
 
 def test_run_error_in_metadata_is_redacted(tmp_path: Path) -> None:
@@ -345,15 +505,18 @@ def test_report_download_is_redacted_and_flagged(tmp_path: Path) -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        # A run whose report contains the credential (as a model echo would).
+        # A run whose host-owned artifact contains the credential (as a model
+        # echo would). The artifact lives under the run directory: the download
+        # path only serves validated regular files from there.
         store = server.store
-        record = store.create("含密钥的报告", run_id="leakreport", workspace=tmp_path / "ws")
-        report = tmp_path / "ws"
-        report.mkdir(parents=True, exist_ok=True)
-        (report / "report.md").write_text(
+        store.create("含密钥的报告", run_id="leakreport", workspace=tmp_path / "ws")
+        artifact_dir = store.run_dir("leakreport") / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact = artifact_dir / "report.md"
+        artifact.write_text(
             f"# 报告\n\n调试时我看到了 OPENAI_API_KEY={AUDIT_SECRET}\n", encoding="utf-8"
         )
-        store.update("leakreport", status="finished", report_path=str(report / "report.md"))
+        store.update("leakreport", status="finished", report_path=str(artifact))
 
         status, headers, body = _get(server, "/api/runs/leakreport/report")
         text = body.decode("utf-8")
@@ -374,16 +537,47 @@ def test_clean_report_is_not_flagged(tmp_path: Path) -> None:
     thread.start()
     try:
         store = server.store
-        workspace = tmp_path / "clean"
-        workspace.mkdir(parents=True, exist_ok=True)
-        (workspace / "report.md").write_text("# 干净报告\n\n没有凭据。\n", encoding="utf-8")
-        store.create("干净", run_id="cleanreport", workspace=workspace)
-        store.update("cleanreport", status="finished", report_path=str(workspace / "report.md"))
+        store.create("干净", run_id="cleanreport", workspace=tmp_path / "ws")
+        artifact_dir = store.run_dir("cleanreport") / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact = artifact_dir / "report.md"
+        artifact.write_text("# 干净报告\n\n没有凭据。\n", encoding="utf-8")
+        store.update("cleanreport", status="finished", report_path=str(artifact))
 
         status, headers, body = _get(server, "/api/runs/cleanreport/report")
         assert status == 200
         assert headers.get("X-Redacted") == "false"
         assert "没有凭据" in body.decode("utf-8")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_report_download_refuses_paths_outside_the_run_directory(tmp_path: Path) -> None:
+    """Audit regression: `reportPath` is not a download capability."""
+    config = make_config(tmp_path)
+    server = create_server(config, client_factory=_fake_factory(echo_secret=False))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        store = server.store
+        outside = tmp_path / "outside.md"
+        original = f"# 外部文件\n\nOPENAI_API_KEY={AUDIT_SECRET}\n"
+        outside.write_text(original, encoding="utf-8")
+        # Direct escape: the stored path points outside the run directory.
+        store.create("越界", run_id="escape", workspace=tmp_path / "ws")
+        store.update("escape", status="finished", report_path=str(outside))
+        assert _get(server, "/api/runs/escape/report")[0] == 404
+        # Symlink escape: a link inside the run directory is refused too.
+        store.create("链接", run_id="linked", workspace=tmp_path / "ws")
+        artifact_dir = store.run_dir("linked") / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / "report.md").symlink_to(outside)
+        store.update("linked", status="finished", report_path=str(artifact_dir / "report.md"))
+        assert _get(server, "/api/runs/linked/report")[0] == 404
+        # Neither read nor redaction may have touched the external bytes.
+        assert outside.read_text(encoding="utf-8") == original
     finally:
         server.shutdown()
         server.server_close()

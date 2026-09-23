@@ -52,6 +52,18 @@ class RunRecord:
     usage: Mapping[str, Any] | None = None
     #: True when a credential was masked in the event stream or the report.
     redacted: bool = False
+    #: pi's final assistant ``stopReason`` (``error``/``length``/``aborted``/…).
+    #: Kept separately from ``status``: a truncated answer is a finished run with
+    #: an incomplete delivery, not a successful one.
+    model_stop_reason: str | None = None
+    #: ``none`` | ``missing`` | ``ok`` | ``rejected`` — what happened to report.md.
+    report_status: str = "none"
+    #: ``{"released": bool, "failures": [...], "external": {...}}`` for the
+    #: process/container/sandbox teardown; a failure here is reported, not hidden.
+    cleanup: Mapping[str, Any] | None = None
+    #: Durable external identity for restart reconciliation (never guessed).
+    container_name: str | None = None
+    sandbox_id: str | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -121,18 +133,18 @@ class RunStore:
         known = {field.name for field in fields(RunRecord)}
         return RunRecord(**{key: value for key, value in data.items() if key in known})
 
-    def list(self, limit: int = 50) -> list[RunRecord]:
+    def list(self, limit: int | None = 50) -> list[RunRecord]:
         if not self._root.is_dir():
             return []
         records: list[RunRecord] = []
-        for entry in self._root.iterdir():
+        for entry in sorted(self._root.iterdir(), key=lambda item: item.name):
             if not entry.is_dir():
                 continue
             record = self.get(entry.name)
             if record is not None:
                 records.append(record)
         records.sort(key=lambda item: item.created_at, reverse=True)
-        return records[:limit]
+        return records if limit is None else records[:limit]
 
     def iter_events(self, run_id: str, after: int = 0) -> Iterator[dict[str, Any]]:
         """Yield persisted events with ``seq > after``, in file order.
@@ -165,6 +177,10 @@ class RunStore:
         with self._lock:
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
+
+    def count_events(self, run_id: str) -> int:
+        """Number of readable persisted events (what a reader would see)."""
+        return sum(1 for _event in self.iter_events(run_id))
 
     def _write(self, record: RunRecord) -> None:
         directory = self.run_dir(record.run_id)

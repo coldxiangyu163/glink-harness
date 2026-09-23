@@ -33,6 +33,9 @@ _FALLBACK_REDACTOR = SecretRedactor()
 TOOL_TEXT_LIMIT = 4000
 #: Characters kept from a single streaming delta (a delta is already small).
 DELTA_LIMIT = 20000
+#: Bound on an array argument (urls/queries/...): item count and item length.
+ARG_LIST_LIMIT = 20
+ARG_ITEM_LIMIT = 500
 
 # pi assistant-stream delta types -> product event type
 _DELTA_EVENTS = {
@@ -279,18 +282,38 @@ def _usage_from_message(message: Any) -> dict[str, Any] | None:
 
 
 def _project_args(args: Any) -> dict[str, Any]:
-    """Keep tool arguments small and JSON-safe."""
+    """Keep tool arguments small, JSON-safe and type-stable.
+
+    A tool that searches several queries (``queries``) or reads several pages
+    (``urls``) passes an **array**; flattening it to one string here destroys
+    the multi-value payload before the front-end can consume it. The payload
+    contract is therefore: strings stay strings, primitive scalars stay
+    scalars, an array stays a bounded array of clipped strings, and anything
+    else degrades to one clipped string. Bounded means at most
+    :data:`ARG_LIST_LIMIT` items of :data:`ARG_ITEM_LIMIT` characters.
+    """
     if not isinstance(args, Mapping):
         return {}
     projected: dict[str, Any] = {}
     for key, value in list(args.items())[:20]:
-        if isinstance(value, str):
-            projected[str(key)] = _clip_text(value, 2000)
-        elif isinstance(value, (int, float, bool)) or value is None:
-            projected[str(key)] = value
-        else:
-            projected[str(key)] = _clip_text(extract_text(value), 500)
+        projected[str(key)] = _project_arg_value(value)
     return projected
+
+
+def _project_arg_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _clip_text(value, 2000)
+    if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+        return value
+    if isinstance(value, (list, tuple)):
+        items: list[str] = []
+        for item in list(value)[:ARG_LIST_LIMIT]:
+            if isinstance(item, str):
+                items.append(_clip_text(item, ARG_ITEM_LIMIT))
+            else:
+                items.append(_clip_text(extract_text(item), ARG_ITEM_LIMIT))
+        return items
+    return _clip_text(extract_text(value), 500)
 
 
 def _clip_text(text: str, limit: int) -> str:

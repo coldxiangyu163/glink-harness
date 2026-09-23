@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .framing import split_lf_records, strip_trailing_cr_bytes
+
 logger = logging.getLogger("pi_glink.kernel.rpc")
 
 _STDERR_HISTORY = 200
@@ -136,6 +138,13 @@ class PiRpcClient:
         return self._process.pid if self._process is not None else None
 
     @property
+    def exit_code(self) -> int | None:
+        """The child's exit status once it has exited, else ``None``."""
+        if self._process is None:
+            return None
+        return self._process.returncode
+
+    @property
     def running(self) -> bool:
         return self._process is not None and self._process.poll() is None
 
@@ -236,8 +245,9 @@ class PiRpcClient:
             if not chunk:
                 break
             buffer += chunk
-            while b"\n" in buffer:
-                raw, buffer = buffer.split(b"\n", 1)
+            # LF-only framing (docs/json.md): U+2028/U+2029 stay inside a frame.
+            records, buffer = split_lf_records(buffer)
+            for raw in records:
                 self._handle_line(raw)
         if buffer.strip():
             self._handle_line(buffer)
@@ -245,7 +255,7 @@ class PiRpcClient:
         self._fail_pending(PiRpcClosed("pi stdout closed"))
 
     def _handle_line(self, raw: bytes) -> None:
-        text = raw.rstrip(b"\r").decode("utf-8", errors="replace").strip()
+        text = strip_trailing_cr_bytes(raw).decode("utf-8", errors="replace").strip()
         if not text:
             return
         try:

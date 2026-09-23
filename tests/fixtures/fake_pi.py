@@ -25,6 +25,7 @@ anything else                error response (``Unknown command: …``)
 from __future__ import annotations
 
 import json
+import copy
 import os
 import sys
 from pathlib import Path
@@ -172,23 +173,46 @@ def write_report(prompt: str) -> None:
     """Stand in for the artifact the research contract asks pi to produce.
 
     With ``FAKE_PI_ECHO_SECRET=1`` the report also carries the credential, so the
-    host's in-place report redaction is exercised end to end.
+    host's in-place report redaction is exercised end to end. With
+    ``FAKE_PI_REPORT_SYMLINK=<path>`` the stand-in writes the report *outside*
+    the workspace and leaves a symlink named ``report.md`` behind — the audit's
+    path-escape reproduction.
     """
     from pathlib import Path
 
     body = f"# 研究报告（fake pi）\n\n原始问题：{prompt}\n\n结论：这是测试替身产出的报告。\n"
     if os.environ.get("FAKE_PI_ECHO_SECRET") == "1":
         body += f"\n环境检查：OPENAI_API_KEY={runtime_secret()}\n"
+    target = os.environ.get("FAKE_PI_REPORT_SYMLINK")
+    if target:
+        # Only plant the link: the bytes live outside the workspace already.
+        link = Path("report.md")
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(target)
+        return
     Path("report.md").write_text(body, encoding="utf-8")
 
 
-def prompt_events() -> list[dict]:
+def prompt_events(message: str = "") -> list[dict]:
     """Scripted turn, optionally echoing a credential like a real tool would.
 
     ``FAKE_PI_ECHO_SECRET=1`` makes the stand-in print ``OPENAI_API_KEY=…`` the way
     a bash ``env`` call (or a config-file read) would — the leak the audit found.
+
+    Prompt markers select the terminal model result the host must handle:
+
+    ===================  ======================================================
+    ``MODELERROR``       final assistant ``stopReason=error`` + ``errorMessage``
+    ``MODELABORT``       final assistant ``stopReason=aborted``
+    ``MODELLENGTH``      final assistant ``stopReason=length`` (truncated output)
+    ``RETRYTHENOK``      one failed attempt (``willRetry``), then a successful one
+    ``RETRYTHENFAIL``    one failed attempt, then a retry that also fails
+    ``CRASH``            process exits after accepting the prompt, no settle
+    ``NOSETTLE``         never emits ``agent_settled``
+    ===================  ======================================================
     """
-    events = list(PROMPT_EVENTS)
+    events: list[dict] = copy.deepcopy(PROMPT_EVENTS)
     if os.environ.get("FAKE_PI_ECHO_SECRET") == "1":
         secret = runtime_secret()
         events.insert(
@@ -205,7 +229,87 @@ def prompt_events() -> list[dict]:
                 "isError": False,
             },
         )
+    if "MODELERROR" in message:
+        _set_final_stop(events, "error", "upstream 500: model failed")
+    elif "MODELABORT" in message:
+        _set_final_stop(events, "aborted", "request was aborted")
+    elif "MODELLENGTH" in message:
+        _set_final_stop(events, "length", None)
+    elif "RETRYTHENOK" in message:
+        # A recoverable failure must not end the run as failed when a later
+        # attempt succeeds.
+        _set_final_stop(events, "error", "529 overloaded")
+        settled = events.pop()  # agent_settled
+        events.extend(
+            [
+                {"type": "agent_end", "messages": [], "willRetry": True},
+                {
+                    "type": "auto_retry_start",
+                    "attempt": 1,
+                    "maxAttempts": 3,
+                    "delayMs": 1,
+                    "errorMessage": "529 overloaded",
+                },
+                {"type": "auto_retry_end", "success": True, "attempt": 2},
+                {"type": "turn_start"},
+                {
+                    "type": "message_update",
+                    "assistantMessageEvent": {"type": "text_delta", "delta": "重试成功"},
+                },
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "重试成功"}],
+                        "stopReason": "stop",
+                        "usage": {"input": 130, "output": 50, "totalTokens": 180},
+                    },
+                },
+                {
+                    "type": "turn_end",
+                    "message": {
+                        "role": "assistant",
+                        "usage": {"input": 130, "output": 50, "totalTokens": 180},
+                    },
+                    "toolResults": [],
+                },
+                {"type": "agent_end", "messages": [], "willRetry": False},
+            ]
+        )
+        events.append(settled)
+    elif "RETRYTHENFAIL" in message:
+        # Every attempt failed: the final error must decide the run.
+        _set_final_stop(events, "error", "529 overloaded")
+        settled = events.pop()  # agent_settled
+        events.extend(
+            [
+                {"type": "agent_end", "messages": [], "willRetry": True},
+                {
+                    "type": "auto_retry_start",
+                    "attempt": 1,
+                    "maxAttempts": 3,
+                    "delayMs": 1,
+                    "errorMessage": "529 overloaded",
+                },
+                {
+                    "type": "auto_retry_end",
+                    "success": False,
+                    "attempt": 3,
+                    "finalError": "529 overloaded after 3 attempts",
+                },
+                {"type": "agent_end", "messages": [], "willRetry": False},
+            ]
+        )
+        events.append(settled)
     return events
+
+
+def _set_final_stop(events: list[dict], stop_reason: str, error_message: str | None) -> None:
+    for event in events:
+        if event.get("type") == "message_end" and event.get("message", {}).get("role") == "assistant":
+            event["message"]["stopReason"] = stop_reason
+            if error_message is not None:
+                event["message"]["errorMessage"] = error_message
 
 
 def main() -> int:
@@ -245,7 +349,12 @@ def main() -> int:
             respond(request)
             if os.environ.get("FAKE_PI_WRITE_REPORT") == "1":
                 write_report(message)
-            for event in prompt_events():
+            if "CRASH" in message:
+                # Die after accepting the prompt without settling: the host
+                # must converge now instead of waiting for the task timeout.
+                emit({"type": "turn_start"})
+                return 3
+            for event in prompt_events(message):
                 # ``NOSETTLE`` keeps the run alive: the agent never settles, so
                 # the host's timeout/cancel paths can be exercised.
                 if "NOSETTLE" in message and event.get("type") == "agent_settled":
