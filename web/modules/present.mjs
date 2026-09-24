@@ -137,6 +137,55 @@ function urlObject(value) {
   }
 }
 
+/** Parse one delegated task: the projection hands array items over as text. */
+function parseTask(item) {
+  if (item && typeof item === 'object') {
+    return { agent: String(item.agent ?? item.name ?? ''), task: String(item.task ?? item.prompt ?? '') };
+  }
+  const text = typeof item === 'string' ? item.trim() : '';
+  if (text.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object') {
+        return { agent: String(parsed.agent ?? parsed.name ?? ''), task: String(parsed.task ?? parsed.prompt ?? '') };
+      }
+    } catch {
+      /* A task long enough to be clipped is no longer valid JSON (the host bounds
+       * every array item): read the fields straight out of the JSON prefix. */
+      const agent = /"agent"\s*:\s*"([^"]*)"/.exec(text);
+      const task = /"(?:task|prompt)"\s*:\s*"([^"]*)"/.exec(text);
+      if (agent || task) return { agent: agent?.[1] ?? '', task: task?.[1] ?? '' };
+    }
+  }
+  return { agent: '', task: text };
+}
+
+/** The read-only subagent actions the guard lets through, in reader language. */
+const SUBAGENT_ACTIONS = {
+  list: '列出可用子代理',
+  get: '查看子代理定义',
+  status: '查看子代理状态',
+  doctor: '检查子代理配置',
+  models: '查看可用模型',
+};
+
+/** What a delegation acted on: the agents and tasks of one batch, or a control action. */
+function subagentObject(args) {
+  const raw = args.tasks ?? args.task ?? args.prompt;
+  const items = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw];
+  const parsed = items.map(parseTask).filter((item) => item.agent || item.task);
+  if (!parsed.length) {
+    // A management action (list/get/status) has no tasks: say what it did, in
+    // the reader's language — engine action names never appear on screen.
+    const action = String(args.action ?? '').trim().toLowerCase();
+    if (action) return SUBAGENT_ACTIONS[action] ?? '';
+    return oneLine(args.agent ?? '');
+  }
+  const [first] = parsed;
+  const label = [first.agent, oneLine(first.task, 56)].filter(Boolean).join('：');
+  return parsed.length > 1 ? `${label} 等 ${parsed.length} 个子代理` : label;
+}
+
 /**
  * Tool call → (icon, action, running label, object). The action is a verb the
  * reader recognises; the object is what it acted on, in human form. Engine tool
@@ -157,6 +206,8 @@ const TOOL_RULES = [
     object: (args) => pathObject(args.path ?? args.file_path ?? args.filePath ?? ''), mono: true },
   { test: /edit|apply|patch/i, icon: 'new-chat', action: '修改', active: '正在修改文件',
     object: (args) => pathObject(args.path ?? args.file_path ?? args.filePath ?? ''), mono: true },
+  { test: /^(subagent|task|spawn_agent|delegate)$/i, icon: 'agent', action: '派发子代理', active: '正在派发子代理',
+    object: (args) => subagentObject(args) },
   { test: /^(grep|find|glob|ls|list|search)$/i, icon: 'search', action: '查找', active: '正在查找',
     object: (args) => oneLine(args.pattern ?? args.query ?? pathObject(args.path ?? '')), mono: true },
   { test: /todo|plan/i, icon: 'checklist', action: '更新计划', active: '正在更新计划',

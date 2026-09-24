@@ -49,6 +49,35 @@ test('research titles are the first clause, at most 20 characters', () => {
   assert.ok(long.endsWith('…'));
 });
 
+test('a delegated batch shows its agents and tasks, not empty strings', () => {
+  // 投影把数组里的对象元素送成紧凑 JSON 文本（host/pi_glink/kernel/projection.py）：
+  // 卡片必须解析它并说出派了谁、做什么；这一条是 2026-09-24 E2B 真机 run 里
+  // tasks 显示为 ["","","",""] 的回归。
+  const batch = describeTool('subagent', {
+    tasks: [
+      JSON.stringify({ agent: 'researcher', task: '中国大陆个税与六年规则取证' }),
+      JSON.stringify({ agent: 'researcher', task: '加拿大税务居民与信托规则' }),
+      JSON.stringify({ agent: 'researcher', task: '澳洲受托人信托与CFC' }),
+    ],
+    concurrency: 3,
+    async: true,
+  });
+  assert.equal(batch.action, '派发子代理');
+  assert.equal(batch.object, 'researcher：中国大陆个税与六年规则取证 等 3 个子代理');
+
+  const single = describeTool('subagent', { tasks: [{ agent: 'researcher', task: '香港FSIE' }] });
+  assert.equal(single.object, 'researcher：香港FSIE');
+
+  // 管理动作不显示引擎动词，未识别的动作不猜测内容。
+  assert.equal(describeTool('subagent', { action: 'list' }).object, '列出可用子代理');
+  assert.equal(describeTool('subagent', { action: 'weird-thing' }).object, '');
+  assert.equal(describeTool('subagent', {}).object, '');
+
+  // 截断到非法的 JSON 前缀不会让卡片崩溃或显示空白：退回原文。
+  const clipped = describeTool('subagent', { tasks: ['{"agent":"researcher","task":"长'.concat('x'.repeat(300))] });
+  assert.match(clipped.object, /^researcher/);
+});
+
 test('workspace paths from every execution surface collapse to 工作区', () => {
   assert.equal(displayPath('/Users/someone/.pi-glink/workspaces/1ac8777fd709'), '工作区');
   assert.equal(displayPath('wrote /Users/someone/.pi-glink/workspaces/1ac8777fd709/report.md'), 'wrote 工作区/report.md');

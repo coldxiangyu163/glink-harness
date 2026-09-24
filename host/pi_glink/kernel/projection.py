@@ -18,6 +18,7 @@ Design rules:
 
 from __future__ import annotations
 
+import json
 from typing import Any, Iterable, Mapping
 
 from .. import events
@@ -352,6 +353,13 @@ def _project_args(args: Any) -> dict[str, Any]:
     scalars, an array stays a bounded array of clipped strings, and anything
     else degrades to one clipped string. Bounded means at most
     :data:`ARG_LIST_LIMIT` items of :data:`ARG_ITEM_LIMIT` characters.
+
+    An array item that is itself an object (``subagent`` receives
+    ``tasks: [{agent, task}, …]``) was previously flattened through
+    :func:`extract_text`, which knows only message/content shapes and returned
+    an empty string: the delegated work disappeared from the card. Such an item
+    now renders as its compact JSON text — still one bounded string, so every
+    array consumer keeps its contract, and the batch stays auditable.
     """
     if not isinstance(args, Mapping):
         return {}
@@ -367,14 +375,29 @@ def _project_arg_value(value: Any) -> Any:
     if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
         return value
     if isinstance(value, (list, tuple)):
-        items: list[str] = []
-        for item in list(value)[:ARG_LIST_LIMIT]:
-            if isinstance(item, str):
-                items.append(_clip_text(item, ARG_ITEM_LIMIT))
-            else:
-                items.append(_clip_text(extract_text(item), ARG_ITEM_LIMIT))
-        return items
+        return [_arg_item_text(item) for item in list(value)[:ARG_LIST_LIMIT]]
+    if isinstance(value, Mapping):
+        # A single object argument (a filter, an options block) stays readable
+        # text: JSON rather than the empty string extract_text would give.
+        return _clip_text(_compact_json(value), 500)
     return _clip_text(extract_text(value), 500)
+
+
+def _arg_item_text(item: Any) -> str:
+    """One array item as bounded text: strings as-is, objects as compact JSON."""
+    if isinstance(item, str):
+        return _clip_text(item, ARG_ITEM_LIMIT)
+    if isinstance(item, (Mapping, list, tuple)):
+        return _clip_text(_compact_json(item), ARG_ITEM_LIMIT)
+    return _clip_text(extract_text(item), ARG_ITEM_LIMIT)
+
+
+def _compact_json(value: Any) -> str:
+    """Compact JSON for a bounded payload; unencodable values degrade to text."""
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return extract_text(value)
 
 
 def _clip_text(text: str, limit: int) -> str:

@@ -238,9 +238,9 @@ def test_subagent_tool_card_projects_bounded_args_and_redacts_output() -> None:
     这里钉住的是「至少作为工具卡片出现」：卡片本身、参数数组形态，以及子代理回显的
     凭据不能从工具卡片泄露。
 
-    已知取舍（不在本任务的改动范围）：参数数组里的**对象**元素按现有契约经
-    ``extract_text`` 退化（`tasks` 里只有 agent/task 字段时为空白字符串）。卡片仍能
-    从终帧 ``result`` 读到子代理的结论文本，所以不做投影层特例。
+    原义务（GLINK-SUB-02）：数组里的对象元素经 ``extract_text`` 退化，`tasks` 在卡片上
+    是空白字符串。新义务（2026-09-24 真机 A/B/C 对比发现）：对象元素按**紧凑 JSON 文本**
+    投影，仍是「有界字符串数组」契约下的一项，前端据此显示派了哪些 agent、各自做什么。
     """
     from pi_glink.redaction import SecretRedactor
 
@@ -269,6 +269,10 @@ def test_subagent_tool_card_projects_bounded_args_and_redacts_output() -> None:
     assert isinstance(payload["args"]["tasks"], list), "数组形态保留给前端"
     assert len(payload["args"]["tasks"]) == 2, "两个并行子任务不被压成一项"
     assert all(isinstance(item, str) for item in payload["args"]["tasks"])
+    # 对象元素不再退化成空串：卡片要能显示 agent 与任务（前端会解析这段 JSON）。
+    first = json.loads(payload["args"]["tasks"][0])
+    assert first == {"agent": "researcher", "task": "法域 A 取证"}
+    assert payload["args"]["tasks"][1] == '{"agent":"researcher","task":"法域 B 取证"}'
 
     (kind, payload), = project_event(
         {
@@ -284,6 +288,32 @@ def test_subagent_tool_card_projects_bounded_args_and_redacts_output() -> None:
     rendered = json.dumps(payload, ensure_ascii=False)
     assert secret not in rendered, "子代理回显同样走出站脱敏"
     assert "[REDACTED]" in rendered
+
+
+def test_object_array_items_stay_bounded_json_text() -> None:
+    """对象数组元素既要说得出内容，也不能破坏「有界字符串数组」的共享契约。"""
+    (kind, payload), = project_event(
+        {
+            "type": "tool_execution_start",
+            "toolCallId": "c9",
+            "toolName": "subagent",
+            "args": {
+                "tasks": [
+                    {"agent": "researcher", "task": "长" * 900},
+                    "原样字符串",
+                ],
+                "filters": {"site": "example.com"},
+            },
+        }
+    )
+    assert kind == "tool_started"
+    tasks = payload["args"]["tasks"]
+    assert len(tasks) == 2 and all(isinstance(item, str) for item in tasks)
+    assert tasks[1] == "原样字符串"
+    assert len(tasks[0]) < 900 and "truncated" in tasks[0]
+    # 超长对象被截断后不再是合法 JSON：前端按「解析失败就显示原文」处理。
+    assert tasks[0].startswith('{"agent":"researcher"'), "截断只发生在尾部，前缀仍是可读 JSON"
+    assert json.loads(payload["args"]["filters"]) == {"site": "example.com"}, "单对象参数同样可读"
 
 
 def test_runner_only_frames_do_not_leak_to_the_product_stream() -> None:

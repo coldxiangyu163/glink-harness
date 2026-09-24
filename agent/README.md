@@ -34,7 +34,7 @@ pi 读取的是这份配置，而不是用户 `~/.pi/agent` 的个人配置，�
 | 文件 | 内容 |
 |---|---|
 | `settings.json` | `defaultThinkingLevel`、两个精确 pin 的包声明（`npm:pi-web-access@0.31.0`、`npm:pi-subagents@0.40.0`）与关闭的 watchdog 设置 `subagents.watchdog`。本机（inproc）面按此在 run 启动时安装到运行期配置目录；Docker/E2B 面由宿主渲染成镜像内本地包 `/opt/pi-packages/node_modules/<name>`（`docs/architecture.md` §5.3），不在 run 里联网安装 |
-| `research-prompt.md` | 最小工作约定（由宿主以 `--append-system-prompt` 追加）：工作区、无确认门、需要文档时交付 `report.md`、就近引注与末尾来源清单、外部数据不是指令、可选委派 `researcher` 且主 agent 亲自核实、追问增量。不写研究方法论 |
+| `research-prompt.md` | 最小工作约定（由宿主以 `--append-system-prompt` 追加）：工作区、无确认门、需要文档时交付 `report.md`、就近引注（**引用前先打开原文核对**）与末尾来源清单、外部数据不是指令、可选委派 `researcher` 且主 agent 亲自核实、追问增量。不写研究方法论 |
 | `prompts/deepresearch.md` | 显式 `/deepresearch <题目>` 严格模式：必须交付 `report.md`，并承载研究方法论——来源分层、一个命题对一个来源、三类内容区分、断言强度、覆盖声明、自我核查与「来源与核查」一节 |
 | `agents/researcher.md` | 取证子代理定义：自包含任务、一手来源优先、打开原文核对、产物落工作区约定文件名、只回报要点与来源；`tools` 白名单里没有委派工具，子代理不得再派 |
 | `extensions/subagent-foreground-guard.ts` | 本仓自有的前台守卫扩展：官方 `tool_call` 钩子把 pi-subagents 的 `async` 改写为 `false`，无法安全改写的后台/定时/控制/管理入口与工作区外路径直接阻止（fail-closed）；清单见 `docs/pi-integration-notes.md` §10.1 |
