@@ -288,13 +288,13 @@ key 检索）；显式 `shared` 策略只渲染宿主级 `PI_GLINK_WEB_SEARCH_KE
 
 本仓库不包含 Serper / Jina 链路。检索证据见 [docs/evidence/local-web-search.txt](docs/evidence/local-web-search.txt)。
 
-## 委派与子代理（已接入；委派纪律待定）
+## 委派与子代理
 
 `pi-subagents@0.40.0` 已随模板加载，并配一个在本仓的取证子代理定义
 （[agent/agents/researcher.md](agent/agents/researcher.md)：自包含任务、一手来源优先、打开原文核对、
-产物落工作区、只回报要点与来源）。**怎么委派**（哪些任务用前台并行 researcher、主 agent 保留
-哪些环节）属于提示词约定，正在重新定形（任务 5 暂缓待用户决定），本 README 不提前承诺；
-当前 `agent/research-prompt.md` 仍是上一版约定。
+产物落工作区、只回报要点与来源）。默认工作约定只写一句委派原则：相互独立、可并行取证的子问题
+可以交给 `researcher`，主 agent 亲自核实回报的关键事实并自己写 `report.md`；何时派、派几个由
+模型按题目决定。
 
 **强制前台不靠包开关。** pi-subagents 0.40.0 没有禁用 async/detached 的配置或环境开关
 （[验证记录](docs/pi-integration-notes.md#8-pi-subagents-0400-验证spike-glink-sub-01)），
@@ -339,7 +339,7 @@ key 检索）；显式 `shared` 策略只渲染宿主级 `PI_GLINK_WEB_SEARCH_KE
 |---|---|
 | `host/pi_glink/` | 宿主：配置解析、事件总线、HTTP/SSE 服务、静态资源 |
 | `host/pi_glink/kernel/` | pi 接入层：headless 协议客户端（RPC / JSON）、事件投影、运行期配置渲染、三执行面适配 |
-| `agent/` | pi 侧配置模板：每次 run 先删再拷到 `runs/<id>/pi-agent/` 后作为 `PI_CODING_AGENT_DIR`，内核之外的定制只落在这里（含 `extensions/` 的前台守卫与 `agents/researcher.md`）；委派纪律的提示词改写暂缓（任务 5） |
+| `agent/` | pi 侧配置模板：每次 run 先删再拷到 `runs/<id>/pi-agent/` 后作为 `PI_CODING_AGENT_DIR`，内核之外的定制只落在这里（含 `extensions/` 的前台守卫与 `agents/researcher.md`） |
 | `web/` | 前端：按百鉴 UI 标准库逐值对齐的静态 ESM 资源（token 层 + 组件层 + 外壳） |
 | `docs/` | `architecture.md`（进程拓扑、事件契约、执行器契约）、`pi-boundary.md`（扩展点与禁止项）、`multitenancy-plan.md`（下一阶段设计与决策点） |
 | `tests/` | 宿主与内核的回归 |

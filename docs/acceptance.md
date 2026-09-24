@@ -108,7 +108,7 @@ HTTPS_PROXY=socks5h://127.0.0.1:1080 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 
 3. **版本 pin 差异**：inproc 面已在 pi 0.87.0 验证；Docker 镜像与 E2B 模板仍 pin 0.86.1
    （已实测），按 `docs/pi-boundary.md` §3 重建即可升级，本次未重建。
 4. **串行执行**：三种执行面都只允许同时一个 run（`409 run_busy`）。
-5. **报告无强制校验**：是否产出 `report.md` 取决于 pi 遵循工作约定（只有深入任务才交付报告，
+5. **报告无强制校验**：是否产出 `report.md` 取决于 pi 遵循工作约定（需要交付文档时才写报告，
    直接回答不写报告）；缺失记为 `no_report`，宿主不伪造产物。
 6. **思考内容依赖上游**：thinking 事件仅在模型返回 reasoning 时出现（同一任务在不同
    prompt 下可能没有思考块），前端能正常接受"这一轮没有思考"。

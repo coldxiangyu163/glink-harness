@@ -200,9 +200,10 @@ pi-web-access 的 `supportsDynamicTools()` 会 `import.meta.resolve` 这份副�
 GLINK-SUB-01 已记录它与 `~/.feynman/npm-global` 参考副本有 23 个 `src/` 文件不同）。以下行号都指向
 该发布包。离线验证证据：`docs/evidence/pi-subagents-foreground.txt`。
 
-**范围注**：本任务只做工具面的强制前台与子代理定义（`agent/agents/researcher.md`）；提示词侧的委派
-纪律（何时派、怎么描述任务、主 agent 保留哪些环节）按 Lead 指令暂缓，`agent/research-prompt.md`
-与 `/deepresearch` 模板保持原约定。
+**范围注**：本节只记录工具面的强制前台与子代理定义（`agent/agents/researcher.md`）。委派约定
+（2026-09-24 用户决定）写在最小化后的 `agent/research-prompt.md`：独立、可并行的子问题**可以**
+交给 `researcher`，任务说明自包含，主 agent 亲自核实回报的关键事实并负责整合与 `report.md`；
+何时派、派几个由模型按题目决定，不设固定检索步骤。
 
 ### 10.1 能把执行推离主 run 的入口清单与处置
 

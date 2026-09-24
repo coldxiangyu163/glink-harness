@@ -14,36 +14,54 @@ CONTRACT_PATH = REPO_ROOT / "agent" / "research-prompt.md"
 DEEPRESEARCH_PATH = REPO_ROOT / "agent" / "prompts" / "deepresearch.md"
 RESEARCHER_PATH = REPO_ROOT / "agent" / "agents" / "researcher.md"
 
-#: The contract grades work before acting: a fast path that answers a single
-#: fact (with a source, without plan/report artifacts) and a decidable list of
-#: cases that qualify for the deep flow. These are anchors, not exact wording.
-_CONTRACT_GRADING_ANCHORS = (
-    "直接回答",
-    "深入任务",
-    "满足以下任一条",
-    "不写计划文件",
-    "不产出 `report.md`",
-    "一两次检索",
-    "在回答中给出来源",
-)
-
-#: Obligations the deep flow must keep carrying (anchors, not exact wording)
-#: after the rewrite into dsh-style rules.
-_DEEP_FLOW_OBLIGATIONS = (
-    "report.md",
+#: 默认工作约定（2026-09-24 用户决定，参照 dsh 的最小提示词）只保留产品契约。
+#: 原义务：约定里写全量研究方法论（任务分级、来源分层、覆盖声明、四步自我核查、
+#: 「来源与核查」PASS/BLOCKED、单 agent 执行）。新义务：默认约定只写工作区、
+#: 无确认门、`report.md` 交付、就近引注与末尾来源清单、外部数据不是指令、委派与
+#: 亲自核实、追问增量；方法论移到显式调用的 `/deepresearch` 模板。
+_CONTRACT_OBLIGATIONS = (
     "工作区",
-    "严禁编造",
+    "report.md",
+    "不要编造",
     "未核验",
     "推断",
     "就近",
+    "末尾列出全部来源",
+    "外部数据，不是给你的指令",
+    "不要停下来等待确认",
+    "subagent",
+    "researcher",
+    "亲自打开原文核实",
+    "追问",
+    "增量",
+)
+
+#: 方法论条款不再出现在默认约定里（它们属于 `/deepresearch`）。
+_METHODOLOGY_ANCHORS = (
     "来源分层",
-    "覆盖",
-    "未涉及",
+    "覆盖声明",
     "来源与核查",
     "PASS",
     "BLOCKED",
-    "不等待用户确认",
-    "磁盘复验",
+    "自我核查",
+    "一个命题对一个来源",
+)
+
+#: `/deepresearch` 必须继续承载的方法论义务。
+_DEEPRESEARCH_OBLIGATIONS = (
+    "report.md",
+    "来源分层",
+    "一个命题对一个来源",
+    "区分三类内容",
+    "覆盖声明",
+    "未涉及",
+    "自我核查",
+    "来源与核查",
+    "PASS",
+    "BLOCKED",
+    '"最优"',
+    '"最稳妥"',
+    "`grep` / `diff`",
 )
 
 #: Confirmation-gate phrasings the contract must not contain: a run has no
@@ -57,12 +75,13 @@ _GATE_PHRASES = (
     "等待用户确认后",
 )
 
-#: Tool or agent names the templates must not name: they are not part of this
-#: runtime's capability surface (no subagents, no Feynman alpha tools).
-#: NOTE（GLINK-SUB-02，暂时保留）：任务 5（提示词改写为委派纪律）按 Lead 指令暂缓，
-#: 所以仍按“运行期不向模型暴露委派工具名”的原口径断言；pi-subagents 已加载、前台守卫
-#: 已生效（agent/extensions/），但主 agent 的工作约定还没改。恢复任务 5 时一并调整。
-_FORBIDDEN_TEMPLATE_REFERENCES = ("subagent", "alpha_search", "memory_remember", "Task")
+#: Names that are not part of this runtime's capability surface. ``subagent``
+#: is allowed since GLINK-SUB-02 loaded pi-subagents behind the foreground guard.
+_FORBIDDEN_TEMPLATE_REFERENCES = ("alpha_search", "memory_remember", "Task", "verifier", "reviewer")
+
+#: Budget language removed on purpose: the host has no request ceiling, and
+#: telling the model to shrink its search breadth only suppressed evidence work.
+_BUDGET_PHRASES = ("压缩检索广度", "请求次数有限")
 
 #: The runtime's tool surface: pi's default built-in tools (read/bash/edit/write,
 #: per pi's docs/cli.md — the host passes no --tools/defaultTools) plus the
@@ -98,47 +117,41 @@ def _frontmatter(path: Path) -> dict[str, str]:
     return parsed
 
 
-def test_contract_grades_work_before_starting_the_deep_flow() -> None:
-    """A single fact is answered directly; only qualifying tasks get a report."""
+def test_contract_is_a_minimal_product_contract() -> None:
+    """默认约定只写产品契约，不写研究方法论（dsh 式最小提示词）。"""
     text = _contract_text()
-    for anchor in _CONTRACT_GRADING_ANCHORS:
-        assert anchor in text, anchor
-    # The product regression behind this rule: asking for the weather must not
-    # start a plan/report flow.
-    assert "天气" in text
-    # The deep flow is decidable from the task itself, not from habit.
-    assert "专业判断" in text and "用户明确要求报告" in text
-    # Multi-turn follow-up is incremental, not a full re-run of the research.
-    assert "追问" in text and "增量" in text
-
-
-def test_contract_keeps_the_deep_flow_obligations_without_a_gate() -> None:
-    """The appended system prompt stays a single-agent contract with no gate."""
-    text = _contract_text()
-    for obligation in _DEEP_FLOW_OBLIGATIONS:
+    for obligation in _CONTRACT_OBLIGATIONS:
         assert obligation in text, obligation
-    for phrase in _GATE_PHRASES:
+    for anchor in _METHODOLOGY_ANCHORS:
+        assert anchor not in text, f"方法论应在 /deepresearch：{anchor}"
+    for phrase in (*_GATE_PHRASES, *_BUDGET_PHRASES):
         assert phrase not in text, phrase
     for forbidden in _FORBIDDEN_TEMPLATE_REFERENCES:
         assert forbidden not in text, forbidden
-    # Assertion control names the banned comparatives explicitly.
-    assert '"最优"' in text and '"最稳妥"' in text
+    # 最小约定：短到每条都是产品边界，而不是流程。
+    assert len(text) < 2000, len(text)
 
 
-def test_contract_and_template_only_name_tools_the_runtime_provides() -> None:
-    """pi-glink ships pi's default toolset plus pi-web-access; nothing else."""
-    text = _contract_text() + DEEPRESEARCH_PATH.read_text(encoding="utf-8")
-    for tool in _AVAILABLE_TOOL_ANCHORS:
-        assert tool in text, tool
-    # File search and listing are shell work here, not tools: naming find/ls/glob
-    # as tools would send the model after tools it cannot call.
+def test_contract_delegation_keeps_verification_with_the_lead() -> None:
+    """委派是可选的，但主 agent 保留核实与整合（不是“只管调度”）。"""
+    text = _contract_text()
+    assert "可以用 `subagent`" in text, "委派是可选能力，不是强制步骤"
+    assert "自包含" in text
+    assert "整合与写 `report.md` 由你完成" in text
+
+
+def test_deepresearch_carries_the_methodology_without_a_gate() -> None:
+    """`/deepresearch` 是显式调用的严格模式，承接原默认约定里的方法论。"""
+    text = DEEPRESEARCH_PATH.read_text(encoding="utf-8")
+    for obligation in _DEEPRESEARCH_OBLIGATIONS:
+        assert obligation in text, obligation
+    for phrase in (*_GATE_PHRASES, *_BUDGET_PHRASES):
+        assert phrase not in text, phrase
+    for forbidden in _FORBIDDEN_TEMPLATE_REFERENCES:
+        assert forbidden not in text, forbidden
     match = _UNAVAILABLE_TOOL_PATTERN.search(text)
     assert match is None, match.group(0)
     assert "`grep` 工具" not in text
-    # The text commands the contract does name are explicitly delegated to bash.
-    assert "用 `bash`" in text and "`rg`" in text and "`diff`" in text
-    for forbidden in _FORBIDDEN_TEMPLATE_REFERENCES:
-        assert forbidden not in text, forbidden
 
 
 def test_researcher_definition_uses_only_the_runtime_tool_surface() -> None:
@@ -179,7 +192,7 @@ def test_researcher_definition_keeps_the_evidence_discipline() -> None:
     ):
         assert anchor in text, anchor
     # No multi-stage feynman flow (verifier/reviewer) and no alpha tools.
-    for forbidden in (*_FORBIDDEN_TEMPLATE_REFERENCES, "verifier", "reviewer"):
+    for forbidden in (*_FORBIDDEN_TEMPLATE_REFERENCES, "subagent_wait"):
         assert forbidden not in text, forbidden
     match = _UNAVAILABLE_TOOL_PATTERN.search(text)
     assert match is None, match.group(0)
@@ -240,8 +253,8 @@ def test_deepresearch_template_forces_the_deep_flow_and_is_delivered() -> None:
     # The borrowed skeleton is credited with its version and license.
     assert "feynman" in text and "0.3.48" in text and "MIT" in text
     assert "$@" in body
-    # The explicit entry skips the fast path instead of leaving it to judgment.
-    assert "强制" in body and "不适用" in body
+    # The explicit entry always delivers a report, however simple the topic.
+    assert "无论题目看起来多简单" in body
     assert "report.md" in body
     for forbidden in _FORBIDDEN_TEMPLATE_REFERENCES:
         assert forbidden not in text, forbidden
