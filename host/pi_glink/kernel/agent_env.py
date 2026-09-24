@@ -278,6 +278,39 @@ def template_manifest(template_dir: Path) -> list[tuple[str, Path, bool]]:
     return manifest
 
 
+#: Prompt-template directory inside the agent template. Its ``*.md`` file stems
+#: are the ``/`` command names pi expands (docs/prompt-templates.md) and, because
+#: of that, the only ``/`` messages the host admits. Adding a file there is the
+#: single source of truth for the accepted command set.
+PROMPTS_DIRNAME = "prompts"
+
+
+def prompt_template_names(template_dir: Path) -> tuple[str, ...]:
+    """The ``/`` command names this configuration accepts, from the template directory.
+
+    pi expands a prompt template only when the message starts with ``/`` and its
+    first token exactly equals a template file's stem (``expandPromptTemplate``:
+    ``^/([^\\s]+)`` plus a case-sensitive name match). Every other ``/...``
+    message is either an extension command or plain text; the host admits only
+    this set, so a new command is reviewed repository content rather than
+    something a loaded package registers at runtime.
+
+    Symlinks are skipped for the same reason :func:`template_manifest` skips
+    them: the accepted set must be repository content, not a path into the
+    operator's filesystem.
+    """
+    directory = Path(template_dir) / PROMPTS_DIRNAME
+    if not directory.is_dir():
+        return ()
+    return tuple(
+        sorted(
+            path.stem
+            for path in directory.glob("*.md")
+            if path.is_file() and not path.is_symlink()
+        )
+    )
+
+
 def local_package_source(source: str) -> str | None:
     """The image-local path for a prebaked ``npm:`` package, else ``None``.
 

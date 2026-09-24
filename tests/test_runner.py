@@ -21,7 +21,13 @@ from pi_glink.kernel.execution import (
     ExecutionOutcome,
     SessionInfo,
 )
-from pi_glink.kernel.runner import FollowupUnavailable, RunBusy, RunManager
+from pi_glink.kernel.runner import (
+    FollowupUnavailable,
+    RunBusy,
+    RunManager,
+    UnsupportedCommand,
+    prompt_names_unsupported_command,
+)
 from pi_glink.store import CANCELLED, FAILED, FINISHED, RunStore
 from pi_glink.tenancy import TenantContext
 
@@ -332,6 +338,80 @@ def test_prompt_reaches_the_kernel_verbatim_and_never_through_argv(tmp_path: Pat
     assert "--append-system-prompt" in argv
     contract = (REPO_ROOT / "agent" / "research-prompt.md").read_text(encoding="utf-8").strip()
     assert contract in argv, "the rendered research prompt must reach the kernel verbatim"
+
+
+# -- slash 命令门禁（GLINK-SUB-02 评审修复） ---------------------------------
+
+
+def _run_dirs(config: HostConfig) -> list[str]:
+    runs = config.data_root / "runs"
+    return sorted(path.name for path in runs.glob("*")) if runs.is_dir() else []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/run researcher --bg 查跨境资金监管",
+        "/subagents-detach",
+        "   /chain scout -> planner",
+        "\n\t/parallel researcher --bg",
+        "/",
+        # pi 的模板匹配精确且大小写敏感：这些既不是模板，也不是普通文本。
+        "/DeepResearch 题目",
+        "/deepresearch2 题目",
+        "/skill:pi-subagents",
+    ],
+)
+def test_the_command_gate_refuses_before_any_run_exists(tmp_path: Path, text: str) -> None:
+    """载入 pi-subagents 后，`/run --bg` 等命令能绕过 tool_call 守卫。
+
+    准入层只放行从 `agent/prompts/` 推导出的模板命令（当前只有 deepresearch）；
+    拒绝必须发生在凭据解析、父会话读取、run 目录与执行面创建之前。
+    """
+    manager, _store = build_manager(tmp_path)
+    with pytest.raises(UnsupportedCommand) as excinfo:
+        manager.start(text)
+    assert excinfo.value.allowed == ("deepresearch",)
+    assert _run_dirs(manager.config) == [], "拒绝必须早于 run 目录创建"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("普通问题", False),
+        ("正文里出现 /run --bg 也不算命令", False),
+        ("  普通问题前导空白", False),
+        ("/deepresearch 题目", False),
+        ("/deepresearch", False),
+        ("\t/deepresearch 题目", False),
+        ("/run --bg x", True),
+        ("  /subagents-detach", True),
+        ("/", True),
+        ("/DeepResearch x", True),
+        ("/deepresearch2 x", True),
+        ("/skill:pi-subagents", True),
+    ],
+)
+def test_command_detection_follows_pi_semantics(text: str, expected: bool) -> None:
+    assert prompt_names_unsupported_command(text, ("deepresearch",)) is expected
+
+
+def test_the_command_gate_reads_the_template_directory(tmp_path: Path) -> None:
+    """命令白名单不硬编码：模板目录里有什么，就放行什么。"""
+    template = tmp_path / "agent-template"
+    (template / "prompts").mkdir(parents=True)
+    (template / "prompts" / "deepresearch.md").write_text("题目：$@\n", encoding="utf-8")
+    manager, _store = build_manager(tmp_path, PI_CODING_AGENT_DIR=str(template))
+
+    record = manager.start("/deepresearch 监管新规")
+    assert manager.wait(record.run_id, timeout=30).status == FINISHED
+
+    with pytest.raises(UnsupportedCommand):
+        manager.start("/notes 还没有这个模板")
+
+    (template / "prompts" / "notes.md").write_text("题目：$@\n", encoding="utf-8")
+    record = manager.start("/notes 现在可以了")
+    assert manager.wait(record.run_id, timeout=30).status == FINISHED
 
 
 def test_two_runs_do_not_share_runtime_configuration_or_credentials(tmp_path: Path) -> None:

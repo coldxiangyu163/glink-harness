@@ -172,7 +172,14 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 ## 4. run 生命周期
 
 1. `POST /api/runs {prompt, parentRunId?}` → 准入（见下）→ 生成 `runId`（run 目录**排他**创建，
-   生成的 id 碰撞则有限重试重新生成；既有记录绝不被覆盖），写 `meta.json`（status=running）。`parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
+   生成的 id 碰撞则有限重试重新生成；既有记录绝不被覆盖），写 `meta.json`（status=running）。准入先过
+   **`/` 命令门禁**：去掉前导空白的 prompt 若以 `/` 开头，只有命令名等于 `agent/prompts/` 下模板文件
+   stem 的（当前仅 `deepresearch`，从模板目录推导、不硬编码）才被接受，其他一律 `400 unsupported_command`
+   （错误体只给允许的命令列表，不回显被拒输入）；门禁在凭据解析、父会话读取、run 目录与执行面创建之前，
+   追问（`parentRunId`）与三个执行面同样适用。该门禁存在的原因：pi 对以 `/` 开头的消息先派发扩展命令
+   （docs/rpc-commands.md），载入 pi-subagents 后 `/run --bg`、`/subagents-detach` 这类客户端可控输入
+   能绕过 `tool_call` 守卫发起不随本 run 收口的后台进程（见 pi-integration-notes.md §10.4）。
+   `parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
 2. 渲染**本 run 的**运行期配置目录与 session 目录（`runs/<id>/pi-agent`、会话根下的 `<id>/`），
    按 `LOCAL_WEB_EXECUTOR` 选择执行面（见 §5）；
 3. 事件投影 → `EventBus.commit`：先落 `events.jsonl`，再实时给 SSE（见 §3.1）；
@@ -461,6 +468,11 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 组合与生命周期（数据目录锁、租户材料、run 对账、绑定端口、资源台账扫描线程），CLI 入口与
 离线运维子命令在 `cli.py`。拆分是纯结构调整：路由、状态码、载荷与既有导入路径（含
 `pi_glink.app.main` / `load_config` / `_resource_command` 再导出）保持不变。
+
+`/` 命令门禁本身在**准入层**（`kernel/runner.py::RunManager.start`，命令名单从
+`kernel/agent_env.py::prompt_template_names(config.agent_config_dir)` 推导），路由只负责把
+`UnsupportedCommand` 映射成 `400 unsupported_command`：这样任何调用者（HTTP、脚本、未来的适配器）
+都逃不过，且追问与三个执行面走同一条判定。拒绝发生在读父会话、写 run 目录、拉起执行面之前。
 
 ## 8. 可重复验证入口
 

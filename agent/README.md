@@ -58,8 +58,9 @@ pi 读取的是这份配置，而不是用户 `~/.pi/agent` 的个人配置，�
   `tests/extensions/subagent-foreground-guard.test.mjs` 的正反例。
 - **不得再派**：`researcher.md` 的 `tools` 白名单不含委派工具（子进程拿到 `--tools`），
   `maxSubagentDepth: 1` 再兵一层。
-- **未覆盖**：pi-subagents 注册的扩展命令（`/run --bg`、`/subagents-detach` 等）由用户输入触发，
-  `tool_call` 钩子不可达，详见 §10.4 的已知未覆盖项。
+- **命令面**：pi-subagents 注册的扩展命令（`/run --bg`、`/subagents-detach` 等）由用户输入触发，
+  `tool_call` 钩子不可达；宿主在准入层用 `/` 命令门禁挡住（只接受 `agent/prompts/` 模板命令，
+  其余 `400 unsupported_command`，见 architecture.md §4 与 pi-integration-notes.md §10.4）。
 
 `models.json`、`auth.json` 与 `web-search.json` 不在本目录：它们含运行期值/凭据，由宿主渲染到
 每个 run 自己的 `runs/<runId>/pi-agent/`（见 `host/pi_glink/kernel/agent_env.py`）。本目录里的

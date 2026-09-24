@@ -79,6 +79,8 @@ bash scripts/check.sh
 | UI 布局与交互 | Node 回归及 [UI 对齐文档](ui-alignment.md)的对应浏览器步骤 | 现有浏览器脚本有下述副作用，默认检查不自动执行 |
 | 文档 | 对照实现检查命令、链接、作用域与验收口径 | 纯文档修改不默认跑真实研究或三面 smoke |
 
+| run HTTP 准入与命令门禁 | `python -m pytest tests/test_runs_api.py tests/test_runner.py tests/test_kernel_agent_env.py` | 以 `/` 开头的 prompt 只接受 `agent/prompts/` 模板命令（当前仅 `/deepresearch`），其他（`/run --bg`、`/subagents-detach`、前导空白 + `/chain`、裸 `/`、大小写或名字相近的变体）返回 `400 unsupported_command`、错误体只给允许列表且不回显输入、拒绝早于 run 目录/执行面创建；普通题目（含正文中间出现 `/run`）与前导空白的普通问题照常运行；追问（`parentRunId`）走同一门禁；命令名单从模板目录推导（新增/删除模板文件立即生效，符号链接不计入，目录缺失时 fail-closed）。不证明真实模型下 pi 的扩展命令派发行为，也不覆盖内核启动后由其他扩展注入命令的路径 |
+
 表中 `python` 应指向项目依赖环境。直接执行定向测试时也应使用临时 HOME、合成配置和自建资源；统一入口会完成环境隔离。优先复用可核验的同范围通过证据；代码、输入、环境或集成行为变化时，只补失效部分。
 
 ### 浏览器与 live 验收

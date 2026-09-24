@@ -156,7 +156,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | POST | `/api/invitations/check` | 校验邀请可用性，body `{"token": "…"}`（限速；无效与已用同形返回 `{"valid":false}`；邀请码只走 JSON body，不进 URL/查询/日志） |
 | POST | `/api/admin/invitations` | 管理员为**本租户**签发一次性邀请（需要 CSRF；响应只在这一次返回邀请码原文） |
 
-本机（`local`）执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
+本机（`local`）执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。以 `/` 开头的 prompt 只有命令名等于 `agent/prompts/` 下模板文件名的才被接受（当前仅 `/deepresearch`），其余返回 `400 unsupported_command`（错误体只给允许的命令列表，不回显被拒输入）——pi 对这类消息会先执行扩展命令，而 pi-subagents 注册了 `/run --bg`、`/subagents-detach` 等后台入口；拒绝在任何 run 目录/执行面创建之前，追问同样适用。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
 
 多租户模式（`PI_GLINK_TENANCY=multitenant`）下所有 `/api/*`（健康的存活性探测除外）都要求可信身份——网关断言或站内会话：未认证 `401`，权限不足 `403`，未知/异租户/legacy 记录统一 `404`，超过并发上限 `429 quota_exceeded`。下一节说明完整语义。
 
@@ -305,8 +305,9 @@ key 检索）；显式 `shared` 策略只渲染宿主级 `PI_GLINK_WEB_SEARCH_KE
 并发 4、产物落工作区）。清单与逐项理由见
 [集成笔记 §10](docs/pi-integration-notes.md#10-pi-subagents-0400-的前台强制接入glink-sub-02离线验证)。
 
-未覆盖项如实记录：扩展命令面（`/run --bg`、`/subagents-detach` 等由用户输入触发的 pi-subagents
-命令）不在 `tool_call` 钩子可达范围；真实模型下的前台并行效果与子代理会话文件的收尾脱敏也未验证。
+未覆盖项如实记录：真实模型下的前台并行效果与子代理会话文件的收尾脱敏尚未验证；客户端输入面的
+`/` 命令（`/run --bg`、`/subagents-detach` 等）不在 `tool_call` 钩子可达范围，由宿主在准入层挡住
+（只接受 `agent/prompts/` 模板命令，其余 `400 unsupported_command`，见 architecture.md §4）。
 
 ## 安全边界
 

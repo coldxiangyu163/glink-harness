@@ -168,11 +168,11 @@ package.json 的 pi 清单: {"extensions":["./index.ts"],"skills":["./skills"],"
 
 ⑥ 仓库回归
 ------------
-命令与结果:
+命令与结果（评审修复后的最终状态）:
   bash scripts/check.sh                              → exit 0
-    Python（含仓库边界和检查入口回归）: 554 passed, 1 deselected（基线 4dd01d2：547 / 1）
+    Python（含仓库边界和检查入口回归）: 585 passed, 1 deselected
+      （4dd01d2 基线：547 / 1；本任务：+31 命令门禁用例、+4 提示词/定义用例、+3 其他）
     Node（前端回归 + 扩展单元测试）:     115 pass / 0 fail（基线 92；新增 23 个扩展单测）
-  上述 check.sh 的完整通过输出由提交前最后一次运行产生；分阶段提交后若代码变化会重跑。
 
 ⑦ 本任务创建/清理的资源
 -------------------------
@@ -180,3 +180,22 @@ package.json 的 pi 清单: {"extensions":["./index.ts"],"skills":["./skills"],"
   未触碰用户 ~/.pi 或 ~/.pi-glink、未运行 Docker/E2B、无后台进程遗留。
 - 冒烟脚本自建的临时目录由脚本 trap 清理；负例对照的临时目录在手工实验后已删除。
 - 未调用任何真实模型或检索。
+
+⑧ 评审修复：`/` 命令门禁（GLINK-SUB-02 第 1 轮 BLOCKER）
+----------------------------------------------------------
+背景: 载入 pi-subagents 后，客户端可控的 prompt 如果以 `/` 开头，pi 会先执行扩展命令
+（docs/rpc-commands.md:31），`/run --bg`、`/subagents-detach` 等因此绕过 tool_call 守卫；
+inproc 面会留下不随 run 取消/超时收口的孤儿进程。
+修复: 宿主在准入层加门禁（kernel/runner.py::RunManager.start → prompt_names_unsupported_command，
+命令名单从 kernel/agent_env.py::prompt_template_names(config.agent_config_dir) 推导；
+web_routes.py 把 UnsupportedCommand 映射为 HTTP 400 unsupported_command）。
+拒绝发生在凭据解析、父会话读取、run 目录创建、执行面拉起之前；追问与三个执行面同一条判定。
+回归命令与结果:
+  .venv/bin/python -m pytest tests/test_runs_api.py tests/test_runner.py \
+      tests/test_kernel_agent_env.py tests/test_agent_prompts.py tests/test_repository_boundaries.py -q
+  → 全部通过（含在 585 passed 内）
+主要用例: `/run ... --bg`、`/subagents-detach`、前导空白 + `/chain`、`/parallel`、裸 `/`、
+`/DeepResearch`、`/deepresearch2`、`/skill:…` → 400 且 run 目录数不变；`/deepresearch 题目`、
+正文中间出现 `/run`、前导空白的普通问题 → 201 并正常 finished；追问被拒与放行两组；
+命令名单随模板目录变化（新增 notes.md 后 `/notes` 被接受，证明不硬编码；符号链接不计入；
+目录缺失时 fail-closed）。错误体只给 allowed 列表，不回显被拒输入。

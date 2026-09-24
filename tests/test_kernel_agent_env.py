@@ -17,6 +17,7 @@ from pi_glink.kernel.agent_env import (
     build_pi_env,
     local_package_source,
     prepare_agent_dir,
+    prompt_template_names,
     template_manifest,
 )
 
@@ -271,6 +272,26 @@ def test_agents_directory_is_rendered_into_the_run_configuration(
     config = _config(tmp_path, template_dir)
     runtime = _prepare(config, tmp_path)
     assert (runtime.directory / "agents" / "researcher.md").read_text(encoding="utf-8") == "# researcher\n"
+
+
+def test_prompt_template_names_come_from_the_template_directory(tmp_path: Path) -> None:
+    """准入层的 `/` 命令白名单从 `agent/prompts/` 推导，不硬编码。
+
+    pi 只展开文件名（stem）精确匹配的模板命令（docs/prompt-templates.md），
+    宿主因此把同一份模板目录当作唯一真源：新增命令 = 新增受审阅的模板文件；
+    符号链接不进入白名单（与 template_manifest 同口径）。
+    """
+    template = tmp_path / "template"
+    (template / "prompts").mkdir(parents=True)
+    (template / "prompts" / "deepresearch.md").write_text("题目：$@\n", encoding="utf-8")
+    (template / "prompts" / "notes.md").write_text("题目：$@\n", encoding="utf-8")
+    (template / "prompts" / "ignored.txt").write_text("不是模板\n", encoding="utf-8")
+    (template / "prompts" / "escape.md").symlink_to(template / "prompts" / "notes.md")
+    assert prompt_template_names(template) == ("deepresearch", "notes")
+    # 模板目录缺失 = 不接受任何 `/` 命令（fail-closed）。
+    assert prompt_template_names(tmp_path / "absent") == ()
+    # 仓库当前只有 `/deepresearch`：加载的包注册的扩展命令不在其中。
+    assert prompt_template_names(REPO_ROOT / "agent") == ("deepresearch",)
 
 
 def test_template_settings_declare_pinned_packages_and_quiet_subagent_surfaces() -> None:
