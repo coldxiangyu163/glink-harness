@@ -18,6 +18,21 @@ __pycache__/
 node_modules/
 .pi/
 
+# 本地 agent 工具的运行痕迹：不是产品配置，也没有仓库契约。
+#   .pi-subagents/  pi-subagents 的 artifactDir 默认 project，子 agent 产物写在 cwd
+#   .feynman/       检索内容缓存（fetch-content）
+#   .herdr/         委派 brief 与评审报告
+.pi-subagents/
+.feynman/
+.herdr/
+
+# 手动 run 的落地目录：成稿、草稿、检索中间件与来源附件。
+# 产品自己的数据根是 LOCAL_WEB_DATA_ROOT（默认 ~/.pi-glink，见 host/pi_glink/config.py），
+# 仓库里这两个目录只在开发期使用，且含客户资料与二进制附件，不进版本库。
+# 确实需要留档时用 `git add -f <路径>` 显式加回。
+outputs/
+notes/
+
 # pi 会把运行时状态写进它的配置目录。仓库里的 agent/ 只是模板：
 # 真正的配置目录由宿主渲染到数据根下（见 host/pi_glink/kernel/agent_env.py），
 # 这几条防线保证即使误把 agent/ 当成配置目录也不会把状态提交进去。
