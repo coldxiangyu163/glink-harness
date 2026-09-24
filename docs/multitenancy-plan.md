@@ -10,15 +10,15 @@
 
 | 能力 | 现状 | 实现位置 |
 |---|---|---|
-| 租户身份（gateway） | 本机认证网关注入 `X-Pi-Glink-Identity` 短时效 HMAC-SHA256 断言；宿主验签（constant-time）、校验 audience/过期/寿命 | `host/pi_glink/tenancy.py`、`app.py` |
-| 租户身份（accounts） | 邀请注册 + 站内登录 + SQLite 会话（只存摘要），cookie `HttpOnly`/`SameSite`，CSRF 头，停用/注销/过期即时失效；`/api/me` 与账号界面 | `host/pi_glink/accounts.py`、`auth.py`、`app.py`、`web/modules/{auth,account}.mjs` |
+| 租户身份（gateway） | 本机认证网关注入 `X-Pi-Glink-Identity` 短时效 HMAC-SHA256 断言；宿主验签（constant-time）、校验 audience/过期/寿命 | `host/pi_glink/tenancy.py`、`web_security.py` |
+| 租户身份（accounts） | 邀请注册 + 站内登录 + SQLite 会话（只存摘要），cookie `HttpOnly`/`SameSite`，CSRF 头，停用/注销/过期即时失效；`/api/me` 与账号界面 | `host/pi_glink/accounts.py`、`auth.py`、`web_security.py`、`web/modules/{auth,account}.mjs` |
 | 请求授权 | 多租户下除健康探测外所有 `/api/*` 验签；未认证 401、权限不足 403、未知/异租户/legacy 同形 404；SSE 在响应头之前验权并在断言过期时结束 | `app.py::HostRequestHandler` |
 | run 归属 | 受理时原子写 `tenant_id`/`creator_user_id`；`get_for`/`list_for` 按租户过滤；同租户 creator/admin 才能取消 | `store.py`、`kernel/runner.py` |
-| 并发准入 | 仅多租户 Docker/E2B 并发，默认全局 4 / 单租户 2，原子检查与预留，超额 429，无队列；资源台账全局 fail-closed | `kernel/runner.py::RunManager._check_admission` |
+| 并发准入 | 仅多租户 Docker/E2B 并发，默认全局 4 / 单租户 2，原子检查与预留，超额 429，无队列；未确认释放的持有计入 owner 租户与全局槽位，并可由宿主在线自动对账释放 | `kernel/runner.py::RunManager._check_admission`、`_probe_resource` |
 | 租户凭据 | 默认每租户条目提供 `modelApiKey`（必需）/`webSearchKey`（可选）；显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时改为宿主冻结的一套模型凭据，且不得配置/读取租户凭据文件 | `tenancy.py`、`kernel/agent_env.py` |
 | 脱敏边界 | 每 run 一个 redactor（宿主已知秘密 + 本 run 凭据），事件/日志/报告/工作区/会话/下载都经过它 | `kernel/runner.py`、`redaction.py` |
 | 执行资源上限 | Docker 容器实例限 cpu/memory/pids 并降权；E2B 只限生命周期（SDK 不暴露 cpu/内存） | `kernel/docker_env.py`、`kernel/e2b_env.py` |
-| 历史数据 | 无 owner 的旧记录在多租户读面完全不可见、不迁移、不改写；本地模式按旧口径读取 | `store.py`、`app.py` |
+| 历史数据 | 无 owner 的旧记录在多租户读面完全不可见、不迁移、不改写；本地模式按旧口径读取 | `store.py`、`web_routes.py` |
 
 **仍未实现**：多宿主租约与共享存储（SQLite/Postgres/outbox）、真实网关与密钥轮换、BYOK 与短期
 凭据代理、计费与上线运维；容器/沙箱的实际隔离强度不在本仓库的验证范围内。
@@ -75,8 +75,22 @@ outbox 模式，事务内写 `events` 后投递到共享流供多宿主 SSE 与�
 - 默认全局 4、单租户 2；`PI_GLINK_MAX_GLOBAL_RUNS` / `PI_GLINK_MAX_TENANT_RUNS` 可调。
 - 准入检查与槽位预留原子完成；超额立即拒绝（`429 quota_exceeded`，带 scope/limit，不含 run id），
   不设无限队列。
-- 终态 run 只有在清理报告确认 `released: true`（或运维裁决）后才归还容量；资源状态未知继续
-  挡住新准入（全局 fail-closed），**不自动**销毁任何外部资源。
+- **资源持有的口径（已在 GLINK-RES-01 变更）**：未确认释放的终态 run 计入其 owner 租户的槽位与
+  全局槽位（无 owner 的 legacy/损坏记录只计全局），因此一个租户的泄漏不会挡住别的租户，但会持续
+  吞噬额度，持有达到全局上限时任何新准入都被拒绝（仍是 fail-closed）。`local` 单用户模式保持原
+  口径：任一持有即 `409 resources_unreleased`（附 run id）。
+- **损坏记录**：run 目录存在但 `meta.json` 不可读时，读面一律隐藏它，资源台账计为全局持有
+  （`--unreleased` 标注 `corrupt`）；人工裁决写入 run 目录内的 `resource-adjudication.json`
+  侧车，不改写损坏文件。
+- **释放容量的三条路**：执行面清理确认 `released: true`；宿主在线自动对账；宿主停止时的
+  `--mark-released` 人工裁决。自动对账只按 run 记录里持久化的身份探测（Docker 按容器名 inspect，
+  必要时幂等删除后确认；E2B 按 `sandbox_id` 终止/查询，凭据取自冻结配置），不猜名字也不批量
+  操作；确认写入 `resource_adjudication{source: "auto-verified", method, at}`，与人工裁决
+  （`source: "operator"`）区分。间隔由 `PI_GLINK_RESOURCE_RECONCILE_SECONDS`（默认 60，0 关闭）
+  控制，后台线程，不在准入锁内；`inproc` 宿主不启用，遗留外部身份仍走离线人工裁决。
+- **SSE 连接**：全局 `PI_GLINK_MAX_GLOBAL_STREAMS`（默认 64），每租户
+  `PI_GLINK_MAX_TENANT_STREAMS`（默认 16）；超额在写出流响应头之前返回 `429 stream_limit`，
+  不含 run id；流结束时归还额度。
 - `inproc` 在两种模式下都维持全局单 run；多租户配置直接拒绝 `inproc`（共享宿主文件系统）。
 - Docker：每个容器实例带 `--cpus`/`--memory`/`--pids-limit`（默认 2 / 2g / 512，可配置）与
   `--cap-drop ALL` / `--security-opt no-new-privileges`；镜像与模板不动。
@@ -142,8 +156,8 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
 
 1. **跨租户拒绝矩阵**：列表、详情、事件流、报告下载、取消、启动、凭据——owner 正例与另一租户反例，
    同一 404 口径且无副作用；legacy 记录不可见。
-2. **并发与配额**：租户/全局上限、超额 429、九请求竞争填满且不超过上限、资源未确认释放继续挡准入、
-   已受理取消优先。
+2. **并发与配额**：租户/全局上限、超额 429、九请求竞争填满且不超过上限、未确认释放的持有计入
+   租户与全局槽位、SSE 连接额度按租户分离、已受理取消优先。
 3. **凭据隔离**：每租户只渲染自己的 key；缺模型 key 拒绝准入；缺搜索 key 回退无 key；每 run
    redactor 只含本 run 凭据。
 4. **会话与 SSE**：异租户在响应头之前 404；断言过期在重放与实时两个阶段都终止流（含大量历史、

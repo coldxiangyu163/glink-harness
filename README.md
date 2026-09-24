@@ -117,8 +117,11 @@ scripts/run-local-web.sh --mark-released <runId> --note "已核对容器/沙箱�
 
 一个数据目录同一时间只能被一个宿主进程持有（`<数据根>/host.lock`）；第二个宿主无论用哪个端口都会
 直接拒绝启动，不会改动正在运行的任务。执行面清理未确认成功（或宿主异常退出后资源状态未知）的 run
-会持续占用运行额度，新研究返回 `409 resources_unreleased`；核对真实资源后用 `--mark-released`
-记录裁决才会放行，宿主不会自动清理任何容器或沙箱。
+会持续占用运行额度：本机（`local`）模式任一持有即让新研究返回 `409 resources_unreleased`（附 run id）；
+多租户模式把持有计入其 owner 租户与全局槽位，额度用尽时返回 `429 quota_exceeded`。Docker/E2B 宿主会按
+记录里持久化的容器名/沙箱 id 周期性自动对账（`PI_GLINK_RESOURCE_RECONCILE_SECONDS`，默认 60 秒，0 关闭；
+只探测、不猜名字），确认资源不存在后归还额度；核对真实资源后也可用 `--mark-released` 记录人工裁决。
+`--unreleased` 列出待核对项，`meta.json` 损坏的记录标注 `corrupt`。
 
 ## 运行一次真实研究
 
@@ -181,8 +184,13 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   凭据，不会把不同租户的秘密互相写入事件、日志或产物。
 - **并发**：仅本模式的 Docker/E2B 可并发，默认全局上限 4、单租户 2，超额立即返回
   `429 quota_exceeded`（带 `scope` 与 `limit`，不含任何 run id），没有排队。准入检查与槽位预留
-  原子完成；终态 run 只有确认资源释放才归还容量，清理状态未知会全局挡住新准入（fail-closed），
-  需要运维用 `--unreleased` / `--mark-released` 人工裁决。
+  原子完成；终态 run 只有确认资源释放才归还容量，未确认的持有计入其 owner 租户与全局槽位
+  （一个租户的泄漏不会挡住别的租户，但会持续吃掉额度；达到全局上限时拒绝所有新准入，
+  fail-closed）。宿主在线按持久化身份自动对账释放；离线仍可用 `--unreleased` / `--mark-released`
+  人工裁决（`--unreleased` 对损坏记录标注 `corrupt`）。
+- **SSE 连接额度**：事件流同时打开数有上限——全局 `PI_GLINK_MAX_GLOBAL_STREAMS`（默认 64），
+  本模式每租户 `PI_GLINK_MAX_TENANT_STREAMS`（默认 16）；额度在写出任何流响应头之前检查，
+  超额返回 `429 {"error":"stream_limit", ...}`（不含 run id），流结束时归还。
 - **SSE 与 CSRF**：事件流在写出任何响应头之前验权；断言过期在重放与实时两个阶段都按帧检查，
   中途过期立即结束该流（没有宽限窗口）。POST 会检查
   `Origin`/`Referer`/`Sec-Fetch-Site`，跨站请求在启动任何执行面之前被拒绝。健康端点无需身份，但

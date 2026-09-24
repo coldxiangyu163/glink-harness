@@ -9,7 +9,7 @@
 
 产品的既定方向是多租户研究工作台：通过 Docker / E2B 为研究 run 提供独立执行环境，本地 `inproc` 保留为单 Agent 开发与调试入口。默认 `PI_GLINK_TENANCY=local` 仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用单宿主多租户实现（§10）：身份入口二选一——本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`PI_GLINK_AUTH_MODE=accounts`，§10.6）；两者都只在服务端生成 `TenantContext`，run 带租户归属，模型凭据默认每租户自备（显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时由宿主统一提供），Docker/E2B 可并发。该实现目前只有**合成验证**（临时密钥/账号库、自签断言、fake 执行面、临时数据根）；真实网关、真实 HTTPS 终止、邮件交付、Docker/E2B live 与生产数据验收未覆盖，不能由单 run smoke 替代。
 
-多租户实现已覆盖服务端可信身份、run/事件/报告/取消的归属过滤、每 run 凭据交付与脱敏边界、显式并发准入与全局 fail-closed 资源台账；仍未覆盖多宿主租约、共享存储、真实网关与云环境的资源上限执行。单独容器/沙箱提供执行隔离，但不自动解决宿主 API 授权、存储隔离或凭据访问，也不构成本仓库对容器/沙箱实际隔离强度的保证。
+多租户实现已覆盖服务端可信身份、run/事件/报告/取消的归属过滤、每 run 凭据交付与脱敏边界、显式并发准入与 fail-closed 资源台账（未确认释放的持有计入 owner 租户与全局槽位，可由在线自动对账或离线人工裁决释放）；仍未覆盖多宿主租约、共享存储、真实网关与云环境的资源上限执行。单独容器/沙箱提供执行隔离，但不自动解决宿主 API 授权、存储隔离或凭据访问，也不构成本仓库对容器/沙箱实际隔离强度的保证。
 
 具体接口与迁移在对应任务中决定，不预建无消费者的租户抽象；修改这些承诺遵循 [工程约束](engineering.md)。现有单 run 测试继续保护当前行为，将来的多租户变更在取得决定后同步替换相关断言，而不是把当前串行测试当作永久需求。
 
@@ -91,6 +91,10 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
   已提交的终帧，因此详情、列表、报告下载与 SSE 重放在终帧发布的瞬间、落定副本写失败之后、
   重启之后都读到同一个已提交事实，且不会先出现再撤回；`event_count` 取终帧 `seq`。
   耐久性以日志文件的 `fsync` 为界（不额外做目录 `fsync` 或 macOS `F_FULLFSYNC`）。
+* **进程内索引只是加速器**：宿主为每个 data_root 维护一份 run 记录索引，列表、按租户列表、
+  `unsettled` 与资源台账都从它读取，准入在 manager 锁内不再遍历 run 目录。它不是第二条事实源：
+  终帧只在 `fsync` 与提交水位越过之后才进入索引，写入失败时不产生任何可见投影；`scan_all()`
+  保留全量扫描作为对照；重启时先从磁盘重建，语义与逐目录读取完全一致。
 * 环形窗口只是「读完日志 → 挂上实时尾」之间的交接缓冲，不是历史来源；run 关闭时即释放，
   不会让所有 run 的历史常驻内存。用户历史（`events.jsonl`）不因任何 TTL 被删除。
 
@@ -103,6 +107,14 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 * 已结束/上次进程的 run：只读 `events.jsonl`，因此重放不受内存窗口容量影响，也无需重新启动 pi。
 * 每个实时订阅者有一个**有界队列**（默认 2000 帧）。停止读取的客户端会被主动断开，而不是让
   队列无限增长；浏览器按 `Last-Event-ID` 重连并从日志补齐，因此断开不丢已提交历史。
+* **连接数有界**：全局上限 `PI_GLINK_MAX_GLOBAL_STREAMS`（默认 64），多租户下每个租户另有
+  `PI_GLINK_MAX_TENANT_STREAMS`（默认 16；local 只用全局上限）。额度在查看 run 之前预留，超额
+  在写出任何流响应头之前返回 `429 {"error":"stream_limit","scope","limit"}`（附
+  `Retry-After`，不含 run id，也不透露他租户是否存在）；流的每条结束路径（正常结束、客户端断开、
+  断言/会话过期、慢消费者断开）都会归还额度。前端对非 200 响应做有界重连（1.5/4/10 秒三次后报
+  失败，连上后重置）。两个已知取舍如实记录：浏览器读不到该 429 的 JSON 体，受拒后重建的
+  `EventSource` 不带 `after`，会从 `seq 0` 重新全量重放（模型按 `seq` 去重，语义正确但有额外
+  流量）；确实不存在的 run（404）也要等三次重试（约 15 秒）才显示失败。
 
 ### 3.3 流式凭据回显保护
 
@@ -191,23 +203,45 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 `409 run_not_cancellable`，带已提交的 `status` 与 `reason`（`terminal`，或提交失败时的
 `finalizing`）；未知 run 返回 `404 unknown_run`。取消请求在 pi 尚未启动时也被受理。
 
-**准入与资源**：新 run 只在「本进程没有执行中的 run（否则 `409 run_busy`）」且「没有任何 run
-持有未确认释放的资源（否则 `409 resources_unreleased`，附 run id）」时受理。资源台账直接由持久
-记录导出：未终态的 run、`cleanup.released` 不为 `true`（`false` 为已知失败，`null` 为未知）且
-没有人工裁决的终态 run 都占用容量；早于资源跟踪的历史记录（无 `cleanup`）不参与。重启不会
-清空台账。释放容量只有两条路：执行面清理确认 `released: true`，或操作员在宿主**停止时**以
-`python -m pi_glink.app --mark-released <runId> --note "<核对说明>"` 记录裁决（`--unreleased`
-列出待核对项）；裁决只写入 `resource_adjudication`，保留原清理事实，不自动操作任何容器/沙箱。
+**准入与资源**：新 run 只在「本进程没有执行中的 run（仅 local 模式；否则 `409 run_busy`）」且容量未满时
+受理。资源台账直接由持久记录导出：未终态的 run、`cleanup.released` 不为 `true`（`false` 为已知失败，
+`null` 为未知）且没有裁决的终态 run 都占用容量；早于资源跟踪的历史记录（无 `cleanup`）不参与。重启不会
+清空台账。
+
+* **local 单用户**：任一持有未确认释放即 `409 resources_unreleased`（附 run id），且保持全局单 run 槽位。
+* **multitenant**：持有计入其 owner 租户的并发槽位**和**全局槽位（无 owner 的 legacy 记录只计全局），
+  与 `PI_GLINK_MAX_TENANT_RUNS` / `PI_GLINK_MAX_GLOBAL_RUNS` 一同比较，超额返回
+  `429 quota_exceeded`（scope/limit，不含 run id）；持有不会被遗忘，达到全局上限时所有新准入都被拒绝
+  （fail-closed）。
+* **损坏记录**：run 目录存在但 `meta.json` 不可读/不可解析时，列表、详情与重放一律隐藏它（不向租户
+  暴露），但资源台账把它计为**全局持有**（owner 未知），`--unreleased` 列出并标注 `corrupt`；裁决写入
+  该 run 目录内的 `resource-adjudication.json` 侧车，损坏的 `meta.json` 字节不变。
+
+释放容量有三条路：执行面清理确认 `released: true`、在线自动对账确认，或操作员在宿主**停止时**以
+`python -m pi_glink.app --mark-released <runId> --note "<核对说明>"` 记录人工裁决（`--unreleased`
+列出待核对项）。人工裁决写出 `resource_adjudication{decision, source: "operator", note, at}`，自动对账
+写出 `source: "auto-verified"` 与 `method`；两者都保留原清理事实与已提交的终态。离线运维命令不接触
+Docker/E2B，也不删除任何资源。
+
+**在线自动对账**：宿主持有数据目录时，按 `PI_GLINK_RESOURCE_RECONCILE_SECONDS`（默认 60，0 关闭）在
+后台线程周期性确认未释放的持有。探测只使用 run 记录里**持久化的执行身份**，且按记录选面：有
+`container_name` 就按名字 `docker inspect`（不存在即确认；仍存在则先按 `stop_argv` 语义幂等
+`docker rm -f` 后再次确认），有 `sandbox_id` 就调用 E2B SDK 按 id 终止/查询（凭据取自冻结配置，
+不依赖进程环境）。不按名字模式猜测，不列举或批量操作任何资源；两种身份都有的记录必须都确认。
+「已不存在」只认执行面的契约（inspect 的 no-such、SDK 的 `False` 返回或 `SandboxNotFoundException`
+类型）：探测失败、超时、鉴权错误或无法判定的返回一律保持持有。对账不在准入锁内执行，关闭宿主时
+停止该线程；`inproc` 宿主不启用它（不取得外部资源；遗留的外部身份仍走离线人工裁决）。
 
 **所有权、重启对账与关闭**：宿主先取得 `data_root/host.lock` 的独占 `flock`（进程存活期间
 持有、退出即释放；同进程二次获取也被拒），**再**对账和绑定端口。同一 data_root 的第二个宿主
 ——无论同端口还是不同端口——在读任何记录前以 `DataRootBusy` 退出，不改动活跃 owner 的 run。
 `RunManager.reconcile()` 要求持有所有权：遗留 `running` 记录若已有提交的终帧，只写落定副本；
 否则提交 `run_failed(interrupted)`，资源状态为 `released: null`（未知），并持续占用容量直至裁决。
-容器名/沙箱 id 在拿到时即持久化，`unreleased_resources()` 供操作员做有界对账，**不自动操作真实
-遗留资源**。进程退出时 `RunManager.shutdown()` 取消并等待本进程 run，返回所有「终态未提交或
-资源未确认释放」的 run id（包括更早遗留的持有），进程返回码非零。`flock` 只覆盖单机本地文件
-系统，不是多宿主租约（见 [多租户方案](multitenancy-plan.md) §3.2）。
+容器名/沙箱 id 在拿到时即持久化，`unreleased_resources()` 供操作员做有界对账。除在线自动对账按已持久化
+身份执行的那一次幂等删除/终止（上文）之外，宿主不操作任何其他遗留资源：没有身份、探测不确定或
+不属于本记录的容器/沙箱永远不会被触碰。进程退出时 `RunManager.shutdown()` 取消并等待本进程 run，
+返回所有「终态未提交或资源未确认释放」的 run id（包括更早遗留的持有与不可读记录），进程返回码非零。
+`flock` 只覆盖单机本地文件系统，不是多宿主租约（见 [多租户方案](multitenancy-plan.md) §3.2）。
 
 ## 5. 三种执行面对照
 
@@ -245,10 +279,12 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 * **产物回收与关闭**：`recover_artifacts` 先把该面的产物放到宿主工作区（inproc/Docker 本来就是
   宿主目录，是 no-op；E2B 从沙箱拉回，逐文件限幅并拒绝路径分隔符），然后 `close()` 才销毁
   进程/容器/沙箱并报告 `CleanupReport(released, failures)`。清理失败会被记入 run 记录并继续占用容量（§4），不谎报已释放。
-* **持久执行身份**：`identity()` 给出容器名或沙箱 id，run 管理在拿到时即写入 `meta.json`，
-  供重启对账（§4）使用；它也是唯一的资源归属凭据，不靠猜名字。
+* **持久执行身份**：`identity()` 给出容器名或沙箱 id。身份在资源一存在时就写入 `meta.json`：
+  Docker 面在 `docker run` 之前的容器名确定后写入，E2B 面在拿到 `sandbox_id` 后、上传配置/续接之前
+  写入；创建后的失败清理不会抹掉已拿到的身份，终态 `cleanup.external` 也带上它。它是重启对账（§4）
+  与在线自动对账唯一的资源归属凭据，不靠猜名字。
 
-### 5.2 每 run 独立可写环境（B2）
+### 5.2 每 run 独立可写环境
 
 一个 run 拥有自己的运行期配置目录、session 目录与工作区：
 
@@ -267,28 +303,26 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 
 **多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
 
-**事件时序（GLINK-E2B-LIVE-01 更正）**：原记录称「E2B SDK 2.x 的
-`commands.run(background=True, on_stdout=…)` 回调实测不触发，因此事件只能在 run 结束后回放」——
-这是**用法误判**：`background=True` 的重载不消费 `run()` 上的回调（类型即 `None`），它返回的
-`CommandHandle` 才是流式接口（`__iter__` 逐块产出 stdout/stderr/pty，`wait(on_stdout=…)` 逐块回调），
-而当时 stdout 又被重定向进文件，本就没有数据可流。现在沙箱命令把 pi 的 stdout 同时 `tee` 到
+**事件时序**：E2B 的流式接口是 `commands.run(background=True, …)` 返回的 `CommandHandle`
+（`background=True` 的重载不消费 `run()` 自身的回调）。沙箱命令把 pi 的 stdout 同时 `tee` 到
 `/home/user/events.jsonl`，宿主在命令运行期间迭代 handle，按 LF 拆出完整行立即经
 `parse_json_stream_line` → `on_frame`（沿用 `strip_trailing_cr`；合法 JSON 字符串里的
 U+2028/U+2029 不拆帧，与 RPC 面共用 `tests/fixtures/lf-framing.json` 语料）。「已送出」以
 **完整行数**计：正常结束时文件与流一致、不重复投递；流中途断开（未收到 end）不算 run 失败，
 宿主等命令结束后（命令在管道后把退出码写入 `/home/user/pi-exit-code.txt`）只从文件补发该计数
-之后的帧。非零退出码由 SDK `CommandExitException` 映射为 `kernel_exit` + stderr tail，不再退化成
+之后的帧。非零退出码由 SDK `CommandExitException` 映射为 `kernel_exit` + stderr tail，不退化成
 `execution_error`。宿主侧离线验证已完成（fake handle 分块推送：行跨块/UTF-8 跨块、断流补齐、
 取消、非零退出码、命令字符串）；**真实 E2B 沙箱的实时性尚未验收**。沙箱内的 JSONL 按 LF 分帧；
 配置交付带有 `(相对路径, sha256)` 清单，`AGENTS.md`、`settings.json`、`extensions/`、`skills/`、
-`prompts/` 与生成文件都按同一路径语义送达。详见 `docs/evidence/e2b-run.txt` 末尾更正注记。
+`prompts/` 与生成文件都按同一路径语义送达。该接口此前的误读与更正过程记录在
+`docs/evidence/e2b-run.txt` 末尾。
 
 同一个适配器显式传 `commands.run(..., timeout=<沙箱寿命>)`：SDK 默认值是命令累计运行 60 秒，
 而真实研究 run 是分钟级，遗留默认会把内核在沙箱仍存活时杀掉（run 以 `execution_error` 结束于
 `TimeoutException`，报告与产物丢失）。命令上限与创建沙箱用的同一个计算值绑定，不会比沙箱寿命更长，
 也不会更短。
 
-### 5.3 容器面预装 pi 包（GLINK-PKG-01）
+### 5.3 容器面预装 pi 包
 
 `agent/settings.json` 是唯一的包声明真源（`packages` 里的 `npm:` 声明带精确版本）。三个面在渲染
 本 run 的 `pi-agent/settings.json` 时按面向分流：
@@ -305,12 +339,12 @@ U+2028/U+2029 不拆帧，与 RPC 面共用 `tests/fixtures/lf-framing.json` 语
 同一口径）。预装安装用 `--legacy-peer-deps`，与 pi 自己的 npm 托管安装一致：否则 npm 会自动装入
 一份版本可能不同的 `@earendil-works/pi-*` peer，扩展会从副本解析宿主 API 并改变工具的激活方式。
 
-**包缺失必须是明确失败。** pi 对不存在的本地包路径完全静默（实测：rc=0、stderr 为空、无警告），
-所以两个镜像都带 `/opt/pi-packages/check-packages.sh`：Docker 面把它作为容器的
-`--entrypoint`（镜像早于宿主时容器起不来，退出 127；包被删时 exit 78），E2B 面在命令链里先验证
-守卫存在再交给守卫执行。崩溃语义与其它内核启动失败一致：Docker 面为 `kernel_exit`（退出码 78），
-E2B 面为 `kernel_exit` + stderr tail 里的中文原因。构建、候选 tag、回滚句柄与实测耗时见
-`docs/evidence/prebaked-packages.txt`，机制实测事实见 `docs/pi-integration-notes.md` §9。
+**包缺失必须是明确失败。** pi 对不存在的本地包路径完全静默，所以两个镜像都带
+`/opt/pi-packages/check-packages.sh`：Docker 面把它作为容器的 `--entrypoint`（镜像早于宿主时
+容器起不来，退出 127；包被删时 exit 78），E2B 面在命令链里先验证守卫存在再交给守卫执行。崩溃
+语义与其它内核启动失败一致：Docker 面为 `kernel_exit`（退出码 78），E2B 面为 `kernel_exit` +
+stderr tail 里的中文原因。构建、候选 tag、回滚句柄、实测耗时与研究记录的实测事实见
+`docs/evidence/prebaked-packages.txt` 与 `docs/pi-integration-notes.md` §9。
 
 ## 6. 凭据流
 
@@ -336,7 +370,7 @@ E2B 面为 `kernel_exit` + stderr tail 里的中文原因。构建、候选 tag�
 | 事件总线 / `events.jsonl` | 提交（先落盘）前再脱敏一次 | `kernel/runner.py::_emit` |
 | 报告文件 | 经工作区目录句柄读取、脱敏、在 run 目录句柄内原子写入 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `kernel/runner.py::_recover_report` |
 | 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源 | `kernel/runner.py::_sanitize_session_file`、`docker_env.host_session_path` |
-| 报告下载 | `report_path` 不是下载能力：只认两个固定位置——宿主产物 `runs/<id>/artifacts/report.md`，以及旧版本写下的本 run 工作区 `workspaces/<id>/report.md`（只读，从不改写历史）；其他路径一律视为无报告。服务前再脱敏，响应头 `X-Redacted` 标明是否发生；`hasReport` 用同一位置规则与同一拒绝条件计算 | `store.py::report_location`、`app.py::_send_report`、`artifacts.py` |
+| 报告下载 | `report_path` 不是下载能力：只认两个固定位置——宿主产物 `runs/<id>/artifacts/report.md`，以及旧版本写下的本 run 工作区 `workspaces/<id>/report.md`（只读，从不改写历史）；其他路径一律视为无报告。服务前再脱敏，响应头 `X-Redacted` 标明是否发生；`hasReport` 用同一位置规则与同一拒绝条件计算 | `store.py::report_location`、`web_routes.py::_send_report`、`artifacts.py` |
 
 **产物路径安全**（`artifacts.py::ArtifactTree`）：宿主从不「先 realpath 校验、再按路径打开」。
 每次操作持有 run 根目录的目录句柄（根的父目录是宿主配置，可信；根本身及其下每一级都以
@@ -490,9 +524,14 @@ owner/role 判定再受理：其他租户得到与未知 run 相同的 404 且�
 
 只有多租户 + Docker/E2B 可并发：默认全局上限 4、单租户上限 2；准入检查与槽位预留（写入执行表 +
 打开事件流）在同一把 manager 锁内完成，超额立即返回 `429 quota_exceeded`（带 scope 与 limit，不含
-任何 run id），不排队。资源账保持全局 fail-closed：任意租户的未确认释放资源都会挡住新准入，仍由运维
-`--unreleased` / `--mark-released` 人工裁决。已受理的取消仍与终帧提交在同一线性化点上裁决。`inproc`
-在两种模式下都维持全局单 run；多租户配置直接拒绝 `inproc`（它共享宿主文件系统）。
+任何 run id），不排队。未确认释放的资源持有**计入槽位**（owner 租户 + 全局；无 owner 的 legacy 与
+损坏记录只计全局），因此一个租户的泄漏不会挡住别的租户，但会持续吃掉额度；持有达到全局上限时任何
+新准入都被拒绝（fail-closed）。恢复额度靠宿主在线自动对账或离线 `--unreleased` / `--mark-released`
+（§4）。已受理的取消仍与终帧提交在同一线性化点上裁决。`inproc` 在两种模式下都维持全局单 run；
+多租户配置直接拒绝 `inproc`（它共享宿主文件系统）。
+
+SSE 连接同样有界：全局 `PI_GLINK_MAX_GLOBAL_STREAMS`（默认 64）与每租户
+`PI_GLINK_MAX_TENANT_STREAMS`（默认 16），超额在写出流响应头之前返回 `429 stream_limit`（§3.2）。
 
 Docker 面的每个容器实例额外带 `--cpus` / `--memory` / `--pids-limit`（默认 2 / 2g / 512，可配置）与
 `--cap-drop ALL` / `--security-opt no-new-privileges`，镜像与模板不变。E2B 面只能限制沙箱生命周期
