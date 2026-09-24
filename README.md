@@ -1,6 +1,6 @@
 # pi-glink
 
-以 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 为执行内核的研究工作台：本机 / Docker / E2B 三种执行面共享同一套 run 生命周期。默认 `local` 模式仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用**单宿主多租户**—— 身份入口二选一：本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`PI_GLINK_AUTH_MODE=accounts`）；两者都只在可信服务端生成租户上下文，Docker/E2B 可并发（默认全局 4 / 单租户 2）。模型凭据默认仍是每租户自备（`PI_GLINK_MODEL_CREDENTIALS=tenant`）；SaaS 部署可显式选择 `shared`，由宿主冻结一套模型凭据统一提供，租户条目只保留身份/组织语义。多租户目前只经过**合成验证**（临时密钥文件、自签断言、fake 执行面、临时数据根），没有真实网关、Docker/E2B live 或生产数据验收，不能把“合成矩阵通过”当作多租户已经安全上线。方向、当前实现与尚未覆盖的边界见 [架构](docs/architecture.md) 与 [多租户方案](docs/multitenancy-plan.md)；前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按 pi 的原生事件语义重写。
+以 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 为执行内核的研究工作台：本机 / Docker / E2B 三种执行面共享同一套 run 生命周期。默认 `local` 模式仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用**单宿主多租户**—— 身份入口二选一：本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`PI_GLINK_AUTH_MODE=accounts`）；两者都只在可信服务端生成租户上下文，Docker/E2B 可并发（默认全局 4 / 单租户 2）。模型凭据默认仍是每租户自备（`PI_GLINK_MODEL_CREDENTIALS=tenant`）；SaaS 部署可显式选择 `shared`，由宿主冻结一套模型凭据统一提供，共享模式不读取任何租户配置（配置 `PI_GLINK_TENANT_CONFIG_FILE` 即拒绝启动）。多租户目前只经过**合成验证**（临时密钥文件、自签断言、fake 执行面、临时数据根），没有真实网关、Docker/E2B live 或生产数据验收，不能把“合成矩阵通过”当作多租户已经安全上线。方向、当前实现与尚未覆盖的边界见 [架构](docs/architecture.md) 与 [多租户方案](docs/multitenancy-plan.md)；前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按 pi 的原生事件语义重写。
 
 **当前状态：本机 / Docker / E2B 三种执行面均已跑通真实 run**，验收记录见 [docs/acceptance.md](docs/acceptance.md)，证据在 `docs/evidence/`。除前端静态资源源自 Glink 工作台外，本仓库不引用 FrontierAgent 的任何运行模块。
 
@@ -183,15 +183,16 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 邀请制注册 + 站内登录，保留网关模式的全部 owner/配额语义，但身份来自服务端会话而不是断言：
 
-- **配置**：`PI_GLINK_TENANCY=multitenant`、`PI_GLINK_AUTH_MODE=accounts`、`PI_GLINK_TENANT_CONFIG_FILE`
-  必需；不再需要网关签名密钥。账号库默认 `<LOCAL_WEB_DATA_ROOT>/accounts/accounts.db`（仓库外，
+- **配置**：`PI_GLINK_TENANCY=multitenant`、`PI_GLINK_AUTH_MODE=accounts`，以及默认 `tenant` 策略下
+  必需的 `PI_GLINK_TENANT_CONFIG_FILE`（`shared` 策略下不得配置）；不再需要网关签名密钥。账号库默认
+  `<LOCAL_WEB_DATA_ROOT>/accounts/accounts.db`（仓库外，
   SQLite WAL），与 run/events 文件存储分离，互不迁移。宿主首次创建时建立 0700 专用目录与 0600
   库文件（WAL/SHM 同样属主独占），已有权限过宽或符号链接一律拒绝启动且不自动 chmod——旧库需操作员
   停止宿主后迁移并 `chmod 600`。宿主仍只监听 loopback，生产必须由 TLS 终止代理提供 HTTPS。
 - **引导**：首位管理员由操作员在**宿主停止**时离线签发（取得 data-root ownership 后）：
   `python -m pi_glink.app --create-invite --tenant tenant-alpha --tenant-name 组织甲 --email admin@example.com --role admin`。
   默认（`tenant`）策略下该租户必须已在 `tenants.json` 里配置模型密钥（缺 key 拒绝）；
-  `shared` 策略下只校验宿主冻结的共享模型配置，租户条目可以不存在（首个邀请创建组织记录）。
+  `shared` 策略下只校验宿主冻结的共享模型配置（不配置租户凭据文件），首个邀请直接创建组织记录。
   邀请码只打印一次、数据库只存摘要。注册**只创建账号，不创建租户、不授予模型凭据**；后续管理员
   登录后在账号菜单里给本租户邮箱发一次性邀请。
 - **会话**：`hashlib.scrypt`（随机盐、逐行记录参数、恒时比较）保存口令；登录成功后服务端签发高熵令牌，
@@ -221,15 +222,15 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   `~/.pi/web-search.json` 或别的租户。既有部署不需要改任何东西。
 - **`shared`（显式 SaaS 策略）**：宿主在启动时冻结一套 `OPENAI_API_KEY` / `OPENAI_BASE_URL` /
   `OPENAI_MODEL` 供所有租户使用；可选搜索 key 只来自宿主级 `PI_GLINK_WEB_SEARCH_KEY`，不会
-  读取操作员 `~/.pi/web-search.json` 顶替。租户条目不再需要模型 key，也**不得**包含
-  `modelApiKey` / `webSearchKey`（混用即拒绝启动）；`PI_GLINK_TENANT_CONFIG_FILE` 可省略，
-  或只作为无凭据的租户登记。三件套缺任一、或把 `shared` 用在非多租户模式，宿主一律拒绝启动，
-  绝不静默回退 `tenant` 或 `local`。
+  读取操作员 `~/.pi/web-search.json` 顶替。共享模式不读取任何租户配置：不得配置
+  `PI_GLINK_TENANT_CONFIG_FILE`（不设置或留空即为无该入口），设置即拒绝启动，也不会构造或
+  读取租户凭据存储。三件套缺任一、或把 `shared` 用在非多租户模式，宿主一律拒绝启动，绝不
+  静默回退 `tenant` 或 `local`。
 - **执行隔离**：SaaS 部署首选 `LOCAL_WEB_EXECUTOR=e2b`（Docker 同样允许；`inproc` 在两种策略
   下都被拒绝）。共享 key 仍只经每个 run 的运行期 `auth.json`（0600）交付：不进沙箱进程环境、
   命令行、页面或事件/报告，E2B 面随沙箱销毁；宿主运行期目录内的 0600 副本与工具回显仍是既有
   残留面。每 run 脱敏边界包含共享 key 与宿主已知秘密，`redactor_for_record` 在 `shared` 下走
-  宿主/共享边界，不会因租户条目没有 key 而漏脱敏。这仍是回显保护 + 沙箱执行隔离，不承诺 key
+  宿主/共享边界，不会因共享模式没有租户凭据条目而漏脱敏。这仍是回显保护 + 沙箱执行隔离，不承诺 key
   不可能被宿主可读、工具回显或网络外传。
 - **部署最小步骤（accounts + shared + e2b）**：配置 `E2B_API_KEY`、共享模型三件套与（可选）
   `PI_GLINK_WEB_SEARCH_KEY`；开启 `PI_GLINK_TENANCY=multitenant`、`PI_GLINK_AUTH_MODE=accounts`、

@@ -84,9 +84,12 @@ def write_tenant_file(tmp_path: Path, tenants: dict[str, Any] | None = None, nam
     return path
 
 
-def shared_values(tmp_path: Path, tenant_file: Path | None = None, **overrides: str) -> dict[str, str]:
-    """A synthetic ``shared`` SaaS configuration (accounts + docker by default)."""
-    path = tenant_file if tenant_file is not None else write_tenant_file(tmp_path)
+def shared_values(tmp_path: Path, **overrides: str) -> dict[str, str]:
+    """A synthetic ``shared`` SaaS configuration (accounts + docker by default).
+
+    The shared policy has **no** tenant-credential-file entry: every credential
+    (model and the optional search key) comes from the frozen host values.
+    """
     values: dict[str, str] = {
         "OPENAI_API_KEY": SHARED_KEY,
         "OPENAI_BASE_URL": "https://example.invalid/v1",
@@ -98,7 +101,6 @@ def shared_values(tmp_path: Path, tenant_file: Path | None = None, **overrides: 
         "PI_GLINK_TENANCY": "multitenant",
         "PI_GLINK_AUTH_MODE": "accounts",
         "PI_GLINK_MODEL_CREDENTIALS": "shared",
-        "PI_GLINK_TENANT_CONFIG_FILE": str(path),
         "PI_GLINK_WEB_SEARCH_KEY": SHARED_SEARCH_KEY,
         "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "PI_GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts" / "accounts.db"),
@@ -165,40 +167,72 @@ def test_shared_policy_is_explicit_and_multitenant_only(tmp_path: Path) -> None:
     assert default.model_credentials == "tenant"
 
 
-def test_shared_policy_refuses_tenant_entries_with_their_own_credentials(tmp_path: Path) -> None:
-    """Mixing a tenant key into ``shared`` would make the credential source ambiguous."""
-    mixed = write_tenant_file(tmp_path, {"tenant-alpha": {"modelApiKey": ALPHA_KEY}}, name="mixed.json")
-    with pytest.raises(ConfigError, match="modelApiKey"):
-        build_tenancy(build_config(shared_values(tmp_path, tenant_file=mixed), REPO_ROOT))
+def test_shared_policy_refuses_the_tenant_credential_file_entry(tmp_path: Path) -> None:
+    """``shared`` reads no tenant configuration at all: any file entry is refused.
 
-    search = write_tenant_file(tmp_path, {"tenant-alpha": {"webSearchKey": "search-tenant"}}, name="search.json")
-    with pytest.raises(ConfigError, match="webSearchKey"):
-        build_tenancy(build_config(shared_values(tmp_path, tenant_file=search), REPO_ROOT))
+    This is stricter than the original relaxation: the host credential is the
+    only source, so an entry that could label a second credential set (or even
+    a credential-free registry) fails closed at configuration time.
+    """
+    keyed = write_tenant_file(tmp_path, {"tenant-alpha": {"modelApiKey": ALPHA_KEY}}, name="keyed.json")
+    with pytest.raises(ConfigError, match="PI_GLINK_TENANT_CONFIG_FILE"):
+        build_config(shared_values(tmp_path, PI_GLINK_TENANT_CONFIG_FILE=str(keyed)), REPO_ROOT)
+
+    empty = write_tenant_file(tmp_path, {}, name="empty.json")
+    with pytest.raises(ConfigError, match="PI_GLINK_TENANT_CONFIG_FILE"):
+        build_config(shared_values(tmp_path, PI_GLINK_TENANT_CONFIG_FILE=str(empty)), REPO_ROOT)
+
+    # An empty value is the same as not setting it: no file entry exists.
+    config = build_config(shared_values(tmp_path, PI_GLINK_TENANT_CONFIG_FILE=""), REPO_ROOT)
+    assert config.tenant_config_file is None
+
+    # The invariant also holds for a directly constructed HostConfig.
+    sneak = replace(
+        build_config(shared_values(tmp_path), REPO_ROOT),
+        tenant_config_file=write_tenant_file(tmp_path, {}, name="sneak.json"),
+    )
+    with pytest.raises(ConfigError, match="PI_GLINK_TENANT_CONFIG_FILE"):
+        load_identity_material(sneak)
 
 
-def test_shared_tenant_entries_are_optional_and_credential_free(tmp_path: Path) -> None:
-    path = write_tenant_file(tmp_path, {"tenant-alpha": {}, "tenant-beta": {}})
-    config = build_config(shared_values(tmp_path, tenant_file=path), REPO_ROOT)
-    tenancy = build_tenancy(config)
-    assert tenancy is not None
+def test_shared_mode_has_no_tenant_credential_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No ``TenantCredentialStore`` may be constructed or consulted in shared mode."""
+    config = build_config(shared_values(tmp_path), REPO_ROOT)
+    assert config.tenant_config_file is None
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("shared 模式不得读取租户凭据配置")
+
+    monkeypatch.setattr(TenantCredentialStore, "from_file", classmethod(forbidden))
+    material = load_identity_material(config)
+    assert material is not None
     try:
-        assert tenancy.shared_model_credentials is True
-        assert tenancy.credentials.tenant_ids() == frozenset({"tenant-alpha", "tenant-beta"})
+        assert material.shared_model_credentials is True
+        assert material.credentials is None
     finally:
-        tenancy.close()
+        material.close()
 
-    # The relaxation is explicit: in shared mode the registry file is optional,
-    # because it no longer stores any credential.
-    without_file = shared_values(tmp_path)
-    del without_file["PI_GLINK_TENANT_CONFIG_FILE"]
-    relaxed = build_config(without_file, REPO_ROOT)
-    material = load_identity_material(relaxed)
+    server = create_server(build_config(shared_values(tmp_path), REPO_ROOT))
     try:
-        assert material is not None and material.shared_model_credentials is True
-        assert material.credentials.tenant_ids() == frozenset()
+        assert server.tenancy is not None
+        assert server.tenancy.credentials is None
+        assert server.manager._credential_store is None
     finally:
-        if material is not None:
-            material.close()
+        server.server_close()
+
+
+def test_tenant_policy_keeps_the_tenant_file_entry(tmp_path: Path) -> None:
+    """The default policy still reads the tenant credential file (unchanged)."""
+    config = build_config(tenant_values(tmp_path), REPO_ROOT)
+    assert config.tenant_config_file is not None
+    material = load_identity_material(config)
+    assert material is not None
+    try:
+        assert material.shared_model_credentials is False
+        assert material.credentials is not None
+        assert material.credentials.tenant_ids() == frozenset({"tenant-alpha"})
+    finally:
+        material.close()
 
 
 def test_missing_shared_credentials_are_a_startup_refusal(tmp_path: Path) -> None:

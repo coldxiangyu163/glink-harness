@@ -360,20 +360,17 @@ class TenantCredentialStore:
     no search credential at all (pi-web-access falls back to keyless search,
     exactly as in local mode).
 
-    Under the explicit ``shared`` policy (see ``PI_GLINK_MODEL_CREDENTIALS``)
-    the host provides one frozen model credential for every tenant, so tenant
-    entries are credential-free registry metadata: the ``tenants`` object may
-    be empty or absent, entries may be empty objects, and any ``modelApiKey`` /
-    ``webSearchKey`` on an entry is refused instead of being mixed in.
+    The explicit ``shared`` policy does **not** construct or consult this store
+    at all: every credential comes from the frozen host configuration, and a
+    configured ``PI_GLINK_TENANT_CONFIG_FILE`` is refused at startup (see
+    ``pi_glink.config``).
     """
 
     def __init__(self, entries: Mapping[str, TenantCredentials]) -> None:
         self._entries = dict(entries)
 
     @classmethod
-    def from_file(
-        cls, path: Path, *, repo_root: Path, shared: bool = False
-    ) -> "TenantCredentialStore":
+    def from_file(cls, path: Path, *, repo_root: Path) -> "TenantCredentialStore":
         raw = read_restricted_file(
             path, repo_root=repo_root, what="租户凭据配置文件", min_bytes=1
         )
@@ -383,33 +380,10 @@ class TenantCredentialStore:
             raise ConfigError(f"租户凭据配置不是合法 JSON: {path}: {exc}") from exc
         if not isinstance(document, Mapping):
             raise ConfigError(f"租户凭据配置必须是 JSON 对象: {path}")
-        raw_tenants = document.get("tenants")
-        if shared:
-            # ``shared`` is the SaaS policy: the host owns the model (and the
-            # optional host-level search) credential, so this file is optional
-            # registry metadata and must not smuggle a second credential set in.
-            if raw_tenants is None:
-                raw_tenants = {}
-            if not isinstance(raw_tenants, Mapping):
-                raise ConfigError(f"租户凭据配置的 tenants 必须是对象: {path}")
-            entries: dict[str, TenantCredentials] = {}
-            for tenant_id, entry in raw_tenants.items():
-                if not isinstance(tenant_id, str) or not _ID_PATTERN.match(tenant_id):
-                    raise ConfigError(f"租户 id 非法: {tenant_id!r}")
-                if not isinstance(entry, Mapping):
-                    raise ConfigError(f"租户 {tenant_id} 的配置必须是对象")
-                for field in ("modelApiKey", "webSearchKey"):
-                    if field in entry:
-                        raise ConfigError(
-                            "PI_GLINK_MODEL_CREDENTIALS=shared 由宿主统一提供凭据；"
-                            f"租户 {tenant_id} 的条目不得包含 {field}"
-                        )
-                entries[tenant_id] = TenantCredentials(tenant_id=tenant_id)
-            return cls(entries)
-        tenants = raw_tenants
+        tenants = document.get("tenants")
         if not isinstance(tenants, Mapping) or not tenants:
             raise ConfigError(f"租户凭据配置缺少非空的 tenants 对象: {path}")
-        entries = {}
+        entries: dict[str, TenantCredentials] = {}
         for tenant_id, entry in tenants.items():
             if not isinstance(tenant_id, str) or not _ID_PATTERN.match(tenant_id):
                 raise ConfigError(f"租户 id 非法: {tenant_id!r}")
@@ -449,20 +423,23 @@ class Tenancy:
 
     ``mode`` names the identity entry: ``gateway`` carries the assertion
     authenticator, ``accounts`` carries the SQLite account store. Tenant run
-    credentials are needed by both.
+    credentials are needed by the default ``tenant`` policy; the explicit
+    ``shared`` policy leaves ``credentials`` as ``None`` and renders the frozen
+    host credential instead.
     """
 
-    credentials: TenantCredentialStore
+    #: Per-tenant credential store. ``None`` under the explicit ``shared``
+    #: policy, where every credential comes from the frozen host configuration
+    #: and no tenant credential file is read. Always set under the default
+    #: ``tenant`` policy.
+    credentials: TenantCredentialStore | None = None
     authenticator: GatewayAuthenticator | None = None
     mode: str = "gateway"
     accounts: "AccountsStore | None" = None
     #: True when every tenant shares the one host-frozen model credential
-    #: (``PI_GLINK_MODEL_CREDENTIALS=shared``); the tenant file is then optional
-    #: registry metadata rather than a credential source.
+    #: (``PI_GLINK_MODEL_CREDENTIALS=shared``). No tenant credential file is
+    #: read in that mode.
     shared_model_credentials: bool = False
-
-    def require_run_credentials(self, tenant_id: str) -> TenantCredentials:
-        return self.credentials.require(tenant_id)
 
     def close(self) -> None:
         if self.accounts is not None:
@@ -508,15 +485,22 @@ def load_identity_material(config: HostConfig) -> Tenancy | None:
             raise ConfigError(
                 "PI_GLINK_MODEL_CREDENTIALS=shared 需要宿主冻结 " + "、".join(missing)
             )
-    if config.tenant_config_file is None:
-        if not shared:
+        if config.tenant_config_file is not None:
+            # No TenantCredentialStore may appear on the shared path: the frozen
+            # host configuration is the only credential source, so a tenant
+            # credential file (even a credential-free one) is refused here too.
+            raise ConfigError(
+                "PI_GLINK_MODEL_CREDENTIALS=shared 不接受 PI_GLINK_TENANT_CONFIG_FILE："
+                "共享模式不读取任何租户凭据配置"
+            )
+        credentials: TenantCredentialStore | None = None
+    else:
+        if config.tenant_config_file is None:
             raise ConfigError(
                 "PI_GLINK_TENANT_CONFIG_FILE 在 PI_GLINK_TENANCY=multitenant 时必须配置"
             )
-        credentials = TenantCredentialStore({})
-    else:
         credentials = TenantCredentialStore.from_file(
-            config.tenant_config_file, repo_root=config.repo_root, shared=shared
+            config.tenant_config_file, repo_root=config.repo_root
         )
     if config.auth_mode == "accounts":
         if config.accounts_db is None:
@@ -539,7 +523,7 @@ def load_identity_material(config: HostConfig) -> Tenancy | None:
         "多租户模式已启用：audience=%s，模型凭据策略=%s，已配置租户=%d",
         config.tenancy_audience,
         config.model_credentials,
-        len(credentials.tenant_ids()),
+        len(credentials.tenant_ids()) if credentials is not None else 0,
     )
     return Tenancy(
         credentials=credentials,
@@ -571,9 +555,10 @@ def build_tenancy(config: HostConfig) -> Tenancy | None:
         # warning. The file/directory is left exactly as it was found.
         raise ConfigError(f"账号库不安全: {exc.message}") from exc
     logger.info(
-        "账号模式已启用：账号库=%s，已配置租户=%d",
+        "账号模式已启用：账号库=%s，模型凭据策略=%s，已配置租户=%d",
         config.accounts_db,
-        len(tenancy.credentials.tenant_ids()),
+        config.model_credentials,
+        len(tenancy.credentials.tenant_ids()) if tenancy.credentials is not None else 0,
     )
     return replace(tenancy, accounts=store)
 

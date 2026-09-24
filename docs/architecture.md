@@ -428,15 +428,15 @@ owner/role 判定再受理：其他租户得到与未知 run 相同的 404 且�
 显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 是 SaaS 部署的**显式放宽**，不是任何模式的默认兜底：
 
 * 宿主必须在启动时冻结 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`，任一缺失即拒绝启动；
-* 每个 run 渲染 `RunCredentials(origin="shared")`，即同一套宿主共享凭据；租户凭据文件不再参与
-  模型凭据选择（租户条目不得包含 `modelApiKey`/`webSearchKey`，混用直接拒绝），缺共享 key 时
-  也不会回退到 `tenant` 或 local；
+* 每个 run 渲染 `RunCredentials(origin="shared")`，即同一套宿主共享凭据；共享模式不读取任何
+  租户配置：不得配置 `PI_GLINK_TENANT_CONFIG_FILE`（不设置或留空即为无该入口），设置即拒绝
+  启动，也不会构造或读取 `TenantCredentialStore`；缺共享 key 时也不会回退到 `tenant` 或 local；
 * 可选搜索 key 只来自宿主级 `PI_GLINK_WEB_SEARCH_KEY`，不可能用操作员 `~/.pi/web-search.json`
   顶替；
-* 租户凭据文件在 shared 下只作为可选的租户登记（不得含凭据），租户授权仍完全由身份入口
-  决定（网关注入的断言或账号库会话），文件本身不再是模型凭据的准入名单；
+* 租户授权仍完全由身份入口决定（网关注入的断言或账号库会话）；共享模式没有租户凭据文件入口，
+  也不存在一个可以准入或拒绝租户的文件名单；
 * 每 run 脱敏边界仍包含共享 key（它属于宿主已知秘密）；`redactor_for_record` 在 shared 下使用
-  宿主/共享边界，不会因为租户条目没有 key 而漏脱敏，也不会拿其他租户的凭据去清洗共享内容；
+  宿主/共享边界，不会因为共享模式没有租户凭据条目而漏脱敏，也不会拿其他租户的凭据去清洗共享内容；
 * `tenant` 与 `shared` 的差异只限于“凭据从哪里来”：owner 过滤、每租户配额、审计可见性与
   `tenant` 模式完全一致；run 详情/列表/事件/报告从不回显模型凭据。
 
@@ -506,7 +506,7 @@ Docker 面的每个容器实例额外带 `--cpus` / `--memory` / `--pids-limit`�
   统一剥掉；`/api/invitations/check` 只接受 POST JSON，GET/查询形式返回 405）。注册只创建账号，
   不创建租户、不授予模型凭据，也不静默下发会话（注册成功后回到登录）。首位管理员由操作员在宿主停止时以
   `python -m pi_glink.app --create-invite …` 离线签发（默认策略要求该租户已有模型凭据；`shared`
-  策略只校验宿主冻结的共享模型配置，租户条目可以不存在）；后续管理员通过
+  策略只校验宿主冻结的共享模型配置，不配置租户凭据文件）；后续管理员通过
   `POST /api/admin/invitations` 只给本租户签发，邀请码原文只在成功响应里出现一次。
 - **请求防护**：状态变更 POST 要求 `application/json`、同源 `Origin`/`Referer`/`Sec-Fetch-Site`；
   已登录会话还必须携带与 cookie 绑定的 `X-Pi-Glink-CSRF`（`GET /api/me` 下发，只存在页面内存）。

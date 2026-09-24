@@ -15,7 +15,7 @@
 | 请求授权 | 多租户下除健康探测外所有 `/api/*` 验签；未认证 401、权限不足 403、未知/异租户/legacy 同形 404；SSE 在响应头之前验权并在断言过期时结束 | `app.py::HostRequestHandler` |
 | run 归属 | 受理时原子写 `tenant_id`/`creator_user_id`；`get_for`/`list_for` 按租户过滤；同租户 creator/admin 才能取消 | `store.py`、`kernel/runner.py` |
 | 并发准入 | 仅多租户 Docker/E2B 并发，默认全局 4 / 单租户 2，原子检查与预留，超额 429，无队列；资源台账全局 fail-closed | `kernel/runner.py::RunManager._check_admission` |
-| 租户凭据 | 默认每租户条目提供 `modelApiKey`（必需）/`webSearchKey`（可选）；显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时改为宿主冻结的一套模型凭据，租户条目只为无凭据登记 | `tenancy.py`、`kernel/agent_env.py` |
+| 租户凭据 | 默认每租户条目提供 `modelApiKey`（必需）/`webSearchKey`（可选）；显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时改为宿主冻结的一套模型凭据，且不得配置/读取租户凭据文件 | `tenancy.py`、`kernel/agent_env.py` |
 | 脱敏边界 | 每 run 一个 redactor（宿主已知秘密 + 本 run 凭据），事件/日志/报告/工作区/会话/下载都经过它 | `kernel/runner.py`、`redaction.py` |
 | 执行资源上限 | Docker 容器实例限 cpu/memory/pids 并降权；E2B 只限生命周期（SDK 不暴露 cpu/内存） | `kernel/docker_env.py`、`kernel/e2b_env.py` |
 | 历史数据 | 无 owner 的旧记录在多租户读面完全不可见、不迁移、不改写；本地模式按旧口径读取 | `store.py`、`app.py` |
@@ -94,8 +94,9 @@ outbox 模式，事务内写 `events` 后投递到共享流供多宿主 SSE 与�
 显式 `PI_GLINK_MODEL_CREDENTIALS=shared`（SaaS 统一供模型，已实现）：
 
 - 宿主启动时冻结 `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`，任一缺失即拒绝启动；
-- 每个 run 使用同一套宿主共享凭据（`RunCredentials(origin="shared")`），租户条目不再参与凭据选择，
-  也不得包含 `modelApiKey`/`webSearchKey`；`PI_GLINK_TENANT_CONFIG_FILE` 可省略，或只作无凭据登记；
+- 每个 run 使用同一套宿主共享凭据（`RunCredentials(origin="shared")`）；共享模式不读取任何租户
+  配置：不得配置 `PI_GLINK_TENANT_CONFIG_FILE`（不设置或留空即为无该入口），设置即拒绝启动，
+  也不会构造或读取 `TenantCredentialStore`；
 - 可选搜索 key 只来自宿主级 `PI_GLINK_WEB_SEARCH_KEY`，不会用操作员本机文件顶替；
 - 每 run 脱敏边界包含共享 key；报告下载的 `redactor_for_record` 在 shared 下走宿主/共享边界，
   不因租户条目无 key 而漏脱敏；owner、配额与审计语义与 tenant 模式完全一致；
@@ -171,7 +172,8 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
 （`tests/test_saas_shared_model.py`）：
 
 1. **配置门禁**：缺 `OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL`、非多租户模式、未知取值一律
-   拒绝启动；租户条目混入 `modelApiKey`/`webSearchKey` 拒绝；租户文件可省略或为空。
+   拒绝启动；shared 与 `PI_GLINK_TENANT_CONFIG_FILE` 同时存在即拒绝，shared 无该文件可用，
+   且不构造/不读取 `TenantCredentialStore`；tenant 模式的逐租户 key 语义与文件入口不变。
 2. **凭据交付**：共享 key 只进每 run `auth.json`（0600）与（可选）宿主级 `web-search.json`；Docker
    argv/环境、E2B `Sandbox.create` 环境与命令、沙箱命令环境均不含 key；沙箱 kill 后凭据随沙箱销毁；
    `sandbox_id` 对账与报告回收入 run 记录。

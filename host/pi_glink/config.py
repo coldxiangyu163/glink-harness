@@ -243,6 +243,15 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         raise ConfigError(
             "PI_GLINK_MODEL_CREDENTIALS=shared 需要 PI_GLINK_TENANCY=multitenant"
         )
+    if model_credentials == "shared" and _text(values, "PI_GLINK_TENANT_CONFIG_FILE", ""):
+        # The shared policy has exactly one credential source: the frozen host
+        # configuration. A tenant credential file (even a credential-free
+        # registry) would be a second, unread entry point, so it is refused
+        # outright instead of being silently ignored.
+        raise ConfigError(
+            "PI_GLINK_MODEL_CREDENTIALS=shared 不接受 PI_GLINK_TENANT_CONFIG_FILE："
+            "共享模式不读取任何租户凭据配置"
+        )
     if auth_mode == "accounts" and tenancy_mode != "multitenant":
         # Never a silent downgrade to the unauthenticated local surface: the
         # in-app accounts mode only exists as a multi-tenant identity entry.
@@ -367,13 +376,13 @@ def _require_multitenant(
     The host only ever binds loopback (the local gateway proxies to it) and the
     execution face must be a container/sandbox (the in-process face shares the
     host's filesystem and is a single-user debug entry), and the credential
-    file must be configured — except under the explicit ``shared`` policy,
-    where the tenant file no longer stores credentials and is therefore
-    optional. Gateway mode additionally needs the assertion audience and
-    signing key. Missing material is a startup refusal, never a fallback to the
-    unauthenticated local surface; the files themselves are loaded and
-    permission-checked by :func:`pi_glink.tenancy.build_tenancy` before the host
-    binds a port.
+    file must be configured under the default ``tenant`` policy. Under the
+    explicit ``shared`` policy no tenant credential file may be configured at
+    all (see :func:`build_config`); gateway mode additionally needs the
+    assertion audience and signing key. Missing material is a startup refusal,
+    never a fallback to the unauthenticated local surface or to the other
+    credential policy; the files themselves are loaded and permission-checked
+    by :func:`pi_glink.tenancy.build_tenancy` before the host binds a port.
     """
     if executor == "inproc":
         raise ConfigError(

@@ -644,7 +644,12 @@ class HostRequestHandler(BaseHTTPRequestHandler):
                     ),
                 }
             else:
-                tenant = self.server.tenancy.credentials.get(context.tenant_id)
+                credentials = self.server.tenancy.credentials
+                tenant = (
+                    credentials.get(context.tenant_id)
+                    if credentials is not None
+                    else None
+                )
                 view["configured"] = {
                     **view["configured"],
                     "model": bool(tenant is not None and tenant.model_api_key),
@@ -1338,9 +1343,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--create-invite",
         action="store_true",
-        help="为已配置凭据的租户签发一份一次性管理员/成员邀请（需宿主未运行）",
+        help="为租户签发一份一次性管理员/成员邀请（需宿主未运行；tenant 策略要求该租户已有模型凭据）",
     )
-    parser.add_argument("--tenant", help="--create-invite：租户 id（必须已有模型凭据）")
+    parser.add_argument("--tenant", help="--create-invite：租户 id（tenant 策略下必须已有模型凭据）")
     parser.add_argument("--tenant-name", help="--create-invite：组织显示名（默认沿用已有名称）")
     parser.add_argument("--email", help="--create-invite：受邀邮箱")
     parser.add_argument("--name", help="--create-invite：受邀人姓名（仅用于提示）")
@@ -1483,6 +1488,11 @@ def _create_invite_command(config: HostConfig, args: argparse.Namespace) -> int:
                 )
                 return 2
         else:
+            if tenancy.credentials is None:
+                # Defensive: the ``tenant`` policy always loads the store; a
+                # missing one is a configuration error, never a fallback.
+                print("配置错误 / configuration error: 租户凭据配置不可用", file=sys.stderr)
+                return 2
             try:
                 tenancy.credentials.require(tenant)
             except TenantNotConfigured as exc:
