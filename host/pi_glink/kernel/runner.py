@@ -249,9 +249,15 @@ class RunManager:
         self._credential_store = credential_store
         #: Identity probes used by the online resource ledger sweep. Tests inject
         #: fakes here; production addresses only the persisted container name or
-        #: sandbox id (never a name pattern, never a listing).
+        #: sandbox id (never a name pattern, never a listing). The E2B probe
+        #: authenticates with the frozen host configuration — the same source
+        #: ``Sandbox.create`` gets — instead of the process environment.
         self._docker_probe = docker_probe or docker_confirm_absent
-        self._sandbox_probe = sandbox_probe or e2b_confirm_sandbox_absent
+        self._sandbox_probe = sandbox_probe or (
+            lambda sandbox_id: e2b_confirm_sandbox_absent(
+                sandbox_id, api_key=config.e2b_api_key
+            )
+        )
         self._resource_watch: threading.Thread | None = None
         self._resource_watch_stop: threading.Event | None = None
         self._resource_sweep_lock = threading.Lock()
@@ -912,8 +918,10 @@ class RunManager:
         sweep running is skipped. Returns the run ids it released.
         """
         if self.config.executor not in ("docker", "e2b"):
-            # ``inproc`` runs no external resource: an interrupted inproc record
-            # still holds capacity, but there is nothing to probe for it.
+            # ``inproc`` acquires no external resource and this host therefore
+            # never probes one. (A record left behind by an earlier Docker/E2B
+            # deployment still counts; it just needs the offline operator path
+            # on a host that is not configured for an external face.)
             return []
         if not self._resource_sweep_lock.acquire(blocking=False):
             return []
@@ -962,24 +970,46 @@ class RunManager:
             self._resource_sweep_lock.release()
 
     def _probe_resource(self, record: RunRecord) -> tuple[bool, str, str]:
-        """``(confirmed, method, detail)`` for one unconfirmed hold."""
-        if self.config.executor == "docker":
-            if not record.container_name:
-                return False, "docker-inspect", "缺少持久化的容器名，不猜测身份"
-            confirmed, detail = self._docker_probe(record.container_name)
-            return confirmed, "docker-inspect", detail
-        if not record.sandbox_id:
-            return False, "e2b-kill", "缺少持久化的 sandbox_id，不猜测身份"
-        confirmed, detail = self._sandbox_probe(record.sandbox_id)
-        return confirmed, "e2b-kill", detail
+        """``(confirmed, method, detail)`` for one unconfirmed hold.
+
+        The face is chosen from the *record's persisted identity*, not from the
+        host's current configuration: an operator may have switched
+        ``LOCAL_WEB_EXECUTOR`` since the run, and a leftover container must still
+        be probed as a container. A record with no identity at all cannot be
+        confirmed online. A record carrying both identities is released only
+        when every one of them is confirmed gone.
+        """
+        checks: list[tuple[str, str]] = []
+        if record.container_name:
+            checks.append(("docker-inspect", record.container_name))
+        if record.sandbox_id:
+            checks.append(("e2b-kill", record.sandbox_id))
+        if not checks:
+            return False, "none", "缺少持久化的执行身份，不猜测资源"
+        confirmed = True
+        methods: list[str] = []
+        details: list[str] = []
+        for method, target in checks:
+            if method == "docker-inspect":
+                probe = self._docker_probe
+            else:
+                probe = self._sandbox_probe
+            ok, detail = probe(target)
+            methods.append(method)
+            details.append(f"{target}: {detail}")
+            if not ok:
+                confirmed = False
+        return confirmed, "+".join(methods), "; ".join(details)
 
     def start_resource_watch(self) -> threading.Thread | None:
         """Start the periodic ledger sweep (once at startup, then every interval).
 
         The sweep runs in a background daemon thread: it never executes under
         the admission lock and a sweep that is still probing is skipped, never
-        queued. ``PI_GLINK_RESOURCE_RECONCILE_SECONDS=0`` disables it; the
-        offline operator path stays available either way.
+        queued. It is enabled for the external faces (Docker/E2B) only, because
+        only they acquire resources the host can confirm by identity;
+        ``PI_GLINK_RESOURCE_RECONCILE_SECONDS=0`` disables it. The offline
+        operator path stays available either way.
         """
         interval = self.config.resource_reconcile_seconds
         if interval <= 0 or self.config.executor not in ("docker", "e2b"):

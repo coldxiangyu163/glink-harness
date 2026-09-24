@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,7 @@ import pytest
 
 from pi_glink.config import HostConfig, build_config
 from pi_glink.events import EventBus
-from pi_glink.kernel import docker_env
+from pi_glink.kernel import docker_env, e2b_env
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
@@ -338,11 +339,167 @@ def test_a_probe_never_guesses_a_missing_identity(
     with caplog.at_level(logging.INFO, logger="pi_glink.kernel.runner"):
         assert manager.reconcile_resources() == []
     assert calls == [], "没有持久化身份时不得猜测或批量操作"
-    assert "缺少持久化的 sandbox_id" in caplog.text
+    assert "缺少持久化的执行身份" in caplog.text
     assert store.get("no-identity").holds_resources is True
 
 
+def test_the_probe_face_follows_the_persisted_identity(tmp_path: Path) -> None:
+    """An operator may have switched faces since the run; the record decides."""
+    for executor in ("docker", "e2b"):
+        config = make_config(tmp_path / executor, LOCAL_WEB_EXECUTOR=executor)
+        store = RunStore(config.data_root / "runs")
+        record_hold(store, "container-hold", container="pi-glink-container-hold")
+        record_hold(store, "sandbox-hold", sandbox="sbx-hold")
+        record_hold(store, "both-hold", container="pi-glink-both", sandbox="sbx-both")
+        record_hold(store, "no-identity")
+        docker_calls: list[str] = []
+        sandbox_calls: list[str] = []
+        manager = RunManager(
+            config,
+            EventBus(),
+            store,
+            docker_probe=lambda name: (docker_calls.append(name) or True, "确认不存在"),
+            sandbox_probe=lambda sid: (sandbox_calls.append(sid) or True, "确认不存在"),
+        )
+        assert sorted(manager.reconcile_resources()) == [
+            "both-hold",
+            "container-hold",
+            "sandbox-hold",
+        ]
+        assert sorted(docker_calls) == ["pi-glink-both", "pi-glink-container-hold"]
+        assert sorted(sandbox_calls) == ["sbx-both", "sbx-hold"]
+        assert [record.run_id for record in store.holding_records()] == ["no-identity"]
+
+
+def test_a_record_with_two_identities_needs_all_of_them_confirmed(tmp_path: Path) -> None:
+    config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
+    store = RunStore(config.data_root / "runs")
+    record_hold(store, "both", container="pi-glink-both", sandbox="sbx-both")
+    manager = RunManager(
+        config,
+        EventBus(),
+        store,
+        docker_probe=lambda _name: (True, "容器不存在"),
+        sandbox_probe=lambda _sid: (False, "sandbox 仍存活"),
+    )
+    assert manager.reconcile_resources() == []
+    assert store.get("both").holds_resources is True
+    assert store.get("both").resource_adjudication is None
+
+
+def _install_fake_e2b(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    result: bool = True,
+    errors: list[BaseException] | None = None,
+    calls: list[tuple[str, dict[str, Any]]] | None = None,
+) -> tuple[type[BaseException], list[BaseException]]:
+    """Install a fake ``e2b`` module whose kill follows the SDK's contract."""
+    pending = errors if errors is not None else []
+
+    class FakeNotFound(Exception):
+        pass
+
+    class FakeSandbox:
+        @staticmethod
+        def kill(sandbox_id: str, **opts: Any) -> bool:
+            if calls is not None:
+                calls.append((sandbox_id, opts))
+            if pending:
+                raise pending.pop(0)
+            return result
+
+    module = types.ModuleType("e2b")
+    module.NotFoundException = FakeNotFound  # type: ignore[attr-defined]
+    module.SandboxNotFoundException = FakeNotFound  # type: ignore[attr-defined]
+    module.Sandbox = FakeSandbox  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "e2b", module)
+    return FakeNotFound, pending
+
+
+def test_the_default_e2b_probe_authenticates_with_the_frozen_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe takes its credential from the frozen config, not the environment."""
+    config = make_e2b_config(tmp_path)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    _install_fake_e2b(monkeypatch, calls=calls)
+
+    store = RunStore(config.data_root / "runs")
+    record_hold(store, "leak", sandbox="sbx-1")
+    manager = RunManager(config, EventBus(), store)
+    assert manager.reconcile_resources() == ["leak"]
+    assert calls == [("sbx-1", {"api_key": "e2b-secret-key"})]
+    assert store.get("leak").resource_adjudication["source"] == "auto-verified"
+
+
+def test_release_is_confirmed_only_by_the_sdk_not_found_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message that mentions 404/not found is not evidence of release."""
+
+    class Unauthorized(Exception):
+        pass
+
+    not_found, errors = _install_fake_e2b(monkeypatch)
+    assert e2b_env.confirm_sandbox_absent("sbx", api_key="k")[0] is True, "kill 返回 True"
+    errors.append(not_found("sandbox not found"))
+    confirmed, detail = e2b_env.confirm_sandbox_absent("sbx", api_key="k")
+    assert confirmed is True and "FakeNotFound" in detail
+    errors.append(Unauthorized("401 404 not found: invalid api key"))
+    confirmed, detail = e2b_env.confirm_sandbox_absent("sbx", api_key="k")
+    assert confirmed is False, "消息里的 404/not found 不得当作已释放"
+    assert "Unauthorized" in detail
+
+    absent, _pending = _install_fake_e2b(monkeypatch, result=False)
+    assert absent is not None
+    assert e2b_env.confirm_sandbox_absent("sbx", api_key="k")[0] is True, "kill 返回 False"
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["401 not found: invalid api key", "404 sandbox not found"],
+    ids=["auth", "gateway"],
+)
+def test_a_non_not_found_error_keeps_the_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, message: str
+) -> None:
+    class Unauthorized(Exception):
+        pass
+
+    config = make_e2b_config(tmp_path)
+    _install_fake_e2b(monkeypatch, errors=[Unauthorized(message)])
+    store = RunStore(config.data_root / "runs")
+    record_hold(store, "leak", sandbox="sbx-1")
+
+    manager = RunManager(config, EventBus(), store)
+    assert manager.reconcile_resources() == []
+    assert store.get("leak").holds_resources is True
+    assert store.get("leak").resource_adjudication is None
+
+
+def test_a_real_sdk_not_found_type_confirms_the_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    _install_fake_e2b(
+        monkeypatch, errors=[e2b.SandboxNotFoundException("sandbox not found")]
+    )
+    monkeypatch.setattr(
+        "pi_glink.kernel.e2b_env._not_found_types",
+        lambda: (e2b.SandboxNotFoundException, e2b.NotFoundException),
+    )
+    config = make_e2b_config(tmp_path)
+    store = RunStore(config.data_root / "runs")
+    record_hold(store, "leak", sandbox="sbx-1")
+
+    manager = RunManager(config, EventBus(), store)
+    assert manager.reconcile_resources() == ["leak"]
+    assert store.holding_records() == []
+
+
 def test_the_probe_only_touches_the_persisted_container_name(tmp_path: Path) -> None:
+    """The Docker probe itself: inspect by name, remove by name, confirm again."""
     """The Docker probe itself: inspect by name, remove by name, confirm again."""
     calls: list[list[str]] = []
     present = {"value": True}

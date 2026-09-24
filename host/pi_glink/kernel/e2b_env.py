@@ -703,29 +703,40 @@ def _default_sandbox_factory() -> Callable[..., Any]:
     return factory
 
 
-def _default_kill() -> Callable[[str], Any]:
+def _default_kill(api_key: str) -> Callable[[str], Any]:
     def kill(sandbox_id: str) -> Any:
         from e2b import Sandbox
 
-        return Sandbox.kill(sandbox_id)
+        # The credential comes from the frozen host configuration (the same
+        # source ``Sandbox.create`` receives), never from the process
+        # environment: a deployment that only filled ``.env`` must be able to
+        # authenticate the probe.
+        return Sandbox.kill(sandbox_id, api_key=api_key)
 
     return kill
 
 
 def confirm_sandbox_absent(
-    sandbox_id: str, *, kill_factory: Callable[[str], Any] | None = None
+    sandbox_id: str,
+    *,
+    api_key: str = "",
+    kill_factory: Callable[[str], Any] | None = None,
 ) -> tuple[bool, str]:
     """Confirm by the persisted sandbox id that the sandbox is gone.
 
     ``Sandbox.kill(sandbox_id)`` is the SDK's single-id operation: it returns
     ``True`` when the sandbox existed and is now terminated, and ``False`` when
     it was not found. Only the persisted identity is ever addressed — no
-    listing, no name pattern, no other sandbox. Any other error is uncertainty,
-    not evidence of release, so the hold stands.
+    listing, no name pattern, no other sandbox.
+
+    Release is confirmed **only** by the SDK's own contract: a ``False`` return,
+    or a not-found exception *type*. Every other failure — authentication, a
+    gateway, a timeout, an unparseable answer — is uncertainty, so the hold
+    stands; no exception message is ever read as evidence of release.
     """
     if not sandbox_id:
         return False, "缺少持久化的 sandbox_id"
-    kill = kill_factory or _default_kill()
+    kill = kill_factory or _default_kill(api_key)
     try:
         killed = kill(sandbox_id)
     except Exception as exc:  # noqa: BLE001 - uncertainty keeps the hold
@@ -739,12 +750,24 @@ def confirm_sandbox_absent(
     return False, f"SDK 返回无法判定的结果: {killed!r}"
 
 
+def _not_found_types() -> tuple[type[BaseException], ...]:
+    """The SDK's not-found exception classes (empty when the SDK is unavailable)."""
+    try:
+        from e2b import NotFoundException, SandboxNotFoundException
+    except Exception:  # noqa: BLE001 - the SDK is an optional dependency
+        return ()
+    return (SandboxNotFoundException, NotFoundException)
+
+
 def _is_not_found(exc: BaseException) -> bool:
-    """True for the SDK's not-found answers, without importing the SDK here."""
-    if "notfound" in type(exc).__name__.lower():
-        return True
-    message = str(exc).lower()
-    return "404" in message or "not found" in message
+    """True only for the SDK's not-found exception types.
+
+    Deliberately type-based: an authentication or gateway error whose text
+    happens to mention "404" or "not found" must never confirm a release of a
+    sandbox that may still be running and billing.
+    """
+    not_found = _not_found_types()
+    return bool(not_found) and isinstance(exc, not_found)
 
 
 def sandbox_available() -> tuple[bool, str]:
