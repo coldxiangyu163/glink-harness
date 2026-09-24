@@ -13,6 +13,8 @@
 
 具体接口与迁移在对应任务中决定，不预建无消费者的租户抽象；修改这些承诺遵循 [工程约束](engineering.md)。现有单 run 测试继续保护当前行为，将来的多租户变更在取得决定后同步替换相关断言，而不是把当前串行测试当作永久需求。
 
+另一个既定方向是**多 harness 平台化**：宿主保持 harness 无关，`kernel/` 泛化为 harness 适配层，候选内核包括 deepseek-harness、Claude Code、Codex 及一切 ACP 兼容 agent。方向、架构与里程碑见 [多 harness 方案](multi-harness-plan.md)；当前仓库仍只有 pi 一个内核实现，本文的进程拓扑与事件契约继续以 pi 为参照系描述。
+
 ## 1. 三层结构
 
 | 层 | 位置 | 职责 | 不做什么 |
