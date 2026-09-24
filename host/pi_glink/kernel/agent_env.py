@@ -72,7 +72,13 @@ PROVIDER_ID = "frontier"
 #: openrouter.ai/api/v1: with this format the same model returns reasoning.
 THINKING_FORMAT = "openrouter"
 #: Template entries copied verbatim into the runtime directory.
-TEMPLATE_ENTRIES = ("settings.json", "AGENTS.md", "extensions", "skills", "prompts")
+#:
+#: ``agents`` is pi-subagents' user-scope agent directory
+#: (``<PI_CODING_AGENT_DIR>/agents``, src/agents/agents.ts of pi-subagents 0.40.0);
+#: the workbench ships its own ``researcher`` definition there so the dispatch tool
+#: finds it in every face. ``extensions`` carries both the pi-glink
+#: foreground-dispatch guard and pi-subagents' own extension config.
+TEMPLATE_ENTRIES = ("settings.json", "AGENTS.md", "agents", "extensions", "skills", "prompts")
 #: Backwards-compatible private alias (the list is part of the module contract
 #: for the E2B upload manifest, so it is exported under a public name).
 _TEMPLATE_ENTRIES = TEMPLATE_ENTRIES
@@ -94,11 +100,16 @@ IMAGE_PACKAGE_NODE_MODULES = f"{IMAGE_PACKAGE_ROOT}/node_modules"
 #: ``docker run`` itself), the E2B face calls it inside the command chain.
 IMAGE_PACKAGE_GUARD = f"{IMAGE_PACKAGE_ROOT}/check-packages.sh"
 #: Packages the container faces may load from the image: an ``npm:`` entry
-#: naming one of these is rendered as its image-local path. ``pi-subagents`` is
-#: installed in both images for future use but is deliberately **not** listed
-#: here: GLINK-SUB-01 found no way to disable async/detached subagents, so the
-#: product must not auto-load it (see docs/pi-integration-notes.md §8).
-CONTAINER_LOCAL_PACKAGES = ("pi-web-access",)
+#: naming one of these is rendered as its image-local path. Both images install
+#: ``pi-web-access`` and ``pi-subagents`` by pinned ARG.
+#:
+#: ``pi-subagents`` is loaded since GLINK-SUB-02: the product forces foreground
+#: synchronous dispatch through its own ``tool_call`` guard
+#: (``agent/extensions/subagent-foreground-guard.ts``) plus a conservative
+#: extension config, so the async/detached blocker GLINK-SUB-01 found is handled
+#: on the pi-glink side instead of by a package switch. See
+#: docs/pi-integration-notes.md (pi-subagents 0.40.0 dispatch surface).
+CONTAINER_LOCAL_PACKAGES = ("pi-web-access", "pi-subagents")
 
 #: Environment names handed to the pi process verbatim.
 #:
@@ -265,6 +276,39 @@ def template_manifest(template_dir: Path) -> list[tuple[str, Path, bool]]:
         else:
             manifest.append((entry, source, False))
     return manifest
+
+
+#: Prompt-template directory inside the agent template. Its ``*.md`` file stems
+#: are the ``/`` command names pi expands (docs/prompt-templates.md) and, because
+#: of that, the only ``/`` messages the host admits. Adding a file there is the
+#: single source of truth for the accepted command set.
+PROMPTS_DIRNAME = "prompts"
+
+
+def prompt_template_names(template_dir: Path) -> tuple[str, ...]:
+    """The ``/`` command names this configuration accepts, from the template directory.
+
+    pi expands a prompt template only when the message starts with ``/`` and its
+    first token exactly equals a template file's stem (``expandPromptTemplate``:
+    ``^/([^\\s]+)`` plus a case-sensitive name match). Every other ``/...``
+    message is either an extension command or plain text; the host admits only
+    this set, so a new command is reviewed repository content rather than
+    something a loaded package registers at runtime.
+
+    Symlinks are skipped for the same reason :func:`template_manifest` skips
+    them: the accepted set must be repository content, not a path into the
+    operator's filesystem.
+    """
+    directory = Path(template_dir) / PROMPTS_DIRNAME
+    if not directory.is_dir():
+        return ()
+    return tuple(
+        sorted(
+            path.stem
+            for path in directory.glob("*.md")
+            if path.is_file() and not path.is_symlink()
+        )
+    )
 
 
 def local_package_source(source: str) -> str | None:

@@ -1,0 +1,201 @@
+pi-subagents 0.40.0 强制前台接入证据（GLINK-SUB-02）
+====================================================
+日期: 2026-09-24（UTC-）
+角色: GLINK-SUB-02 受监督写 Worker（launcher pids；实际 provider/model 见最终回执）
+环境: macOS；Node v24.16.0；npm 11.13.0；本机 pi 0.87.1；镜像/模板内 pi 0.86.1（未重建、未验证）
+范围: 任务 1-4 与 6（工具面调研、强制前台扩展、加载渲染、researcher 定义、投影/脱敏核对）。
+      任务 5（research-prompt.md / deepresearch.md 改写）按 Lead 指令暂缓，本文件不覆盖。
+真实模型/检索调用: 0 次。网络操作只有按 brief 允许的 `npm install --prefix`（固定 0.40.0，仓库外）。
+
+① 源码基线
+------------
+命令:
+  npm install --prefix /tmp/glink-sub2/prefix pi-subagents@0.40.0 --no-audit --no-fund
+输出: added 4 packages in 2s（退出码 0）
+安装目录: /tmp/glink-sub2/prefix/node_modules/pi-subagents（package.json version=0.40.0）
+package.json 的 pi 清单: {"extensions":["./index.ts"],"skills":["./skills"],"prompts":["./prompts"]}
+
+② 能把执行推离主 run 的入口（原始 grep/sed 输出）
+--------------------------------------------------
+1) 模型可见参数（src/extension/schemas.ts）
+  240:	worktree: Type.Optional(Type.Boolean({
+  291:	schedule: Type.Optional(Type.String({ description: "Explicit one-shot schedule for action='schedule'. Only honored when scheduledRuns.enabled is true. ... scheduled runs always launch async with fresh context." })),
+  307:	worktree: Type.Optional(Type.Boolean({
+  315:	chainDir: Type.Optional(Type.String({ description: "Persistent chain artifact directory; defaults to user-scoped temp storage." })),
+  316:	async: Type.Optional(Type.Boolean({ description: "Run in background (default: false, or per config)" })),
+  326:	share: Type.Optional(Type.Boolean({ description: "Upload session to GitHub Gist for sharing (default: false)" })),
+
+2) 前台/异步分派判定 + forceTopLevelAsync（src/runs/foreground/subagent-executor.ts:4466-4468；
+   src/runs/background/top-level-async.ts:1-13）
+  		const { depth } = checkSubagentDepth(deps.config.maxSubagentDepth);
+  		const dispatchParams = applyForceTopLevelAsyncOverride(requestParams, depth, deps.config.forceTopLevelAsync === true);
+  		const runsForeground = dispatchParams.clarify === true || (dispatchParams.async ?? deps.asyncByDefault) !== true;
+   export function applyForceTopLevelAsyncOverride(...): T {
+  	if (params.foregroundOnly || !(depth === 0 && forceTopLevelAsync)) return params;
+  	return { ...params, async: true, clarify: false };
+   }
+   （forceTopLevelAsync 只会把 async 改 true；没有反向开关。）
+
+3) async 的 detached 子进程（src/runs/background/async-execution.ts:451-460）
+  		const proc = spawn(nodeCommand, [jitiCliPath, runner, cfgPath], {
+  			cwd,
+  			detached: true,
+  			stdio: ["ignore", stdoutFd ?? "ignore", stderrFd ?? "ignore"],
+  			windowsHide: true,
+  			env: { ...process.env, ...(piPackageRoot ? { [PI_CODING_AGENT_PACKAGE_ROOT_ENV]: piPackageRoot } : {}) },
+
+4) 管理/控制 action 分派行（src/runs/foreground/subagent-executor.ts）
+  3638 single 别名、3643 parallel/tasks 别名、3709 grant-spawn-budget、3773 doctor、3809 status、
+  3855 approve-checkpoint/reject-checkpoint、3907 resume、3910 steer、3975 append-step、
+  3978 schedule/schedule-list/schedule-status/schedule-cancel、3988 stop、4022 interrupt
+  定义/链管理动作在 src/agents/agent-management.ts:1152-1165（list/get/models 只读；
+  create/update/delete/eject/disable/enable/reset 会写 agent 定义）。
+
+5) watchdog（src/watchdog/tool-actions.ts:154；src/watchdog/settings.ts:71-72）
+  export const WATCHDOG_TOOL_ACTIONS = ["watchdog.status", "watchdog.check", "watchdog.configure", "watchdog.recommend-model"] as const;
+  export const DEFAULT_WATCHDOG_CONFIG: ResolvedWatchdogConfig = { enabled: false, delivery: "held", ...
+  配置来源：<PI_CODING_AGENT_DIR>/settings.json 的 subagents.watchdog（settings.ts:384-389/422-424）。
+
+6) intercom 桥（src/intercom/intercom-bridge.ts:77-80）与子代理侧工具
+  export function resolveIntercomBridgeMode(value: unknown): IntercomBridgeMode {
+  	if (value === "off" || value === "always" || value === "fork-only") return value;
+  	return "always";
+  }
+  src/intercom/native-supervisor-channel.ts:295 name: "contact_supervisor"；307 name: "intercom"
+
+7) 扩展命令（用户输入面，不在 tool_call 钩子可达范围；src/slash/slash-commands.ts）
+  1181 subagents、1188 run（[--bg]）、1218 chain（[--bg]）、1232 run-chain、1262 parallel、
+  1286 subagent-cost、1293 subagents-doctor、1300 subagents-fleet、1310 subagents-detach、
+  1337 subagents-stop、1388 subagents-models、1411 subagents-profiles
+  pi 的 RPC `prompt` 会直接执行扩展命令（docs/rpc-commands.md：“Extension commands: ...
+  it executes immediately even during streaming”），且在 input 事件之前派发。
+
+8) agent 定义发现路径（src/agents/agents.ts:1646-1649）
+  export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
+  	const userDirOld = path.join(getAgentDir(), "agents");
+  	const userDirNew = path.join(os.homedir(), ".agents");
+  	const { readDirs: projectAgentDirs, preferredDir: projectAgentsDir } = resolveNearestProjectAgentDirs(cwd);
+  getAgentDir() 优先 PI_CODING_AGENT_DIR（src/shared/utils.ts:95-100）；同名覆盖顺序见
+  src/agents/agent-selection.ts:12-24（builtin → package → user → project）。
+
+9) 子代理工具白名单（src/runs/shared/pi-args.ts:289）
+  		args.push(toolPlan.effectiveToolAllowlist.length > 0 ? "--tools" : "--no-tools");
+
+10) 产物落点
+  src/shared/artifacts.ts:6		const PROJECT_ARTIFACT_ROOT = ".pi-subagents";（project 前缀 = cwd）
+  src/shared/settings.ts:174-176	chainDir 默认 CHAIN_RUNS_DIR（= TEMP_ROOT_DIR/chain-runs）
+  src/runs/shared/worktree.ts:173-175	worktree 基目录默认 os.tmpdir()
+  src/shared/types.ts:1713-1717	TEMP_ROOT_DIR = os.tmpdir()/pi-subagents-<scope>
+
+③ 扩展单元测试（每行入口的正反例）
+-----------------------------------
+命令:
+  node --test tests/extensions/subagent-foreground-guard.test.mjs
+输出（退出码 0，节选末尾）:
+  ✔ 非 subagent 的工具调用不被本扩展介入
+  ✔ subagent_wait 被阻止并说明“没有后台作业可等”
+  ✔ async:true 被改写为前台同步（不阻止）
+  ✔ 没有 async 字段时也显式写成 false（盖掉 agent/配置默认值）
+  ✔ agent frontmatter 的 async:true 默认值被显式 false 覆盖（执行路径必经此处）
+  ✔ 同步 tasks 数组并行原样放行（feynman 同款前台形态）
+  ✔ chain 形态同样被拉回前台
+  ✔ 执行形态别名（action: single/parallel/tasks）按执行处理，不是管理动作
+  ✔ 空串 action 与 pi-subagents 的归一化一致：按执行处理
+  ✔ 只读管理动作放行：status / doctor / list / get / models
+  ✔ 后台/定时/恢复/控制类 action 全部阻止
+  ✔ 改定义/删定义的 action 阻止（避免运行中改写子代理定义）
+  ✔ 未知或非字符串 action 阻止（fail-closed）
+  ✔ share:true 阻止（会话上传外部 Gist）
+  ✔ worktree:true 阻止（run 目录之外的 git worktree 生命周期不由本 run 保证）
+  ✔ 工作区外的 cwd / sessionDir / output 被阻止（含 ~ 展开）
+  ✔ 工作区内的相对/绝对路径放行
+  ✔ chainDir 被强制改写进工作区（pi-subagents 默认落在 OS 临时目录）
+  ✔ 没有 chainDir 时也写进工作区（不给 OS 临时目录留缺口）
+  ✔ handler 内部异常按 fail-closed 阻止（属性访问器抛错）
+  ✔ 回调路径上的异常同样阻止该次调用
+  ✔ 参数不是对象时阻止
+  ✔ 正常派发经注册的 handler 走通并落回前台
+  ℹ tests 23 / pass 23 / fail 0
+
+④ 无模型加载冒烟（本机 pi 0.87.1，隔离临时 HOME + PI_CODING_AGENT_DIR）
+-----------------------------------------------------------------------
+命令:
+  bash tests/extensions/smoke-subagents-load.sh
+      pi=/Users/coldxiangyu/.nvm/versions/node/v24.16.0/bin/pi
+      pi-subagents=/tmp/glink-sub2/prefix/node_modules/pi-subagents
+      agent_dir=<临时目录>/pi-agent（settings.json 用本地包路径；models.json 无 apiKey）
+原始输出（退出码 0）:
+  --- stderr（原样）---
+  --- stdout 行数：2；pi 退出码：0 ---
+  --- 工具清单（探针）---
+  {
+    "cwd": "/Users/coldxiangyu/AI/git/pi-glink-worktrees/subagents-sync-20260924",
+    "mode": "rpc",
+    "agentDir": "<临时目录>/pi-agent",
+    "sessionDir": "<临时目录>/sessions",
+    "activeTools": ["read", "bash", "edit", "write", "subagent", "subagent_wait"]
+  }
+  --- 包含 subagent 的工具 ---
+  [{"name": "subagent", "origin": "package",
+    "source": "/tmp/glink-sub2/prefix/node_modules/pi-subagents",
+    "path": "/tmp/glink-sub2/prefix/node_modules/pi-subagents/index.ts"}]
+  --- 探针捕获的扩展命令 ---
+  ["subagents-watchdog", "subagents", "run", "chain", "run-chain", "parallel", "subagent-cost",
+   "subagents-doctor", "subagents-fleet", "subagents-detach", "subagents-stop", "prompt-workflow",
+   "chain-prompts", "subagents-models", "subagents-profiles", "subagents-load-profile",
+   "subagents-refresh-provider-models", "subagents-generate-profiles", "subagents-check-profile",
+   "llama", "gather-context-and-clarify", "parallel-cleanup", "parallel-context-build",
+   "parallel-handoff-plan", "parallel-research", "parallel-review", "review-loop",
+   "skill:pi-subagents"]
+  --- 守卫自检 ---
+  {"imported": true, "forcedForeground": true, "blockedControlAction": true, "readOnlyActionAllowed": true}
+  [PASS] 扩展与 pi-subagents 在隔离配置目录中加载；subagent 工具存在；无 Tool conflicts；守卫自检通过。
+说明: 探针扩展（tests/extensions/probe-tool-inventory.ts）在 session_start 里调官方
+      pi.getActiveTools()/getAllTools()/getCommands() 写出清单，并动态 import 渲染后的守卫扩展
+      跑三条自检。清单里出现 `/run`、`/subagents-detach` 等命令，就是 §10.4 记录的未覆盖入口。
+
+⑤ 冒烟负例对照（坏扩展必须被发现）
+-----------------------------------
+命令: 同 ④，但把渲染目录里的守卫扩展替换为一行非法 TypeScript，再启动同一个 pi。
+原始输出（节选）:
+  pi exit status: 1
+  Error: Failed to load extension "<临时目录>/agent/extensions/subagent-foreground-guard.ts":
+  Failed to load extension: ParseError: Missing semicolon.
+  Hint: Start without extensions using "pi -ne".
+  （探针没有写出 inventory.json）
+结论: pi 对扩展加载失败是明确失败（退出码 1 + stderr），所以 ④ 的“无加载错误 + 清单存在”
+      可以作为“两个扩展都真的加载了”的证据。
+
+⑥ 仓库回归
+------------
+命令与结果（评审修复后的最终状态）:
+  bash scripts/check.sh                              → exit 0
+    Python（含仓库边界和检查入口回归）: 585 passed, 1 deselected
+      （4dd01d2 基线：547 / 1；本任务：+31 命令门禁用例、+4 提示词/定义用例、+3 其他）
+    Node（前端回归 + 扩展单元测试）:     115 pass / 0 fail（基线 92；新增 23 个扩展单测）
+
+⑦ 本任务创建/清理的资源
+-------------------------
+- /tmp/glink-sub2/（prefix 安装，仓库外；按 brief 允许的 npm install）。未启动 pi 常驻服务、
+  未触碰用户 ~/.pi 或 ~/.pi-glink、未运行 Docker/E2B、无后台进程遗留。
+- 冒烟脚本自建的临时目录由脚本 trap 清理；负例对照的临时目录在手工实验后已删除。
+- 未调用任何真实模型或检索。
+
+⑧ 评审修复：`/` 命令门禁（GLINK-SUB-02 第 1 轮 BLOCKER）
+----------------------------------------------------------
+背景: 载入 pi-subagents 后，客户端可控的 prompt 如果以 `/` 开头，pi 会先执行扩展命令
+（docs/rpc-commands.md:31），`/run --bg`、`/subagents-detach` 等因此绕过 tool_call 守卫；
+inproc 面会留下不随 run 取消/超时收口的孤儿进程。
+修复: 宿主在准入层加门禁（kernel/runner.py::RunManager.start → prompt_names_unsupported_command，
+命令名单从 kernel/agent_env.py::prompt_template_names(config.agent_config_dir) 推导；
+web_routes.py 把 UnsupportedCommand 映射为 HTTP 400 unsupported_command）。
+拒绝发生在凭据解析、父会话读取、run 目录创建、执行面拉起之前；追问与三个执行面同一条判定。
+回归命令与结果:
+  .venv/bin/python -m pytest tests/test_runs_api.py tests/test_runner.py \
+      tests/test_kernel_agent_env.py tests/test_agent_prompts.py tests/test_repository_boundaries.py -q
+  → 全部通过（含在 585 passed 内）
+主要用例: `/run ... --bg`、`/subagents-detach`、前导空白 + `/chain`、`/parallel`、裸 `/`、
+`/DeepResearch`、`/deepresearch2`、`/skill:…` → 400 且 run 目录数不变；`/deepresearch 题目`、
+正文中间出现 `/run`、前导空白的普通问题 → 201 并正常 finished；追问被拒与放行两组；
+命令名单随模板目录变化（新增 notes.md 后 `/notes` 被接受，证明不硬编码；符号链接不计入；
+目录缺失时 fail-closed）。错误体只给 allowed 列表，不回显被拒输入。

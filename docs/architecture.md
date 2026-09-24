@@ -55,7 +55,7 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 | `thinking_delta` | `message_update.thinking_delta` | 思考折叠块（流式） |
 | `assistant_delta` | `message_update.text_delta` | 正文流 |
 | `assistant_message` | `message_end`（权威全文） | 收口后的 Markdown |
-| `tool_started` / `tool_updated` / `tool_finished` | `tool_execution_*` | 工具卡片（含流式输出/错误态） |
+| `tool_started` / `tool_updated` / `tool_finished` | `tool_execution_*` | 工具卡片（含流式输出/错误态）；子代理派发（`subagent`）不做特例，就是普通工具卡片 |
 | `usage_reported` | `turn_end.message.usage` | token 统计（`usage` 为 run 累计，`requestUsage` 为本次请求快照） |
 | `kernel_status` | `extension_error` 等 | 警告提示 |
 | `run_finished` / `run_failed` / `run_cancelled` | 宿主 | 终态、报告入口 |
@@ -172,7 +172,14 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 ## 4. run 生命周期
 
 1. `POST /api/runs {prompt, parentRunId?}` → 准入（见下）→ 生成 `runId`（run 目录**排他**创建，
-   生成的 id 碰撞则有限重试重新生成；既有记录绝不被覆盖），写 `meta.json`（status=running）。`parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
+   生成的 id 碰撞则有限重试重新生成；既有记录绝不被覆盖），写 `meta.json`（status=running）。准入先过
+   **`/` 命令门禁**：去掉前导空白的 prompt 若以 `/` 开头，只有命令名等于 `agent/prompts/` 下模板文件
+   stem 的（当前仅 `deepresearch`，从模板目录推导、不硬编码）才被接受，其他一律 `400 unsupported_command`
+   （错误体只给允许的命令列表，不回显被拒输入）；门禁在凭据解析、父会话读取、run 目录与执行面创建之前，
+   追问（`parentRunId`）与三个执行面同样适用。该门禁存在的原因：pi 对以 `/` 开头的消息先派发扩展命令
+   （docs/rpc-commands.md），载入 pi-subagents 后 `/run --bg`、`/subagents-detach` 这类客户端可控输入
+   能绕过 `tool_call` 守卫发起不随本 run 收口的后台进程（见 pi-integration-notes.md §10.4）。
+   `parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
 2. 渲染**本 run 的**运行期配置目录与 session 目录（`runs/<id>/pi-agent`、会话根下的 `<id>/`），
    按 `LOCAL_WEB_EXECUTOR` 选择执行面（见 §5）；
 3. 事件投影 → `EventBus.commit`：先落 `events.jsonl`，再实时给 SSE（见 §3.1）；
@@ -351,7 +358,8 @@ U+2028/U+2029 不拆帧，与 RPC 面共用 `tests/fixtures/lf-framing.json` 语
 * **docker / e2b** 把每个命中预装名单的 `npm:` 声明改写为镜像内**本地包路径**
   `/opt/pi-packages/node_modules/<name>`（pi 官方 local package，"Loaded from the resolved path
   without copying"），因此容器/沙箱 run **不再访问 registry、不再每 run 生成 `npm/`**；
-  未列入预装名单的声明原样保留（本仓当前只有 `pi-web-access`；`pi-subagents` 只预装不加载）。
+  未列入预装名单的声明原样保留（本仓当前两个 `npm:` 声明都已列名：`pi-web-access` 与
+  `pi-subagents`）。
 
 版本一致性由发布物与仓库测试共同约束：两个 Dockerfile 用 `ARG PI_WEB_ACCESS_VERSION` /
 `ARG PI_SUBAGENTS_VERSION` 精确 pin 并安装到 `/opt/pi-packages`，
@@ -365,6 +373,15 @@ U+2028/U+2029 不拆帧，与 RPC 面共用 `tests/fixtures/lf-framing.json` 语
 语义与其它内核启动失败一致：Docker 面为 `kernel_exit`（退出码 78），E2B 面为 `kernel_exit` +
 stderr tail 里的中文原因。构建、候选 tag、回滚句柄、实测耗时与研究记录的实测事实见
 `docs/evidence/prebaked-packages.txt` 与 `docs/pi-integration-notes.md` §9。
+
+**子代理包（GLINK-SUB-02）**：`pi-subagents` 自本任务起真正加载，并且仍受第 5.3 节的同一套
+机制约束（模板 pin、容器面镜像内路径、版本一致性测试）。0.40.0 没有禁用 async/detached 的
+包开关，产品改用 `agent/extensions/subagent-foreground-guard.ts` 经官方 `tool_call` 钩子把派发
+强制为前台同步（可安全改写就改写，其余阻止；详单见 `docs/pi-integration-notes.md` §10），
+配合 extension config 的最保守取值，使子代理成为主 run 内的同步工具调用。镜像守卫脚本目前
+只检查 `pi-web-access`，这个已知缺口固定在 `tests/test_kernel_docker_env.py`（不受本任务修改
+Dockerfile 的边界约束，缺 `pi-subagents` 只会退化成“没有子代理工具”）。离线的扩展单测与
+无模型加载冒烟不作为真实模型/容器面验收的证据。
 
 ## 6. 凭据流
 
@@ -433,7 +450,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `host/pi_glink/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
 | `host/pi_glink/kernel/` | 接入层 | `rpc` / `framing` / `projection` / `agent_env` / `execution` / `docker_env` / `e2b_env` / `runner` |
 | `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
-| `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`（通用工作约定）、`prompts/deepresearch.md`、扩展位 |
+| `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`（通用工作约定）、`prompts/deepresearch.md`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
 | `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |
 | `docker/` | 执行面 | `Dockerfile.worker`（容器）、`e2b/Dockerfile.e2b`（模板） |
 | `scripts/` | 运维 | 启动、测试、真实 run 冒烟、E2B 模板构建 |
@@ -451,6 +468,11 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 组合与生命周期（数据目录锁、租户材料、run 对账、绑定端口、资源台账扫描线程），CLI 入口与
 离线运维子命令在 `cli.py`。拆分是纯结构调整：路由、状态码、载荷与既有导入路径（含
 `pi_glink.app.main` / `load_config` / `_resource_command` 再导出）保持不变。
+
+`/` 命令门禁本身在**准入层**（`kernel/runner.py::RunManager.start`，命令名单从
+`kernel/agent_env.py::prompt_template_names(config.agent_config_dir)` 推导），路由只负责把
+`UnsupportedCommand` 映射成 `400 unsupported_command`：这样任何调用者（HTTP、脚本、未来的适配器）
+都逃不过，且追问与三个执行面走同一条判定。拒绝发生在读父会话、写 run 目录、拉起执行面之前。
 
 ## 8. 可重复验证入口
 

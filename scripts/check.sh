@@ -54,9 +54,11 @@ if ! "${clean_env[@]}" "$node" -e 'if (Number(process.versions.node.split(".")[0
 fi
 
 shopt -s nullglob
-node_tests=(tests/web/*.test.mjs)
+# 前端事件模型（tests/web）与 agent 扩展的纯逻辑单元测试（tests/extensions；
+# GLINK-SUB-02 强制前台守卫）。两者都不启动真实 pi、模型或浏览器。
+node_tests=(tests/web/*.test.mjs tests/extensions/*.test.mjs)
 if [[ ${#node_tests[@]} -eq 0 ]]; then
-  echo '[FAIL] 没有发现 tests/web/*.test.mjs；不把空测试集当通过。' >&2
+  echo '[FAIL] 没有发现 tests/web/*.test.mjs 或 tests/extensions/*.test.mjs；不把空测试集当通过。' >&2
   exit 2
 fi
 
@@ -81,5 +83,5 @@ run_check 'Python（含仓库边界和检查入口回归）' \
   "$python" -m pytest tests -ra -p no:cacheprovider \
   --basetemp="$scratch/pytest" \
   --deselect=tests/test_ui_tokens.py::test_ui_tokens_match_standard_library
-run_check 'Node 前端回归' "$node" --test "${node_tests[@]}"
+run_check 'Node（前端回归 + 扩展单元测试）' "$node" --test "${node_tests[@]}"
 printf '\n[PASS] 无模型必需检查完成；不包含浏览器、UI 对齐、真实 pi、Docker/E2B 或多租户验收。\n'

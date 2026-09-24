@@ -31,12 +31,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from .. import events
 from ..artifacts import ArtifactError, ArtifactMissing, ArtifactTree
@@ -59,6 +60,7 @@ from .agent_env import (
     build_pi_argv,
     build_pi_env,
     prepare_agent_dir,
+    prompt_template_names,
 )
 from .docker_env import (
     build_plan as build_docker_plan,
@@ -139,11 +141,53 @@ class RunQuotaExceeded(RuntimeError):
 
 
 class FollowupUnavailable(RuntimeError):
-    """A parent run cannot safely supply a resumable session."""
+    """A parent run cannot safely supply a resumable session.
+
+    ``code`` is the refusal an HTTP caller sees (``unknown_run``, ``stale_run``,
+    ``run_busy``, ``session_unavailable``, ``report_unavailable``).
+    """
 
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class UnsupportedCommand(RuntimeError):
+    """The prompt names a ``/`` command outside the workbench's allowlist.
+
+    pi dispatches extension commands and expands prompt templates for a message
+    that starts with ``/`` (docs/rpc-commands.md). Once pi-subagents is loaded,
+    commands such as ``/run --bg`` or ``/subagents-detach`` would start a
+    detached run that no longer follows this run's cancel/timeout/reclaim path,
+    and the entry is client-controlled input. Admission therefore accepts only
+    the prompt-template names rendered from ``agent/prompts/``.
+
+    ``allowed`` carries only the accepted names; the refused command itself is
+    never echoed back to the caller (the HTTP layer reports the allowlist at
+    most), so the refusal does not turn the endpoint into a command oracle.
+    """
+
+    def __init__(self, allowed: Sequence[str]) -> None:
+        self.allowed = tuple(sorted(allowed))
+        super().__init__("prompt names an unsupported / command")
+
+
+def prompt_names_unsupported_command(text: str, allowed: Sequence[str]) -> bool:
+    """Whether ``text`` opens with a ``/`` command outside ``allowed``.
+
+    The prompt is checked the way pi reads it: leading whitespace does not make
+    ``/run`` less of a command, the name is the first whitespace-delimited token
+    (a bare ``/`` has no name and is refused), and the comparison is exact
+    because pi's template match is case-sensitive. Text that does not start with
+    ``/`` is never a command — a ``/run`` in the middle of a question is ordinary
+    prose and stays acceptable.
+    """
+    stripped = text.lstrip()
+    if not stripped.startswith("/"):
+        return False
+    match = re.match(r"^/(\S+)", stripped)
+    name = match.group(1) if match is not None else ""
+    return name not in allowed
 
 
 class EventLogError(RuntimeError):
@@ -307,6 +351,10 @@ class RunManager:
         an unknown, foreign or ownerless parent is refused as ``unknown_run``
         **before** its session, report, status or children are read.
 
+        A prompt that opens with a ``/`` command other than the rendered prompt
+        templates is refused with :class:`UnsupportedCommand` before anything is
+        written or read (see :func:`prompt_names_unsupported_command`).
+
         The follow-up's session snapshot (a bounded file read plus redaction)
         is taken before the admission lock is entered, so one tenant's
         follow-up does not serialize every other tenant's admission behind its
@@ -315,6 +363,17 @@ class RunManager:
         text = (prompt or "").strip()
         if not text:
             raise ValueError("prompt must not be empty")
+        # Slash-command gate: a message starting with ``/`` reaches pi's
+        # extension-command dispatch before anything else, and the loaded
+        # pi-subagents package registers detaching commands (``/run --bg``,
+        # ``/subagents-detach``, …) that no run lifecycle here owns. Only the
+        # prompt templates rendered from ``agent/prompts/`` are accepted; the
+        # refusal happens before a credential is resolved, before the parent's
+        # session is read and before any run directory or execution face exists,
+        # and the same call serves first turns and follow-ups on every face.
+        allowed_commands = prompt_template_names(self.config.agent_config_dir)
+        if prompt_names_unsupported_command(text, allowed_commands):
+            raise UnsupportedCommand(allowed_commands)
         credentials = self._credentials_for_context(context)
         if not credentials.model_api_key:
             raise ConfigError(

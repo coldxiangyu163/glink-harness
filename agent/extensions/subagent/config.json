@@ -1,0 +1,14 @@
+{
+  "asyncByDefault": false,
+  "forceTopLevelAsync": false,
+  "waitTool": { "enabled": false },
+  "scheduledRuns": { "enabled": false },
+  "intercomBridge": { "mode": "off" },
+  "maxSubagentDepth": 1,
+  "globalConcurrencyLimit": 4,
+  "maxSubagentSpawnsPerSession": 8,
+  "parallel": { "concurrency": 4 },
+  "artifactDir": "project",
+  "proactiveSkillSubagents": false,
+  "control": { "enabled": false }
+}

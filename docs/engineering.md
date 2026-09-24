@@ -43,7 +43,8 @@ bash scripts/check.sh
 
 - Git 已跟踪文件中出现真实配置/运行态文件的禁止路径；不读取 `.env` 内容。测试 fixture 中明确合成的 JSON 凭据样例可以保留。
 - `host/` 的 Python 导入重新依赖 `frontier_agent` 或 `apodex`，以及源码中的字面 JS 导入直接引用 pi 的 `src/` 或 `dist/` 私有路径。
-- Docker 与 E2B Dockerfile 的 Node/pi 声明丢失精确版本或发生分叉。
+- Docker 与 E2B Dockerfile 的 Node/pi 声明丢失精确版本或发生分叉，以及两个预装包
+  （`pi-web-access` / `pi-subagents`）的模板 pin 与镜像 ARG 漂移。
 
 检查器自身有临时仓库和非法输入反例。合法的 TypeScript extension 和 pi 公共包导入不被禁止。路径/import 检查不能识别所有源码复制、动态加载或间接泄漏；没有命中不代表经过完整供应链或安全审计。Dockerfile 一致也不证明当前镜像/模板已重建。
 
@@ -56,6 +57,7 @@ bash scripts/check.sh
 | 仓库边界、Dockerfile 版本声明 | `python -m pytest tests/test_repository_boundaries.py` | 非法输入反例和当前工作区；不证明部署产物版本 |
 | 默认检查入口 | `python -m pytest tests/test_check_entrypoint.py` | 环境隔离、无自动安装、原退出码、失败不继续、资源清理 |
 | 配置与凭据交付（每 run 独立） | `python -m pytest tests/test_kernel_agent_env.py tests/test_redaction.py` | 合成凭据穿过真实投影/存储/下载/会话路径；流式释放等于整段脱敏（前后缀重叠、重复片段、全部分割位置、多帧、逐字符与合法相邻文本），并走 fake pi → runner → 日志/总线；`HOLD_CAP` 边界（8192/8193/8194/20000 字符已知值、重叠长值、任意多帧）不释放未判定文本、暂存不超界、越界后本块失败即闭合；同目录重渲染不会残留旧凭据/扩展；用临时 HOME，不读个人 `web-search.json` |
+| 子代理派发与委派纪律（GLINK-SUB-02） | `node --test tests/extensions/*.test.mjs` + `python -m pytest tests/test_agent_prompts.py tests/test_kernel_agent_env.py tests/test_kernel_docker_env.py tests/test_kernel_e2b_env.py tests/test_repository_boundaries.py` | 前台守卫扩展的每个 detach 入口正反例（`async` 改写、只读 action 放行、后台/定时/控制/管理 action 阻止、`share`/`worktree` 阻止、工作区外路径阻止、`chainDir` 改写、`subagent_wait` 阻止、handler 异常 fail-closed）；`subagent` 工具卡片投影与脱敏；模板 pin 与两个镜像 ARG 一致、容器面两个包都映射到镜像内路径、`agents/` 进模板清单；`researcher` 定义的工具白名单与取证纪律。**任务 5（提示词改写为委派纪律）暂缓**：`agent/research-prompt.md`、`/deepresearch` 模板及其断言本轮不动。不包含真实模型/检索 run、取消传播、Docker/E2B live 与子代理会话文件脱敏（见 pi-integration-notes.md §10.4）；无模型加载冒烟 `bash tests/extensions/smoke-subagents-load.sh` 需本机 pi 与本地 pi-subagents 副本，不在默认检查内 |
 | 产物接收与路径安全 | `python -m pytest tests/test_artifacts.py` | 符号链接/目录链接/非普通文件（含 FIFO）/超限/越界一律拒绝；在遍历、打开、发布写入前注入祖先目录替换，外部文件不被读写；宿主拥有 `artifacts/report.md` 副本；HTTP 下载与 `hasReport` 走同一道校验 |
 | RPC、投影、run 生命周期 | `python -m pytest tests/test_kernel_rpc.py tests/test_runner.py tests/test_runs_api.py` | 正常、缺报告、被拒报告、模型 error/aborted/length、重试成功/失败、进程死亡、超时、取消；回收/关闭/报告阶段受理的取消必为 `cancelled`、与终帧提交竞争的取消返回已提交状态；资源持有的准入口径（local `409 resources_unreleased`、multitenant 计入租户与全局槽位）、`shutdown` 如实上报、自动对账与人工裁决放行；旧布局报告只读下载；产品事件或 HTTP 口径变化同时验证 Node 消费方 |
 | run 存储索引 | `python -m pytest tests/test_store_index.py` | 索引与全量扫描（`scan_all`/`scan_unreadable`）在创建、普通帧、终帧提交未落定、`fsync` 失败、settle 失败、重启重建、对账 interrupted、人工裁决与并发创建/提交下一致；`_load_meta` 计数桩证明热索引下列表/租户过滤/资源查询/准入不读 `meta.json`；不包含真实多进程竞争 |
@@ -76,6 +78,8 @@ bash scripts/check.sh
 | 前端状态与呈现逻辑 | `node --test tests/web/*.test.mjs` | 累计快照、权威终帧、取消/失败、重复帧、缺口；导航竞态/dispose（stub DOM）；工具参数数组跨层语料；登录/邀请注册/恢复面、账号菜单与邀请对话框、会话生命周期（`/api/me` 前不揭示外壳、401 清屏回登录、退出只在服务端废止后生效）、HTTP 客户端请求形状（JSON/CSRF/same-origin）；不证明 DOM 布局 |
 | UI 布局与交互 | Node 回归及 [UI 对齐文档](ui-alignment.md)的对应浏览器步骤 | 现有浏览器脚本有下述副作用，默认检查不自动执行 |
 | 文档 | 对照实现检查命令、链接、作用域与验收口径 | 纯文档修改不默认跑真实研究或三面 smoke |
+
+| run HTTP 准入与命令门禁 | `python -m pytest tests/test_runs_api.py tests/test_runner.py tests/test_kernel_agent_env.py` | 以 `/` 开头的 prompt 只接受 `agent/prompts/` 模板命令（当前仅 `/deepresearch`），其他（`/run --bg`、`/subagents-detach`、前导空白 + `/chain`、裸 `/`、大小写或名字相近的变体）返回 `400 unsupported_command`、错误体只给允许列表且不回显输入、拒绝早于 run 目录/执行面创建；普通题目（含正文中间出现 `/run`）与前导空白的普通问题照常运行；追问（`parentRunId`）走同一门禁；命令名单从模板目录推导（新增/删除模板文件立即生效，符号链接不计入，目录缺失时 fail-closed）。不证明真实模型下 pi 的扩展命令派发行为，也不覆盖内核启动后由其他扩展注入命令的路径 |
 
 表中 `python` 应指向项目依赖环境。直接执行定向测试时也应使用临时 HOME、合成配置和自建资源；统一入口会完成环境隔离。优先复用可核验的同范围通过证据；代码、输入、环境或集成行为变化时，只补失效部分。
 

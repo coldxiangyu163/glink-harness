@@ -107,10 +107,10 @@ def worker_versions(text: str) -> tuple[str, str]:
 def worker_package_versions(text: str) -> tuple[str, str]:
     """The exact versions of the prebaked pi packages (both worker images).
 
-    The repository declares pi-web-access in ``agent/settings.json`` (the runtime
-    source for the in-process face) and both images install the same pin plus
-    ``pi-subagents`` (available in the image, deliberately not auto-loaded).
-    A floating or missing declaration is a failure, not a warning.
+    The repository declares both packages in ``agent/settings.json`` (the runtime
+    source for the in-process face) and both images install the same pins into
+    ``/opt/pi-packages``. A floating or missing declaration is a failure, not a
+    warning.
     """
     parsed = []
     for name in ("PI_WEB_ACCESS_VERSION", "PI_SUBAGENTS_VERSION"):
@@ -221,17 +221,27 @@ def test_prebaked_package_versions_are_exact_and_equal() -> None:
 
 
 def test_template_package_pin_matches_the_image_build_argument() -> None:
-    """镜像与宿主声明来自同一份 pin：模板的 npm 版本必须等于镜像 ARG。"""
-    docker_pin, _subagents_pin = worker_package_versions(
+    """镜像与宿主声明来自同一份 pin：模板的 npm 版本必须等于对应镜像 ARG。"""
+    docker_web, docker_subagents = worker_package_versions(
         (ROOT / "docker/Dockerfile.worker").read_text()
     )
+    e2b_web, e2b_subagents = worker_package_versions(
+        (ROOT / "docker/e2b/Dockerfile.e2b").read_text()
+    )
     pins = template_package_pins()
-    assert set(pins) == {"pi-web-access"}, "模板只应该声明检索包（subagents 不由产品加载）"
-    assert pins["pi-web-access"] == docker_pin, "模板 pin 与镜像 ARG 漂移"
+    # GLINK-SUB-02：模板从“只加载 pi-web-access”改为同时加载 pi-subagents
+    # （前台守卫扩展兜住 async）；两个 pin 都必须与镜像 ARG 对齐。
+    assert set(pins) == {"pi-web-access", "pi-subagents"}
+    assert pins["pi-web-access"] == docker_web == e2b_web, "pi-web-access pin 与镜像 ARG 漂移"
+    assert pins["pi-subagents"] == docker_subagents == e2b_subagents, "pi-subagents pin 与镜像 ARG 漂移"
 
 
 def test_worker_dockerfiles_install_and_guard_the_prebaked_packages() -> None:
-    """两个镜像都要按 ARG 安装、并用同一个守卫脚本验证包存在。"""
+    """两个镜像都要按 ARG 安装，并用同一个守卫脚本验证关键包存在。
+
+    守卫脚本的包列表与 ``CONTAINER_LOCAL_PACKAGES`` 的完整对应关系（含 pi-subagents
+    尚未被守卫覆盖的已知缺口）在 tests/test_kernel_docker_env.py 卡住。
+    """
     for relative in ("docker/Dockerfile.worker", "docker/e2b/Dockerfile.e2b"):
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert "pi-web-access@${PI_WEB_ACCESS_VERSION}" in text, relative
@@ -239,7 +249,7 @@ def test_worker_dockerfiles_install_and_guard_the_prebaked_packages() -> None:
         assert "/opt/pi-packages" in text, relative
         # 与 pi 自己的 managed install 一致：不自动装 @earendil-works/pi-* peer。
         assert "npm install --prefix /opt/pi-packages --legacy-peer-deps" in text, relative
-        assert set(guard_packages(text)) == {"pi-web-access"}, relative
+        assert "pi-web-access" in set(guard_packages(text)), relative
         assert "exec \"$@\"" in text, relative
 
 

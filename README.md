@@ -18,7 +18,7 @@
 | Python | ≥ 3.12 | 宿主与内核接入层只用标准库，无运行时依赖 |
 | Node.js | 宿主开发 **v24.16.0**（nvm 固定，本机实测）；Docker / E2B 镜像 **v24.21.0**（`node:24.21.0-bookworm-slim` 精确 tag，实测） | 前端与 pi 的运行时；宿主用 nvm：`nvm install 24.16.0 && nvm use 24.16.0`；镜像/模板的 Node 版本在各自 Dockerfile 里 pin 到精确 tag（不用浮动 `node:24-bookworm-slim`） |
 | pi | 0.86.1（已实测） | `npm install -g @earendil-works/pi-coding-agent@0.86.1`；Docker / E2B 面的版本固定在各自 Dockerfile 的 `ARG PI_VERSION` |
-| pi 包 | `pi-web-access@0.31.0`（检索，三面）；`pi-subagents@0.40.0`（仅 Docker / E2B 镜像内预装、不加载） | `agent/settings.json` 是包声明真源（精确 pin）；Docker / E2B 从镜像内 `/opt/pi-packages` 本地加载，不在 run 里 `npm install`；一致性由 `tests/test_repository_boundaries.py` 卡住 |
+| pi 包 | `pi-web-access@0.31.0`（检索，三面）；`pi-subagents@0.40.0`（委派，三面；前台强制，见「委派与子代理」） | `agent/settings.json` 是包声明真源（两个精确 pin）；Docker / E2B 从镜像内 `/opt/pi-packages` 本地加载，不在 run 里 `npm install`；一致性由 `tests/test_repository_boundaries.py` 卡住 |
 | pytest | ≥ 8（仅开发） | `uv pip install -e ".[dev]"` |
 | e2b SDK | ≥ 2（仅 E2B 执行面） | `uv pip install -e ".[e2b]"`（含代理网络需要的 `httpx[socks]`） |
 
@@ -156,7 +156,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | POST | `/api/invitations/check` | 校验邀请可用性，body `{"token": "…"}`（限速；无效与已用同形返回 `{"valid":false}`；邀请码只走 JSON body，不进 URL/查询/日志） |
 | POST | `/api/admin/invitations` | 管理员为**本租户**签发一次性邀请（需要 CSRF；响应只在这一次返回邀请码原文） |
 
-本机（`local`）执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
+本机（`local`）执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。以 `/` 开头的 prompt 只有命令名等于 `agent/prompts/` 下模板文件名的才被接受（当前仅 `/deepresearch`），其余返回 `400 unsupported_command`（错误体只给允许的命令列表，不回显被拒输入）——pi 对这类消息会先执行扩展命令，而 pi-subagents 注册了 `/run --bg`、`/subagents-detach` 等后台入口；拒绝在任何 run 目录/执行面创建之前，追问同样适用。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
 
 多租户模式（`PI_GLINK_TENANCY=multitenant`）下所有 `/api/*`（健康的存活性探测除外）都要求可信身份——网关断言或站内会话：未认证 `401`，权限不足 `403`，未知/异租户/legacy 记录统一 `404`，超过并发上限 `429 quota_exceeded`。下一节说明完整语义。
 
@@ -288,6 +288,27 @@ key 检索）；显式 `shared` 策略只渲染宿主级 `PI_GLINK_WEB_SEARCH_KE
 
 本仓库不包含 Serper / Jina 链路。检索证据见 [docs/evidence/local-web-search.txt](docs/evidence/local-web-search.txt)。
 
+## 委派与子代理（已接入；委派纪律待定）
+
+`pi-subagents@0.40.0` 已随模板加载，并配一个在本仓的取证子代理定义
+（[agent/agents/researcher.md](agent/agents/researcher.md)：自包含任务、一手来源优先、打开原文核对、
+产物落工作区、只回报要点与来源）。**怎么委派**（哪些任务用前台并行 researcher、主 agent 保留
+哪些环节）属于提示词约定，正在重新定形（任务 5 暂缓待用户决定），本 README 不提前承诺；
+当前 `agent/research-prompt.md` 仍是上一版约定。
+
+**强制前台不靠包开关。** pi-subagents 0.40.0 没有禁用 async/detached 的配置或环境开关
+（[验证记录](docs/pi-integration-notes.md#8-pi-subagents-0400-验证spike-glink-sub-01)），
+产品改用本仓自有的 [前台守卫扩展](agent/extensions/subagent-foreground-guard.ts)：官方 `tool_call`
+钩子把 `async` 一律改写为 `false`，无法安全改写的后台、定时、恢复、控制与定义管理入口直接阻止，
+`share`/`worktree`/工作区外路径也一并挡住；扩展配置（`agent/extensions/subagent/config.json`）
+同时固定为最保守取值（`asyncByDefault:false`、定时关、watchdog 关、intercom 关、嵌套深度 1、
+并发 4、产物落工作区）。清单与逐项理由见
+[集成笔记 §10](docs/pi-integration-notes.md#10-pi-subagents-0400-的前台强制接入glink-sub-02离线验证)。
+
+未覆盖项如实记录：真实模型下的前台并行效果与子代理会话文件的收尾脱敏尚未验证；客户端输入面的
+`/` 命令（`/run --bg`、`/subagents-detach` 等）不在 `tool_call` 钩子可达范围，由宿主在准入层挡住
+（只接受 `agent/prompts/` 模板命令，其余 `400 unsupported_command`，见 architecture.md §4）。
+
 ## 安全边界
 
 - **凭据不进产品面**：事件流、`events.jsonl`、报告文件与下载、pi 会话文件都经过
@@ -318,7 +339,7 @@ key 检索）；显式 `shared` 策略只渲染宿主级 `PI_GLINK_WEB_SEARCH_KE
 |---|---|
 | `host/pi_glink/` | 宿主：配置解析、事件总线、HTTP/SSE 服务、静态资源 |
 | `host/pi_glink/kernel/` | pi 接入层：headless 协议客户端（RPC / JSON）、事件投影、运行期配置渲染、三执行面适配 |
-| `agent/` | pi 侧配置模板：每次 run 先删再拷到 `runs/<id>/pi-agent/` 后作为 `PI_CODING_AGENT_DIR`，内核之外的定制只落在这里 |
+| `agent/` | pi 侧配置模板：每次 run 先删再拷到 `runs/<id>/pi-agent/` 后作为 `PI_CODING_AGENT_DIR`，内核之外的定制只落在这里（含 `extensions/` 的前台守卫与 `agents/researcher.md`）；委派纪律的提示词改写暂缓（任务 5） |
 | `web/` | 前端：按百鉴 UI 标准库逐值对齐的静态 ESM 资源（token 层 + 组件层 + 外壳） |
 | `docs/` | `architecture.md`（进程拓扑、事件契约、执行器契约）、`pi-boundary.md`（扩展点与禁止项）、`multitenancy-plan.md`（下一阶段设计与决策点） |
 | `tests/` | 宿主与内核的回归 |

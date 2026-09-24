@@ -90,6 +90,109 @@ def wait_for_terminal(server: PiGlinkServer, run_id: str, timeout: float = 30.0)
     return latest
 
 
+def _run_dirs(server: PiGlinkServer) -> list[str]:
+    runs = server.config.data_root / "runs"
+    return sorted(path.name for path in runs.glob("*")) if runs.is_dir() else []
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "/run researcher --bg 查跨境资金监管",
+        "/subagents-detach",
+        "   /chain scout -> planner",
+        "\n\t/parallel researcher --bg",
+        "/",
+        "/DeepResearch 题目",
+        "/skill:pi-subagents",
+    ],
+)
+def test_slash_commands_outside_the_template_allowlist_are_refused(
+    server: PiGlinkServer, prompt: str
+) -> None:
+    """GLINK-SUB-02 评审修复：客户端输入不能绕过 tool_call 守卫发起 detached run。
+
+    pi 对以 `/` 开头的消息会先执行扩展命令（docs/rpc-commands.md），而载入的
+    pi-subagents 注册了 `/run --bg`、`/subagents-detach` 等。准入层只接受从
+    `agent/prompts/` 推导的模板命令，并在任何 run 目录/执行面之前返回 400。
+    """
+    before = _run_dirs(server)
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST", body={"prompt": prompt}
+    )
+    assert status == 400, raw
+    body = json.loads(raw)
+    assert body["error"] == "unsupported_command"
+    assert body["allowed"] == ["deepresearch"]
+    # 不得回声被拒的输入（错误体只给命令列表与固定说明）；裸 "/" 没有名字，
+    # 只验证错误码。
+    rejected = prompt.strip()
+    if len(rejected) > 1:
+        assert rejected not in raw.decode("utf-8")
+    assert _run_dirs(server) == before, "拒绝必须早于 run 目录创建"
+
+
+def test_template_commands_and_ordinary_prompts_still_run(server: PiGlinkServer) -> None:
+    for prompt in (
+        "/deepresearch 跨境资金监管新规",
+        "正文里出现 /run --bg 也只是普通文本",
+        "  前导空白的普通问题",
+    ):
+        status, _headers, raw = request(
+            server, "/api/runs", method="POST", body={"prompt": prompt}
+        )
+        assert status == 201, raw
+        run = json.loads(raw)["run"]
+        assert wait_for_terminal(server, run["runId"])["status"] == "finished"
+
+
+def test_followup_prompts_pass_the_same_gate(tmp_path: Path) -> None:
+    """追问走同一个 start()：命令门禁对 parentRunId 同样生效。"""
+
+    def factory(argv, *, cwd=None, env=None, on_event=None):
+        return PiRpcClient(
+            [sys.executable, str(FAKE_PI), *argv[1:]], cwd=cwd,
+            env={**(env or {}), "FAKE_PI_PERSIST_SESSION": "1", "FAKE_PI_WRITE_REPORT": "1"},
+            on_event=on_event,
+        )
+
+    instance = create_server(make_config(tmp_path), client_factory=factory)
+    thread = threading.Thread(target=instance.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, _headers, raw = request(
+            instance, "/api/runs", method="POST", body={"prompt": "第一个问题"}
+        )
+        assert status == 201, raw
+        parent = json.loads(raw)["run"]
+        wait_for_terminal(instance, parent["runId"])
+
+        before = _run_dirs(instance)
+        status, _headers, raw = request(
+            instance,
+            "/api/runs",
+            method="POST",
+            body={"prompt": "  /subagents-detach", "parentRunId": parent["runId"]},
+        )
+        assert status == 400, raw
+        assert json.loads(raw)["error"] == "unsupported_command"
+        assert _run_dirs(instance) == before
+
+        status, _headers, raw = request(
+            instance,
+            "/api/runs",
+            method="POST",
+            body={"prompt": "/deepresearch 合法追问", "parentRunId": parent["runId"]},
+        )
+        assert status == 201, raw
+        child = json.loads(raw)["run"]
+        assert wait_for_terminal(instance, child["runId"])["status"] == "finished"
+    finally:
+        instance.shutdown()
+        instance.server_close()
+        thread.join(timeout=5)
+
+
 def test_start_run_returns_a_run_view(server: PiGlinkServer) -> None:
     status, _headers, raw = request(
         server, "/api/runs", method="POST", body={"prompt": "写一份最小报告"}

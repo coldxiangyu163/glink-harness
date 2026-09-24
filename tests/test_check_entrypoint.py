@@ -15,10 +15,13 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts/check.sh"
 
 def check_fixture(tmp_path: Path, *, python_status: int = 0, node_status: int = 0, preflight_status: int = 0):
     repo = tmp_path / "checkout with spaces"
-    for directory in ("scripts", ".venv/bin", "tests/web", "host", "tools"):
+    for directory in ("scripts", ".venv/bin", "tests/web", "tests/extensions", "host", "tools"):
         (repo / directory).mkdir(parents=True)
     shutil.copyfile(SCRIPT, repo / "scripts/check.sh")
     (repo / "tests/web/example.test.mjs").write_text("// discovered but not executed by the stub\n")
+    (repo / "tests/extensions/example.test.mjs").write_text(
+        "// discovered but not executed by the stub\n"
+    )
     python = repo / ".venv/bin/python"
     python.write_text(
         "#!/bin/sh\n"
@@ -91,7 +94,13 @@ def test_checks_use_disposable_environment_and_report_optional_scope(tmp_path: P
     assert args[:3] == ["-m", "pytest", "tests"]
     assert "--deselect=tests/test_ui_tokens.py::test_ui_tokens_match_standard_library" in args
     assert "no:cacheprovider" in args
-    assert (repo / "node-args.txt").read_text().splitlines() == ["--test", "tests/web/example.test.mjs"]
+    # 两个收集范围：前端事件模型（tests/web）与 agent 扩展单元测试
+    # （tests/extensions，GLINK-SUB-02 强制前台守卫）。
+    assert (repo / "node-args.txt").read_text().splitlines() == [
+        "--test",
+        "tests/web/example.test.mjs",
+        "tests/extensions/example.test.mjs",
+    ]
     assert list(temp.iterdir()) == []
 
 
@@ -128,6 +137,7 @@ def test_missing_dependencies_stop_without_installing_or_running_suites(tmp_path
 def test_missing_node_tests_is_a_failure_not_a_green_empty_run(tmp_path: Path) -> None:
     repo, env, temp = check_fixture(tmp_path)
     (repo / "tests/web/example.test.mjs").unlink()
+    (repo / "tests/extensions/example.test.mjs").unlink()
     result = invoke(repo, env)
     assert result.returncode == 2
     assert "空测试集" in result.stderr

@@ -17,6 +17,7 @@ from pi_glink.kernel.agent_env import (
     build_pi_env,
     local_package_source,
     prepare_agent_dir,
+    prompt_template_names,
     template_manifest,
 )
 
@@ -237,10 +238,19 @@ def test_missing_web_search_credential_is_not_an_error(
 
 
 def test_template_manifest_lists_the_reviewable_entries(tmp_path: Path, template_dir: Path) -> None:
-    """All three faces deliver the same manifest (AGENTS/settings/extensions/…)."""
+    """All three faces deliver the same manifest (AGENTS/settings/agents/extensions/…)."""
+    (template_dir / "agents").mkdir()
+    (template_dir / "agents" / "researcher.md").write_text("---\nname: researcher\n---\n", encoding="utf-8")
     manifest = template_manifest(template_dir)
     relative = {entry for entry, _path, _is_dir in manifest}
-    assert {"settings.json", "AGENTS.md", "extensions", "extensions/hello.js"} <= relative
+    assert {
+        "settings.json",
+        "AGENTS.md",
+        "agents",
+        "agents/researcher.md",
+        "extensions",
+        "extensions/hello.js",
+    } <= relative
     # A symlink in the template is never delivered as a path into the host.
     (template_dir / "prompts").mkdir()
     (template_dir / "prompts" / "escape.md").symlink_to(tmp_path / "outside.md")
@@ -248,11 +258,58 @@ def test_template_manifest_lists_the_reviewable_entries(tmp_path: Path, template
     assert "prompts/escape.md" not in {entry for entry, _p, _d in manifest}
 
 
-def test_template_settings_declare_the_web_access_package() -> None:
-    """声明的是精确版本：镜像 ARG 与模板 pin 的一致性由仓库边界测试卡住。"""
+def test_agents_directory_is_rendered_into_the_run_configuration(
+    tmp_path: Path, template_dir: Path
+) -> None:
+    """pi-subagents discovers user-scope agents in ``PI_CODING_AGENT_DIR/agents``.
+
+    Without this template entry the rendered run directory would have no
+    ``researcher.md`` and the dispatch tool would fall back to the package's own
+    builtin agents (or to user-scope ``~/.agents`` files outside the run).
+    """
+    (template_dir / "agents").mkdir()
+    (template_dir / "agents" / "researcher.md").write_text("# researcher\n", encoding="utf-8")
+    config = _config(tmp_path, template_dir)
+    runtime = _prepare(config, tmp_path)
+    assert (runtime.directory / "agents" / "researcher.md").read_text(encoding="utf-8") == "# researcher\n"
+
+
+def test_prompt_template_names_come_from_the_template_directory(tmp_path: Path) -> None:
+    """准入层的 `/` 命令白名单从 `agent/prompts/` 推导，不硬编码。
+
+    pi 只展开文件名（stem）精确匹配的模板命令（docs/prompt-templates.md），
+    宿主因此把同一份模板目录当作唯一真源：新增命令 = 新增受审阅的模板文件；
+    符号链接不进入白名单（与 template_manifest 同口径）。
+    """
+    template = tmp_path / "template"
+    (template / "prompts").mkdir(parents=True)
+    (template / "prompts" / "deepresearch.md").write_text("题目：$@\n", encoding="utf-8")
+    (template / "prompts" / "notes.md").write_text("题目：$@\n", encoding="utf-8")
+    (template / "prompts" / "ignored.txt").write_text("不是模板\n", encoding="utf-8")
+    (template / "prompts" / "escape.md").symlink_to(template / "prompts" / "notes.md")
+    assert prompt_template_names(template) == ("deepresearch", "notes")
+    # 模板目录缺失 = 不接受任何 `/` 命令（fail-closed）。
+    assert prompt_template_names(tmp_path / "absent") == ()
+    # 仓库当前只有 `/deepresearch`：加载的包注册的扩展命令不在其中。
+    assert prompt_template_names(REPO_ROOT / "agent") == ("deepresearch",)
+
+
+def test_template_settings_declare_pinned_packages_and_quiet_subagent_surfaces() -> None:
+    """模板声明的是精确版本，并且把子代理面固定在最保守取值。
+
+    原义务（GLINK-SUB-01）：模板只加载 pi-web-access，pi-subagents 只预装不加载。
+    GLINK-SUB-02 改为加载 pi-subagents，并用工作台自有的前台守卫扩展兜住 async；
+    模板因此同时声明两个精确 pin，并在同一份 settings.json 里关掉 watchdog——
+    它由 pi-subagents 从 ``subagents.watchdog`` 读取（src/watchdog/settings.ts）。
+    版本一致性与镜像 ARG 的对应由 test_repository_boundaries.py 卡住。
+    """
     settings = json.loads((REPO_ROOT / "agent" / "settings.json").read_text(encoding="utf-8"))
-    assert settings["packages"] == ["npm:pi-web-access@0.31.0"]
+    assert settings["packages"] == ["npm:pi-web-access@0.31.0", "npm:pi-subagents@0.40.0"]
     assert settings["defaultThinkingLevel"] == "medium"
+    watchdog = settings["subagents"]["watchdog"]
+    assert watchdog["enabled"] is False
+    assert watchdog["main"]["enabled"] is False
+    assert watchdog["children"]["enabled"] is False
 
 
 # -- 容器面预装包：镜像内本地加载，不在 run 里联网安装（GLINK-PKG-01） ----------
@@ -275,16 +332,19 @@ def _rendered_settings(config, tmp_path: Path) -> dict:
     return json.loads((runtime.directory / "settings.json").read_text(encoding="utf-8"))
 
 
-def test_container_faces_load_the_prebaked_package_from_the_image(
+def test_container_faces_load_the_prebaked_packages_from_the_image(
     tmp_path: Path, template_dir: Path
 ) -> None:
     """Docker/E2B 的 packages 指向镜像内路径，pi 直接加载（不再每 run npm install）。"""
-    _template_settings(template_dir, ["npm:pi-web-access@0.31.0"])
-    expected = f"{IMAGE_PACKAGE_NODE_MODULES}/pi-web-access"
+    _template_settings(template_dir, ["npm:pi-web-access@0.31.0", "npm:pi-subagents@0.40.0"])
+    expected = [
+        f"{IMAGE_PACKAGE_NODE_MODULES}/pi-web-access",
+        f"{IMAGE_PACKAGE_NODE_MODULES}/pi-subagents",
+    ]
     for executor in ("docker", "e2b"):
         config = _config(tmp_path, template_dir, LOCAL_WEB_EXECUTOR=executor)
         settings = _rendered_settings(config, tmp_path)
-        assert settings["packages"] == [expected]
+        assert settings["packages"] == expected
         # 其他设置项原样保留，只改 packages。
         assert settings["defaultThinkingLevel"] == "medium"
 
@@ -303,13 +363,13 @@ def test_container_faces_leave_unmapped_entries_untouched(
     """只改写预装包；其他来源原样保留，不猜、不静默改写。"""
     _template_settings(
         template_dir,
-        ["npm:pi-web-access@0.31.0", "npm:pi-subagents@0.40.0", "./local-tools", "git:github.com/x/y@v1"],
+        ["npm:pi-web-access@0.31.0", "npm:other-tools@1.0.0", "./local-tools", "git:github.com/x/y@v1"],
     )
     config = _config(tmp_path, template_dir, LOCAL_WEB_EXECUTOR="docker")
     settings = _rendered_settings(config, tmp_path)
     assert settings["packages"] == [
         f"{IMAGE_PACKAGE_NODE_MODULES}/pi-web-access",
-        "npm:pi-subagents@0.40.0",
+        "npm:other-tools@1.0.0",
         "./local-tools",
         "git:github.com/x/y@v1",
     ]
@@ -334,7 +394,8 @@ def test_container_faces_keep_the_object_form_filters(tmp_path: Path, template_d
         ("npm:pi-web-access", f"{IMAGE_PACKAGE_NODE_MODULES}/pi-web-access"),
         ("npm:pi-web-access@0.31.0", f"{IMAGE_PACKAGE_NODE_MODULES}/pi-web-access"),
         ("npm:pi-web-access@^0.31.0", f"{IMAGE_PACKAGE_NODE_MODULES}/pi-web-access"),
-        ("npm:pi-subagents@0.40.0", None),
+        ("npm:pi-subagents@0.40.0", f"{IMAGE_PACKAGE_NODE_MODULES}/pi-subagents"),
+        ("npm:other-tools@1.0.0", None),
         ("npm:@scope/tools@1.0.0", None),
         ("git:github.com/x/y@v1", None),
         ("./local-tools", None),
