@@ -117,10 +117,13 @@ result 一次；两者不同的工具仍保留两份内容。校验：
 断言 `output + result` 只渲染 495 字符且前缀仅出现一次；浏览器回归以
 `toolsRenderingTextTwice === 0` 卡住同类回退（证据 `docs/evidence/browser-run.json`）。
 
-## 8. pi-subagents 0.40.0 验证（spike GLINK-SUB-01，未接入）
+## 8. pi-subagents 0.40.0 验证（spike GLINK-SUB-01）
 
 结论：**0.40.0 没有配置开关可以禁止 async/detached 子 agent**，也没有相关环境变量；按 spike 门禁
 就此停止，未做凭据继承、取消传播、事件投影/脱敏与产物落点的 live 验证（agent/settings.json 未改）。
+该结论仍然成立，也是 GLINK-SUB-02 改用 pi-glink 自有 `tool_call` 守卫的原因；前台强制方案、
+完整入口清单与配置取值见 §10。
+本节其余事实（配置面键集、行号、参考副本与发布包的差异）继续有效；
 本节的源码行号与事实来自 `npm install --prefix /tmp/glink-sub-spike/prefix pi-subagents@0.40.0`
 的发布包（integrity 与原始输出见 `docs/evidence/pi-subagents-spike.txt`）。
 
@@ -181,5 +184,117 @@ pi-web-access 的 `supportsDynamicTools()` 会 `import.meta.resolve` 这份副�
 **版本真源**：`agent/settings.json` 的 pin、两个 Dockerfile 的 `ARG PI_WEB_ACCESS_VERSION` /
 `ARG PI_SUBAGENTS_VERSION` 由 `tests/test_repository_boundaries.py` 卡住一致（与 §3 的 PI_VERSION
 同口径）。候选构建/自检/tag 移动/回滚与完整输出见 `docs/evidence/prebaked-packages.txt`。
-`pi-subagents@0.40.0` 预装在镜像内但不写进 `packages`：§8 的 async/detached 问题仍未解决，
-默认加载仍被 BLOCKER 阻塞。
+`pi-subagents@0.40.0` 在 GLINK-SUB-02 起写进 `packages` 并被真正加载（前台强制方案见 §10）；
+镜像守卫脚本仍只检查 `pi-web-access`，该已知缺口固定在
+`tests/test_kernel_docker_env.py::test_the_image_guard_covers_every_prebaked_package`。
+
+## 10. pi-subagents 0.40.0 的前台强制接入（GLINK-SUB-02，离线验证）
+
+§8 的结论继续成立：0.40.0 没有“禁止 async/detached”的包开关。GLINK-SUB-02 因此不依赖包开关，
+而是在 pi-glink 侧用官方 `tool_call` 钩子（`agent/extensions/subagent-foreground-guard.ts`）
+把派发收回到主 run 内的**前台同步**调用，并按“最保守取值”固定 pi-subagents 的 extension config。
+原则：**能安全改写就改写（`async:false`、`chainDir` 进工作区），改写了会改变语义／无法保证生命周期
+的就阻止并给出可理解的原因**，未知输入一律 fail-closed。
+
+源码基线：`npm install --prefix /tmp/glink-sub2/prefix pi-subagents@0.40.0` 的发布包（仓库外；
+GLINK-SUB-01 已记录它与 `~/.feynman/npm-global` 参考副本有 23 个 `src/` 文件不同）。以下行号都指向
+该发布包。离线验证证据：`docs/evidence/pi-subagents-foreground.txt`。
+
+**范围注**：本任务只做工具面的强制前台与子代理定义（`agent/agents/researcher.md`）；提示词侧的委派
+纪律（何时派、怎么描述任务、主 agent 保留哪些环节）按 Lead 指令暂缓，`agent/research-prompt.md`
+与 `/deepresearch` 模板保持原约定。
+
+### 10.1 能把执行推离主 run 的入口清单与处置
+
+| # | 入口（源码位置） | 形态 | 处置 | 理由 |
+|---|---|---|---|---|
+| 1 | `subagent` 的 `async`（`src/extension/schemas.ts:316`；分派判定 `src/runs/foreground/subagent-executor.ts:4467-4468`） | detached 子进程 | **改写**：显式 `async:false` | 前台是同一工具的受支持形态；同一处判定 `runsForeground = clarify \|\| (async ?? asyncByDefault) !== true` |
+| 2 | agent frontmatter `async: true`（`src/agents/agents.ts:1470-1474`，应用点 `subagent-executor.ts:1799`：仅当 `params.async === undefined`） | 隐式 async 默认值 | **改写**：同 #1 的显式 `false` 直接覆盖 | 只看参数是否缺省，显式 `false` 是唯一能盖住它的地方 |
+| 3 | 配置 `asyncByDefault` / `forceTopLevelAsync`（`src/extension/config.ts:8-9`、`src/extension/index.ts:197`、`src/runs/background/top-level-async.ts:1-13`） | 把 launch 推向 async | **config 置 false + 扩展仍显式改写** | `forceTopLevelAsync` 只会把顶层 `async` 改成 `true`，没有反向开关（§8） |
+| 4 | `action:"schedule"`（+`schedule`/`scheduleName`，`schemas.ts:291-292`；`subagent-executor.ts:3978-3987`；开关 `src/runs/background/scheduled-runs.ts:70`） | 定时、总是 async、fresh context | **阻止** + `scheduledRuns.enabled:false` | 无法改写成同步（定时语义本身依赖后台进程） |
+| 5 | `action:"resume"`（`subagent-executor.ts:3907`；`src/runs/background/async-resume.ts`） | 复活 async/暂停的子代理 | **阻止** | 目标就是后台 run；改写会改变调用含义 |
+| 6 | `action:"steer"`（`subagent-executor.ts:3910-3974`，默认带 pause-and-revive 恢复） | 给活着的 async run 发指令，失败时复活它 | **阻止** | 同上；本运行不存在可 steer 的 async run |
+| 7 | `action:"append-step"`（`subagent-executor.ts:3975-3977`） | 往运行中的 async chain 追加步骤 | **阻止** | 只对后台链有意义 |
+| 8 | `action:"stop"` / `"interrupt"`（`subagent-executor.ts:3988-4060`） | 控制 async/前台 run | **阻止** | 控制面只作用于后台/在途 run；前台等待由 `timeoutMs` 保证 |
+| 9 | watchdog 动作 `watchdog.status/check/configure/recommend-model`（`src/watchdog/tool-actions.ts:154`；`subagent-executor.ts:3690-3708`） | 诊断/改写 watchdog 设置（可写 user/project settings） | **阻止** + settings 关 watchdog | 整面关闭；`configure` 还会改配置文件，不放进模型可写面 |
+| 10 | `action:"grant-spawn-budget"`（`subagent-executor.ts:3709-3772`） | 提高 session 派发上限（交互确认） | **阻止** | 无 UI 确认；上限由配置固定 |
+| 11 | agent/chain 管理动作 `create/update/delete/eject/disable/enable/reset`（`src/agents/agent-management.ts:1152-1165`） | 运行中改写 agent 定义 | **阻止**（只读 `list/get/models` 放行） | 避免运行中改写 `PI_CODING_AGENT_DIR/agents`；`update/delete` 能改掉本次 researcher |
+| 12 | `subagent_wait` 工具（`src/runs/background/wait-tool.ts:8`，注册 `src/extension/index.ts:460`） | 等待后台作业 | **阻止** + `waitTool.enabled:false` | 本运行没有后台作业；留着只会让模型白等一轮 |
+| 13 | detached 子进程本体（`src/runs/background/async-execution.ts:451-460`：`detached:true`、`env: {...process.env}`） | 脱离 pi 进程的子进程 | 由 #1-#3 使其不可达 | 前台运行不经过这条路径 |
+| 14 | intercom/父子监督通道（`src/intercom/intercom-bridge.ts:77-80` 默认 `mode:"always"`；`src/intercom/native-supervisor-channel.ts:295/307/636-637`） | 子代理↔父进程的额外通道 | **config `intercomBridge.mode:"off"`** | 前台同步调用不需要跨进程通道 |
+| 15 | 嵌套派发（子代理再派子代理）：深度检查 `src/shared/types.ts:1794-1799`，拒绝点 `subagent-executor.ts:4086-4094` | 递归委派 | **`maxSubagentDepth:1`** + researcher 的 `tools` 白名单不含委派工具（`src/runs/shared/pi-args.ts:289` 把 frontmatter `tools` 变成 `--tools`） | 双层：工具面先拿不到，深度上限兜底 |
+| 16 | `share: true`（`schemas.ts` 单 agent overrides；`src/runs/foreground/execution.ts` 的 `shareEnabled`） | 把子代理会话上传到 GitHub Gist | **阻止** | 会话内容离开本 run 目录，超出宿主的脱敏与目录边界 |
+| 17 | `worktree: true`（`schemas.ts:240/307`；`src/runs/shared/worktree.ts:173-175` 默认基目录 `os.tmpdir()`） | 在 run 目录外创建 git worktree | **阻止** | 生命周期不由本 run 回收路径保证，且落在工作区外 |
+| 18 | `cwd` / `sessionDir` / `output` / `chainDir` 路径参数（`schemas.ts:135/157/188/218/315`；chainDir 默认 `src/shared/settings.ts:174-176` = `CHAIN_RUNS_DIR`，即 OS 临时目录） | 把读写/产物放到工作区外 | **阻止**（工作区外）或 **改写**（`chainDir` 固定为 `<workspace>/.pi-subagents/chain-runs`） | 宿主只对本 run 工作区做收尾脱敏与目录边界保护（architecture.md §6.1） |
+| 19 | **不在工具面上的入口**：pi-subagents 注册的扩展命令（`src/slash/slash-commands.ts:1181-1340`：`/run [--bg]`、`/chain [--bg]`、`/parallel`、`/subagents-detach`、`/subagents-stop`、`/subagents-fleet`、…） | 用户输入（RPC `prompt`）直接执行的扩展命令 | **未覆盖（已知）** | pi 先派发扩展命令、后触发 `input` 事件（`docs/rpc-commands.md`：extension command “executes immediately”），`tool_call` 钩子拿不到；见 §10.4 |
+
+判定与常量都在 `agent/extensions/subagent-foreground-guard.ts`；单测
+`tests/extensions/subagent-foreground-guard.test.mjs` 对每一行都有正反例（含 handler 异常时阻止）。
+
+### 10.2 extension config 逐项取值（`agent/extensions/subagent/config.json`）
+
+pi-subagents 从 `<PI_CODING_AGENT_DIR>/extensions/subagent/config.json` 读扩展配置
+（`src/extension/config.ts:8-9`，`PI_CODING_AGENT_DIR` 解析见 `src/shared/utils.ts:95-100`）。
+该目录没有 `index.ts`/`index.js`，pi 的扩展发现不会把它当成扩展加载（只在模板里当配置交付；
+加载冒烟确认没有 Tool conflicts / extension_error）。
+
+| 键 | 取值 | 作用与理由 |
+|---|---|---|
+| `asyncByDefault` | `false` | 默认不推向 async；模型显式 `async:true` 仍由 #1 的守卫改写 |
+| `forceTopLevelAsync` | `false` | 关掉“顶层强制 async” |
+| `waitTool` | `{"enabled": false}` | `subagent_wait` 不再阻塞等待（工具本身仍注册，由 #12 阻止调用） |
+| `scheduledRuns` | `{"enabled": false}` | 关掉定时 run；`action:"schedule"` 另被 #4 阻止 |
+| `intercomBridge` | `{"mode": "off"}` | 关掉默认 `always` 的 intercom 桥（#14） |
+| `maxSubagentDepth` | `1` | 顶层 depth=0 可派，子代理 depth=1 被拒 → 子代理不得再派（#15） |
+| `globalConcurrencyLimit` | `4` | 与前台 `tasks` 并行的预期规模一致（2–4 个 researcher） |
+| `maxSubagentSpawnsPerSession` | `8` | 单 run 派发次数上限，防止失控扇出 |
+| `parallel` | `{"concurrency": 4}` | 并行任务并发度上限 |
+| `artifactDir` | `"project"` | 产物落 `<workspace>/.pi-subagents/artifacts`（`src/shared/artifacts.ts:6/20-40`），在工作区内 → 被收尾脱敏覆盖 |
+| `proactiveSkillSubagents` | `false` | 关掉“按 skill 主动推荐子代理”的提示（默认是开的：`src/agents/proactive-skills.ts:48-52`） |
+| `control` | `{"enabled": false}` | 关掉后台注意力提示/通知面 |
+
+watchdog 不在这个文件里：它读 `<PI_CODING_AGENT_DIR>/settings.json` 的 `subagents.watchdog`
+（`src/watchdog/settings.ts:384-389/422-424`）。`agent/settings.json` 因此显式写
+`subagents.watchdog.{enabled,main.enabled,children.enabled} = false`（默认本来关闭，
+见 `src/watchdog/settings.ts:71-72`；显式写入防止任何一处被打开）。同一份 settings.json 的
+`packages` 现在同时声明两个精确 pin（`npm:pi-web-access@0.31.0`、`npm:pi-subagents@0.40.0`），
+与两个 Dockerfile 的 ARG 由 `tests/test_repository_boundaries.py` 卡住一致。
+
+### 10.3 agent 定义的发现路径与优先级
+
+pi-subagents 从 `<PI_CODING_AGENT_DIR>/agents` 读 user 作用域定义（`src/agents/agents.ts:1646-1651`，
+`getAgentDir()` 优先 `PI_CODING_AGENT_DIR`）。渲染模板因此把 `agents` 加进 `TEMPLATE_ENTRIES`
+（`host/pi_glink/kernel/agent_env.py`），三个面都会拿到 `pi-agent/agents/researcher.md`。
+
+发现范围与优先级（`discoverAgents` + `mergeAgentsForScope`，`src/agents/agent-selection.ts:12-24`）：
+
+1. builtin（包自带 `agents/`，含一个同名 `researcher`）→ 2. package → 3. **user**（本项目渲染的
+   `PI_CODING_AGENT_DIR/agents`，以及 `~/.agents` 与 `PI_SUBAGENT_EXTRA_AGENT_DIRS`）→ 4. project
+   （工作区最近 `.pi/agents`、`.agents`）。同名后者覆盖前者：**本仓的 `researcher` 覆盖包内建的
+   同名定义**。`agentScope` 默认 `both`，所以工作区里若出现 `.pi/agents/researcher.md` 也会覆盖
+   本仓定义——本仓的提示词不写这种文件，作为已知发现事实记录在这里。
+
+researcher 的 `tools` 白名单（`read,bash,write,edit,web_search,fetch_content,get_search_content`）
+会被 `--tools` 交给子进程（`src/runs/shared/pi-args.ts:289`），所以子代理既没有委派工具，也没有
+工作台之外的工具；`systemPromptMode` 对自定义 agent 默认 `replace`，子代理的系统提示就是
+`researcher.md` 正文（不继承主 run 的 `--append-system-prompt`）。
+
+### 10.4 已知未覆盖项与残留风险（如实记录）
+
+1. **扩展命令面**（#19）：`/run --bg`、`/chain --bg`、`/subagents-detach` 等由用户输入直接执行，
+   `tool_call` 钩子不可达；pi 的 `input` 事件在扩展命令派发之后才触发，扩展也没有注销他扩展命令的
+   API。仅有模型工具面的强制前台保证，用户输入面的同名能力仍可发起后台 run（同 sandbox 内、无新增
+   权限，但生命周期不随主 run 取消/超时收口）。
+2. **子代理会话文件的收尾脱敏**：前台子进程默认把会话写到
+   `<run 会话目录>/<父会话名>/run-N/session.jsonl`（`subagent-executor.ts:4233-4253`、`4267-4269`；
+   基目录来自 `src/extension/index.ts:86-93`）。它在本 run 目录内，但宿主收尾只脱敏
+   **本 run 自己那个** `.jsonl`（`kernel/runner.py::_sanitize_session`），子代理会话文件不在覆盖范围。
+   工作区内的 `.pi-subagents/`（artifacts/chain-runs）会随工作区清扫被脱敏。
+3. **未做真实 run 效果验证**：本任务只有离线单测与无模型加载冒烟；真实模型/检索下的前台
+   `tasks` 并行、取消传播、事件投影顺序与容器面（Docker/E2B）行为未验证。
+4. **容器 pi 版本差异**：本机加载冒烟用 pi 0.87.1，镜像/模板内是 0.86.1；`tool_call` 钩子与
+   `getAllTools` 等 API 两版都覆盖本次用到的部分，但未在 0.86.1 上跑同一冒烟（未修改镜像）。
+5. **镜像守卫未覆盖 pi-subagents**：两个镜像无条件安装它（ARG pin），但
+   `/opt/pi-packages/check-packages.sh` 的 `for pkg in pi-web-access;` 不含它；旧镜像/被删包时
+   pi 会静默跳过该本地包（缺的是子代理能力，主 run 仍可自己取证）。本任务禁改 Dockerfile，
+   缺口固定在 `tests/test_kernel_docker_env.py`。
