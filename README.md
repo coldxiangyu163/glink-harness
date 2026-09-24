@@ -226,10 +226,11 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   或只作为无凭据的租户登记。三件套缺任一、或把 `shared` 用在非多租户模式，宿主一律拒绝启动，
   绝不静默回退 `tenant` 或 `local`。
 - **执行隔离**：SaaS 部署首选 `LOCAL_WEB_EXECUTOR=e2b`（Docker 同样允许；`inproc` 在两种策略
-  下都被拒绝）。共享 key 仍只经每个 run 的运行期 `auth.json`（0600，随沙箱销毁）交付，不进沙箱
-  进程环境、命令行、页面或事件/报告；每 run 脱敏边界包含共享 key 与宿主已知秘密，
-  `redactor_for_record` 在 `shared` 下走宿主/共享边界，不会因租户条目没有 key 而漏脱敏。
-  这仍是回显保护 + 沙箱执行隔离，不承诺 key 不可能被宿主可读、工具回显或网络外传。
+  下都被拒绝）。共享 key 仍只经每个 run 的运行期 `auth.json`（0600）交付：不进沙箱进程环境、
+  命令行、页面或事件/报告，E2B 面随沙箱销毁；宿主运行期目录内的 0600 副本与工具回显仍是既有
+  残留面。每 run 脱敏边界包含共享 key 与宿主已知秘密，`redactor_for_record` 在 `shared` 下走
+  宿主/共享边界，不会因租户条目没有 key 而漏脱敏。这仍是回显保护 + 沙箱执行隔离，不承诺 key
+  不可能被宿主可读、工具回显或网络外传。
 - **部署最小步骤（accounts + shared + e2b）**：配置 `E2B_API_KEY`、共享模型三件套与（可选）
   `PI_GLINK_WEB_SEARCH_KEY`；开启 `PI_GLINK_TENANCY=multitenant`、`PI_GLINK_AUTH_MODE=accounts`、
   `PI_GLINK_MODEL_CREDENTIALS=shared`、`LOCAL_WEB_EXECUTOR=e2b`，并指定仓库外的 0700 账号库目录；
