@@ -215,7 +215,7 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 |---|---|---|---|
 | 内核进程位置 | 宿主机器 | 一次性容器 | 云沙箱 |
 | 协议 | `--mode rpc`（双向 JSONL） | `--mode rpc`（跨容器 stdio） | `--mode json`（单向流） |
-| 事件时序 | 实时 | 实时 | **run 结束后回放**（SDK 无 stdout 回调，见下） |
+| 事件时序 | 实时 | 实时 | 实时（命令 stdout `tee` 到 JSONL 后逐 LF 行投递；断流按文件补齐，见 §5.2） |
 | 运行时来源 | 宿主安装的 Node v24.16.0 / pi | 镜像自包含（`pi-glink-worker:latest`，node v24.21.0 + pi 0.86.1；镜像名在启动时冻结） | 模板自包含（`pi-glink-worker`，node v24.21.0 + pi 0.86.1） |
 | 运行期配置 | `runs/<id>/pi-agent`（本 run 独占） | 同目录挂到 `/config` | 同一目录整棵上传到沙箱 `/home/user/config` |
 | 工作区 | `<data>/workspaces/<runId>` | 同左（挂到 `/workspace`） | 沙箱内 `/home/user/workspace`，结束后拉回宿主 |
@@ -267,12 +267,21 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 
 **多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
 
-**已知差异（如实记录）**：E2B SDK 2.x 的 `commands.run(background=True, on_stdout=…)`
-回调实测不触发，因此沙箱把事件写入 `/home/user/events.jsonl`，宿主在 run 结束后一次性
-回放——事件的顺序、词汇与另两面一致，差别是**非实时**。沙箱内的 JSONL 按 LF 分帧
-（与 RPC 面共用同一语料验证：合法 JSON 字符串里的 U+2028/U+2029 不得拆帧）；配置交付带有
-`(相对路径, sha256)` 清单，`AGENTS.md`、`settings.json`、`extensions/`、`skills/`、`prompts/`
-与生成文件都按同一路径语义送达。详见 `docs/evidence/e2b-run.txt`。
+**事件时序（GLINK-E2B-LIVE-01 更正）**：原记录称「E2B SDK 2.x 的
+`commands.run(background=True, on_stdout=…)` 回调实测不触发，因此事件只能在 run 结束后回放」——
+这是**用法误判**：`background=True` 的重载不消费 `run()` 上的回调（类型即 `None`），它返回的
+`CommandHandle` 才是流式接口（`__iter__` 逐块产出 stdout/stderr/pty，`wait(on_stdout=…)` 逐块回调），
+而当时 stdout 又被重定向进文件，本就没有数据可流。现在沙箱命令把 pi 的 stdout 同时 `tee` 到
+`/home/user/events.jsonl`，宿主在命令运行期间迭代 handle，按 LF 拆出完整行立即经
+`parse_json_stream_line` → `on_frame`（沿用 `strip_trailing_cr`；合法 JSON 字符串里的
+U+2028/U+2029 不拆帧，与 RPC 面共用 `tests/fixtures/lf-framing.json` 语料）。「已送出」以
+**完整行数**计：正常结束时文件与流一致、不重复投递；流中途断开（未收到 end）不算 run 失败，
+宿主等命令结束后（命令在管道后把退出码写入 `/home/user/pi-exit-code.txt`）只从文件补发该计数
+之后的帧。非零退出码由 SDK `CommandExitException` 映射为 `kernel_exit` + stderr tail，不再退化成
+`execution_error`。宿主侧离线验证已完成（fake handle 分块推送：行跨块/UTF-8 跨块、断流补齐、
+取消、非零退出码、命令字符串）；**真实 E2B 沙箱的实时性尚未验收**。沙箱内的 JSONL 按 LF 分帧；
+配置交付带有 `(相对路径, sha256)` 清单，`AGENTS.md`、`settings.json`、`extensions/`、`skills/`、
+`prompts/` 与生成文件都按同一路径语义送达。详见 `docs/evidence/e2b-run.txt` 末尾更正注记。
 
 同一个适配器显式传 `commands.run(..., timeout=<沙箱寿命>)`：SDK 默认值是命令累计运行 60 秒，
 而真实研究 run 是分钟级，遗留默认会把内核在沙箱仍存活时杀掉（run 以 `execution_error` 结束于

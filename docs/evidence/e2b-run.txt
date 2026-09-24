@@ -144,3 +144,15 @@ turn_finished · turn_started · usage_reported
   产出        report.md 前两行：v24.21.0 / 0
   结论        沙箱 Node 与 Dockerfile 固定的 `node:24.21.0-bookworm-slim` 一致；进程环境无模型 key。
   说明        E2B 模板未重建（覆盖既有 tag 需先确认）；现有模板实测 Node v24.21.0 已与固定版本一致。
+
+
+更正注记（GLINK-E2B-LIVE-01）
+------------------------------
+本文「已知差异 2. 事件时序」的结论已被更正：e2b 2.x 的
+`commands.run(background=True, on_stdout=…)` 回调不触发是**用法误判** ——
+background=True 的重载不消费 `run()` 上的回调（类型即 None），流式接口是它返回的
+`CommandHandle`（`__iter__` 逐块产出 stdout/stderr/pty，`wait(on_stdout=…)` 逐块回调），
+且当时 pi 的 stdout 被重定向进文件，本就没有数据可流。宿主现已在命令运行期间迭代
+handle，把 pi 的 stdout 同时 `tee` 到 `/home/user/events.jsonl`，按 LF 逐行实时投递；
+流中途断开时按文件补发「已送出行数」之后的帧（命令在管道后写退出码标记文件），
+不漏不误。宿主侧离线验证完成；真实 E2B live 实时性待另行授权复验。

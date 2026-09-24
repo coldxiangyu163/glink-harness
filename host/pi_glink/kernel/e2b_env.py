@@ -27,22 +27,37 @@ relative paths the in-process and Docker faces use. The upload records a manifes
 of ``(relative path, sha256)`` so the delivery is verifiable instead of "the
 current directory happened to be empty".
 
-**Known limitation (honest, not papered over).** The E2B SDK 2.x does not fire
-its stdout callback for ``commands.run(background=True)``, so the sandbox writes
-its event stream to a file and the host replays it after the command settles.
-The order and vocabulary match the other faces; the difference is that this face
-is **not live**. See ``docs/architecture.md`` §5 and ``docs/evidence/e2b-run.txt``.
+**Live event stream (corrected by GLINK-E2B-LIVE-01).** The SDK's streaming
+interface for a background command is the ``CommandHandle`` returned by
+``commands.run(background=True, …)``: iterating it yields ``(stdout, stderr,
+pty)`` chunks while the command runs, and ``CommandHandle.wait(on_stdout=…)``
+delivers them to a callback. ``background=True`` ignores callbacks passed to
+``run()`` itself, which is why the earlier face concluded no callback fires and
+replayed a file after the command settled — a usage misjudgment, since stdout
+was also redirected into that file and there was nothing to stream. The sandbox
+command now pipes pi's stdout through ``tee`` into ``/home/user/events.jsonl``:
+the same bytes reach the host live *and* remain a complete file. The host
+projects every complete LF-framed record as it arrives, and when the stream
+drops before an end event it waits for the command to finish (the command
+writes its exit code to ``/home/user/pi-exit-code.txt`` after the pipeline) and
+delivers only the records the stream had not handed over — dropping neither a
+frame nor a duplicate. Host-side streaming and recovery are covered by the
+regressions; real-sandbox live timing is not yet validated. See
+``docs/architecture.md`` §5 and §5.2.
 """
 
 from __future__ import annotations
 
 import base64
+import codecs
 import hashlib
 import json
 import re
 import shutil
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from ..artifacts import ArtifactError, ArtifactTree
 from ..config import ConfigError, HostConfig
@@ -55,9 +70,11 @@ SANDBOX_CONFIG = f"{SANDBOX_HOME}/config"
 SANDBOX_WORKSPACE = f"{SANDBOX_HOME}/workspace"
 SANDBOX_SESSIONS = f"{SANDBOX_HOME}/sessions"
 REPORT_FILENAME = "report.md"
-#: The sandbox writes its JSON event stream here (see module docstring).
+#: The sandbox tees its JSON event stream here (see module docstring) and
+#: records the pipeline's exit code in the marker file once it finishes.
 _EVENTS_FILE = f"{SANDBOX_HOME}/events.jsonl"
 _STDERR_FILE = f"{SANDBOX_HOME}/pi-stderr.txt"
+_EXIT_FILE = f"{SANDBOX_HOME}/pi-exit-code.txt"
 #: One uploaded config file / recovered artifact may not exceed this.
 UPLOAD_MAX_BYTES = 8 * 1024 * 1024
 ARTIFACT_MAX_BYTES = 32 * 1024 * 1024
@@ -65,6 +82,65 @@ ARTIFACT_MAX_BYTES = 32 * 1024 * 1024
 
 class SandboxError(RuntimeError):
     """Raised when the sandbox cannot be created or the run cannot start."""
+
+
+class LFLineFramer:
+    """Incremental LF-only framing for the streamed event records.
+
+    pi writes strict JSONL: records end with LF (optionally preceded by CR),
+    while U+2028/U+2029 are ordinary characters *inside* a JSON string and must
+    not split a record (``kernel/framing.py``). Chunk boundaries are arbitrary
+    and may fall inside a multi-byte UTF-8 character, so bytes run through one
+    incremental decoder and the trailing partial record is kept for the next
+    chunk. That trailing piece is finally supplied by the events file (see
+    :meth:`E2BSandboxClient.fetch_event_lines`), never flushed here: that is why
+    a record can be delivered exactly once even when the stream is cut short.
+    """
+
+    def __init__(self) -> None:
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._pending = ""
+
+    def feed(self, chunk: str | bytes) -> list[str]:
+        """Complete records unlocked by ``chunk`` (LF-split, trailing CR kept)."""
+        if isinstance(chunk, (bytes, bytearray, memoryview)):
+            self._pending += self._decoder.decode(bytes(chunk))
+        else:
+            self._pending += chunk
+        parts = self._pending.split("\n")
+        self._pending = parts.pop()
+        return parts
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxRunResult:
+    """Facts about one sandboxed kernel command.
+
+    ``delivered_lines`` counts the complete LF-framed records handed to
+    ``on_line`` — the live stream first, then the file catch-up — and is the
+    exact-once unit the regressions assert. ``stream_error`` is set when the
+    stdout stream ended without an end event; the records are still completed
+    from the file and the exit code from the sandbox marker, so a dropped
+    stream is not a run failure. ``exit_code`` is ``None`` only when the host
+    cancelled the run or the command's ending could not be observed at all.
+    """
+
+    exit_code: int | None
+    stderr_tail: str
+    delivered_lines: int
+    stream_error: str | None = None
+
+
+class _RunCancelled(Exception):
+    """Internal: the host cancelled the run while the sandbox was streaming."""
+
+
+class _SinkFailure(Exception):
+    """Internal: the host frame sink raised; not a recoverable sandbox problem."""
+
+    def __init__(self, original: BaseException) -> None:
+        super().__init__(f"{type(original).__name__}: {original}")
+        self.original = original
 
 
 class E2BSandboxClient:
@@ -210,16 +286,29 @@ class E2BSandboxClient:
         *,
         system_prompt: str = "",
         resume_session: str | None = None,
-    ) -> tuple[int, str]:
-        """Run ``pi --mode json`` once inside the sandbox.
+        on_line: Callable[[str], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> SandboxRunResult:
+        """Run ``pi --mode json`` once inside the sandbox and stream its records.
 
-        The sandbox writes its stdout/stderr to files instead of relying on the
-        SDK's streaming callback: in e2b 2.x, ``commands.run(background=True,
-        on_stdout=…)`` never fires (verified against the SDK), while the command
-        result carries the whole buffer only at the end. Writing a JSONL file and
-        replaying it once the command settles keeps every frame — the trade-off
-        is that this face replays the run *after* it ends rather than live, which
-        ``docs/architecture.md`` records as a known difference.
+        The command pipes pi's stdout through ``tee`` into ``events.jsonl``, so
+        the same bytes arrive on the SDK's stdout stream while the command runs
+        and stay available as a complete file. ``on_line`` receives every
+        complete LF-framed record as soon as its bytes arrive (the handle is the
+        SDK's streaming interface — see the module docstring), and
+        ``delivered_lines`` counts exactly those records.
+
+        The file is the completeness authority, not a second protocol. When the
+        stream drops before an end event, this method does not fail the run: it
+        waits for the command to finish — the command writes its exit code to
+        ``/home/user/pi-exit-code.txt`` after the ``tee`` pipeline — and then
+        delivers ``fetch_event_lines(skip=delivered_lines)``. Records the stream
+        already handed over are never taken from the file again. The SDK's
+        ``commands.connect`` is deliberately not used for that gap: whether a
+        reconnected stream replays output the host already consumed is not
+        specified by the SDK, and a replay would break exact-once delivery; the
+        marker plus the file answer both questions (fell over, and with which
+        exit code) without that ambiguity.
 
         ``timeout`` is passed explicitly: the SDK default is 60 seconds for a
         command's total active time, which would kill every research run while
@@ -233,9 +322,124 @@ class E2BSandboxClient:
             envs=self._model_envs(),
             timeout=self._command_timeout(),
         )
-        result = handle.wait()
-        exit_code = int(getattr(result, "exit_code", 1))
-        return exit_code, self.fetch_stderr_tail()
+        framer = LFLineFramer()
+        delivered = 0
+
+        def cancelled() -> bool:
+            return is_cancelled is not None and is_cancelled()
+
+        def record(raw: str) -> None:
+            """Hand one complete wire record to the sink, CR stripped."""
+            nonlocal delivered
+            delivered += 1
+            if on_line is None:
+                return
+            try:
+                on_line(strip_trailing_cr(raw))
+            except Exception as exc:  # noqa: BLE001 - the sink's failure is fatal
+                raise _SinkFailure(exc) from exc
+
+        def consume(chunk: str | bytes) -> None:
+            for raw in framer.feed(chunk):
+                record(raw)
+
+        try:
+            stream_error: str | None = None
+            iterator = _handle_iterator(handle)
+            if iterator is not None:
+                try:
+                    for stdout, _stderr, _pty in iterator:
+                        if cancelled():
+                            raise _RunCancelled()
+                        if stdout:
+                            consume(stdout)
+                except (_RunCancelled, _SinkFailure):
+                    raise
+                except Exception as exc:  # noqa: BLE001 - recoverable: the file keeps the records
+                    stream_error = f"{type(exc).__name__}: {exc}"
+
+            exit_code: int | None = None
+            if stream_error is None:
+                exit_code, reason = self._wait_for_exit(handle)
+                if exit_code is None:
+                    stream_error = reason
+            if exit_code is None:
+                exit_code = self._wait_for_exit_code(cancelled)
+
+            if cancelled():
+                raise _RunCancelled()
+
+            # File catch-up: exactly the records the live stream did not hand
+            # over (normally none; after a drop, the rest of the run).
+            for raw in self.fetch_event_lines(skip=delivered):
+                record(raw)
+        except _RunCancelled:
+            return SandboxRunResult(exit_code=None, stderr_tail="", delivered_lines=delivered)
+        except _SinkFailure as failure:
+            raise failure.original from None
+
+        return SandboxRunResult(
+            exit_code=exit_code,
+            stderr_tail=self.fetch_stderr_tail(),
+            delivered_lines=delivered,
+            stream_error=stream_error,
+        )
+
+    @staticmethod
+    def _wait_for_exit(handle: Any) -> tuple[int | None, str | None]:
+        """The handle's exit code, or ``(None, reason)`` when the stream ended early.
+
+        The SDK raises ``CommandExitException`` for a non-zero exit code; that
+        is the command's own result, not a stream failure, so it is returned as
+        an exit code and mapped to ``kernel_exit`` by the adapter.
+        """
+        try:
+            result = handle.wait()
+        except Exception as exc:  # noqa: BLE001 - an exit code is still a result
+            code = getattr(exc, "exit_code", None)
+            if isinstance(code, int) and not isinstance(code, bool):
+                return code, None
+            return None, f"{type(exc).__name__}: {exc}"
+        code = getattr(result, "exit_code", None)
+        if isinstance(code, int) and not isinstance(code, bool):
+            return code, None
+        return None, "sandbox command returned no exit code"
+
+    def _wait_for_exit_code(self, cancelled: Callable[[], bool]) -> int | None:
+        """Wait for the command's exit-code marker after its stream was lost.
+
+        The command writes the marker after the ``tee`` pipeline finishes, so
+        its presence is exactly "the command ended and ``events.jsonl`` is
+        complete". The SDK's per-command timeout bounds a command's lifetime, so
+        it bounds this wait too; cancellation ends it immediately because the
+        sandbox is being destroyed and no marker will appear.
+
+        Returns ``None`` when the marker never appeared or is unreadable.
+        """
+        sandbox = self._require_sandbox()
+        deadline = time.monotonic() + max(self._command_timeout(), 1) + 5.0
+        delay = 0.05
+        while time.monotonic() < deadline:
+            if cancelled():
+                return None
+            try:
+                content = sandbox.files.read(_EXIT_FILE)
+            except Exception:  # noqa: BLE001 - not written yet, or sandbox gone
+                content = None
+            if content is not None:
+                text = (
+                    content.decode("utf-8", "replace")
+                    if isinstance(content, bytes)
+                    else str(content)
+                ).strip()
+                if text:
+                    try:
+                        return int(text)
+                    except ValueError:
+                        return None
+            time.sleep(delay)
+            delay = min(delay * 2, 0.5)
+        return None
 
     def _command_timeout(self) -> int:
         """How long the sandboxed kernel command may run, in seconds.
@@ -251,11 +455,23 @@ class E2BSandboxClient:
         return int(self.config.task_timeout_seconds) + 300
 
     def fetch_events(self) -> list[str]:
-        """Return the JSONL records the sandbox wrote for this run.
+        """Return the non-empty JSONL records the sandbox wrote for this run.
+
+        Kept for the replay/regression path; a live run streams through
+        :meth:`run_prompt` and completes through :meth:`fetch_event_lines` with
+        the stream's delivered-line offset.
+        """
+        return [line for line in self.fetch_event_lines() if line.strip()]
+
+    def fetch_event_lines(self, *, skip: int = 0) -> list[str]:
+        """Every LF-framed record after ``skip`` complete lines.
 
         Framing is LF-only (``pi`` documents strict JSONL): ``splitlines`` would
         also split on U+2028/U+2029, tearing a valid JSON string in two and
-        losing both halves.
+        losing both halves. Blank lines are kept, so an index into this list is
+        the same unit the stream framer counts. A final record without LF is
+        still a record: the live stream never terminated it, and this file is
+        the one place that can.
         """
         sandbox = self._require_sandbox()
         try:
@@ -263,11 +479,11 @@ class E2BSandboxClient:
         except Exception:  # noqa: BLE001 - absent stream means no frames
             return []
         text = content.decode("utf-8", "replace") if isinstance(content, bytes) else str(content)
-        return [
-            strip_trailing_cr(line)
-            for line in text.split("\n")
-            if line.strip()
-        ]
+        lines = text.split("\n")
+        if lines and lines[-1] == "":
+            # The final LF terminates the previous record; it is not a record.
+            lines.pop()
+        return [strip_trailing_cr(line) for line in lines[max(skip, 0):]]
 
     def fetch_stderr_tail(self, limit: int = 20) -> str:
         sandbox = self._require_sandbox()
@@ -368,9 +584,19 @@ class E2BSandboxClient:
         ``$(…)`` and non-ASCII text cannot break the command or execute anything:
         the shell only ever sees a base64 alphabet. The command is asserted by
         the adapter tests against exactly those inputs.
+
+        The kernel's stdout is piped through ``tee`` so it reaches the host live
+        *and* lands in ``events.jsonl``; ``stderr`` still goes to its own file.
+        ``set -o pipefail`` keeps a non-zero kernel exit from being masked by
+        ``tee``, and the shell records the pipeline's status in the exit-code
+        marker before exiting with it, so a run whose stream was lost can still
+        be classified (``kernel_exit``) from the sandbox alone.
         """
         encoded_prompt = base64.b64encode(prompt.encode("utf-8")).decode("ascii")
         parts = [
+            # Without pipefail the pipeline status is tee's, turning a failed
+            # kernel into a successful run.
+            "set -o pipefail",
             f"mkdir -p {SANDBOX_CONFIG} {SANDBOX_WORKSPACE} {SANDBOX_SESSIONS}",
             f"cd {SANDBOX_WORKSPACE}",
             f"PROMPT=$(printf '%s' '{encoded_prompt}' | base64 -d)",
@@ -390,7 +616,11 @@ class E2BSandboxClient:
             encoded_system = base64.b64encode(system_prompt.encode("utf-8")).decode("ascii")
             parts.append(f"SYSTEM=$(printf '%s' '{encoded_system}' | base64 -d)")
             pi.extend(["--append-system-prompt", '"$SYSTEM"'])
-        parts.append(f"{' '.join(pi)} \"$PROMPT\" > {_EVENTS_FILE} 2> {_STDERR_FILE}")
+        parts.append(
+            "{ "
+            + f"{' '.join(pi)} \"$PROMPT\" 2> {_STDERR_FILE} | tee {_EVENTS_FILE}; "
+            + f"rc=$?; printf '%s' \"$rc\" > {_EXIT_FILE}; exit \"$rc\"; }}"
+        )
         return " && ".join(parts)
 
 
@@ -408,6 +638,20 @@ def _runtime_manifest(runtime_dir: Path) -> list[tuple[str, bool]]:
             continue
         manifest.append((child.relative_to(runtime_dir).as_posix(), child.is_dir()))
     return manifest
+
+
+def _handle_iterator(handle: Any) -> Iterator[Any] | None:
+    """The SDK's streaming iterator for a background handle, or ``None``.
+
+    ``CommandHandle.__iter__`` yields ``(stdout, stderr, pty)`` chunks while
+    the command runs. A handle without it (an older SDK, or a test double that
+    only models ``wait()``) falls back to ``wait()`` plus the file catch-up
+    instead of failing.
+    """
+    try:
+        return iter(handle)
+    except TypeError:
+        return None
 
 
 def parse_json_stream_line(line: str) -> Mapping[str, Any] | None:

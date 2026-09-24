@@ -99,8 +99,11 @@ HTTPS_PROXY=socks5h://127.0.0.1:1080 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 
 
 ## 5. 未覆盖项与已知限制
 
-1. **E2B 面事件非实时**：E2B SDK 2.x 的 stdout 回调实测不触发，事件在 run 结束后一次性
-   回放（顺序与词汇正确）。见 `e2b-run.txt`。
+1. **E2B 面事件实时性**：原文「E2B SDK 2.x 的 stdout 回调实测不触发，事件在 run 结束后
+   一次性回放」是用法误判；GLINK-E2B-LIVE-01 已更正（流式接口是 `commands.run(background=True)`
+   返回的 `CommandHandle`）：宿主迭代 handle 实时投递，断流时按 `events.jsonl` 补齐。宿主侧
+   离线验证完成，真实 E2B live 实时性尚未验收。见 `e2b-run.txt` 末尾注记与
+   architecture.md §5.2。
 2. **E2B 面会话不持久**：会话文件留在沙箱内，销毁即失，`session_id` 为空。
 3. **版本 pin 差异**：inproc 面已在 pi 0.87.0 验证；Docker 镜像与 E2B 模板仍 pin 0.86.1
    （已实测），按 `docs/pi-boundary.md` §3 重建即可升级，本次未重建。

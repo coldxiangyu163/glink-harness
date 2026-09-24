@@ -55,8 +55,9 @@ LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 scripts/run-local-web.sh   # 用云�
 `/home/user/config/`；不进沙箱进程环境（沙箱内 `env | grep -c OPENAI_API_KEY` 实测 0），随沙箱销毁
 而消失。pi-web-access 凭据随运行期 `web-search.json` 一并上传。交付内容不只几个 JSON：整个运行期目录
 （含 `AGENTS.md`、`extensions/`、`skills/`、`prompts/` 等模板条目）按同一路径语义上传，并记录
-`(相对路径, sha256)` 清单供核验；沙箱内 JSONL 按 LF 分帧（U+2028 不得拆帧）。事件在 run 结束后一次性
-回放（E2B SDK 的 stdout 回调实测不触发），报告会先拉回宿主工作区再校验/脱敏。
+`(相对路径, sha256)` 清单供核验；沙箱内 JSONL 按 LF 分帧（U+2028 不得拆帧）。事件在命令运行期间
+实时投递（宿主迭代 SDK `CommandHandle` 的 stdout 流，同时 `tee` 到沙箱内 JSONL；流中断时按文件补齐，
+不漏不重；真实 E2B live 实时性尚未验收），报告会先拉回宿主工作区再校验/脱敏。
 证据：[docs/evidence/e2b-run.txt](docs/evidence/e2b-run.txt)。
 
 ### Docker 执行面

@@ -116,6 +116,6 @@ ls web/node_modules 2>/dev/null || echo "无前端依赖树（原生 ESM）"
 |---|---|---|
 | `models.json` 的 `baseUrl` / 模型 id 不支持 `$VAR` 插值 | 无法把 endpoint 交给 pi 自己解析 | 宿主渲染本 run 的运行期 `models.json`（`agent_env.py`） |
 | pi 会往配置目录写运行时状态（`auth.json` / `models-store.json`） | 仓库目录会被污染 | 仓库 `agent/` 只作模板；每次 run 渲染到 `runs/<id>/pi-agent/`（先删再拷，凭据缺失则删除旧文件）；`.gitignore` 兜底 |
-| E2B SDK 的 stdout 回调不触发 | E2B 面事件非实时 | 沙箱内写 JSONL、结束后回放（`e2b_env.py`）；差异记在 architecture.md |
+| E2B 后台命令的流式接口是 `CommandHandle`，不是 `commands.run()` 上的回调 | 沿用旧结论会让该面退化为结束后回放 | 命令 stdout `tee` 到 JSONL，宿主迭代 handle 实时投递；断流按文件补齐（`e2b_env.py`，见 architecture.md §5.2） |
 | E2B 会话文件不会自动留存 | 未回收则不能追问 | 销毁前回收单个有界 `.jsonl` 到本 run 专属目录并脱敏；失败时明确拒绝追问 |
 | 模型 key 以文件形式位于本 run 的运行期 `auth.json`（不在进程环境） | 工具可用 `read` 打开并回显 | `env` 类读取已不可行（三面实测 0）；回显被出站脱敏覆盖（含跨 delta 分割，见 architecture.md §3.3/§6.1）；更强隔离用 Docker / E2B 面 |

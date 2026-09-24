@@ -26,7 +26,7 @@ import pytest
 
 from pi_glink.config import build_config
 from pi_glink.events import EventBus
-from pi_glink.kernel import agent_env
+from pi_glink.kernel import agent_env, e2b_env
 from pi_glink.kernel.e2b_env import (
     ARTIFACT_MAX_BYTES,
     E2BSandboxClient,
@@ -120,6 +120,7 @@ class FakeSandbox:
         report: str | None = "# 报告\n\n来自沙箱。\n",
         workspace_files: tuple[str, ...] = ("report.md",),
         events: list[dict[str, Any]] | None = None,
+        events_text: str | None = None,
     ) -> None:
         self.sandbox_id = "fake-sandbox"
         self.exit_code = exit_code
@@ -138,6 +139,8 @@ class FakeSandbox:
             self.readable["/home/user/events.jsonl"] = "\n".join(
                 json.dumps(event) for event in events
             )
+        elif events_text is not None:
+            self.readable["/home/user/events.jsonl"] = events_text
         if report is not None:
             self.readable["/home/user/workspace/report.md"] = report
         self.files = FakeFiles(self)
@@ -678,3 +681,488 @@ def test_recovered_artifacts_are_bounded_and_path_safe(tmp_path: Path) -> None:
     assert any("非法产物名" in failure for failure in failures)
     assert any("上限" in failure for failure in failures)
     client.close()
+
+
+# -- live streaming (GLINK-E2B-LIVE-01) --------------------------------------
+#
+# The e2b 2.x background handle *is* the streaming interface: iterating it
+# yields ``(stdout, stderr, pty)`` chunks while the command runs. The old face
+# was built on the misdiagnosis that no callback fires for
+# ``commands.run(background=True)``, so it redirected stdout to a file and
+# replayed the file once the command settled. These fakes model the real handle
+# contract (chunks, end event, drop without end) and never contact E2B.
+
+_EVENTS_PATH = "/home/user/events.jsonl"
+_EXIT_PATH = "/home/user/pi-exit-code.txt"
+
+
+def _record_lines(records: list[dict[str, Any]]) -> list[str]:
+    """The exact LF-terminated wire records for ``records``."""
+    return [json.dumps(record, ensure_ascii=False) + "\n" for record in records]
+
+
+def _delivered(lines: list[str]) -> list[str]:
+    """The wire records as ``on_line`` sees them: LF/CR removed."""
+    return [line.removesuffix("\n").removesuffix("\r") for line in lines]
+
+
+class FakeCommandExit(Exception):
+    """Stand-in for the SDK's ``CommandExitException`` (carries the code)."""
+
+    def __init__(self, exit_code: int, stderr: str) -> None:
+        super().__init__(f"Command exited with code {exit_code} and error:\n{stderr}")
+        self.exit_code = exit_code
+        self.stderr = stderr
+
+
+class StreamedHandle:
+    """The e2b 2.x ``CommandHandle`` contract: iterate for output, then wait().
+
+    ``drop_after`` makes the stream raise after that many chunks, before the
+    end event, which is the "connection lost without end" case. ``gate_after``
+    blocks after delivering that chunk so a test can observe the run *while the
+    command is running*.
+    """
+
+    def __init__(self, sandbox: "StreamingSandbox") -> None:
+        self.pid = 4242
+        self._sandbox = sandbox
+        self.ended = False
+        self.dropped = False
+
+    def __iter__(self):
+        sandbox = self._sandbox
+        for index, chunk in enumerate(sandbox.stream_chunks):
+            yield chunk, None, None
+            if index == 0:
+                sandbox.stream_started.set()
+            if sandbox.gate_after == index:
+                assert sandbox.released.wait(timeout=10), "the test never released the stream"
+        if sandbox.drop_after is not None and sandbox.drop_after <= len(sandbox.stream_chunks):
+            self.dropped = True
+            raise SandboxError("stream disconnected before the end event")
+        self.ended = True
+
+    def wait(self) -> "_Result":
+        if not self.ended and not self.dropped:
+            for _ in self:
+                pass
+        if self.dropped:
+            # The SDK raises a generic error when the stream ends without an
+            # end event: "Command ended without an end event".
+            raise Exception("Command ended without an end event")
+        if self._sandbox.exit_code != 0:
+            raise FakeCommandExit(
+                self._sandbox.exit_code,
+                str(self._sandbox.readable.get("/home/user/pi-stderr.txt", "")),
+            )
+        return _Result(self._sandbox.exit_code)
+
+
+class StreamingCommands(FakeCommands):
+    def run(
+        self,
+        cmd: str,
+        *,
+        background: bool = False,
+        envs: dict[str, str] | None = None,
+        timeout: float | None = None,
+        **_: Any,
+    ) -> StreamedHandle:
+        self._sandbox.command = cmd
+        self._sandbox.command_envs = envs or {}
+        self._sandbox.command_timeout = timeout
+        return StreamedHandle(self._sandbox)
+
+
+class StreamingSandbox(FakeSandbox):
+    """FakeSandbox whose command streams stdout chunks like the real SDK."""
+
+    def __init__(
+        self,
+        *,
+        events_text: str | None = None,
+        chunks: tuple[str | bytes, ...] = (),
+        exit_code: int = 0,
+        drop_after: int | None = None,
+        gate_after: int | None = None,
+        marker: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(exit_code=exit_code, events_text=events_text, **kwargs)
+        if marker is not None:
+            self.readable[_EXIT_PATH] = marker
+        self.stream_chunks = chunks
+        self.drop_after = drop_after
+        self.gate_after = gate_after
+        self.stream_started = threading.Event()
+        self.released = threading.Event()
+        self.commands = StreamingCommands(self)
+
+    def kill(self) -> None:
+        super().kill()
+        # Killing the sandbox ends the command; a gated stream unblocks.
+        self.released.set()
+
+
+def test_live_frames_reach_the_event_bus_before_the_sandbox_command_ends(
+    tmp_path: Path,
+) -> None:
+    """The behavioural red line: frames must be committed while pi still runs.
+
+    The file-replay mechanism had produced nothing here yet, because every
+    frame only arrived after ``wait()`` returned.
+    """
+    config = make_config(tmp_path)
+    records = [
+        {
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "delta": "第一帧"},
+        },
+        {"type": "session", "id": "live-session"},
+        {"type": "agent_settled"},
+    ]
+    lines = _record_lines(records)
+    sandbox = StreamingSandbox(
+        events_text="".join(lines),
+        chunks=tuple(lines),
+        gate_after=0,
+    )
+    sandbox.session_files = ("live.jsonl",)
+    sandbox.readable["/home/user/sessions/live.jsonl"] = b'{"id":"live-session"}\n'
+    manager, storage = _manager(config, sandbox, tmp_path)
+    record = manager.start("实时投递")
+    try:
+        assert sandbox.stream_started.wait(timeout=10), "the sandbox never streamed a chunk"
+        # The command is still blocked before its final chunk, so nothing has
+        # settled; the first frame must already be committed regardless.
+        assert "assistant_delta" in _event_kinds(storage, record.run_id)
+    finally:
+        sandbox.released.set()
+    final = manager.wait(record.run_id, timeout=30)
+    assert final.status == "finished"
+    assert final.session_id == "live-session", "the streamed session frame still sets the id"
+    assert _event_kinds(storage, record.run_id)[-1] == "run_finished"
+
+
+def test_run_prompt_delivers_lines_while_the_command_is_still_running(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    records = [
+        {"type": "session", "id": "s"},
+        {"type": "agent_settled"},
+    ]
+    lines = _record_lines(records)
+    sandbox = StreamingSandbox(events_text="".join(lines), chunks=tuple(lines), gate_after=0)
+    client = E2BSandboxClient(
+        config,
+        _prepare(config, tmp_path),
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: sandbox,
+    )
+    client.start()
+    outcome: dict[str, Any] = {}
+    seen: list[str] = []
+
+    def drive() -> None:
+        outcome["result"] = client.run_prompt("实时投递", on_line=seen.append)
+
+    worker = threading.Thread(target=drive, daemon=True)
+    worker.start()
+    try:
+        assert sandbox.stream_started.wait(timeout=10), "the stream never delivered a chunk"
+        assert _delivered(seen) == [lines[0].removesuffix("\n")], (
+            "the first record must reach on_line before the end event"
+        )
+    finally:
+        sandbox.released.set()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    assert outcome["result"].exit_code == 0
+    assert _delivered(seen) == _delivered(lines)
+    client.close()
+
+
+def test_lf_framer_splits_on_lf_only_and_survives_byte_boundaries() -> None:
+    framer = e2b_env.LFLineFramer()
+    frame = json.dumps(
+        {"type": "message_update", "delta": "你\u2028好\u2029尾"},
+        ensure_ascii=False,
+    )
+    wire = (frame + "\n" + '{"type": "agent_settled"}\n').encode("utf-8")
+    # Cut inside the multi-byte CJK character: the decoder must reassemble it.
+    cut = wire.index("你".encode("utf-8")) + 1
+    assert framer.feed(wire[:cut]) == []
+    records = framer.feed(wire[cut : wire.index(b"\n") + 1])
+    assert records == [frame], "U+2028/U+2029 inside a JSON string are not separators"
+    assert framer.feed(wire[wire.index(b"\n") + 1 :]) == ['{"type": "agent_settled"}']
+    # CRLF writers leave one CR before the LF; the caller strips it.
+    assert framer.feed('{"type":"x"}\r\n') == ['{"type":"x"}\r']
+
+
+def test_streamed_records_survive_chunk_and_utf8_boundaries(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    records = [
+        {"type": "session", "id": "s"},
+        {
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "delta": "你\u2028好"},
+        },
+        {
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "delta": "跨块"},
+        },
+        {"type": "agent_settled"},
+    ]
+    wire = "".join(_record_lines(records))
+    raw = wire.encode("utf-8")
+    head = raw.index("你".encode("utf-8"))
+    chunks = (raw[: head + 1], raw[head + 1 : head + 4], raw[head + 4 :])
+    sandbox = StreamingSandbox(events_text=wire, chunks=chunks, marker="0")
+    client = E2BSandboxClient(
+        config,
+        _prepare(config, tmp_path),
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: sandbox,
+    )
+    client.start()
+    seen: list[str] = []
+    result = client.run_prompt("分块", on_line=seen.append)
+    client.close()
+
+    assert [json.loads(line) for line in seen] == records
+    assert result.delivered_lines == len(records)
+    assert result.exit_code == 0
+    assert result.stream_error is None
+
+
+def test_a_dropped_stream_is_caught_up_from_the_file_exactly_once(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    records = [
+        {"type": "session", "id": "s"},
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "一"}},
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "二"}},
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "三"}},
+        {"type": "agent_settled"},
+    ]
+    lines = _record_lines(records)
+    sandbox = StreamingSandbox(
+        events_text="".join(lines),
+        chunks=(lines[0], lines[1]),
+        drop_after=2,
+        marker="0",
+    )
+    client = E2BSandboxClient(
+        config,
+        _prepare(config, tmp_path),
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: sandbox,
+    )
+    client.start()
+    seen: list[str] = []
+    result = client.run_prompt("断流补齐", on_line=seen.append)
+    client.close()
+
+    assert seen == _delivered(lines), "every record exactly once, in order"
+    assert result.delivered_lines == len(lines)
+    assert result.exit_code == 0
+    assert result.stream_error, "the drop is still reported as a stream problem"
+    # The same run without streaming delivers the same frames (no duplicate, no loss).
+    assert [json.loads(line) for line in seen] == records
+
+
+def test_a_dropped_stream_waits_for_the_command_then_reads_the_finished_file(
+    tmp_path: Path,
+) -> None:
+    """A drop must not read a half-written file: wait for the command's end."""
+    config = make_config(tmp_path)
+    records = [
+        {"type": "session", "id": "s"},
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "前半"}},
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "后半"}},
+        {"type": "agent_settled"},
+    ]
+    lines = _record_lines(records)
+    # The command is still running at the drop: only its first record exists.
+    sandbox = StreamingSandbox(events_text=lines[0], chunks=(lines[0],), drop_after=1)
+
+    def finish_command() -> None:
+        time.sleep(0.1)
+        sandbox.readable[_EVENTS_PATH] = "".join(lines)
+        sandbox.readable[_EXIT_PATH] = "0"
+
+    finisher = threading.Thread(target=finish_command, daemon=True)
+    finisher.start()
+
+    client = E2BSandboxClient(
+        config,
+        _prepare(config, tmp_path),
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: sandbox,
+    )
+    client.start()
+    seen: list[str] = []
+    result = client.run_prompt("等待结束再补齐", on_line=seen.append)
+    client.close()
+    finisher.join(timeout=10)
+
+    assert seen == _delivered(lines)
+    assert result.exit_code == 0
+
+
+def test_a_final_record_the_stream_never_terminated_comes_from_the_file(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    records = [
+        {"type": "session", "id": "s"},
+        {"type": "agent_settled"},
+    ]
+    lines = _record_lines(records)
+    unterminated = lines[1].removesuffix("\n")
+    sandbox = StreamingSandbox(
+        events_text=lines[0] + unterminated,
+        chunks=(lines[0],),
+        drop_after=1,
+        marker="0",
+    )
+    client = E2BSandboxClient(
+        config,
+        _prepare(config, tmp_path),
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: sandbox,
+    )
+    client.start()
+    seen: list[str] = []
+    result = client.run_prompt("末行无换行", on_line=seen.append)
+    client.close()
+
+    assert [json.loads(line) for line in seen] == records
+    assert result.delivered_lines == len(records)
+
+
+def test_cancel_during_a_live_stream_stops_delivery(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    records = [
+        {"type": "session", "id": "s"},
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "已送达"}},
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "不应送达"}},
+        {"type": "agent_settled"},
+    ]
+    lines = _record_lines(records)
+    sandbox = StreamingSandbox(
+        events_text="".join(lines),
+        chunks=tuple(lines),
+        gate_after=1,
+        marker="0",
+    )
+    manager, storage = _manager(config, sandbox, tmp_path)
+    record = manager.start("取消实时流")
+    assert sandbox.stream_started.wait(timeout=10), "the sandbox never streamed"
+    assert manager.stop(record.run_id).accepted is True
+
+    final = manager.wait(record.run_id, timeout=30)
+    assert final.status == "cancelled", final.error
+    assert sandbox.killed is True, "a cancelled stream still kills the sandbox"
+    kinds = _event_kinds(storage, record.run_id)
+    assert kinds[-1] == "run_cancelled"
+    log = storage.events_path(record.run_id).read_text(encoding="utf-8")
+    assert "已送达" in log, "frames delivered before the cancel stay"
+    assert "不应送达" not in log, "no frame may be delivered after the cancel"
+
+
+def test_a_dropped_stream_run_matches_a_full_replay_frame_for_frame(tmp_path: Path) -> None:
+    records = [
+        {"type": "session", "id": "s"},
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "一"}},
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "二"}},
+        {"type": "agent_settled"},
+    ]
+    lines = _record_lines(records)
+    config = make_config(tmp_path)
+    baseline_manager, baseline_store = _manager(config, FakeSandbox(events=records), tmp_path)
+    baseline = baseline_manager.start("完整回放")
+    baseline_final = baseline_manager.wait(baseline.run_id, timeout=30)
+    assert baseline_final.status == "finished"
+    baseline_kinds = _event_kinds(baseline_store, baseline.run_id)
+
+    sandbox = StreamingSandbox(events_text="".join(lines), chunks=(lines[0],), drop_after=1, marker="0")
+    manager, storage = _manager(config, sandbox, tmp_path)
+    record = manager.start("断流补齐")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final.status == "finished", final.error
+    assert _event_kinds(storage, record.run_id) == baseline_kinds, (
+        "the catch-up must neither lose nor repeat a frame"
+    )
+
+
+def test_nonzero_exit_is_reported_as_an_exit_code_not_a_stream_error(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    records = [{"type": "agent_settled"}]
+    lines = _record_lines(records)
+    sandbox = StreamingSandbox(events_text="".join(lines), chunks=tuple(lines), exit_code=3, marker="3")
+    sandbox.readable["/home/user/pi-stderr.txt"] = "pi exploded\n"
+    client = E2BSandboxClient(
+        config,
+        _prepare(config, tmp_path),
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: sandbox,
+    )
+    client.start()
+    result = client.run_prompt("强制失败", on_line=lambda line: None)
+    client.close()
+
+    assert result.exit_code == 3
+    assert "pi exploded" in result.stderr_tail
+
+
+def test_a_nonzero_sandbox_exit_is_kernel_exit_not_execution_error(tmp_path: Path) -> None:
+    """The SDK raises ``CommandExitException`` for a non-zero command exit."""
+    config = make_config(tmp_path)
+    lines = _record_lines([{"type": "agent_settled"}])
+    sandbox = StreamingSandbox(events_text="".join(lines), chunks=tuple(lines), exit_code=7, marker="7")
+    sandbox.readable["/home/user/pi-stderr.txt"] = "sdkerror\n"
+    manager, storage = _manager(config, sandbox, tmp_path)
+    record = manager.start("非零退出码")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final.status == "failed"
+    assert final.stop_reason == "kernel_exit", final.error
+    assert final.error is not None and "exit" in final.error.lower()
+    assert "sdkerror" in final.error
+    assert "execution_error" not in (final.error or "")
+    assert _event_kinds(storage, record.run_id)[-1] == "run_failed"
+
+
+def test_sandbox_command_streams_stdout_and_records_the_pipeline_exit_code(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    client = E2BSandboxClient(
+        config,
+        _prepare(config, tmp_path),
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: FakeSandbox(),
+    )
+    prompt = 'echo "$(rm -rf /)" `whoami` \'quote\' \\ backslash\n第二行 \u2028 line'
+    command = client._command(prompt, "系统提示 with 'quotes' and $vars")  # noqa: SLF001
+
+    assert command.startswith("set -o pipefail && "), "a pipeline must not swallow pi's exit code"
+    assert "| tee /home/user/events.jsonl" in command, "stdout must stream *and* persist"
+    assert "2> /home/user/pi-stderr.txt" in command
+    assert 'rc=$?' in command and "> /home/user/pi-exit-code.txt" in command
+    assert 'exit "$rc"' in command, "the command's own exit code must survive the marker write"
+    # The base64 contract is unchanged: no prompt text reaches the shell line.
+    assert prompt not in command
+    assert "$(rm -rf /)" not in command
+    assert "`whoami`" not in command
+    assert f"'{base64.b64encode(prompt.encode('utf-8')).decode('ascii')}'" in command

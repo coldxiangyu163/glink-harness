@@ -55,7 +55,7 @@ from typing import Any, Callable, Mapping
 
 from ..config import HostConfig
 from .agent_env import AgentRuntime
-from .e2b_env import E2BSandboxClient, parse_json_stream_line
+from .e2b_env import E2BSandboxClient, SandboxError, parse_json_stream_line
 from .rpc import PiRpcClient, PiRpcError
 
 logger = logging.getLogger("pi_glink.kernel.execution")
@@ -350,7 +350,15 @@ class RpcExecutionAdapter(ExecutionAdapter):
 
 
 class E2BSandboxExecutionAdapter(ExecutionAdapter):
-    """pi inside an E2B sandbox (single-shot JSON stream, replayed on settle)."""
+    """pi inside an E2B sandbox, streaming its single-shot JSON event stream.
+
+    The sandbox kernel runs ``pi --mode json`` once; its stdout is teed inside
+    the sandbox so the host can project complete LF-framed records while the
+    command runs (the SDK's background ``CommandHandle`` is the streaming
+    interface). The file is the completeness authority: a stream that drops
+    before an end event is recovered from the file plus the sandbox's
+    exit-code marker, so the run is not lost and no frame is delivered twice.
+    """
 
     kind = "e2b"
 
@@ -422,27 +430,29 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
         client = self._client
         assert client is not None
         try:
-            exit_code, stderr_tail = client.run_prompt(
-                self.spec.prompt, system_prompt=self.spec.system_prompt,
+            result = client.run_prompt(
+                self.spec.prompt,
+                system_prompt=self.spec.system_prompt,
                 resume_session=self.spec.resume_session,
+                on_line=self._deliver_line,
+                is_cancelled=self._cancelled.is_set,
             )
             if self._cancelled.is_set():
                 return
-            for line in client.fetch_events():
-                if self._cancelled.is_set():
-                    return
-                frame = parse_json_stream_line(line)
-                if frame is not None:
-                    if frame.get("type") == "session" and isinstance(frame.get("id"), str):
-                        self._session_id = frame["id"]
-                    self._on_frame(frame)
+            if result.exit_code is None:
+                # The stream was lost and the sandbox never wrote its exit-code
+                # marker: there is no honest way to call this settled.
+                raise SandboxError(
+                    "sandbox command ended without a recoverable exit code: "
+                    f"{result.stream_error or 'unknown'}"
+                )
             if self.spec.expected_session_id and self._session_id != self.spec.expected_session_id:
                 raise PiRpcError("continued session identity did not match the parent")
-            self._outcome.exit_code = exit_code
-            if exit_code != 0:
+            self._outcome.exit_code = int(result.exit_code)
+            if result.exit_code != 0:
                 self._outcome.stop_reason = "kernel_exit"
                 self._outcome.error = (
-                    f"sandbox pi exited with {exit_code}: {stderr_tail[-300:]}"
+                    f"sandbox pi exited with {result.exit_code}: {result.stderr_tail[-300:]}"
                 )
             else:
                 # ``--mode json`` exits after the supplied prompt finishes: a
@@ -455,6 +465,19 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
             self._outcome.error = f"{type(exc).__name__}: {exc}"
         finally:
             self._done.set()
+
+    def _deliver_line(self, line: str) -> None:
+        """Project one LF-framed record — streamed live or caught up from file.
+
+        The session id is captured here, so it is set whether the record
+        arrived on the stream or from the file after a dropped connection.
+        """
+        frame = parse_json_stream_line(line)
+        if frame is None:
+            return
+        if frame.get("type") == "session" and isinstance(frame.get("id"), str):
+            self._session_id = frame["id"]
+        self._on_frame(frame)
 
     def wait(self, *, cancel: Callable[[], bool], deadline: float) -> ExecutionOutcome:
         while True:
