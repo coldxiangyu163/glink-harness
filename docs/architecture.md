@@ -55,7 +55,7 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 | `thinking_delta` | `message_update.thinking_delta` | 思考折叠块（流式） |
 | `assistant_delta` | `message_update.text_delta` | 正文流 |
 | `assistant_message` | `message_end`（权威全文） | 收口后的 Markdown |
-| `tool_started` / `tool_updated` / `tool_finished` | `tool_execution_*` | 工具卡片（含流式输出/错误态） |
+| `tool_started` / `tool_updated` / `tool_finished` | `tool_execution_*` | 工具卡片（含流式输出/错误态）；子代理派发（`subagent`）不做特例，就是普通工具卡片 |
 | `usage_reported` | `turn_end.message.usage` | token 统计（`usage` 为 run 累计，`requestUsage` 为本次请求快照） |
 | `kernel_status` | `extension_error` 等 | 警告提示 |
 | `run_finished` / `run_failed` / `run_cancelled` | 宿主 | 终态、报告入口 |
@@ -351,7 +351,8 @@ U+2028/U+2029 不拆帧，与 RPC 面共用 `tests/fixtures/lf-framing.json` 语
 * **docker / e2b** 把每个命中预装名单的 `npm:` 声明改写为镜像内**本地包路径**
   `/opt/pi-packages/node_modules/<name>`（pi 官方 local package，"Loaded from the resolved path
   without copying"），因此容器/沙箱 run **不再访问 registry、不再每 run 生成 `npm/`**；
-  未列入预装名单的声明原样保留（本仓当前只有 `pi-web-access`；`pi-subagents` 只预装不加载）。
+  未列入预装名单的声明原样保留（本仓当前两个 `npm:` 声明都已列名：`pi-web-access` 与
+  `pi-subagents`）。
 
 版本一致性由发布物与仓库测试共同约束：两个 Dockerfile 用 `ARG PI_WEB_ACCESS_VERSION` /
 `ARG PI_SUBAGENTS_VERSION` 精确 pin 并安装到 `/opt/pi-packages`，
@@ -365,6 +366,15 @@ U+2028/U+2029 不拆帧，与 RPC 面共用 `tests/fixtures/lf-framing.json` 语
 语义与其它内核启动失败一致：Docker 面为 `kernel_exit`（退出码 78），E2B 面为 `kernel_exit` +
 stderr tail 里的中文原因。构建、候选 tag、回滚句柄、实测耗时与研究记录的实测事实见
 `docs/evidence/prebaked-packages.txt` 与 `docs/pi-integration-notes.md` §9。
+
+**子代理包（GLINK-SUB-02）**：`pi-subagents` 自本任务起真正加载，并且仍受第 5.3 节的同一套
+机制约束（模板 pin、容器面镜像内路径、版本一致性测试）。0.40.0 没有禁用 async/detached 的
+包开关，产品改用 `agent/extensions/subagent-foreground-guard.ts` 经官方 `tool_call` 钩子把派发
+强制为前台同步（可安全改写就改写，其余阻止；详单见 `docs/pi-integration-notes.md` §10），
+配合 extension config 的最保守取值，使子代理成为主 run 内的同步工具调用。镜像守卫脚本目前
+只检查 `pi-web-access`，这个已知缺口固定在 `tests/test_kernel_docker_env.py`（不受本任务修改
+Dockerfile 的边界约束，缺 `pi-subagents` 只会退化成“没有子代理工具”）。离线的扩展单测与
+无模型加载冒烟不作为真实模型/容器面验收的证据。
 
 ## 6. 凭据流
 
@@ -433,7 +443,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `host/pi_glink/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
 | `host/pi_glink/kernel/` | 接入层 | `rpc` / `framing` / `projection` / `agent_env` / `execution` / `docker_env` / `e2b_env` / `runner` |
 | `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
-| `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`（通用工作约定）、`prompts/deepresearch.md`、扩展位 |
+| `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`（通用工作约定）、`prompts/deepresearch.md`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
 | `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |
 | `docker/` | 执行面 | `Dockerfile.worker`（容器）、`e2b/Dockerfile.e2b`（模板） |
 | `scripts/` | 运维 | 启动、测试、真实 run 冒烟、E2B 模板构建 |
