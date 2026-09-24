@@ -287,6 +287,11 @@ class RunManager:
         multi-tenant mode the parent must belong to the caller's own tenant:
         an unknown, foreign or ownerless parent is refused as ``unknown_run``
         **before** its session, report, status or children are read.
+
+        The follow-up's session snapshot (a bounded file read plus redaction)
+        is taken before the admission lock is entered, so one tenant's
+        follow-up does not serialize every other tenant's admission behind its
+        disk IO; the parent's authoritative state is rechecked inside the lock.
         """
         text = (prompt or "").strip()
         if not text:
@@ -300,10 +305,19 @@ class RunManager:
         # prompt can be stored: a credential pasted into the prompt is masked
         # with the same knowledge the run's own output will be.
         redactor = self._redactor_for(credentials)
+        # Caller holds no lock: the parent gate, the refusal checks and the
+        # session snapshot's file IO happen before admission. The refusals are
+        # re-evaluated inside the lock below, where the seed is consumed, so a
+        # state that changed while the file was being read is still enforced.
+        seed = self._resume_seed(context, parent_run_id, redactor)
 
         with self._lock:
             self._check_admission(context)
-            seed = self._resume_seed(context, parent_run_id, redactor)
+            if parent_run_id is not None:
+                # Authoritative recheck (the snapshot above may have raced a
+                # concurrent follow-up of the same parent): a refusal here
+                # discards the seed, nothing has been written yet.
+                self._resumable_parent(context, parent_run_id)
             run_id = uuid.uuid4().hex[:12]
             workspace = self.config.workspace_root / run_id
             record = self.store.create(
@@ -395,22 +409,22 @@ class RunManager:
             return self.store.list(limit=None)
         return self.store.list_for(context.tenant_id, limit=None)
 
-    def _resume_seed(
-        self,
-        context: TenantContext | None,
-        parent_run_id: str | None,
-        redactor: SecretRedactor,
-    ) -> bytes | None:
-        """Snapshot the sanitized session of an authorized parent run.
+    def _resumable_parent(
+        self, context: TenantContext | None, parent_run_id: str
+    ) -> RunRecord:
+        """The parent a follow-up may resume *now*, or the refusal it has earned.
 
-        The owner gate comes first: nothing of an unknown or other-tenant
-        parent is read before :meth:`_authorized_parent` approved it. The
-        recorded session path is not a capability either — it must be a direct
-        file in that run's own session directory, and the bytes are re-redacted
-        before they can reach the next kernel. Caller holds the admission lock.
+        The owner gate comes first (``unknown_run``): an unknown, foreign or
+        ownerless parent is refused before its status, session, report or
+        children are read. The state refusals then follow in their fixed order:
+        a parent that is not terminal is ``run_busy``, one that already has a
+        follow-up turn is ``stale_run``.
+
+        One admission calls this twice: outside the lock, to fail fast before
+        the parent's session file is read, and inside it, where the decision is
+        authoritative — between the two calls the parent may have gained a
+        follow-up turn.
         """
-        if parent_run_id is None:
-            return None
         parent = self._authorized_parent(context, parent_run_id)
         if parent is None:
             raise FollowupUnavailable("unknown_run")
@@ -421,6 +435,27 @@ class RunManager:
             for item in self._visible_records(context)
         ):
             raise FollowupUnavailable("stale_run")
+        return parent
+
+    def _resume_seed(
+        self,
+        context: TenantContext | None,
+        parent_run_id: str | None,
+        redactor: SecretRedactor,
+    ) -> bytes | None:
+        """Snapshot the sanitized session of an authorized parent run.
+
+        Caller holds no lock. This is the follow-up's file IO — up to
+        ``REPORT_MAX_BYTES`` read, decoded and redacted — which therefore never
+        blocks another admission. The owner gate and the state refusals still
+        run first (:meth:`_resumable_parent`) and are rechecked under the
+        admission lock before the run is created, so the seed handed to the
+        kernel comes from a parent that was authorized when it was read *and*
+        was still resumable when the child was admitted.
+        """
+        if parent_run_id is None:
+            return None
+        parent = self._resumable_parent(context, parent_run_id)
         # The recorded path is not a capability. It must be a direct file in
         # that run's own session directory; ArtifactTree refuses links.
         session_dir = Path(self.config.session_dir) / parent_run_id

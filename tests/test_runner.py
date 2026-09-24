@@ -15,9 +15,15 @@ import pytest
 from pi_glink.config import HostConfig, build_config
 from pi_glink.events import EventBus
 from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.kernel.execution import ArtifactRecovery, CleanupReport, ExecutionOutcome
-from pi_glink.kernel.runner import RunBusy, RunManager
+from pi_glink.kernel.execution import (
+    ArtifactRecovery,
+    CleanupReport,
+    ExecutionOutcome,
+    SessionInfo,
+)
+from pi_glink.kernel.runner import FollowupUnavailable, RunBusy, RunManager
 from pi_glink.store import CANCELLED, FAILED, FINISHED, RunStore
+from pi_glink.tenancy import TenantContext
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
@@ -824,3 +830,138 @@ def test_a_tail_withheld_during_finalization_is_released_before_the_verdict(
     text = "".join(e["payload"]["text"] for e in events if e["type"] == "assistant_delta")
     assert text == "迟到的尾部 O"
     assert events[-1]["type"] == "run_finished"
+
+
+# -- follow-up admission: the snapshot is IO, the fork decision is not ----------
+
+
+class _ResumingAdapter(ScriptedAdapter):
+    """A stand-in kernel that reports the session id the run had to resume."""
+
+    def __init__(self, expected_session_id: str | None) -> None:
+        super().__init__()
+        self._expected_session_id = expected_session_id
+
+    def session_info(self):
+        return SessionInfo({}, session_id=self._expected_session_id)
+
+
+def test_two_concurrent_followups_of_one_parent_admit_exactly_one_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """两个并发追问：一个建立子 run，一个得到 ``stale_run``。
+
+    父会话快照（读取 + 脱敏，上限 32 MiB）在准入锁外完成，所以两个调用者能同时
+    处在快照阶段：下面的 barrier 只有在两人都到达时才放行，锁内读取的第二个调用者
+    永远到不了这里。而“父 run 是否已有后续轮次”的复核与子 run 的建立仍在同一临界区，
+    所以两人都通过锁外检查（此时父 run 确实还没有后续轮次）后，只有一个能建立子 run，
+    另一个必须被权威复核拦下——而不是从同一父 run 分叉出第二轮。
+
+    观测点在多租户面上：本地 ``inproc`` 同一时刻只有一个 run 槽位，第二个追问会在
+    准入处先得到 ``run_busy``，看不到父 run 的权威复核。
+    """
+    secret = "sk-shared-0123456789abcdef"
+    config = make_config(
+        tmp_path,
+        OPENAI_API_KEY=secret,
+        LOCAL_WEB_EXECUTOR="docker",
+        PI_GLINK_TENANCY="multitenant",
+        PI_GLINK_MODEL_CREDENTIALS="shared",
+        PI_GLINK_TENANCY_AUDIENCE="pi-glink-test",
+        PI_GLINK_GATEWAY_SECRET_FILE=str(tmp_path / "gateway-secret"),
+        PI_GLINK_MAX_TENANT_RUNS="2",  # 两个并发追问都进得到锁内复核
+    )
+    store = RunStore(config.data_root / "runs")
+    context = TenantContext(
+        tenant_id="tenant-alpha",
+        user_id="user-a",
+        role="member",
+        audience="pi-glink-test",
+        expires_at=time.time() + 600,
+    )
+    manager = RunManager(config, EventBus(), store)
+    monkeypatch.setattr(
+        "pi_glink.kernel.runner.build_adapter",
+        lambda spec, **kwargs: _ResumingAdapter(spec.expected_session_id),
+    )
+
+    # 父 run：一个已终态、带会话文件的历史轮次（不需要真的执行）。
+    parent_id = "parentrun001"
+    session_dir = config.session_dir / parent_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session_file = session_dir / "parent.jsonl"
+    session_file.write_text(
+        json.dumps({"id": "same-session", "text": f"OPENAI_API_KEY={secret}"}) + "\n",
+        encoding="utf-8",
+    )
+    workspace = config.workspace_root / parent_id
+    workspace.mkdir(parents=True, exist_ok=True)
+    store.create(
+        "第一轮",
+        run_id=parent_id,
+        workspace=workspace,
+        tenant_id=context.tenant_id,
+        creator_user_id=context.user_id,
+    )
+    store.update(
+        parent_id,
+        status=FINISHED,
+        session_id="same-session",
+        session_file=str(session_file),
+        finished_at=time.time(),
+    )
+
+    both_snapshotting = threading.Barrier(2, timeout=10)
+    snapshot = manager._resume_seed  # noqa: SLF001 - the lock boundary under test
+
+    def gated_snapshot(context_, parent_run_id, redactor):
+        seed = snapshot(context_, parent_run_id, redactor)
+        both_snapshotting.wait()
+        return seed
+
+    monkeypatch.setattr(manager, "_resume_seed", gated_snapshot)
+    outcomes: list[tuple[str, str]] = []
+    crashes: list[BaseException] = []
+    collected = threading.Lock()
+
+    def follow_up(index: int) -> None:
+        try:
+            record = manager.start(f"追问 {index}", context, parent_run_id=parent_id)
+        except FollowupUnavailable as refused:
+            with collected:
+                outcomes.append(("refused", refused.code))
+        except BaseException as exc:  # noqa: BLE001 - reported, never hidden
+            with collected:
+                crashes.append(exc)
+        else:
+            with collected:
+                outcomes.append(("admitted", record.run_id))
+
+    threads = [threading.Thread(target=follow_up, args=(index,)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert not crashes, f"两个追问必须能同时在锁外取快照；调用方异常退出: {crashes!r}"
+    admitted = [value for kind, value in outcomes if kind == "admitted"]
+    refused = [value for kind, value in outcomes if kind == "refused"]
+    assert len(admitted) == 1, f"只有一个追问能建立子 run: {outcomes}"
+    assert refused == ["stale_run"], f"另一个必须在锁内复核处被拦下: {outcomes}"
+
+    children = [
+        record
+        for record in store.list_for(context.tenant_id, limit=None)
+        if record.parent_run_id == parent_id
+    ]
+    assert [record.run_id for record in children] == admitted
+    assert children[0].tenant_id == context.tenant_id
+    assert children[0].creator_user_id == context.user_id
+
+    # 被接受的追问照常继续：子 run 拿到的是脱敏后的父会话快照。
+    final = manager.wait(admitted[0], timeout=30)
+    assert final.status == FINISHED and final.session_id == "same-session"
+    seeded_file = config.session_dir / admitted[0] / "continued.jsonl"
+    seeded = seeded_file.read_text(encoding="utf-8")
+    assert secret not in seeded and "[REDACTED]" in seeded
+    assert manager.shutdown(timeout=10) == []
