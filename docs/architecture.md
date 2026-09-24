@@ -372,7 +372,9 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 
 | 路径 | 属于 | 说明 |
 |---|---|---|
-| `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `app` |
+| `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files`；组成根 `app`（服务器与 `create_server`） |
+| `host/pi_glink/web_*.py` | 宿主 HTTP 层 | `web_routes`（路由与 run/health/报告 API）/ `web_sse`（事件流与连接额度）/ `web_security`（身份、会话与请求防护）/ `web_http`（请求体、响应、静态资源、脱敏访问日志）；一个 `HostRequestHandler` 由它们组合而成 |
+| `host/pi_glink/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
 | `host/pi_glink/kernel/` | 接入层 | `rpc` / `framing` / `projection` / `agent_env` / `execution` / `docker_env` / `e2b_env` / `runner` |
 | `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
 | `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`（通用工作约定）、`prompts/deepresearch.md`、扩展位 |
@@ -387,6 +389,12 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 `models.json` 与 `web-search.json`，复制 `agent/` 的可版本化配置，pi 自己往里写 `auth.json` /
 `models-store.json`。仓库里的 `agent/` 只是模板，永远不作为运行目录使用；`pi-agent/` 不共享，
 所以并发 run 不会互写凭据或扩展。
+
+宿主 HTTP 层的职责边界：路由只决定请求含义（`web_routes`），身份与请求防护集中在
+`web_security`，事件流与连接额度在 `web_sse`，字节读写与静态资源在 `web_http`；`app.py` 只做
+组合与生命周期（数据目录锁、租户材料、run 对账、绑定端口、资源台账扫描线程），CLI 入口与
+离线运维子命令在 `cli.py`。拆分是纯结构调整：路由、状态码、载荷与既有导入路径（含
+`pi_glink.app.main` / `load_config` / `_resource_command` 再导出）保持不变。
 
 ## 8. 可重复验证入口
 

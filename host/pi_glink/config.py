@@ -36,6 +36,8 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _DEFAULT_PORT = 7860
 _DEFAULT_MAX_GLOBAL_RUNS = 4
 _DEFAULT_MAX_TENANT_RUNS = 2
+_DEFAULT_MAX_GLOBAL_STREAMS = 64
+_DEFAULT_MAX_TENANT_STREAMS = 16
 _DEFAULT_ASSERTION_MAX_SECONDS = 300
 _DEFAULT_ASSERTION_SKEW_SECONDS = 30
 #: 默认使用本仓库自己的云沙箱模板（含 Node + pi）；FrontierAgent 的
@@ -125,6 +127,12 @@ class HostConfig:
     #: one covers a single tenant; both apply only in multi-tenant mode.
     max_global_runs: int = _DEFAULT_MAX_GLOBAL_RUNS
     max_tenant_runs: int = _DEFAULT_MAX_TENANT_RUNS
+    #: Concurrent SSE connections. The global ceiling covers the whole host; the
+    #: tenant one applies in multi-tenant mode only (local mode has no tenant).
+    #: An over-limit connection is refused with 429 ``stream_limit`` before any
+    #: stream header is written.
+    max_global_streams: int = _DEFAULT_MAX_GLOBAL_STREAMS
+    max_tenant_streams: int = _DEFAULT_MAX_TENANT_STREAMS
     #: Container resource ceilings (Docker face only; the image is never changed).
     docker_cpus: str = "2"
     docker_memory: str = "2g"
@@ -366,6 +374,12 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         ),
         max_global_runs=_integer(values, "PI_GLINK_MAX_GLOBAL_RUNS", _DEFAULT_MAX_GLOBAL_RUNS),
         max_tenant_runs=_integer(values, "PI_GLINK_MAX_TENANT_RUNS", _DEFAULT_MAX_TENANT_RUNS),
+        max_global_streams=_positive_integer(
+            values, "PI_GLINK_MAX_GLOBAL_STREAMS", _DEFAULT_MAX_GLOBAL_STREAMS
+        ),
+        max_tenant_streams=_positive_integer(
+            values, "PI_GLINK_MAX_TENANT_STREAMS", _DEFAULT_MAX_TENANT_STREAMS
+        ),
         docker_cpus=_text(values, "LOCAL_WEB_DOCKER_CPUS", "2"),
         docker_memory=_text(values, "LOCAL_WEB_DOCKER_MEMORY", "2g"),
         docker_pids_limit=_integer(values, "LOCAL_WEB_DOCKER_PIDS_LIMIT", 512),
@@ -434,6 +448,13 @@ def _non_negative_integer(values: Mapping[str, str], key: str, default: int) -> 
     value = _integer(values, key, default)
     if value < 0:
         raise ConfigError(f"{key} 不能为负值；当前 {value}")
+    return value
+
+
+def _positive_integer(values: Mapping[str, str], key: str, default: int) -> int:
+    value = _integer(values, key, default)
+    if value < 1:
+        raise ConfigError(f"{key} 必须为 >= 1 的整数；当前 {value}")
     return value
 
 

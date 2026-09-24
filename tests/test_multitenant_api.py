@@ -1235,6 +1235,73 @@ def test_event_stream_stops_when_the_assertion_expires_during_replay(
     assert elapsed < 4.0, f"流应在断言过期附近结束（实际 {elapsed:.2f}s）"
 
 
+def test_the_per_tenant_stream_budget_is_separate_from_the_global_one(
+    tmp_path: Path, tenant_files: tuple[Path, Path], adapters: AdapterBehavior
+) -> None:
+    """GLINK-HTTP-01: the stream budget is per host and, in this mode, per tenant.
+
+    A tenant at its own ceiling is refused with its own scope, another tenant
+    still streams, and once the host total is reached every tenant is refused
+    with the global scope — always before a single stream header is written.
+    """
+    adapters.settle = False
+    instance = create_server(
+        make_config(
+            tmp_path,
+            tenant_files,
+            PI_GLINK_MAX_TENANT_STREAMS="1",
+            PI_GLINK_MAX_GLOBAL_STREAMS="2",
+        ),
+        docker_probe=lambda _name: (False, "测试替身：不确认释放"),
+    )
+    thread = start_server(instance)
+    try:
+        alpha = assertion("tenant-alpha", "user-a")
+        beta = assertion("tenant-beta", "user-b")
+        alpha_run = start_run(instance, "甲租户流", token=alpha)
+        beta_run = start_run(instance, "乙租户流", token=beta)
+        path_alpha = f"/api/runs/{alpha_run['runId']}/events"
+        path_beta = f"/api/runs/{beta_run['runId']}/events"
+
+        connection = HTTPConnection("127.0.0.1", instance.server_address[1], timeout=15)
+        connection.request("GET", path_alpha, headers={ASSERTION_HEADER: alpha})
+        held = connection.getresponse()
+        try:
+            assert held.status == 200
+            assert held.getheader("Content-Type").startswith("text/event-stream")
+
+            # Alpha is at its own ceiling; the answer is JSON, the scope is
+            # alpha's own and no run id is disclosed.
+            status, content_type, raw = read_stream(instance, path_alpha, token=alpha)
+            assert status == 429
+            assert content_type.startswith("application/json")
+            assert "text/event-stream" not in content_type
+            payload = json.loads(raw)
+            assert payload["error"] == "stream_limit"
+            assert payload["scope"] == "tenant" and payload["limit"] == 1
+            assert alpha_run["runId"] not in raw.decode("utf-8")
+
+            # Beta has its own budget and the host total still has room.
+            status, content_type, body = read_stream(
+                instance, path_beta, token=beta, head_bytes=256
+            )
+            assert status == 200, body
+            assert content_type.startswith("text/event-stream")
+            assert b"event: run_started" in body
+
+            # The host total is now full: beta is refused with the global scope.
+            status, _content_type, raw = read_stream(instance, path_beta, token=beta)
+            assert status == 429
+            payload = json.loads(raw)
+            assert payload["scope"] == "global" and payload["limit"] == 2
+        finally:
+            connection.close()
+        request(instance, f"/api/runs/{alpha_run['runId']}/stop", method="POST", token=alpha)
+        request(instance, f"/api/runs/{beta_run['runId']}/stop", method="POST", token=beta)
+    finally:
+        stop_server(instance, thread)
+
+
 def test_event_stream_replays_the_whole_history_with_a_valid_assertion(
     server: PiGlinkServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:

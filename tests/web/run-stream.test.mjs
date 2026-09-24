@@ -14,6 +14,8 @@ import {
   applyEvent,
   applyEvents,
   createRunModel,
+  createRunSubscription,
+  STREAM_RETRY_DELAYS_MS,
   runSummary,
 } from '../../web/modules/run-stream.mjs';
 import { renderMarkdown } from '../../web/modules/markdown.mjs';
@@ -304,4 +306,99 @@ test('the shipped front-end never parses terminal text', () => {
   for (const forbidden of ['xterm', 'strip-ansi', 'stripansi', '\u001b[', 'escape_code']) {
     assert.ok(!sources.toLowerCase().includes(forbidden), `front-end must not reference ${forbidden}`);
   }
+});
+
+/*
+ * Reconnect policy (GLINK-HTTP-01). The SSE endpoint answers an over-limit
+ * request with 429 stream_limit, and `EventSource` gives up on a non-200
+ * answer without exposing the status; the subscription therefore retries a
+ * bounded number of times instead of reporting a permanent failure at once —
+ * and instead of reconnecting forever.
+ */
+
+function failingSource(readyState = 2) {
+  return {
+    readyState,
+    closed: false,
+    listeners: new Map(),
+    addEventListener(type, handler) {
+      this.listeners.set(type, handler);
+    },
+    close() {
+      this.closed = true;
+      this.readyState = 2;
+    },
+  };
+}
+
+function retryingHarness() {
+  const sources = [];
+  const scheduled = [];
+  const statuses = [];
+  const subscription = createRunSubscription({
+    runId: 'r1',
+    eventsUrl: () => '/api/runs/r1/events',
+    eventSourceFactory: () => {
+      const source = failingSource();
+      sources.push(source);
+      return source;
+    },
+    onStatus: (status) => statuses.push(status),
+    schedule: (callback, delayMs) => {
+      scheduled.push({ callback, delayMs });
+      return scheduled.length;
+    },
+  });
+  return { sources, scheduled, statuses, subscription };
+}
+
+test('a refused stream is retried a bounded number of times, then fails', () => {
+  const h = retryingHarness();
+  assert.equal(h.sources.length, 1, '订阅立刻打开一次');
+  assert.deepEqual(h.statuses, ['connecting']);
+
+  const delays = [];
+  for (let round = 0; round < STREAM_RETRY_DELAYS_MS.length; round += 1) {
+    h.sources.at(-1).onerror();
+    assert.equal(h.statuses.at(-1), 'reconnecting');
+    const pending = h.scheduled.at(-1);
+    delays.push(pending.delayMs);
+    pending.callback();
+    assert.equal(h.sources.length, round + 2, '重试打开一个新连接');
+  }
+  assert.deepEqual(delays, STREAM_RETRY_DELAYS_MS);
+
+  h.sources.at(-1).onerror();
+  assert.equal(h.statuses.at(-1), 'failed', '重试用尽后如实失败');
+  assert.equal(h.scheduled.length, STREAM_RETRY_DELAYS_MS.length, '不得无限重连');
+});
+
+test('a retry that reaches live resets the retry budget', () => {
+  const h = retryingHarness();
+  h.sources[0].onerror();
+  h.scheduled[0].callback();
+  h.sources[1].onopen();
+  assert.equal(h.statuses.at(-1), 'live');
+
+  // A later drop gets the full ladder again.
+  h.sources[1].onerror();
+  assert.equal(h.scheduled[1].delayMs, STREAM_RETRY_DELAYS_MS[0]);
+});
+
+test('closing the subscription cancels a pending retry', () => {
+  const h = retryingHarness();
+  h.sources[0].onerror();
+  assert.equal(h.scheduled.length, 1);
+  h.subscription.close();
+  assert.equal(h.subscription.status, 'closed');
+  h.scheduled[0].callback();
+  assert.equal(h.sources.length, 1, '关闭后不得再打开连接');
+});
+
+test('a dropped connection still reports reconnecting, not failed', () => {
+  const h = retryingHarness();
+  h.sources[0].readyState = 0; // CONNECTING: EventSource retries this itself
+  h.sources[0].onerror();
+  assert.equal(h.statuses.at(-1), 'reconnecting');
+  assert.equal(h.scheduled.length, 0, '不重复调度：浏览器自己会重连');
 });
