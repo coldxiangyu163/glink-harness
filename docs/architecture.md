@@ -171,7 +171,8 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 
 ## 4. run 生命周期
 
-1. `POST /api/runs {prompt, parentRunId?}` → 准入（见下）→ 生成 `runId`，写 `meta.json`（status=running）。`parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
+1. `POST /api/runs {prompt, parentRunId?}` → 准入（见下）→ 生成 `runId`（run 目录**排他**创建，
+   生成的 id 碰撞则有限重试重新生成；既有记录绝不被覆盖），写 `meta.json`（status=running）。`parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
 2. 渲染**本 run 的**运行期配置目录与 session 目录（`runs/<id>/pi-agent`、会话根下的 `<id>/`），
    按 `LOCAL_WEB_EXECUTOR` 选择执行面（见 §5）；
 3. 事件投影 → `EventBus.commit`：先落 `events.jsonl`，再实时给 SSE（见 §3.1）；
@@ -241,7 +242,10 @@ Docker/E2B，也不删除任何资源。
 停止该线程；`inproc` 宿主不启用它（不取得外部资源；遗留的外部身份仍走离线人工裁决）。
 
 **所有权、重启对账与关闭**：宿主先取得 `data_root/host.lock` 的独占 `flock`（进程存活期间
-持有、退出即释放；同进程二次获取也被拒），**再**对账和绑定端口。同一 data_root 的第二个宿主
+持有、退出即释放；同进程二次获取也被拒），**再**对账和绑定端口。`data_root` 由宿主以 0700 创建，
+`runs/`、`sessions/`、`workspaces/` 与各 run 子目录（含 `pi-agent/`、`artifacts/`）同样；已存在的
+data_root 若是符号链接、不是目录或带组/其他人写权限，宿主拒绝启动并提示操作员自行 `chmod 700`
+（不自动改动已有目录权限，参照账号库的 fail-closed 口径）。同一 data_root 的第二个宿主
 ——无论同端口还是不同端口——在读任何记录前以 `DataRootBusy` 退出，不改动活跃 owner 的 run。
 `RunManager.reconcile()` 要求持有所有权：遗留 `running` 记录若已有提交的终帧，只写落定副本；
 否则提交 `run_failed(interrupted)`，资源状态为 `released: null`（未知），并持续占用容量直至裁决。
@@ -435,7 +439,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `scripts/` | 运维 | 启动、测试、真实 run 冒烟、E2B 模板构建 |
 | `docs/` | 文档与证据 | 架构、边界、集成笔记、`evidence/` |
 | `tests/` | 回归 | `test_*.py`（宿主/内核）、`web/*.test.mjs`（前端模型）、`browser/`（真实浏览器） |
-| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/<id>/{meta.json,events.jsonl,pi-agent/,artifacts/}`、`sessions/<id>/`、`workspaces/<id>/` |
+| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/<id>/{meta.json,events.jsonl,pi-agent/,artifacts/}`、`sessions/<id>/`、`workspaces/<id>/`；目录由宿主以 0700 创建，已存在的符号链接或组/其他人可写目录拒绝启动（不自动 chmod） |
 
 运行期配置目录 `runs/<id>/pi-agent/` 是 pi 的 `PI_CODING_AGENT_DIR`：宿主在其中渲染
 `models.json` 与 `web-search.json`，复制 `agent/` 的可版本化配置，pi 自己往里写 `auth.json` /
@@ -560,7 +564,8 @@ Docker 面的每个容器实例额外带 `--cpus` / `--memory` / `--pids-limit`�
 
 - **迁移**：任何模式都不再允许绑定非 loopback：无认证公网模式被移除，历史的 `LOCAL_WEB_ALLOW_REMOTE`
   不再生效；远端访问必须经过本机认证网关注入身份（`PI_GLINK_TENANCY=multitenant`）。这是本次交付
-  明确的行为收紧。
+  明确的行为收紧。该边界与整数配置范围（端口 0–65535、并发/超时/限速/资源上限为正等）在
+  `validate_host_config` 里统一校验，构造与 CLI 的 `--host`/`--port` 覆盖都经过它。
 - **回退**：关闭 `PI_GLINK_TENANCY` 回到单用户模式；新旧记录都保留，不需要删除、迁移或改写；
   多租户密钥文件也不再被读取。
 - **合并窗口兼容（前端）**：静态模块由宿主从 `web/` 逐次读盘，所以先合并前端、后重启宿主时，旧

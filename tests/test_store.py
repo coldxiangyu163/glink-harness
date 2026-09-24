@@ -61,3 +61,67 @@ def test_terminal_status_helper_covers_all_ends(store: RunStore) -> None:
     store.create("q", run_id="r1")
     assert store.update("r1", status=CANCELLED).is_terminal is True
     assert store.update("r1", status=RUNNING).is_terminal is False
+
+
+# -- exclusive run directory creation (GLINK-HARDEN-01) ------------------------
+
+
+class _Uuid:
+    """A stand-in for ``uuid.uuid4()`` whose ``.hex`` the test controls."""
+
+    def __init__(self, value: str) -> None:
+        self.hex = value
+
+
+def test_a_generated_id_collision_is_regenerated_not_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pi_glink.store as store_module  # noqa: PLC0415
+
+    store = RunStore(tmp_path / "runs")
+    original = store.create("原有研究", run_id="dup")
+    meta_before = (store.run_dir("dup") / "meta.json").read_bytes()
+
+    ids = iter(["dup", "freshid00001"])
+    monkeypatch.setattr(store_module.uuid, "uuid4", lambda: _Uuid(next(ids)))
+
+    created = store.create("新研究")
+    assert created.run_id == "freshid00001", "碰撞后必须重新生成 id"
+    assert original.prompt == "原有研究"
+    assert (store.run_dir("dup") / "meta.json").read_bytes() == meta_before, (
+        "既有 run 的记录不得被覆盖"
+    )
+    assert store.get("dup").prompt == "原有研究"
+
+    with pytest.raises(FileExistsError):
+        store.create("覆盖尝试", run_id="dup")
+    assert (store.run_dir("dup") / "meta.json").read_bytes() == meta_before
+
+
+def test_generated_ids_are_exhausted_after_bounded_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pi_glink.store as store_module  # noqa: PLC0415
+
+    store = RunStore(tmp_path / "runs")
+    store.create("占用 id", run_id="collide00001")
+    monkeypatch.setattr(store_module.uuid, "uuid4", lambda: _Uuid("collide00001"))
+    with pytest.raises(RuntimeError, match="唯一"):
+        store.create("无法分配 id")
+
+
+def test_the_workspace_can_be_derived_from_the_generated_id(tmp_path: Path) -> None:
+    store = RunStore(tmp_path / "runs")
+    record = store.create("问题", workspace_root=tmp_path / "workspaces")
+    assert record.workspace == str(tmp_path / "workspaces" / record.run_id)
+    assert store.get(record.run_id) == record
+
+
+def test_run_directories_are_created_private(tmp_path: Path) -> None:
+    import stat  # noqa: PLC0415
+
+    store = RunStore(tmp_path / "runs")
+    record = store.create("问题")
+    store.append_event(record.run_id, {"type": "run_started", "seq": 1})
+    assert stat.S_IMODE(store.root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(store.run_dir(record.run_id).stat().st_mode) == 0o700

@@ -205,3 +205,78 @@ def test_resource_adjudication_requires_the_host_to_be_stopped(
     assert adjudication["decision"] == "released" and "控制台" in adjudication["note"]
     assert store.get("held").cleanup["released"] is False, "the cleanup fact is kept"
     assert _resource_command(config, "held", "重复裁决") == 1, "nothing left to adjudicate"
+
+
+# -- data-root permissions (GLINK-HARDEN-01) -----------------------------------
+
+
+def test_a_fresh_data_root_is_private(tmp_path: Path) -> None:
+    import stat  # noqa: PLC0415
+
+    from pi_glink.ownership import DataRootOwnership  # noqa: PLC0415
+
+    root = tmp_path / "data"
+    ownership = DataRootOwnership.acquire(root)
+    try:
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    finally:
+        ownership.release()
+
+
+@pytest.mark.parametrize("mode", [0o777, 0o770, 0o775, 0o757, 0o702])
+def test_a_group_or_other_writable_data_root_is_refused_untouched(
+    tmp_path: Path, mode: int
+) -> None:
+    """Fail closed and report; the host never chmods an existing root for you."""
+    import stat  # noqa: PLC0415
+
+    from pi_glink.ownership import DataRootOwnership, DataRootUnsafe  # noqa: PLC0415
+
+    root = tmp_path / "wide"
+    root.mkdir()
+    root.chmod(mode)
+    with pytest.raises(DataRootUnsafe) as refusal:
+        DataRootOwnership.acquire(root)
+    assert "权限过宽" in str(refusal.value)
+    assert "700" in str(refusal.value), "错误信息要给出操作员的下一步"
+    assert stat.S_IMODE(root.stat().st_mode) == mode, "不得自动 chmod"
+
+
+def test_a_symlinked_or_non_directory_data_root_is_refused(tmp_path: Path) -> None:
+    from pi_glink.ownership import DataRootOwnership, DataRootUnsafe  # noqa: PLC0415
+
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    with pytest.raises(DataRootUnsafe, match="符号链接"):
+        DataRootOwnership.acquire(link)
+
+    file_root = tmp_path / "not-a-dir"
+    file_root.write_text("x", encoding="utf-8")
+    with pytest.raises(DataRootUnsafe, match="不是目录"):
+        DataRootOwnership.acquire(file_root)
+
+
+def test_the_host_refuses_to_start_on_an_unsafe_data_root(tmp_path: Path) -> None:
+    """The same rule applies to the real start path, not only to the lock class."""
+    from pi_glink.ownership import DataRootUnsafe  # noqa: PLC0415
+
+    config = make_config(tmp_path)
+    config.data_root.mkdir(parents=True, exist_ok=True)
+    config.data_root.chmod(0o777)
+    with pytest.raises(DataRootUnsafe):
+        create_server(config, client_factory=fake_factory)
+
+
+def test_the_cli_reports_an_unsafe_data_root_and_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from pi_glink.app import main as app_main  # noqa: PLC0415
+
+    config = make_config(tmp_path)
+    config.data_root.mkdir(parents=True, exist_ok=True)
+    config.data_root.chmod(0o777)
+    monkeypatch.setattr("pi_glink.app.load_config", lambda: config)
+    assert app_main([]) == 2
+    assert "权限过宽" in capsys.readouterr().err

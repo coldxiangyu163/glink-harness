@@ -22,7 +22,7 @@ from dataclasses import replace
 from typing import Callable
 
 from .accounts import AccountsError
-from .config import ConfigError, HostConfig, load_config
+from .config import ConfigError, HostConfig, load_config, validate_host_config
 from .events import EventBus
 from .kernel.runner import RunBusy, RunManager
 from .ownership import DataRootBusy, DataRootOwnership
@@ -117,6 +117,13 @@ def main(
             host=args.host or config.host,
             port=args.port or config.port,
         )
+    try:
+        # The same boundary validation the frozen construction ran: a CLI
+        # override must not be able to skip the loopback/range checks.
+        validate_host_config(config)
+    except ConfigError as exc:
+        print(f"配置错误 / configuration error: {exc}", file=sys.stderr)
+        return 2
     logging.basicConfig(
         level=getattr(logging, config.log_level, logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

@@ -337,16 +337,18 @@ class RunManager:
                 # concurrent follow-up of the same parent): a refusal here
                 # discards the seed, nothing has been written yet.
                 self._resumable_parent(context, parent_run_id)
-            run_id = uuid.uuid4().hex[:12]
-            workspace = self.config.workspace_root / run_id
+            # The store allocates the id and creates the run directory
+            # exclusively (a generated collision is retried there): a new run can
+            # never adopt or overwrite an existing record.
             record = self.store.create(
                 redactor.redact(text),
-                run_id=run_id,
-                workspace=workspace,
+                workspace_root=self.config.workspace_root,
                 tenant_id=context.tenant_id if context is not None else None,
                 creator_user_id=context.user_id if context is not None else None,
                 parent_run_id=parent_run_id,
             )
+            run_id = record.run_id
+            workspace = Path(record.workspace)
             execution = _Execution(
                 record=record,
                 workspace=workspace,
@@ -1059,7 +1061,8 @@ class RunManager:
     def _execute(self, execution: _Execution) -> None:
         run_id = execution.record.run_id
         try:
-            execution.workspace.mkdir(parents=True, exist_ok=True)
+            self.config.workspace_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            execution.workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
             self._seed_report(execution)
             self._emit_open(execution, events.RUN_STARTED, {"prompt": execution.record.prompt})
 

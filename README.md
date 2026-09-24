@@ -98,7 +98,7 @@ cp .env.example .env         # 填写 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_
 scripts/run-local-web.sh     # 默认 http://127.0.0.1:7860
 ```
 
-脚本把所有依赖都铺好了：优先用仓库内的 `.venv`，否则回退 `uv run` 或系统 Python，并始终把 `host/` 放进导入路径。等价的手动方式：
+脚本把所有依赖都铺好了：优先用仓库内的 `.venv`，否则回退 `uv run` 或系统 Python，并始终把 `host/` 放进导入路径。部署单位是**整个仓库目录**：宿主按仓库相对路径定位 `web/`（前端资源）、`agent/`（内核配置模板）与 `scripts/`；`pip install -e .` 只用于让 `pi_glink` 可导入（包声明含 `pi_glink.kernel`），独立安装 wheel 不是受支持的形态。等价的手动方式：
 
 ```bash
 uv venv --python 3.12 .venv       # 首次
@@ -109,11 +109,16 @@ uv pip install -e ".[dev]"        # 首次：让 pi_glink 可导入并装上 pyt
 常用参数：
 
 ```bash
-scripts/run-local-web.sh --port 7861     # 覆盖端口
+scripts/run-local-web.sh --port 7861     # 覆盖端口（0 = 内核分配临时端口；覆盖后仍走同一套边界校验）
 scripts/run-local-web.sh --print-config  # 打印生效配置（不含密钥）
 scripts/run-local-web.sh --unreleased    # 列出执行资源未确认释放的 run（需宿主已停止）
 scripts/run-local-web.sh --mark-released <runId> --note "已核对容器/沙箱不存在"   # 记录人工裁决
 ```
+
+`--host` / `--port` 覆盖与构造走同一套校验（`validate_host_config`）：非 loopback 主机、或超出
+0–65535 的端口直接拒绝启动（退出码 2）。数据目录（默认 `~/.pi-glink`）由宿主以 0700 创建
+（`runs/`、`sessions/`、`workspaces/` 与各 run 子目录同样）；已存在的数据目录若是符号链接、不是目录，
+或带组/其他人写权限，宿主拒绝启动并提示操作员自行 `chmod 700`，不会自动改动已有目录权限。
 
 一个数据目录同一时间只能被一个宿主进程持有（`<数据根>/host.lock`）；第二个宿主无论用哪个端口都会
 直接拒绝启动，不会改动正在运行的任务。执行面清理未确认成功（或宿主异常退出后资源状态未知）的 run

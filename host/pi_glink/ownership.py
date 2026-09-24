@@ -22,10 +22,22 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import stat
 import time
 from pathlib import Path
 
+from .config import ConfigError
+
 LOCK_NAME = "host.lock"
+
+#: Permission bits that make the data root unusable: group or other write access
+#: means another account could add runs, replace the lock target or rewrite the
+#: event logs the ownership decision rests on.
+_UNSAFE_MODE_BITS = 0o022
+
+
+class DataRootUnsafe(ConfigError):
+    """The data root exists but is not safe to use (symlink, wide permissions)."""
 
 
 class DataRootBusy(RuntimeError):
@@ -52,7 +64,7 @@ class DataRootOwnership:
     @classmethod
     def acquire(cls, data_root: Path) -> "DataRootOwnership":
         data_root = Path(data_root)
-        data_root.mkdir(parents=True, exist_ok=True)
+        _ensure_data_root(data_root)
         path = data_root / LOCK_NAME
         descriptor = os.open(
             path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600
@@ -92,6 +104,32 @@ class DataRootOwnership:
         finally:
             os.close(self._descriptor)
             self._descriptor = -1
+
+
+def _ensure_data_root(data_root: Path) -> None:
+    """Create the data root private (0700) or refuse to use an unsafe one.
+
+    Same fail-closed rule as the account database: an existing root that is a
+    symlink, not a directory, or writable by group/other accounts is reported to
+    the operator instead of being chmod'ed behind their back — the host cannot
+    know who created it or what points at it.
+    """
+    if data_root.is_symlink():
+        raise DataRootUnsafe(
+            f"数据目录 {data_root} 是符号链接；请改用真实目录（宿主不跟随链接）"
+        )
+    if not data_root.exists():
+        data_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if data_root.is_symlink():  # lost a race with a link creator: refuse
+        raise DataRootUnsafe(f"数据目录 {data_root} 在创建时被换成了符号链接")
+    if not data_root.is_dir():
+        raise DataRootUnsafe(f"数据目录 {data_root} 不是目录")
+    mode = stat.S_IMODE(data_root.stat().st_mode)
+    if mode & _UNSAFE_MODE_BITS:
+        raise DataRootUnsafe(
+            f"数据目录 {data_root} 权限过宽（{mode:04o}）：组或其他账户可写。"
+            "请停止宿主后自行 chmod 700 并重试（宿主不自动修改已有目录权限）"
+        )
 
 
 def _read_owner(descriptor: int) -> str:

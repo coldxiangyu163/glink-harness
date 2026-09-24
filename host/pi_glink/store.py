@@ -74,6 +74,8 @@ ARTIFACTS_DIRNAME = "artifacts"
 
 _META_NAME = "meta.json"
 _EVENTS_NAME = "events.jsonl"
+#: Bounded retries when a generated run id collides with an existing directory.
+_RUN_ID_ATTEMPTS = 5
 _TAIL_CHUNK = 64 * 1024
 _STATUS_BY_EVENT = {
     "run_finished": FINISHED,
@@ -285,6 +287,8 @@ class RunStore:
         # cannot interleave with the first on the same record.
         self._lock = self._index.record_lock
         self._events_lock = self._index.append_lock
+        # The runs root is host-owned data: create it private (0700).
+        self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     @property
     def root(self) -> Path:
@@ -307,31 +311,63 @@ class RunStore:
         *,
         run_id: str | None = None,
         workspace: Path | None = None,
+        workspace_root: Path | None = None,
         tenant_id: str | None = None,
         creator_user_id: str | None = None,
         parent_run_id: str | None = None,
     ) -> RunRecord:
         """Admit a run and write its assignment facts in one atomic meta write.
 
+        The run directory is created **exclusively** (``exist_ok=False``): a new
+        run never adopts or overwrites an existing record. A generated id that
+        collides is regenerated a bounded number of times; an explicitly given
+        ``run_id`` that already exists is refused (the caller owns that
+        contract). ``workspace_root`` derives the run's workspace from the
+        generated id, so the store stays the one place that allocates ids.
+
         The owner labels (``tenant_id`` / ``creator_user_id``) are part of the
         same replacement as the run id and created-at stamp, so no reader can
         observe an ownerless run that an authenticated request must hide. The
         optional ``parent_run_id`` records the follow-up chain in the same write.
         """
-        identifier = run_id or uuid.uuid4().hex[:12]
-        directory = self.run_dir(identifier)
-        directory.mkdir(parents=True, exist_ok=True)
+        identifier, directory = self._create_run_directory(run_id)
+        if workspace is not None:
+            workspace_path = str(workspace)
+        elif workspace_root is not None:
+            workspace_path = str(workspace_root / identifier)
+        else:
+            workspace_path = str(directory / "workspace")
         record = RunRecord(
             run_id=identifier,
             prompt=prompt,
             status=RUNNING,
             created_at=time.time(),
-            workspace=str(workspace) if workspace is not None else str(directory / "workspace"),
+            workspace=workspace_path,
             tenant_id=tenant_id,
             creator_user_id=creator_user_id,
             parent_run_id=parent_run_id,
         )
         return self._write(record)
+
+    def _create_run_directory(self, run_id: str | None) -> tuple[str, Path]:
+        """Exclusively create one run directory; returns ``(id, path)``.
+
+        The 0700 mode is the host's own data: run records, event logs and the
+        rendered credentials of one run live under this directory.
+        """
+        if run_id is not None:
+            directory = self.run_dir(run_id)
+            directory.mkdir(parents=True, exist_ok=False, mode=0o700)
+            return run_id, directory
+        for _attempt in range(_RUN_ID_ATTEMPTS):
+            candidate = uuid.uuid4().hex[:12]
+            directory = self.run_dir(candidate)
+            try:
+                directory.mkdir(parents=True, exist_ok=False, mode=0o700)
+            except FileExistsError:
+                continue
+            return candidate, directory
+        raise RuntimeError("无法生成唯一的 run id（连续冲突）")
 
     def update(self, run_id: str, **changes: Any) -> RunRecord:
         """Change facts in ``meta.json`` (in-flight facts, adjudication)."""
@@ -548,7 +584,7 @@ class RunStore:
 
     def _append(self, run_id: str, event: Mapping[str, Any], *, durable: bool) -> None:
         path = self.events_path(run_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         line = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
         with self._events_lock:
             descriptor = os.open(
@@ -710,7 +746,7 @@ class RunStore:
         same run cannot leave the index describing an older meta than the file.
         """
         directory = self.run_dir(record.run_id)
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = asdict(record)
         temporary = directory / f".{_META_NAME}.tmp"
         with self._lock:
