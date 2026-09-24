@@ -1,19 +1,31 @@
-"""pi kernel adapter: procotol client plus event projection.
+"""Kernel adapters: harness-specific protocol clients plus event projection.
 
-The adapter owns exactly two jobs:
+Each harness family owns exactly two jobs:
 
-* run ``pi --mode rpc`` as a child process and speak its documented JSONL
-  protocol (:mod:`pi_glink.kernel.rpc`);
-* translate pi session events into the product vocabulary
-  (:mod:`pi_glink.kernel.projection`).
+* run its kernel as a child process and speak the documented protocol —
+  :mod:`pi_glink.kernel.rpc` for pi's JSONL RPC, :mod:`pi_glink.kernel.acp_rpc`
+  for ACP's JSON-RPC over stdio;
+* translate that protocol's frames into the product vocabulary
+  (:mod:`pi_glink.kernel.projection`, :mod:`pi_glink.kernel.acp_projection`).
 
 It deliberately owns no research logic, no prompts, and no file layout policy:
-those belong to the pi configuration directory (``agent/``) and its official
-extension points.
+those belong to the per-harness configuration (the pi template in ``agent/``,
+and the ACP agent's own configuration) and its official extension points.
 """
 
 from __future__ import annotations
 
+from .acp_env import AcpRuntime, prepare_acp_runtime
+from .acp_execution import AcpExecutionAdapter
+from .acp_projection import ACP_STOP_REASONS, AcpProjector
+from .acp_rpc import (
+    AcpClosed,
+    AcpError,
+    AcpProtocolError,
+    AcpRequestError,
+    AcpRpcClient,
+    AcpTimeout,
+)
 from .agent_env import (
     AgentRuntime,
     build_pi_argv,
@@ -42,6 +54,16 @@ from .rpc import (
 )
 
 __all__ = [
+    "ACP_STOP_REASONS",
+    "AcpClosed",
+    "AcpError",
+    "AcpExecutionAdapter",
+    "AcpProjector",
+    "AcpProtocolError",
+    "AcpRequestError",
+    "AcpRpcClient",
+    "AcpRuntime",
+    "AcpTimeout",
     "AgentRuntime",
     "ArtifactRecovery",
     "CleanupReport",
@@ -62,6 +84,7 @@ __all__ = [
     "build_pi_argv",
     "build_pi_env",
     "extract_text",
+    "prepare_acp_runtime",
     "prepare_agent_dir",
     "project_event",
     "project_frames",
