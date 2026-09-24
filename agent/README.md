@@ -15,7 +15,7 @@ pi 读取的是这份配置，而不是用户 `~/.pi/agent` 的个人配置，�
 | 位置 | 用途 |
 |---|---|
 | `settings.json` | pi 的官方设置（模型、思考档位、工具开关等） |
-| `AGENTS.md` | 研究 agent 的运行约定：工作区路径、报告产出位置、检索纪律 |
+| `AGENTS.md` | 目录级运行约定：工作区路径、报告产出位置、检索纪律 |
 | `extensions/` | pi 扩展：自定义工具、provider、命令（官方 extension API） |
 | `skills/` | 按需加载的能力包（官方 skill 机制） |
 | `prompts/` | 提示词模板 |
@@ -33,15 +33,15 @@ pi 读取的是这份配置，而不是用户 `~/.pi/agent` 的个人配置，�
 | 文件 | 内容 |
 |---|---|
 | `settings.json` | `defaultThinkingLevel` 与 `packages: ["npm:pi-web-access"]` |
-| `research-prompt.md` | 研究执行约定（由宿主以 `--append-system-prompt` 追加） |
-| `prompts/deepresearch.md` | 显式 `/deepresearch <题目>` 入口：在通用研究约定之上收紧覆盖声明与核查 |
+| `research-prompt.md` | 通用工作约定：任务分级、工具与取证纪律、深入任务纪律（由宿主以 `--append-system-prompt` 追加） |
+| `prompts/deepresearch.md` | 显式 `/deepresearch <题目>` 入口：跳过「直接回答」分级，强制深入流程并收紧覆盖声明与核查 |
 | `extensions/` | 扩展位（当前为空；新需求优先落在这里） |
 | `README.md` | 本文件 |
 
-### 研究约定与 `/deepresearch` 的关系
+### 工作约定与 `/deepresearch` 的关系
 
-- `research-prompt.md` 每次 run 都由宿主追加到系统提示（本机/Docker 面 `kernel/runner.py::_extra_argv`，E2B 面 `kernel/e2b_env.py`），定义工作区与 `report.md` 交付、引注、来源分层、覆盖声明与自我核查纪律。
-- `prompts/deepresearch.md` 是 pi 的 prompt template：**文件名就是命令名**（pi 官方 `docs/prompt-templates.md`），用户在工作台提问框以 `/deepresearch <题目>` 开头发送时，pi 在把消息交给模型之前展开模板，`$@` 替换为题目内容。它只叠加三条更严格的要求（覆盖声明逐项给原因、核查留痕、二次来源标注），不重复通用约定，也没有"等用户确认"的确认门：展开后直接执行。
+- `research-prompt.md` 每次 run 都由宿主追加到系统提示（本机/Docker 面 `kernel/runner.py::_extra_argv`，E2B 面 `kernel/e2b_env.py`），先要求对任务分级：闲聊与单点事实直接回答（必要时一两次检索并给出来源，不写计划与报告）；只有跨来源比较、专业分析、多子问题或用户明确要求报告时才进入深入流程，交付 `report.md`、就近引注、来源分层、覆盖声明与自我核查。
+- `prompts/deepresearch.md` 是 pi 的 prompt template：**文件名就是命令名**（pi 官方 `docs/prompt-templates.md`），用户在工作台提问框以 `/deepresearch <题目>` 开头发送时，pi 在把消息交给模型之前展开模板，`$@` 替换为题目内容。它强制走深入流程，并只叠加四条更严格的要求（必须交付报告、覆盖声明逐项给原因、核查留痕、二次来源收紧），不重复通用约定，也没有"等用户确认"的确认门：展开后直接执行。
 - 两者都随模板渲染进每个 run 的 `runs/<runId>/pi-agent/`：`TEMPLATE_ENTRIES`（`kernel/agent_env.py`）包含 `prompts`，pi 从 `PI_CODING_AGENT_DIR` 这个个人配置目录加载模板与追加提示。
 
 `models.json`、`auth.json` 与 `web-search.json` 不在本目录：它们含运行期值/凭据，由宿主渲染到
