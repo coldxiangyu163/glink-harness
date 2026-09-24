@@ -24,7 +24,7 @@ from dataclasses import replace
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .accounts import AccountsError, AccountsStore
@@ -147,6 +147,9 @@ class PiGlinkServer(ThreadingHTTPServer):
         try:
             super().server_close()
         finally:
+            # The ledger sweep is host lifecycle: stop it before the manager and
+            # the data-root lock go away, so no probe runs against a closed host.
+            self.manager.stop_resource_watch()
             if self.tenancy is not None:
                 self.tenancy.close()
             if self.ownership is not None:
@@ -1253,12 +1256,18 @@ def _resume_offset(last_event_id: str | None, query: str) -> int:
 
 
 def create_server(
-    config: HostConfig, *, client_factory: ClientFactory | None = None
+    config: HostConfig,
+    *,
+    client_factory: ClientFactory | None = None,
+    docker_probe: Callable[[str], tuple[bool, str]] | None = None,
+    sandbox_probe: Callable[[str], tuple[bool, str]] | None = None,
 ) -> PiGlinkServer:
     """Build a ready-to-serve host (used by tests and by ``main``).
 
-    ``client_factory`` exists for tests: production always talks to the real
-    ``pi`` binary through :class:`~pi_glink.kernel.rpc.PiRpcClient`.
+    ``client_factory`` and the two identity probes exist for tests: production
+    always talks to the real ``pi`` binary, the real Docker CLI and the real E2B
+    SDK. The probes are what the online resource-ledger sweep calls; they never
+    run inside the admission lock.
 
     Ordering is part of the safety contract:
 
@@ -1267,7 +1276,8 @@ def create_server(
     2. identity material is loaded (a missing or over-permissive key file
        refuses to start instead of falling back to the unauthenticated local
        surface);
-    3. the run store is reconciled and the port is bound last.
+    3. the run store is reconciled and the port is bound last;
+    4. only then does the periodic resource sweep start.
     """
     # Ownership comes first: only a process that holds the data root may
     # conclude that a ``running`` record has no live owner, or create/rewrite
@@ -1294,12 +1304,15 @@ def create_server(
             client_factory=client_factory or PiRpcClient,
             ownership=ownership,
             credential_store=tenancy.credentials if tenancy is not None else None,
+            docker_probe=docker_probe,
+            sandbox_probe=sandbox_probe,
         )
         # Runs left ``running`` by a previous process cannot continue; close
         # them out honestly before the host serves history. External leftovers
-        # are not touched — their identity is recorded for an operator decision.
+        # are not touched here — their identity is recorded for the operator,
+        # and the periodic sweep below is the only thing that may confirm one.
         manager.reconcile()
-        return PiGlinkServer(
+        server = PiGlinkServer(
             config,
             bus,
             store,
@@ -1309,6 +1322,11 @@ def create_server(
             tenancy=tenancy,
             auth=auth,
         )
+        # After startup reconciliation: one sweep immediately, then every
+        # configured interval (0 disables it). Background, daemon, never inside
+        # the admission lock.
+        manager.start_resource_watch()
+        return server
     except BaseException:
         if tenancy is not None:
             tenancy.close()

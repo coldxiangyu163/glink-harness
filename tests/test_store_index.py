@@ -113,15 +113,15 @@ def assert_index_matches_disk(store: RunStore) -> None:
 
 
 def counting_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Record every ``_read_meta`` call (the per-run ``meta.json`` re-read)."""
+    """Record every ``_load_meta`` call (the per-run ``meta.json`` read)."""
     reads: list[str] = []
-    original = RunStore._read_meta
+    original = RunStore._load_meta
 
     def counting(self: RunStore, run_id: str):
         reads.append(run_id)
         return original(self, run_id)
 
-    monkeypatch.setattr(RunStore, "_read_meta", counting)
+    monkeypatch.setattr(RunStore, "_load_meta", counting)
     return reads
 
 

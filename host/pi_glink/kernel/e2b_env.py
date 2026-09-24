@@ -703,6 +703,50 @@ def _default_sandbox_factory() -> Callable[..., Any]:
     return factory
 
 
+def _default_kill() -> Callable[[str], Any]:
+    def kill(sandbox_id: str) -> Any:
+        from e2b import Sandbox
+
+        return Sandbox.kill(sandbox_id)
+
+    return kill
+
+
+def confirm_sandbox_absent(
+    sandbox_id: str, *, kill_factory: Callable[[str], Any] | None = None
+) -> tuple[bool, str]:
+    """Confirm by the persisted sandbox id that the sandbox is gone.
+
+    ``Sandbox.kill(sandbox_id)`` is the SDK's single-id operation: it returns
+    ``True`` when the sandbox existed and is now terminated, and ``False`` when
+    it was not found. Only the persisted identity is ever addressed — no
+    listing, no name pattern, no other sandbox. Any other error is uncertainty,
+    not evidence of release, so the hold stands.
+    """
+    if not sandbox_id:
+        return False, "缺少持久化的 sandbox_id"
+    kill = kill_factory or _default_kill()
+    try:
+        killed = kill(sandbox_id)
+    except Exception as exc:  # noqa: BLE001 - uncertainty keeps the hold
+        if _is_not_found(exc):
+            return True, f"SDK 确认沙箱不存在: {type(exc).__name__}"
+        return False, f"沙箱查询失败: {type(exc).__name__}: {exc}"
+    if killed is False:
+        return True, "SDK 确认沙箱不存在"
+    if killed is True:
+        return True, "已按 sandbox_id 终止沙箱"
+    return False, f"SDK 返回无法判定的结果: {killed!r}"
+
+
+def _is_not_found(exc: BaseException) -> bool:
+    """True for the SDK's not-found answers, without importing the SDK here."""
+    if "notfound" in type(exc).__name__.lower():
+        return True
+    message = str(exc).lower()
+    return "404" in message or "not found" in message
+
+
 def sandbox_available() -> tuple[bool, str]:
     """Best-effort preflight used by the host before it accepts a run."""
     try:

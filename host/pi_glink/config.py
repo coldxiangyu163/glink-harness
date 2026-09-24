@@ -131,6 +131,11 @@ class HostConfig:
     docker_pids_limit: int = 512
     #: E2B sandbox lifetime ceiling; 0 keeps the adapter default (task timeout + 300s).
     e2b_sandbox_timeout_seconds: int = 0
+    #: Interval of the online resource ledger sweep (seconds). The sweep asks
+    #: the execution face whether the resources of an unconfirmed hold still
+    #: exist, addressing only the identity persisted with the run. ``0`` disables
+    #: it; the offline ``--unreleased`` / ``--mark-released`` path still works.
+    resource_reconcile_seconds: int = 60
 
     @property
     def multi_tenant(self) -> bool:
@@ -365,6 +370,9 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         docker_memory=_text(values, "LOCAL_WEB_DOCKER_MEMORY", "2g"),
         docker_pids_limit=_integer(values, "LOCAL_WEB_DOCKER_PIDS_LIMIT", 512),
         e2b_sandbox_timeout_seconds=_integer(values, "LOCAL_WEB_E2B_TIMEOUT_SECONDS", 0),
+        resource_reconcile_seconds=_non_negative_integer(
+            values, "PI_GLINK_RESOURCE_RECONCILE_SECONDS", 60
+        ),
     )
 
 
@@ -420,6 +428,13 @@ def _integer(values: Mapping[str, str], key: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ConfigError(f"{key} must be an integer; got {raw!r}") from exc
+
+
+def _non_negative_integer(values: Mapping[str, str], key: str, default: int) -> int:
+    value = _integer(values, key, default)
+    if value < 0:
+        raise ConfigError(f"{key} 不能为负值；当前 {value}")
+    return value
 
 
 def _path(values: Mapping[str, str], key: str, default: Path) -> Path:

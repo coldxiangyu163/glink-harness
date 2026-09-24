@@ -368,9 +368,11 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
         *,
         on_frame: FrameCallback,
         sandbox_factory: Callable[..., Any] | None = None,
+        on_identity: Callable[[Mapping[str, str]], None] | None = None,
     ) -> None:
         super().__init__(spec, on_frame=on_frame)
         self._sandbox_factory = sandbox_factory
+        self._on_identity = on_identity
         self._client: E2BSandboxClient | None = None
         self._outcome = ExecutionOutcome()
         self._done = threading.Event()
@@ -380,6 +382,9 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
         self._driver: threading.Thread | None = None
         self._session_file: Path | None = None
         self._session_id: str | None = None
+        #: The sandbox id as soon as it exists, kept even after ``close()``: a
+        #: failure later in ``start()`` must not erase the durable identity.
+        self._sandbox_id: str = ""
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -394,6 +399,10 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
         self._client = client
         try:
             client.start(timeout_seconds=self.spec.timeout_seconds + 300)
+            # The sandbox exists from here on. Hand its identity to the host
+            # before any step that can fail, so a partial creation still leaves
+            # a named leftover the operator and the online sweep can act on.
+            self._record_identity(client.sandbox_id)
             client.upload_config()
             if self.spec.resume_session:
                 client.upload_continuation(self.spec.resume_session, self.spec.workspace)
@@ -403,6 +412,13 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
             self._released = not self._release_failures
             self._client = None
             raise
+
+    def _record_identity(self, sandbox_id: str) -> None:
+        if not sandbox_id:
+            return
+        self._sandbox_id = sandbox_id
+        if self._on_identity is not None:
+            self._on_identity({"sandbox": sandbox_id})
 
     def session_info(self) -> SessionInfo | None:
         client = self._client
@@ -538,8 +554,7 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
         )
 
     def identity(self) -> Mapping[str, str]:
-        sandbox_id = self._client.sandbox_id if self._client is not None else ""
-        return {"sandbox": sandbox_id} if sandbox_id else {}
+        return {"sandbox": self._sandbox_id} if self._sandbox_id else {}
 
 
 def build_adapter(
@@ -549,6 +564,7 @@ def build_adapter(
     client_factory: Callable[..., PiRpcClient],
     on_frame: FrameCallback,
     sandbox_factory: Callable[..., Any] | None = None,
+    on_identity: Callable[[Mapping[str, str]], None] | None = None,
     rpc_plan: Callable[[ExecutionSpec], tuple[list[str], Mapping[str, str], Path | None]],
     docker_plan: Callable[[ExecutionSpec], tuple[list[str], Mapping[str, str], str]],
     docker_stop: Callable[[str], list[str]],
@@ -557,11 +573,12 @@ def build_adapter(
 
     ``rpc_plan``/``docker_plan`` are the face-specific input builders kept in
     the runner (they touch the run's rendered configuration); the adapter owns
-    everything after that.
+    everything after that. ``on_identity`` is called as soon as a face knows the
+    durable identity of the resource it created, before any later step can fail.
     """
     if executor == "e2b":
         return E2BSandboxExecutionAdapter(
-            spec, on_frame=on_frame, sandbox_factory=sandbox_factory
+            spec, on_frame=on_frame, sandbox_factory=sandbox_factory, on_identity=on_identity
         )
     if executor == "docker":
         argv, env, container_name = docker_plan(spec)

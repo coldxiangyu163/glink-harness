@@ -47,6 +47,7 @@ multi-user or multi-tenant lands, this module is the seam that changes.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -56,6 +57,8 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 from .events import TERMINAL_EVENT_TYPES
+
+logger = logging.getLogger("pi_glink.store")
 
 #: Run states. ``running`` is the only non-terminal one.
 RUNNING = "running"
@@ -220,12 +223,32 @@ class _RunIndex:
     this process must agree on the same records; a per-instance cache would let
     two stores disagree after one of them wrote. Readers therefore share one
     index per root, and a fresh process rebuilds it from disk on first use.
+
+    ``lock`` guards the in-memory index state (a reader copies its snapshot
+    there). ``record_lock`` is the shared per-root write lock: the metadata
+    replacement and the index update happen inside it, so two writers of the
+    same record cannot leave the index ordered opposite to disk — and no reader
+    blocks behind a writer's disk write. ``append_lock`` serializes appends to
+    the shared event logs for the same reason on the log side.
+
+    ``unreadable`` holds run directories whose ``meta.json`` cannot be read:
+    they are excluded from every record read (a corrupt record must never be
+    served, least of all cross-tenant) but the ledger counts them as global
+    holds until an operator adjudicates them in their own sidecar file.
     """
 
     def __init__(self) -> None:
         self.lock = threading.RLock()
+        self.record_lock = threading.RLock()
+        self.append_lock = threading.RLock()
         self.entries: dict[str, _IndexEntry] = {}
+        self.unreadable: dict[str, Mapping[str, Any] | None] = {}
         self.loaded = False
+
+
+#: Per-run sidecar recording an operator decision for a run whose ``meta.json``
+#: cannot be parsed. The corrupt file itself is never rewritten.
+UNREADABLE_ADJUDICATION_NAME = "resource-adjudication.json"
 
 
 _INDEXES: dict[str, _RunIndex] = {}
@@ -256,8 +279,12 @@ class RunStore:
 
     def __init__(self, root: Path) -> None:
         self._root = root
-        self._lock = threading.RLock()
         self._index = _index_for(root)
+        # The per-root shared locks: the meta replacement and the index update
+        # are one critical section, and a second RunStore over the same root
+        # cannot interleave with the first on the same record.
+        self._lock = self._index.record_lock
+        self._events_lock = self._index.append_lock
 
     @property
     def root(self) -> Path:
@@ -351,6 +378,10 @@ class RunStore:
         including records without an owner (legacy and reconciled leftovers),
         because those still consume the global capacity. Newest first, like
         :meth:`list`.
+
+        Run directories whose metadata cannot be read are not records at all;
+        they are reported separately by :meth:`unreadable_holds` and count as
+        global holds there.
         """
         return [
             record
@@ -363,15 +394,61 @@ class RunStore:
         entries = self._entries()
         return [run_id for run_id in sorted(entries) if entries[run_id].raw.status == RUNNING]
 
+    def unreadable_holds(self) -> list[str]:
+        """Run directories whose metadata cannot be read and are not adjudicated.
+
+        Such a directory is hidden from every record read (a corrupt record must
+        not be listed, downloaded or replayed, least of all across tenants), but
+        it is **not** evidence that its container or sandbox is gone: the
+        resource ledger counts it as a global hold until an operator records a
+        decision via :meth:`adjudicate_unreadable`.
+        """
+        return [
+            run_id
+            for run_id, adjudication in sorted(self._unreadable().items())
+            if adjudication is None
+        ]
+
+    def adjudicate_unreadable(self, run_id: str, adjudication: Mapping[str, Any]) -> None:
+        """Record the operator decision for a run whose ``meta.json`` is unreadable.
+
+        The corrupt ``meta.json`` is left byte-for-byte untouched; the decision
+        lives in :data:`UNREADABLE_ADJUDICATION_NAME` next to it, which is what
+        the index reads back on a restart. Raises ``KeyError`` when the directory
+        is unknown and ``ValueError`` when its metadata is actually readable (the
+        normal record path owns that decision).
+        """
+        with self._lock:
+            entries, unreadable = self._scan()
+            if run_id in {entry.raw.run_id for entry in entries}:
+                raise ValueError(f"run {run_id} 的 meta.json 可读，应使用普通裁决")
+            if run_id not in unreadable:
+                raise KeyError(run_id)
+            directory = self.run_dir(run_id)
+            temporary = directory / f".{UNREADABLE_ADJUDICATION_NAME}.tmp"
+            temporary.write_text(
+                json.dumps(dict(adjudication), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(directory / UNREADABLE_ADJUDICATION_NAME)
+            with self._index.lock:
+                self._index.unreadable[run_id] = dict(adjudication)
+
     def scan_all(self) -> list[RunRecord]:
         """Uncached reference read: walk every run directory, project each record.
 
         This is what the index is built from and the comparison the regressions
         use; production reads must not call it per request.
         """
-        records = [entry.projected for entry in self._scan_entries()]
+        entries, _unreadable = self._scan()
+        records = [entry.projected for entry in entries]
         records.sort(key=lambda item: item.created_at, reverse=True)
         return records
+
+    def scan_unreadable(self) -> list[str]:
+        """Uncached reference read of the unreadable, unadjudicated run ids."""
+        _entries, unreadable = self._scan()
+        return [run_id for run_id, value in sorted(unreadable.items()) if value is None]
 
     def settle(self, run_id: str) -> RunRecord | None:
         """Copy the committed terminal record into ``meta.json``.
@@ -473,7 +550,7 @@ class RunStore:
         path = self.events_path(run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         line = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
-        with self._lock:
+        with self._events_lock:
             descriptor = os.open(
                 path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o666
             )
@@ -523,16 +600,32 @@ class RunStore:
         return _apply_terminal(record, terminal) if terminal is not None else record
 
     def _entries(self) -> dict[str, _IndexEntry]:
-        """The in-process index, built once from disk on first use."""
+        """Snapshot of the readable records (built once from disk on first use)."""
         index = self._index
-        if index.loaded:
-            return index.entries
+        if not index.loaded:
+            self._load_index()
         with index.lock:
-            if not index.loaded:
-                for entry in self._scan_entries():
-                    index.entries[entry.raw.run_id] = entry
-                index.loaded = True
-        return index.entries
+            return dict(index.entries)
+
+    def _unreadable(self) -> dict[str, Mapping[str, Any] | None]:
+        """Snapshot of the unreadable run directories and their adjudications."""
+        index = self._index
+        if not index.loaded:
+            self._load_index()
+        with index.lock:
+            return dict(index.unreadable)
+
+    def _load_index(self) -> None:
+        """Build the index from disk exactly once per process and root."""
+        index = self._index
+        with index.lock:
+            if index.loaded:
+                return
+            entries, unreadable = self._scan()
+            for entry in entries:
+                index.entries[entry.raw.run_id] = entry
+            index.unreadable.update(unreadable)
+            index.loaded = True
 
     def _records(self) -> list[RunRecord]:
         """Projected records newest first (stable by directory name on ties)."""
@@ -541,19 +634,29 @@ class RunStore:
         records.sort(key=lambda item: item.created_at, reverse=True)
         return records
 
-    def _scan_entries(self) -> list[_IndexEntry]:
-        """Read every run directory (index build and the reference read)."""
+    def _scan(self) -> tuple[list[_IndexEntry], dict[str, Mapping[str, Any] | None]]:
+        """Read every run directory (index build and the uncached reference).
+
+        A directory whose ``meta.json`` cannot be read produces no record: it is
+        returned as an unreadable entry together with the operator adjudication
+        sidecar, if any. A directory without ``meta.json`` at all is not a run.
+        """
         if not self._root.is_dir():
-            return []
+            return [], {}
         entries: list[_IndexEntry] = []
+        unreadable: dict[str, Mapping[str, Any] | None] = {}
         for entry in sorted(self._root.iterdir(), key=lambda item: item.name):
             if not entry.is_dir():
                 continue
-            record = self._read_meta(entry.name)
-            if record is None:
-                continue
-            entries.append(_IndexEntry(raw=record, projected=self._project(record)))
-        return entries
+            record, problem = self._load_meta(entry.name)
+            if problem:
+                unreadable[entry.name] = self._read_unreadable_adjudication(entry.name)
+                logger.warning(
+                    "run 记录不可读，已计入全局资源持有直至人工裁决 run=%s", entry.name
+                )
+            elif record is not None:
+                entries.append(_IndexEntry(raw=record, projected=self._project(record)))
+        return entries, unreadable
 
     def _refresh_projection(self, run_id: str) -> None:
         """Fold a just-committed terminal frame into the run's index entry."""
@@ -570,21 +673,42 @@ class RunStore:
                 projected=_apply_terminal(entry.raw, terminal),
             )
 
-    def _read_meta(self, run_id: str) -> RunRecord | None:
+    def _load_meta(self, run_id: str) -> tuple[RunRecord | None, bool]:
+        """``(record, unreadable)`` for one run directory.
+
+        ``unreadable`` is true only when ``meta.json`` exists but cannot be used:
+        a missing file is simply not a run record. Corruption is never silently
+        equal to absence — the resource ledger must keep holding for it (B.7).
+        """
         path = self.run_dir(run_id) / _META_NAME
         if not path.is_file():
-            return None
+            return None, False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None, True
+        if not isinstance(data, dict):
+            return None, True
+        known = {field.name for field in fields(RunRecord)}
+        return RunRecord(**{key: value for key, value in data.items() if key in known}), False
+
+    def _read_meta(self, run_id: str) -> RunRecord | None:
+        return self._load_meta(run_id)[0]
+
+    def _read_unreadable_adjudication(self, run_id: str) -> Mapping[str, Any] | None:
+        path = self.run_dir(run_id) / UNREADABLE_ADJUDICATION_NAME
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        if not isinstance(data, dict):
-            return None
-        known = {field.name for field in fields(RunRecord)}
-        return RunRecord(**{key: value for key, value in data.items() if key in known})
+        return data if isinstance(data, dict) else None
 
     def _write(self, record: RunRecord) -> RunRecord:
-        """Atomically replace ``meta.json`` and refresh the index entry."""
+        """Atomically replace ``meta.json`` and refresh the index entry.
+
+        Both steps run in one per-root critical section, so two writers of the
+        same run cannot leave the index describing an older meta than the file.
+        """
         directory = self.run_dir(record.run_id)
         directory.mkdir(parents=True, exist_ok=True)
         payload = asdict(record)
@@ -594,12 +718,12 @@ class RunStore:
                 json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
             )
             temporary.replace(directory / _META_NAME)
-        index = self._index
-        with index.lock:
-            index.entries[record.run_id] = _IndexEntry(
-                raw=record, projected=self._project(record)
-            )
-        return index.entries[record.run_id].projected
+            projected = self._project(record)
+            with self._index.lock:
+                self._index.entries[record.run_id] = _IndexEntry(
+                    raw=record, projected=projected
+                )
+            return projected
 
 
 def _terminal_line(path: Path, end: int) -> dict[str, Any] | None:
