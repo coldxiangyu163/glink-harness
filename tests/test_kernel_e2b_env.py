@@ -95,9 +95,18 @@ class FakeCommands:
     def __init__(self, sandbox: "FakeSandbox") -> None:
         self._sandbox = sandbox
 
-    def run(self, cmd: str, *, background: bool = False, envs: dict[str, str] | None = None, **_: Any) -> _Handle:
+    def run(
+        self,
+        cmd: str,
+        *,
+        background: bool = False,
+        envs: dict[str, str] | None = None,
+        timeout: float | None = None,
+        **_: Any,
+    ) -> _Handle:
         self._sandbox.command = cmd
         self._sandbox.command_envs = envs or {}
+        self._sandbox.command_timeout = timeout
         return _Handle(self._sandbox.exit_code)
 
 
@@ -121,6 +130,9 @@ class FakeSandbox:
         self.session_files: tuple[str, ...] = ()
         self.command = ""
         self.command_envs: dict[str, str] = {}
+        #: ``timeout`` the host passed to ``commands.run`` (``None`` when the
+        #: caller left the SDK default in place).
+        self.command_timeout: float | None = None
         self.killed = False
         if events is not None:
             self.readable["/home/user/events.jsonl"] = "\n".join(
@@ -599,6 +611,50 @@ def test_sandbox_lifetime_defaults_to_the_task_timeout_plus_headroom(tmp_path: P
     )
     client.start()
     assert captured["timeout"] == 1200
+    client.close()
+
+
+def test_the_kernel_command_is_allowed_to_run_for_the_whole_sandbox_lifetime(
+    tmp_path: Path,
+) -> None:
+    """The SDK default of 60 s must never be what bounds a research run.
+
+    A real run (retrieval + synthesis + report) takes minutes, while the sandbox
+    is created with the run's full budget. Leaving ``timeout`` unset let E2B kill
+    the kernel after 60 seconds and the run failed with ``TimeoutException`` even
+    though the sandbox was healthy; the host therefore passes the sandbox's own
+    lifetime explicitly.
+    """
+    config = make_config(tmp_path, LOCAL_WEB_TASK_TIMEOUT_SECONDS="900")
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    client = E2BSandboxClient(
+        config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
+    )
+    client.start()
+    client.run_prompt("把结果写成 report.md")
+
+    assert sandbox.command_timeout is not None, "the SDK default (60 s) must not be left in place"
+    # The command may run as long as the sandbox it runs in; never longer.
+    assert sandbox.command_timeout == client.sandbox_timeout == 1200
+    client.close()
+
+
+def test_the_command_timeout_follows_a_tighter_configured_sandbox_ceiling(
+    tmp_path: Path,
+) -> None:
+    config = make_config(
+        tmp_path, LOCAL_WEB_TASK_TIMEOUT_SECONDS="900", LOCAL_WEB_E2B_TIMEOUT_SECONDS="300"
+    )
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    client = E2BSandboxClient(
+        config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
+    )
+    client.start()
+    client.run_prompt("把结果写成 report.md")
+
+    assert sandbox.command_timeout == 300
     client.close()
 
 

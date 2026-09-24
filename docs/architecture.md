@@ -274,6 +274,11 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 `(相对路径, sha256)` 清单，`AGENTS.md`、`settings.json`、`extensions/`、`skills/`、`prompts/`
 与生成文件都按同一路径语义送达。详见 `docs/evidence/e2b-run.txt`。
 
+同一个适配器显式传 `commands.run(..., timeout=<沙箱寿命>)`：SDK 默认值是命令累计运行 60 秒，
+而真实研究 run 是分钟级，遗留默认会把内核在沙箱仍存活时杀掉（run 以 `execution_error` 结束于
+`TimeoutException`，报告与产物丢失）。命令上限与创建沙箱用的同一个计算值绑定，不会比沙箱寿命更长，
+也不会更短。
+
 ## 6. 凭据流
 
 * 模型：`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`（与 FrontierAgent 同名语义）。

@@ -93,6 +93,9 @@ class E2BSandboxClient:
         #: ``(relative path, sha256)`` for everything delivered to the sandbox.
         self.upload_manifest: list[tuple[str, str]] = []
         self.sandbox_id: str = ""
+        #: Lifetime the sandbox was created with; the kernel command must be
+        #: allowed to run at least that long (see ``_command_timeout``).
+        self.sandbox_timeout: int = 0
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -120,6 +123,7 @@ class E2BSandboxClient:
             or (self.config.task_timeout_seconds + 300)
         )
         timeout = min(adapter_bound, ceiling) if adapter_bound > 0 else ceiling
+        self.sandbox_timeout = int(timeout)
         create_kwargs: dict[str, Any] = {
             "template": template,
             "timeout": timeout,
@@ -216,13 +220,35 @@ class E2BSandboxClient:
         replaying it once the command settles keeps every frame — the trade-off
         is that this face replays the run *after* it ends rather than live, which
         ``docs/architecture.md`` records as a known difference.
+
+        ``timeout`` is passed explicitly: the SDK default is 60 seconds for a
+        command's total active time, which would kill every research run while
+        the sandbox itself is still alive (a real run does minutes of work).
         """
         sandbox = self._require_sandbox()
         command = self._command(prompt, system_prompt, resume_session=resume_session)
-        handle = sandbox.commands.run(command, background=True, envs=self._model_envs())
+        handle = sandbox.commands.run(
+            command,
+            background=True,
+            envs=self._model_envs(),
+            timeout=self._command_timeout(),
+        )
         result = handle.wait()
         exit_code = int(getattr(result, "exit_code", 1))
         return exit_code, self.fetch_stderr_tail()
+
+    def _command_timeout(self) -> int:
+        """How long the sandboxed kernel command may run, in seconds.
+
+        Matched to the sandbox's own lifetime: a shorter bound would kill the
+        kernel (and discard its work) while the sandbox is still usable, and a
+        longer one is meaningless because the sandbox dies first. The value is
+        frozen from the same calculation that created the sandbox, so the two
+        cannot drift apart.
+        """
+        if self.sandbox_timeout > 0:
+            return self.sandbox_timeout
+        return int(self.config.task_timeout_seconds) + 300
 
     def fetch_events(self) -> list[str]:
         """Return the JSONL records the sandbox wrote for this run.
