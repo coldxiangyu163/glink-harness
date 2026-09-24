@@ -109,11 +109,15 @@ class FakeFiles:
     def list(self, path: str) -> list[Any]:
         readable = self._sandbox.readable
         sizes = self._sandbox.sizes
+        types = self._sandbox.entry_types
 
         class Entry:
             def __init__(self, name: str) -> None:
                 self.name = name
                 self.path = f"{path}/{name}"
+                # The real SDK reports an EntryInfo.type (an enum); absent
+                # means a regular file.
+                self.type = types.get(self.path, "file")
                 content = readable.get(self.path)
                 if self.path in sizes:
                     self.size = sizes[self.path]
@@ -189,6 +193,8 @@ class FakeSandbox:
         self.reads: list[str] = []
         #: Entry sizes the SDK reports instead of the real content length.
         self.sizes: dict[str, int] = {}
+        #: Entry kinds the SDK reports (path -> "file"/"dir"/"symlink"/enum).
+        self.entry_types: dict[str, Any] = {}
         if events is not None:
             self.readable["/home/user/events.jsonl"] = "\n".join(
                 json.dumps(event) for event in events
@@ -1421,3 +1427,59 @@ def test_the_stderr_tail_stays_empty_when_the_read_is_refused(tmp_path: Path) ->
         assert "/home/user/pi-stderr.txt" not in sandbox.reads
     finally:
         client.close()
+
+
+def _recover_from(sandbox: FakeSandbox, tmp_path: Path):
+    config = make_config(tmp_path)
+    client = E2BSandboxClient(
+        config,
+        _prepare(config, tmp_path),
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: sandbox,
+    )
+    client.start()
+    try:
+        return client.recover_artifacts(tmp_path / "ws")
+    finally:
+        client.close()
+
+
+def test_directories_and_symlinks_are_skipped_without_a_false_failure(tmp_path: Path) -> None:
+    """The audit blocker: a directory entry must not become an artifact failure.
+
+    The real SDK reports ``EntryInfo.type`` as the ``FileType`` enum, so an
+    agent that wrote a ``notes/`` directory (very common) must not turn every
+    E2B run's terminal record into a false alarm.
+    """
+    sandbox = FakeSandbox(workspace_files=("report.md", "notes", "linked.md"))
+    sandbox.readable["/home/user/workspace/report.md"] = "# 报告\n"
+    sandbox.entry_types["/home/user/workspace/notes"] = "dir"
+    sandbox.entry_types["/home/user/workspace/linked.md"] = "symlink"
+    sandbox.reads.clear()
+
+    files, failures = _recover_from(sandbox, tmp_path)
+
+    assert {path.name for path in files} == {"report.md"}
+    assert failures == [], "目录/符号链接不是产物的失败，不得写进终态 artifactFailures"
+    assert "/home/user/workspace/notes" not in sandbox.reads, "目录不得被读取"
+    assert "/home/user/workspace/linked.md" not in sandbox.reads, "链接不得被跟随"
+
+
+def test_the_real_sdk_file_type_enum_is_understood(tmp_path: Path) -> None:
+    e2b = pytest.importorskip("e2b")
+    from e2b import FileType  # noqa: PLC0415 - optional dependency
+
+    assert FileType.DIR.value == "dir" and str(FileType.DIR) == "FileType.DIR"
+    sandbox = FakeSandbox(workspace_files=("report.md", "notes", "linked.md"))
+    sandbox.readable["/home/user/workspace/report.md"] = "# 报告\n"
+    sandbox.entry_types["/home/user/workspace/notes"] = FileType.DIR
+    sandbox.entry_types["/home/user/workspace/linked.md"] = FileType.SYMLINK
+
+    files, failures = _recover_from(sandbox, tmp_path)
+
+    assert {path.name for path in files} == {"report.md"}
+    assert failures == []
+    assert sandbox.reads.count("/home/user/workspace/report.md") >= 1
+    assert "/home/user/workspace/notes" not in sandbox.reads
+    assert e2b is not None

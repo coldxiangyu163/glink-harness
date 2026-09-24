@@ -572,9 +572,15 @@ class E2BSandboxClient:
                 if "/" in name or "\\" in name or name in {".", ".."}:
                     failures.append(f"跳过非法产物名: {name!r}")
                     continue
-                if str(getattr(entry, "type", "") or "").lower() in {"dir", "directory"}:
+                kind = _entry_kind(entry)
+                if kind == "dir":
                     # Directories are not deliverables; only regular entries are
                     # recovered (and an unreadable regular entry is reported).
+                    continue
+                if kind == "symlink":
+                    # The host never follows links — the same rule ArtifactTree
+                    # enforces on every read and write. A linked artifact is
+                    # skipped rather than resolved and is not a run failure.
                     continue
                 if name.startswith("."):
                     continue
@@ -746,6 +752,21 @@ def _default_sandbox_factory() -> Callable[..., Any]:
         return Sandbox.create(**kwargs)
 
     return factory
+
+
+def _entry_kind(entry: Any) -> str:
+    """The SDK's entry kind as a plain lowercase string.
+
+    ``EntryInfo.type`` is :class:`e2b.sandbox.filesystem.filesystem.FileType`, an
+    ``Enum`` whose string form is ``"FileType.DIR"``; an older payload or a test
+    double may hand back the plain value instead. Both shapes resolve to the same
+    kind, and an absent type means a regular file (the listing's default).
+    """
+    raw = getattr(entry, "type", None)
+    value = getattr(raw, "value", raw)
+    if isinstance(value, str) and value:
+        return value.strip().lower()
+    return "file"
 
 
 def _entry_size(sandbox: Any, path: str) -> int | None:

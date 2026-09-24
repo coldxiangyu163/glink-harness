@@ -374,6 +374,7 @@ class FakeFiles:
             def __init__(self, name: str) -> None:
                 self.name = name
                 self.path = f"{path}/{name}"
+                self.type = "file"
                 content = readable.get(self.path)
                 if content is None:
                     self.size = 0

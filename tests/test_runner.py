@@ -558,6 +558,7 @@ class _PoorlyClosingSandbox:
                 class _Entry:
                     name = "report.md"
                     path = "/home/user/workspace/report.md"
+                    type = "file"
 
                 return [_Entry()]
 
