@@ -574,8 +574,8 @@ class RunManager:
             }
         return [
             record.run_id
-            for record in self.store.list(limit=None)
-            if record.run_id not in in_flight and record.holds_resources
+            for record in self.store.holding_records()
+            if record.run_id not in in_flight
         ]
 
     # -- cancellation ---------------------------------------------------------
@@ -786,7 +786,7 @@ class RunManager:
                 "sandbox": record.sandbox_id,
                 "cleanup": record.cleanup,
             }
-            for record in self.store.list(limit=None)
+            for record in self.store.holding_records()
             if record.run_id in holds
         ]
 

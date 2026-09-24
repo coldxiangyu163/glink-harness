@@ -27,6 +27,18 @@ terminal frame onto a record whose ``meta.json`` still says ``running``: every
 reader — run detail, run list, report download, SSE replay — sees the same
 committed fact, never before it is durable, and never taken back.
 
+**The in-process index is an accelerator, never a second source.** One run
+record is one directory with its own ``meta.json``; listing runs, listing one
+tenant's runs and deriving the resource ledger used to walk and re-parse every
+one of them on every call — inside the admission lock. The data root has exactly
+one owning process (:mod:`pi_glink.ownership`), so :class:`_RunIndex` builds
+that projection once from disk and every write path (``create``, ``update``,
+``settle``, terminal commit) refreshes its own entry. Reads keep their exact
+semantics: the committed-prefix rule, the terminal projection, the newest-first
+order and the multi-tenant owner filter all come from the same helpers the disk
+scan uses, and :meth:`RunStore.scan_all` is the uncached reference the
+regressions compare the index against.
+
 The store is deliberately small. The workbench needs run history, reconnect
 support and an auditable event log, none of which require a database yet; when
 multi-user or multi-tenant lands, this module is the seam that changes.
@@ -190,6 +202,47 @@ _WATERMARKS = _CommitWatermarks()
 
 
 @dataclass(frozen=True, slots=True)
+class _IndexEntry:
+    """One run as written to disk plus the projection every reader must see.
+
+    ``raw`` is the ``meta.json`` record; ``projected`` additionally carries a
+    committed terminal frame that the settled copy has not caught up with yet.
+    """
+
+    raw: RunRecord
+    projected: RunRecord
+
+
+class _RunIndex:
+    """Process-wide projection of one runs root (built once, then incremental).
+
+    The data root has a single owning process, so every :class:`RunStore` in
+    this process must agree on the same records; a per-instance cache would let
+    two stores disagree after one of them wrote. Readers therefore share one
+    index per root, and a fresh process rebuilds it from disk on first use.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.entries: dict[str, _IndexEntry] = {}
+        self.loaded = False
+
+
+_INDEXES: dict[str, _RunIndex] = {}
+_INDEXES_LOCK = threading.Lock()
+
+
+def _index_for(root: Path) -> _RunIndex:
+    key = os.path.abspath(root)
+    with _INDEXES_LOCK:
+        index = _INDEXES.get(key)
+        if index is None:
+            index = _RunIndex()
+            _INDEXES[key] = index
+        return index
+
+
+@dataclass(frozen=True, slots=True)
 class ReportLocation:
     """Where a record's report may be read: a run-owned root and a fixed name."""
 
@@ -204,6 +257,7 @@ class RunStore:
     def __init__(self, root: Path) -> None:
         self._root = root
         self._lock = threading.RLock()
+        self._index = _index_for(root)
 
     @property
     def root(self) -> Path:
@@ -250,8 +304,7 @@ class RunStore:
             creator_user_id=creator_user_id,
             parent_run_id=parent_run_id,
         )
-        self._write(record)
-        return record
+        return self._write(record)
 
     def update(self, run_id: str, **changes: Any) -> RunRecord:
         """Change facts in ``meta.json`` (in-flight facts, adjudication)."""
@@ -263,14 +316,12 @@ class RunStore:
             unknown = set(changes) - allowed
             if unknown:
                 raise ValueError(f"unknown run fields: {sorted(unknown)}")
-            updated = replace(record, **changes)
-            self._write(updated)
-            return self._project(updated)
+            return self._write(replace(record, **changes))
 
     def get(self, run_id: str) -> RunRecord | None:
         """The run as every reader must see it (committed terminal projected)."""
-        record = self._read_meta(run_id)
-        return self._project(record) if record is not None else None
+        entry = self._entries().get(run_id)
+        return entry.projected if entry is not None else None
 
     def get_for(self, run_id: str, tenant_id: str) -> RunRecord | None:
         """The run only when it belongs to ``tenant_id``.
@@ -286,42 +337,41 @@ class RunStore:
 
     def list_for(self, tenant_id: str, limit: int | None = 50) -> list[RunRecord]:
         """Runs of exactly one tenant, newest first (legacy records excluded)."""
-        if not self._root.is_dir():
-            return []
-        records: list[RunRecord] = []
-        for entry in sorted(self._root.iterdir(), key=lambda item: item.name):
-            if not entry.is_dir():
-                continue
-            record = self.get(entry.name)
-            if record is not None and record.tenant_id == tenant_id:
-                records.append(record)
-        records.sort(key=lambda item: item.created_at, reverse=True)
+        records = [record for record in self._records() if record.tenant_id == tenant_id]
         return records if limit is None else records[:limit]
 
     def list(self, limit: int | None = 50) -> list[RunRecord]:
-        if not self._root.is_dir():
-            return []
-        records: list[RunRecord] = []
-        for entry in sorted(self._root.iterdir(), key=lambda item: item.name):
-            if not entry.is_dir():
-                continue
-            record = self.get(entry.name)
-            if record is not None:
-                records.append(record)
-        records.sort(key=lambda item: item.created_at, reverse=True)
+        records = self._records()
         return records if limit is None else records[:limit]
+
+    def holding_records(self, tenant_id: str | None = None) -> list[RunRecord]:
+        """Records whose execution resources are not confirmed released.
+
+        ``tenant_id`` selects one tenant's holds; ``None`` returns every hold,
+        including records without an owner (legacy and reconciled leftovers),
+        because those still consume the global capacity. Newest first, like
+        :meth:`list`.
+        """
+        return [
+            record
+            for record in self._records()
+            if record.holds_resources and (tenant_id is None or record.tenant_id == tenant_id)
+        ]
 
     def unsettled(self) -> list[str]:
         """Run ids whose ``meta.json`` still says ``running`` (no settled copy)."""
-        if not self._root.is_dir():
-            return []
-        return [
-            entry.name
-            for entry in sorted(self._root.iterdir(), key=lambda item: item.name)
-            if entry.is_dir()
-            and (record := self._read_meta(entry.name)) is not None
-            and record.status == RUNNING
-        ]
+        entries = self._entries()
+        return [run_id for run_id in sorted(entries) if entries[run_id].raw.status == RUNNING]
+
+    def scan_all(self) -> list[RunRecord]:
+        """Uncached reference read: walk every run directory, project each record.
+
+        This is what the index is built from and the comparison the regressions
+        use; production reads must not call it per request.
+        """
+        records = [entry.projected for entry in self._scan_entries()]
+        records.sort(key=lambda item: item.created_at, reverse=True)
+        return records
 
     def settle(self, run_id: str) -> RunRecord | None:
         """Copy the committed terminal record into ``meta.json``.
@@ -339,9 +389,7 @@ class RunStore:
             terminal = self.committed_terminal(run_id)
             if terminal is None:
                 return None
-            settled = _apply_terminal(record, terminal)
-            self._write(settled)
-            return settled
+            return self._write(_apply_terminal(record, terminal))
 
     def report_location(self, record: RunRecord) -> ReportLocation | None:
         """The only places a record's ``report_path`` may point to.
@@ -453,6 +501,10 @@ class RunStore:
                         pass
                     raise
                 _WATERMARKS.advance(path, size + len(line), seal=durable)
+                if durable:
+                    # The index must never run ahead of the committed prefix:
+                    # refresh it only after the watermark passed the new line.
+                    self._refresh_projection(run_id)
             finally:
                 os.close(descriptor)
 
@@ -470,6 +522,54 @@ class RunStore:
         terminal = self.committed_terminal(record.run_id)
         return _apply_terminal(record, terminal) if terminal is not None else record
 
+    def _entries(self) -> dict[str, _IndexEntry]:
+        """The in-process index, built once from disk on first use."""
+        index = self._index
+        if index.loaded:
+            return index.entries
+        with index.lock:
+            if not index.loaded:
+                for entry in self._scan_entries():
+                    index.entries[entry.raw.run_id] = entry
+                index.loaded = True
+        return index.entries
+
+    def _records(self) -> list[RunRecord]:
+        """Projected records newest first (stable by directory name on ties)."""
+        entries = self._entries()
+        records = [entries[run_id].projected for run_id in sorted(entries)]
+        records.sort(key=lambda item: item.created_at, reverse=True)
+        return records
+
+    def _scan_entries(self) -> list[_IndexEntry]:
+        """Read every run directory (index build and the reference read)."""
+        if not self._root.is_dir():
+            return []
+        entries: list[_IndexEntry] = []
+        for entry in sorted(self._root.iterdir(), key=lambda item: item.name):
+            if not entry.is_dir():
+                continue
+            record = self._read_meta(entry.name)
+            if record is None:
+                continue
+            entries.append(_IndexEntry(raw=record, projected=self._project(record)))
+        return entries
+
+    def _refresh_projection(self, run_id: str) -> None:
+        """Fold a just-committed terminal frame into the run's index entry."""
+        index = self._index
+        with index.lock:
+            entry = index.entries.get(run_id)
+            if entry is None:
+                return
+            terminal = self.committed_terminal(run_id)
+            if terminal is None:
+                return
+            index.entries[run_id] = _IndexEntry(
+                raw=entry.raw,
+                projected=_apply_terminal(entry.raw, terminal),
+            )
+
     def _read_meta(self, run_id: str) -> RunRecord | None:
         path = self.run_dir(run_id) / _META_NAME
         if not path.is_file():
@@ -483,7 +583,8 @@ class RunStore:
         known = {field.name for field in fields(RunRecord)}
         return RunRecord(**{key: value for key, value in data.items() if key in known})
 
-    def _write(self, record: RunRecord) -> None:
+    def _write(self, record: RunRecord) -> RunRecord:
+        """Atomically replace ``meta.json`` and refresh the index entry."""
         directory = self.run_dir(record.run_id)
         directory.mkdir(parents=True, exist_ok=True)
         payload = asdict(record)
@@ -493,6 +594,12 @@ class RunStore:
                 json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
             )
             temporary.replace(directory / _META_NAME)
+        index = self._index
+        with index.lock:
+            index.entries[record.run_id] = _IndexEntry(
+                raw=record, projected=self._project(record)
+            )
+        return index.entries[record.run_id].projected
 
 
 def _terminal_line(path: Path, end: int) -> dict[str, Any] | None:
