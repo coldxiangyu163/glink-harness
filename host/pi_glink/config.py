@@ -36,6 +36,8 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _DEFAULT_PORT = 7860
 _DEFAULT_MAX_GLOBAL_RUNS = 4
 _DEFAULT_MAX_TENANT_RUNS = 2
+_DEFAULT_MAX_GLOBAL_STREAMS = 64
+_DEFAULT_MAX_TENANT_STREAMS = 16
 _DEFAULT_ASSERTION_MAX_SECONDS = 300
 _DEFAULT_ASSERTION_SKEW_SECONDS = 30
 #: 默认使用本仓库自己的云沙箱模板（含 Node + pi）；FrontierAgent 的
@@ -125,12 +127,23 @@ class HostConfig:
     #: one covers a single tenant; both apply only in multi-tenant mode.
     max_global_runs: int = _DEFAULT_MAX_GLOBAL_RUNS
     max_tenant_runs: int = _DEFAULT_MAX_TENANT_RUNS
+    #: Concurrent SSE connections. The global ceiling covers the whole host; the
+    #: tenant one applies in multi-tenant mode only (local mode has no tenant).
+    #: An over-limit connection is refused with 429 ``stream_limit`` before any
+    #: stream header is written.
+    max_global_streams: int = _DEFAULT_MAX_GLOBAL_STREAMS
+    max_tenant_streams: int = _DEFAULT_MAX_TENANT_STREAMS
     #: Container resource ceilings (Docker face only; the image is never changed).
     docker_cpus: str = "2"
     docker_memory: str = "2g"
     docker_pids_limit: int = 512
     #: E2B sandbox lifetime ceiling; 0 keeps the adapter default (task timeout + 300s).
     e2b_sandbox_timeout_seconds: int = 0
+    #: Interval of the online resource ledger sweep (seconds). The sweep asks
+    #: the execution face whether the resources of an unconfirmed hold still
+    #: exist, addressing only the identity persisted with the run. ``0`` disables
+    #: it; the offline ``--unreleased`` / ``--mark-released`` path still works.
+    resource_reconcile_seconds: int = 60
 
     @property
     def multi_tenant(self) -> bool:
@@ -214,7 +227,7 @@ def load_config(
 
 def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     host = _text(values, "LOCAL_WEB_HOST", "127.0.0.1")
-    port = _integer(values, "LOCAL_WEB_PORT", _DEFAULT_PORT)
+    port = _port(values, "LOCAL_WEB_PORT", _DEFAULT_PORT)
     executor = _text(values, "LOCAL_WEB_EXECUTOR", "inproc").lower()
     tenancy_mode = _text(values, "PI_GLINK_TENANCY", "local").lower()
     auth_mode = _text(values, "PI_GLINK_AUTH_MODE", "gateway").lower()
@@ -258,15 +271,6 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         raise ConfigError(
             "PI_GLINK_AUTH_MODE=accounts 需要 PI_GLINK_TENANCY=multitenant"
         )
-    if host not in _LOOPBACK_HOSTS:
-        # One behaviour migration: an unauthenticated host may no longer be
-        # exposed beyond loopback. Remote access goes through the local
-        # authentication gateway (PI_GLINK_TENANCY=multitenant); the legacy
-        # ``LOCAL_WEB_ALLOW_REMOTE`` switch no longer opens one.
-        raise ConfigError(
-            f"LOCAL_WEB_HOST={host} 不是 loopback；宿主只允许本机监听，"
-            "远端访问必须由本机认证网关反代（PI_GLINK_TENANCY=multitenant）"
-        )
     if tenancy_mode == "multitenant":
         _require_multitenant(values, executor, auth_mode, model_credentials)
 
@@ -302,7 +306,7 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         _require_accounts_db(accounts_db, data_root, repo_root)
     public_origin = _origin(values, "PI_GLINK_PUBLIC_ORIGIN", "")
 
-    return HostConfig(
+    config = HostConfig(
         repo_root=repo_root,
         web_root=repo_root / "web",
         data_root=data_root,
@@ -316,17 +320,19 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         openai_base_url=base_url,
         openai_model=model,
         openai_api_key=api_key,
-        context_window=_integer(
+        context_window=_positive_integer(
             values, "OPENAI_CONTEXT_WINDOW", _DEFAULT_CONTEXT_WINDOW
         ),
-        max_output_tokens=_integer(
+        max_output_tokens=_positive_integer(
             values, "OPENAI_MAX_TOKENS", _DEFAULT_MAX_OUTPUT_TOKENS
         ),
         e2b_template=_text(values, "LOCAL_WEB_E2B_TEMPLATE", _DEFAULT_E2B_TEMPLATE),
         e2b_api_key=e2b_key,
         worker_image=_text(values, "LOCAL_WEB_WORKER_IMAGE", DEFAULT_WORKER_IMAGE),
         log_level=_text(values, "LOCAL_WEB_LOG_LEVEL", "INFO").upper(),
-        task_timeout_seconds=_integer(values, "LOCAL_WEB_TASK_TIMEOUT_SECONDS", 1800),
+        task_timeout_seconds=_positive_integer(
+            values, "LOCAL_WEB_TASK_TIMEOUT_SECONDS", 1800
+        ),
         web_search_key=_text(values, "PI_GLINK_WEB_SEARCH_KEY", ""),
         web_search_config_path=_optional_path(
             values,
@@ -340,32 +346,95 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         accounts_db=accounts_db,
         public_origin=public_origin,
         session_cookie_secure=_flag(values, "PI_GLINK_COOKIE_SECURE", True),
-        session_absolute_seconds=_integer(values, "PI_GLINK_SESSION_ABSOLUTE_SECONDS", 43200),
-        session_idle_seconds=_integer(values, "PI_GLINK_SESSION_IDLE_SECONDS", 7200),
-        invite_ttl_seconds=_integer(values, "PI_GLINK_INVITE_TTL_SECONDS", 172800),
-        login_max_attempts=_integer(values, "PI_GLINK_LOGIN_MAX_ATTEMPTS", 5),
-        login_window_seconds=_integer(values, "PI_GLINK_LOGIN_WINDOW_SECONDS", 300),
-        login_peer_max_attempts=_integer(values, "PI_GLINK_LOGIN_PEER_MAX_ATTEMPTS", 120),
-        login_peer_window_seconds=_integer(values, "PI_GLINK_LOGIN_PEER_WINDOW_SECONDS", 60),
-        register_max_attempts=_integer(values, "PI_GLINK_REGISTER_MAX_ATTEMPTS", 10),
-        register_window_seconds=_integer(values, "PI_GLINK_REGISTER_WINDOW_SECONDS", 900),
-        invite_check_max_attempts=_integer(values, "PI_GLINK_INVITE_CHECK_MAX_ATTEMPTS", 60),
-        invite_check_window_seconds=_integer(values, "PI_GLINK_INVITE_CHECK_WINDOW_SECONDS", 300),
+        session_absolute_seconds=_positive_integer(
+            values, "PI_GLINK_SESSION_ABSOLUTE_SECONDS", 43200
+        ),
+        session_idle_seconds=_positive_integer(values, "PI_GLINK_SESSION_IDLE_SECONDS", 7200),
+        invite_ttl_seconds=_positive_integer(values, "PI_GLINK_INVITE_TTL_SECONDS", 172800),
+        login_max_attempts=_positive_integer(values, "PI_GLINK_LOGIN_MAX_ATTEMPTS", 5),
+        login_window_seconds=_positive_integer(values, "PI_GLINK_LOGIN_WINDOW_SECONDS", 300),
+        login_peer_max_attempts=_positive_integer(
+            values, "PI_GLINK_LOGIN_PEER_MAX_ATTEMPTS", 120
+        ),
+        login_peer_window_seconds=_positive_integer(
+            values, "PI_GLINK_LOGIN_PEER_WINDOW_SECONDS", 60
+        ),
+        register_max_attempts=_positive_integer(values, "PI_GLINK_REGISTER_MAX_ATTEMPTS", 10),
+        register_window_seconds=_positive_integer(
+            values, "PI_GLINK_REGISTER_WINDOW_SECONDS", 900
+        ),
+        invite_check_max_attempts=_positive_integer(
+            values, "PI_GLINK_INVITE_CHECK_MAX_ATTEMPTS", 60
+        ),
+        invite_check_window_seconds=_positive_integer(
+            values, "PI_GLINK_INVITE_CHECK_WINDOW_SECONDS", 300
+        ),
         tenant_config_file=_optional_path(values, "PI_GLINK_TENANT_CONFIG_FILE", None),
         tenancy_audience=_text(values, "PI_GLINK_TENANCY_AUDIENCE", ""),
-        assertion_max_lifetime_seconds=_integer(
+        assertion_max_lifetime_seconds=_positive_integer(
             values, "PI_GLINK_ASSERTION_MAX_SECONDS", _DEFAULT_ASSERTION_MAX_SECONDS
         ),
-        assertion_clock_skew_seconds=_integer(
+        assertion_clock_skew_seconds=_non_negative_integer(
             values, "PI_GLINK_ASSERTION_SKEW_SECONDS", _DEFAULT_ASSERTION_SKEW_SECONDS
         ),
-        max_global_runs=_integer(values, "PI_GLINK_MAX_GLOBAL_RUNS", _DEFAULT_MAX_GLOBAL_RUNS),
-        max_tenant_runs=_integer(values, "PI_GLINK_MAX_TENANT_RUNS", _DEFAULT_MAX_TENANT_RUNS),
+        max_global_runs=_positive_integer(
+            values, "PI_GLINK_MAX_GLOBAL_RUNS", _DEFAULT_MAX_GLOBAL_RUNS
+        ),
+        max_tenant_runs=_positive_integer(
+            values, "PI_GLINK_MAX_TENANT_RUNS", _DEFAULT_MAX_TENANT_RUNS
+        ),
+        max_global_streams=_positive_integer(
+            values, "PI_GLINK_MAX_GLOBAL_STREAMS", _DEFAULT_MAX_GLOBAL_STREAMS
+        ),
+        max_tenant_streams=_positive_integer(
+            values, "PI_GLINK_MAX_TENANT_STREAMS", _DEFAULT_MAX_TENANT_STREAMS
+        ),
         docker_cpus=_text(values, "LOCAL_WEB_DOCKER_CPUS", "2"),
         docker_memory=_text(values, "LOCAL_WEB_DOCKER_MEMORY", "2g"),
-        docker_pids_limit=_integer(values, "LOCAL_WEB_DOCKER_PIDS_LIMIT", 512),
-        e2b_sandbox_timeout_seconds=_integer(values, "LOCAL_WEB_E2B_TIMEOUT_SECONDS", 0),
+        docker_pids_limit=_positive_integer(values, "LOCAL_WEB_DOCKER_PIDS_LIMIT", 512),
+        e2b_sandbox_timeout_seconds=_non_negative_integer(
+            values, "LOCAL_WEB_E2B_TIMEOUT_SECONDS", 0
+        ),
+        resource_reconcile_seconds=_non_negative_integer(
+            values, "PI_GLINK_RESOURCE_RECONCILE_SECONDS", 60
+        ),
     )
+    validate_host_config(config)
+    return config
+
+
+def validate_host_config(config: HostConfig) -> None:
+    """Re-check the construction invariants that a caller may override later.
+
+    ``build_config`` runs this before returning, and the CLI runs it again after
+    ``--host``/``--port`` overrides: an operator-supplied value must not be able
+    to skip the loopback or range checks by arriving after construction.
+    """
+    if config.host not in _LOOPBACK_HOSTS:
+        # One behaviour migration: an unauthenticated host may no longer be
+        # exposed beyond loopback. Remote access goes through the local
+        # authentication gateway (PI_GLINK_TENANCY=multitenant); the legacy
+        # ``LOCAL_WEB_ALLOW_REMOTE`` switch no longer opens one.
+        raise ConfigError(
+            f"LOCAL_WEB_HOST={config.host} 不是 loopback；宿主只允许本机监听，"
+            "远端访问必须由本机认证网关反代（PI_GLINK_TENANCY=multitenant）"
+        )
+    if not 0 <= config.port <= 65535:
+        raise ConfigError(
+            f"LOCAL_WEB_PORT 必须在 0–65535 之间（0 = 由内核分配临时端口）；当前 {config.port}"
+        )
+    if config.executor not in EXECUTORS:
+        raise ConfigError(
+            f"LOCAL_WEB_EXECUTOR must be one of {', '.join(EXECUTORS)}; got {config.executor!r}"
+        )
+    if config.tenancy_mode not in TENANCY_MODES:
+        raise ConfigError(
+            f"PI_GLINK_TENANCY must be one of {', '.join(TENANCY_MODES)}; got {config.tenancy_mode!r}"
+        )
+    if config.multi_tenant and config.executor == "inproc":
+        raise ConfigError(
+            "PI_GLINK_TENANCY=multitenant 要求 Docker/E2B 执行面；inproc 仅用于本地单用户调试"
+        )
 
 
 def _require_multitenant(
@@ -420,6 +489,28 @@ def _integer(values: Mapping[str, str], key: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise ConfigError(f"{key} must be an integer; got {raw!r}") from exc
+
+
+def _non_negative_integer(values: Mapping[str, str], key: str, default: int) -> int:
+    value = _integer(values, key, default)
+    if value < 0:
+        raise ConfigError(f"{key} 不能为负值；当前 {value}")
+    return value
+
+
+def _positive_integer(values: Mapping[str, str], key: str, default: int) -> int:
+    value = _integer(values, key, default)
+    if value < 1:
+        raise ConfigError(f"{key} 必须为 >= 1 的整数；当前 {value}")
+    return value
+
+
+def _port(values: Mapping[str, str], key: str, default: int) -> int:
+    """A TCP port: 0 asks the kernel for an ephemeral one (tests, local debug)."""
+    value = _integer(values, key, default)
+    if not 0 <= value <= 65535:
+        raise ConfigError(f"{key} 必须在 0–65535 之间（0 = 内核分配临时端口）；当前 {value}")
+    return value
 
 
 def _path(values: Mapping[str, str], key: str, default: Path) -> Path:

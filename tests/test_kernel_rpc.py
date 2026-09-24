@@ -260,3 +260,34 @@ def test_projection_matches_the_shared_payload_corpus() -> None:
     assert search_args["queries"] == corpus["expected_sources"]["queries"]
     fetch_args = corpus["projected"][1]["payload"]["args"]
     assert fetch_args["urls"] == [page["href"] for page in corpus["expected_sources"]["pages"]]
+
+
+# -- the authoritative answer frame may be clipped, and must say so ------------
+#
+# GLINK-INTEG-01: the streamed deltas carry the whole answer to the browser while
+# the terminal ``assistant_message`` keeps only ``ASSISTANT_TEXT_LIMIT`` of it
+# (one frame must not blow up events.jsonl). A client that already holds the
+# longer streamed body needs to know the authoritative copy is incomplete
+# instead of silently replacing more with less.
+
+
+def test_a_clipped_authoritative_message_is_marked_truncated() -> None:
+    text = "答" * 20000
+    produced = project_event(
+        {"type": "message_end", "message": {"role": "assistant", "content": text, "stopReason": "stop"}}
+    )
+    ((kind, payload),) = produced
+    assert kind == "assistant_message"
+    assert payload["truncated"] is True
+    assert payload["text"].startswith("答" * 16000)
+    assert "…[truncated 4000 chars]" in payload["text"]
+    assert payload["stopReason"] == "stop"
+
+
+def test_a_short_authoritative_message_carries_no_truncated_flag() -> None:
+    produced = project_event(
+        {"type": "message_end", "message": {"role": "assistant", "content": "简短回答"}}
+    )
+    ((_kind, payload),) = produced
+    assert payload["text"] == "简短回答"
+    assert "truncated" not in payload

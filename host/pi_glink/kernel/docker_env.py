@@ -27,7 +27,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ..config import DEFAULT_WORKER_IMAGE, HostConfig
 from .agent_env import IMAGE_PACKAGE_GUARD, PASSTHROUGH_ENV, AgentRuntime
@@ -128,7 +128,7 @@ def build_plan(
     exist — the guard turns that silent loss into a clear failure (exit 78).
     """
     image = worker_image(config)
-    container_name = f"pi-glink-{run_id}"
+    container_name = container_name_for(run_id)
     argv: list[str] = [
         "docker", "run", "--rm", "-i",
         "--name", container_name,
@@ -188,6 +188,83 @@ def build_env(
 def stop_argv(container_name: str) -> list[str]:
     """Force-remove a container after a cancelled or timed-out run."""
     return ["docker", "rm", "-f", container_name]
+
+
+#: Bound on one identity probe (inspect / force-remove). The ledger sweep skips
+#: a tick while a probe runs, so this bounds the call, not a whole sweep.
+PROBE_TIMEOUT_SECONDS = 20
+
+
+def container_name_for(run_id: str) -> str:
+    """The container name of one run — fixed before ``docker run`` executes.
+
+    The runner persists it before starting the container, so a failure inside
+    ``start()`` cannot leave an unconfirmed hold without its identity.
+    """
+    return f"pi-glink-{run_id}"
+
+
+def confirm_absent(
+    container_name: str, *, runner: Callable[..., Any] = subprocess.run
+) -> tuple[bool, str]:
+    """Confirm by persisted name that no container remains; remove it if it does.
+
+    Only the named identity is ever addressed: no name pattern, no listing and
+    no other container. ``(True, detail)`` means the container is proven gone;
+    a missing identity, an unclear CLI answer or a timeout keeps the hold. A
+    container that is still there is removed with the same idempotent
+    force-remove the cancel path uses, then confirmed again.
+    """
+    if not container_name:
+        return False, "缺少持久化的容器名"
+    present, detail = _container_present(container_name, runner)
+    if present is None or present is False:
+        return present is False, detail
+    try:
+        result = runner(
+            stop_argv(container_name),
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"删除容器失败: {type(exc).__name__}: {exc}"
+    stderr = (result.stderr or "").strip()
+    if result.returncode != 0 and "No such container" not in stderr:
+        return False, f"删除容器失败: exit {result.returncode}: {stderr[-200:]}"
+    present, detail = _container_present(container_name, runner)
+    if present is False:
+        return True, f"已按名字强制删除并确认容器不存在（{detail}）"
+    return False, f"删除后仍无法确认容器不存在: {detail}"
+
+
+def _container_present(
+    container_name: str, runner: Callable[..., Any]
+) -> tuple[bool | None, str]:
+    """``True``/``False`` when the daemon answered, ``None`` when it did not."""
+    try:
+        result = runner(
+            [
+                "docker",
+                "inspect",
+                "--type",
+                "container",
+                "--format",
+                "{{.Id}}",
+                container_name,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"docker inspect 不可用: {type(exc).__name__}: {exc}"
+    if result.returncode == 0:
+        return True, "docker inspect 确认容器仍存在"
+    message = ((result.stderr or "") + (result.stdout or "")).strip()
+    if "no such" in message.lower():
+        return False, "docker inspect 确认容器不存在"
+    return None, f"docker inspect 无法判定: exit {result.returncode}: {message[-200:]}"
 
 
 def host_session_path(raw: str, session_dir: Path) -> Path | None:

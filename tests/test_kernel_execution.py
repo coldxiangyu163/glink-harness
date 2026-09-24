@@ -184,17 +184,34 @@ class _FakeSandboxFiles:
     def write(self, path: str, content: Any) -> None:
         self.written[path] = content
 
-    def read(self, path: str) -> str:
+    def read(self, path: str, format: str | None = None) -> Any:
         if path == "/home/user/events.jsonl":
-            return self.events_text
-        if path == "/home/user/workspace/report.md":
-            return "# 沙箱报告\n"
-        raise FileNotFoundError(path)
+            data: Any = self.events_text
+        elif path == "/home/user/workspace/report.md":
+            data = "# 沙箱报告\n"
+        else:
+            raise FileNotFoundError(path)
+        if format == "stream":
+            raw = data if isinstance(data, bytes) else data.encode("utf-8")
+            return iter([raw])
+        return data
+
+    def get_info(self, path: str) -> Any:
+        data = self.read(path)
+        size = len(data) if isinstance(data, bytes) else len(data.encode("utf-8"))
+
+        class _Info:
+            pass
+
+        info = _Info()
+        info.size = size
+        return info
 
     def list(self, path: str) -> list[Any]:
         class _Entry:
             name = "report.md"
             path = "/home/user/workspace/report.md"
+            type = "file"
 
         return [_Entry()]
 

@@ -276,3 +276,27 @@ def test_git_discovery_covers_tracked_secrets_and_new_sources(tmp_path: Path) ->
     source.unlink()
     source.symlink_to(tmp_path / ".env")
     assert source_violations(tmp_path) == ["host/new.py: source symlink needs explicit ownership review"]
+
+
+def test_the_distribution_declares_the_kernel_subpackage() -> None:
+    """The packaging config must cover ``pi_glink.kernel``.
+
+    The deployment unit is the repository directory (``web/``, ``agent/`` and
+    ``scripts/`` are resolved relative to it); the package declaration only has
+    to make the host importable, and ``pi_glink.kernel`` is part of the host.
+    Checked without importing setuptools: the declared layout must match the
+    subpackage name.
+    """
+    import fnmatch  # noqa: PLC0415
+    import tomllib  # noqa: PLC0415
+
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    setuptools = config["tool"]["setuptools"]
+    assert setuptools["package-dir"] == {"": "host"}, "包根必须指向 host/"
+    declared = setuptools.get("packages")
+    if isinstance(declared, list):
+        assert "pi_glink.kernel" in declared
+        return
+    find = setuptools["packages"]["find"]
+    assert find["where"] == ["host"]
+    assert any(fnmatch.fnmatchcase("pi_glink.kernel", pattern) for pattern in find["include"])

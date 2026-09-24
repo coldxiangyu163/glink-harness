@@ -27,6 +27,18 @@ terminal frame onto a record whose ``meta.json`` still says ``running``: every
 reader — run detail, run list, report download, SSE replay — sees the same
 committed fact, never before it is durable, and never taken back.
 
+**The in-process index is an accelerator, never a second source.** One run
+record is one directory with its own ``meta.json``; listing runs, listing one
+tenant's runs and deriving the resource ledger used to walk and re-parse every
+one of them on every call — inside the admission lock. The data root has exactly
+one owning process (:mod:`pi_glink.ownership`), so :class:`_RunIndex` builds
+that projection once from disk and every write path (``create``, ``update``,
+``settle``, terminal commit) refreshes its own entry. Reads keep their exact
+semantics: the committed-prefix rule, the terminal projection, the newest-first
+order and the multi-tenant owner filter all come from the same helpers the disk
+scan uses, and :meth:`RunStore.scan_all` is the uncached reference the
+regressions compare the index against.
+
 The store is deliberately small. The workbench needs run history, reconnect
 support and an auditable event log, none of which require a database yet; when
 multi-user or multi-tenant lands, this module is the seam that changes.
@@ -35,6 +47,7 @@ multi-user or multi-tenant lands, this module is the seam that changes.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -44,6 +57,8 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 from .events import TERMINAL_EVENT_TYPES
+
+logger = logging.getLogger("pi_glink.store")
 
 #: Run states. ``running`` is the only non-terminal one.
 RUNNING = "running"
@@ -59,6 +74,8 @@ ARTIFACTS_DIRNAME = "artifacts"
 
 _META_NAME = "meta.json"
 _EVENTS_NAME = "events.jsonl"
+#: Bounded retries when a generated run id collides with an existing directory.
+_RUN_ID_ATTEMPTS = 5
 _TAIL_CHUNK = 64 * 1024
 _STATUS_BY_EVENT = {
     "run_finished": FINISHED,
@@ -190,6 +207,67 @@ _WATERMARKS = _CommitWatermarks()
 
 
 @dataclass(frozen=True, slots=True)
+class _IndexEntry:
+    """One run as written to disk plus the projection every reader must see.
+
+    ``raw`` is the ``meta.json`` record; ``projected`` additionally carries a
+    committed terminal frame that the settled copy has not caught up with yet.
+    """
+
+    raw: RunRecord
+    projected: RunRecord
+
+
+class _RunIndex:
+    """Process-wide projection of one runs root (built once, then incremental).
+
+    The data root has a single owning process, so every :class:`RunStore` in
+    this process must agree on the same records; a per-instance cache would let
+    two stores disagree after one of them wrote. Readers therefore share one
+    index per root, and a fresh process rebuilds it from disk on first use.
+
+    ``lock`` guards the in-memory index state (a reader copies its snapshot
+    there). ``record_lock`` is the shared per-root write lock: the metadata
+    replacement and the index update happen inside it, so two writers of the
+    same record cannot leave the index ordered opposite to disk — and no reader
+    blocks behind a writer's disk write. ``append_lock`` serializes appends to
+    the shared event logs for the same reason on the log side.
+
+    ``unreadable`` holds run directories whose ``meta.json`` cannot be read:
+    they are excluded from every record read (a corrupt record must never be
+    served, least of all cross-tenant) but the ledger counts them as global
+    holds until an operator adjudicates them in their own sidecar file.
+    """
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.record_lock = threading.RLock()
+        self.append_lock = threading.RLock()
+        self.entries: dict[str, _IndexEntry] = {}
+        self.unreadable: dict[str, Mapping[str, Any] | None] = {}
+        self.loaded = False
+
+
+#: Per-run sidecar recording an operator decision for a run whose ``meta.json``
+#: cannot be parsed. The corrupt file itself is never rewritten.
+UNREADABLE_ADJUDICATION_NAME = "resource-adjudication.json"
+
+
+_INDEXES: dict[str, _RunIndex] = {}
+_INDEXES_LOCK = threading.Lock()
+
+
+def _index_for(root: Path) -> _RunIndex:
+    key = os.path.abspath(root)
+    with _INDEXES_LOCK:
+        index = _INDEXES.get(key)
+        if index is None:
+            index = _RunIndex()
+            _INDEXES[key] = index
+        return index
+
+
+@dataclass(frozen=True, slots=True)
 class ReportLocation:
     """Where a record's report may be read: a run-owned root and a fixed name."""
 
@@ -203,7 +281,14 @@ class RunStore:
 
     def __init__(self, root: Path) -> None:
         self._root = root
-        self._lock = threading.RLock()
+        self._index = _index_for(root)
+        # The per-root shared locks: the meta replacement and the index update
+        # are one critical section, and a second RunStore over the same root
+        # cannot interleave with the first on the same record.
+        self._lock = self._index.record_lock
+        self._events_lock = self._index.append_lock
+        # The runs root is host-owned data: create it private (0700).
+        self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     @property
     def root(self) -> Path:
@@ -226,32 +311,63 @@ class RunStore:
         *,
         run_id: str | None = None,
         workspace: Path | None = None,
+        workspace_root: Path | None = None,
         tenant_id: str | None = None,
         creator_user_id: str | None = None,
         parent_run_id: str | None = None,
     ) -> RunRecord:
         """Admit a run and write its assignment facts in one atomic meta write.
 
+        The run directory is created **exclusively** (``exist_ok=False``): a new
+        run never adopts or overwrites an existing record. A generated id that
+        collides is regenerated a bounded number of times; an explicitly given
+        ``run_id`` that already exists is refused (the caller owns that
+        contract). ``workspace_root`` derives the run's workspace from the
+        generated id, so the store stays the one place that allocates ids.
+
         The owner labels (``tenant_id`` / ``creator_user_id``) are part of the
         same replacement as the run id and created-at stamp, so no reader can
         observe an ownerless run that an authenticated request must hide. The
         optional ``parent_run_id`` records the follow-up chain in the same write.
         """
-        identifier = run_id or uuid.uuid4().hex[:12]
-        directory = self.run_dir(identifier)
-        directory.mkdir(parents=True, exist_ok=True)
+        identifier, directory = self._create_run_directory(run_id)
+        if workspace is not None:
+            workspace_path = str(workspace)
+        elif workspace_root is not None:
+            workspace_path = str(workspace_root / identifier)
+        else:
+            workspace_path = str(directory / "workspace")
         record = RunRecord(
             run_id=identifier,
             prompt=prompt,
             status=RUNNING,
             created_at=time.time(),
-            workspace=str(workspace) if workspace is not None else str(directory / "workspace"),
+            workspace=workspace_path,
             tenant_id=tenant_id,
             creator_user_id=creator_user_id,
             parent_run_id=parent_run_id,
         )
-        self._write(record)
-        return record
+        return self._write(record)
+
+    def _create_run_directory(self, run_id: str | None) -> tuple[str, Path]:
+        """Exclusively create one run directory; returns ``(id, path)``.
+
+        The 0700 mode is the host's own data: run records, event logs and the
+        rendered credentials of one run live under this directory.
+        """
+        if run_id is not None:
+            directory = self.run_dir(run_id)
+            directory.mkdir(parents=True, exist_ok=False, mode=0o700)
+            return run_id, directory
+        for _attempt in range(_RUN_ID_ATTEMPTS):
+            candidate = uuid.uuid4().hex[:12]
+            directory = self.run_dir(candidate)
+            try:
+                directory.mkdir(parents=True, exist_ok=False, mode=0o700)
+            except FileExistsError:
+                continue
+            return candidate, directory
+        raise RuntimeError("无法生成唯一的 run id（连续冲突）")
 
     def update(self, run_id: str, **changes: Any) -> RunRecord:
         """Change facts in ``meta.json`` (in-flight facts, adjudication)."""
@@ -263,14 +379,12 @@ class RunStore:
             unknown = set(changes) - allowed
             if unknown:
                 raise ValueError(f"unknown run fields: {sorted(unknown)}")
-            updated = replace(record, **changes)
-            self._write(updated)
-            return self._project(updated)
+            return self._write(replace(record, **changes))
 
     def get(self, run_id: str) -> RunRecord | None:
         """The run as every reader must see it (committed terminal projected)."""
-        record = self._read_meta(run_id)
-        return self._project(record) if record is not None else None
+        entry = self._entries().get(run_id)
+        return entry.projected if entry is not None else None
 
     def get_for(self, run_id: str, tenant_id: str) -> RunRecord | None:
         """The run only when it belongs to ``tenant_id``.
@@ -286,42 +400,91 @@ class RunStore:
 
     def list_for(self, tenant_id: str, limit: int | None = 50) -> list[RunRecord]:
         """Runs of exactly one tenant, newest first (legacy records excluded)."""
-        if not self._root.is_dir():
-            return []
-        records: list[RunRecord] = []
-        for entry in sorted(self._root.iterdir(), key=lambda item: item.name):
-            if not entry.is_dir():
-                continue
-            record = self.get(entry.name)
-            if record is not None and record.tenant_id == tenant_id:
-                records.append(record)
-        records.sort(key=lambda item: item.created_at, reverse=True)
+        records = [record for record in self._records() if record.tenant_id == tenant_id]
         return records if limit is None else records[:limit]
 
     def list(self, limit: int | None = 50) -> list[RunRecord]:
-        if not self._root.is_dir():
-            return []
-        records: list[RunRecord] = []
-        for entry in sorted(self._root.iterdir(), key=lambda item: item.name):
-            if not entry.is_dir():
-                continue
-            record = self.get(entry.name)
-            if record is not None:
-                records.append(record)
-        records.sort(key=lambda item: item.created_at, reverse=True)
+        records = self._records()
         return records if limit is None else records[:limit]
+
+    def holding_records(self, tenant_id: str | None = None) -> list[RunRecord]:
+        """Records whose execution resources are not confirmed released.
+
+        ``tenant_id`` selects one tenant's holds; ``None`` returns every hold,
+        including records without an owner (legacy and reconciled leftovers),
+        because those still consume the global capacity. Newest first, like
+        :meth:`list`.
+
+        Run directories whose metadata cannot be read are not records at all;
+        they are reported separately by :meth:`unreadable_holds` and count as
+        global holds there.
+        """
+        return [
+            record
+            for record in self._records()
+            if record.holds_resources and (tenant_id is None or record.tenant_id == tenant_id)
+        ]
 
     def unsettled(self) -> list[str]:
         """Run ids whose ``meta.json`` still says ``running`` (no settled copy)."""
-        if not self._root.is_dir():
-            return []
+        entries = self._entries()
+        return [run_id for run_id in sorted(entries) if entries[run_id].raw.status == RUNNING]
+
+    def unreadable_holds(self) -> list[str]:
+        """Run directories whose metadata cannot be read and are not adjudicated.
+
+        Such a directory is hidden from every record read (a corrupt record must
+        not be listed, downloaded or replayed, least of all across tenants), but
+        it is **not** evidence that its container or sandbox is gone: the
+        resource ledger counts it as a global hold until an operator records a
+        decision via :meth:`adjudicate_unreadable`.
+        """
         return [
-            entry.name
-            for entry in sorted(self._root.iterdir(), key=lambda item: item.name)
-            if entry.is_dir()
-            and (record := self._read_meta(entry.name)) is not None
-            and record.status == RUNNING
+            run_id
+            for run_id, adjudication in sorted(self._unreadable().items())
+            if adjudication is None
         ]
+
+    def adjudicate_unreadable(self, run_id: str, adjudication: Mapping[str, Any]) -> None:
+        """Record the operator decision for a run whose ``meta.json`` is unreadable.
+
+        The corrupt ``meta.json`` is left byte-for-byte untouched; the decision
+        lives in :data:`UNREADABLE_ADJUDICATION_NAME` next to it, which is what
+        the index reads back on a restart. Raises ``KeyError`` when the directory
+        is unknown and ``ValueError`` when its metadata is actually readable (the
+        normal record path owns that decision).
+        """
+        with self._lock:
+            entries, unreadable = self._scan()
+            if run_id in {entry.raw.run_id for entry in entries}:
+                raise ValueError(f"run {run_id} 的 meta.json 可读，应使用普通裁决")
+            if run_id not in unreadable:
+                raise KeyError(run_id)
+            directory = self.run_dir(run_id)
+            temporary = directory / f".{UNREADABLE_ADJUDICATION_NAME}.tmp"
+            temporary.write_text(
+                json.dumps(dict(adjudication), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(directory / UNREADABLE_ADJUDICATION_NAME)
+            with self._index.lock:
+                self._index.unreadable[run_id] = dict(adjudication)
+
+    def scan_all(self) -> list[RunRecord]:
+        """Uncached reference read: walk every run directory, project each record.
+
+        This is what the index is built from and the comparison the regressions
+        use; production reads must not call it per request.
+        """
+        entries, _unreadable = self._scan()
+        records = [entry.projected for entry in entries]
+        records.sort(key=lambda item: item.created_at, reverse=True)
+        return records
+
+    def scan_unreadable(self) -> list[str]:
+        """Uncached reference read of the unreadable, unadjudicated run ids."""
+        _entries, unreadable = self._scan()
+        return [run_id for run_id, value in sorted(unreadable.items()) if value is None]
 
     def settle(self, run_id: str) -> RunRecord | None:
         """Copy the committed terminal record into ``meta.json``.
@@ -339,9 +502,7 @@ class RunStore:
             terminal = self.committed_terminal(run_id)
             if terminal is None:
                 return None
-            settled = _apply_terminal(record, terminal)
-            self._write(settled)
-            return settled
+            return self._write(_apply_terminal(record, terminal))
 
     def report_location(self, record: RunRecord) -> ReportLocation | None:
         """The only places a record's ``report_path`` may point to.
@@ -423,9 +584,9 @@ class RunStore:
 
     def _append(self, run_id: str, event: Mapping[str, Any], *, durable: bool) -> None:
         path = self.events_path(run_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         line = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
-        with self._lock:
+        with self._events_lock:
             descriptor = os.open(
                 path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o666
             )
@@ -453,6 +614,10 @@ class RunStore:
                         pass
                     raise
                 _WATERMARKS.advance(path, size + len(line), seal=durable)
+                if durable:
+                    # The index must never run ahead of the committed prefix:
+                    # refresh it only after the watermark passed the new line.
+                    self._refresh_projection(run_id)
             finally:
                 os.close(descriptor)
 
@@ -470,22 +635,118 @@ class RunStore:
         terminal = self.committed_terminal(record.run_id)
         return _apply_terminal(record, terminal) if terminal is not None else record
 
-    def _read_meta(self, run_id: str) -> RunRecord | None:
+    def _entries(self) -> dict[str, _IndexEntry]:
+        """Snapshot of the readable records (built once from disk on first use)."""
+        index = self._index
+        if not index.loaded:
+            self._load_index()
+        with index.lock:
+            return dict(index.entries)
+
+    def _unreadable(self) -> dict[str, Mapping[str, Any] | None]:
+        """Snapshot of the unreadable run directories and their adjudications."""
+        index = self._index
+        if not index.loaded:
+            self._load_index()
+        with index.lock:
+            return dict(index.unreadable)
+
+    def _load_index(self) -> None:
+        """Build the index from disk exactly once per process and root."""
+        index = self._index
+        with index.lock:
+            if index.loaded:
+                return
+            entries, unreadable = self._scan()
+            for entry in entries:
+                index.entries[entry.raw.run_id] = entry
+            index.unreadable.update(unreadable)
+            index.loaded = True
+
+    def _records(self) -> list[RunRecord]:
+        """Projected records newest first (stable by directory name on ties)."""
+        entries = self._entries()
+        records = [entries[run_id].projected for run_id in sorted(entries)]
+        records.sort(key=lambda item: item.created_at, reverse=True)
+        return records
+
+    def _scan(self) -> tuple[list[_IndexEntry], dict[str, Mapping[str, Any] | None]]:
+        """Read every run directory (index build and the uncached reference).
+
+        A directory whose ``meta.json`` cannot be read produces no record: it is
+        returned as an unreadable entry together with the operator adjudication
+        sidecar, if any. A directory without ``meta.json`` at all is not a run.
+        """
+        if not self._root.is_dir():
+            return [], {}
+        entries: list[_IndexEntry] = []
+        unreadable: dict[str, Mapping[str, Any] | None] = {}
+        for entry in sorted(self._root.iterdir(), key=lambda item: item.name):
+            if not entry.is_dir():
+                continue
+            record, problem = self._load_meta(entry.name)
+            if problem:
+                unreadable[entry.name] = self._read_unreadable_adjudication(entry.name)
+                logger.warning(
+                    "run 记录不可读，已计入全局资源持有直至人工裁决 run=%s", entry.name
+                )
+            elif record is not None:
+                entries.append(_IndexEntry(raw=record, projected=self._project(record)))
+        return entries, unreadable
+
+    def _refresh_projection(self, run_id: str) -> None:
+        """Fold a just-committed terminal frame into the run's index entry."""
+        index = self._index
+        with index.lock:
+            entry = index.entries.get(run_id)
+            if entry is None:
+                return
+            terminal = self.committed_terminal(run_id)
+            if terminal is None:
+                return
+            index.entries[run_id] = _IndexEntry(
+                raw=entry.raw,
+                projected=_apply_terminal(entry.raw, terminal),
+            )
+
+    def _load_meta(self, run_id: str) -> tuple[RunRecord | None, bool]:
+        """``(record, unreadable)`` for one run directory.
+
+        ``unreadable`` is true only when ``meta.json`` exists but cannot be used:
+        a missing file is simply not a run record. Corruption is never silently
+        equal to absence — the resource ledger must keep holding for it (B.7).
+        """
         path = self.run_dir(run_id) / _META_NAME
         if not path.is_file():
-            return None
+            return None, False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None, True
+        if not isinstance(data, dict):
+            return None, True
+        known = {field.name for field in fields(RunRecord)}
+        return RunRecord(**{key: value for key, value in data.items() if key in known}), False
+
+    def _read_meta(self, run_id: str) -> RunRecord | None:
+        return self._load_meta(run_id)[0]
+
+    def _read_unreadable_adjudication(self, run_id: str) -> Mapping[str, Any] | None:
+        path = self.run_dir(run_id) / UNREADABLE_ADJUDICATION_NAME
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        if not isinstance(data, dict):
-            return None
-        known = {field.name for field in fields(RunRecord)}
-        return RunRecord(**{key: value for key, value in data.items() if key in known})
+        return data if isinstance(data, dict) else None
 
-    def _write(self, record: RunRecord) -> None:
+    def _write(self, record: RunRecord) -> RunRecord:
+        """Atomically replace ``meta.json`` and refresh the index entry.
+
+        Both steps run in one per-root critical section, so two writers of the
+        same run cannot leave the index describing an older meta than the file.
+        """
         directory = self.run_dir(record.run_id)
-        directory.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = asdict(record)
         temporary = directory / f".{_META_NAME}.tmp"
         with self._lock:
@@ -493,6 +754,12 @@ class RunStore:
                 json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
             )
             temporary.replace(directory / _META_NAME)
+            projected = self._project(record)
+            with self._index.lock:
+                self._index.entries[record.run_id] = _IndexEntry(
+                    raw=record, projected=projected
+                )
+            return projected
 
 
 def _terminal_line(path: Path, end: int) -> dict[str, Any] | None:

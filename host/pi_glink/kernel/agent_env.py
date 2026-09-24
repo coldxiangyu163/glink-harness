@@ -215,8 +215,10 @@ def prepare_agent_dir(
     source = credentials if credentials is not None else RunCredentials.from_host(config)
     directory = Path(runtime_dir)
     sessions = Path(session_dir) if session_dir is not None else directory.parent / "sessions"
-    directory.mkdir(parents=True, exist_ok=True)
-    sessions.mkdir(parents=True, exist_ok=True)
+    # One run's runtime configuration and session directory are host-owned data
+    # (they carry the rendered credentials): create them private.
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    sessions.mkdir(parents=True, exist_ok=True, mode=0o700)
     _sync_template(config.agent_config_dir, directory)
     if config.executor in CONTAINER_EXECUTORS:
         _map_prebaked_packages(directory)
@@ -478,7 +480,7 @@ def _sync_template(template_dir: Path, target_dir: Path) -> None:
             continue
         source = template_dir / name
         if source.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
+            target.mkdir(parents=True, exist_ok=True, mode=0o700)
         else:
             shutil.copy2(source, target)
     for entry, source, is_dir in manifest:
@@ -486,9 +488,9 @@ def _sync_template(template_dir: Path, target_dir: Path) -> None:
             continue
         target = target_dir / entry
         if is_dir:
-            target.mkdir(parents=True, exist_ok=True)
+            target.mkdir(parents=True, exist_ok=True, mode=0o700)
         else:
-            target.parent.mkdir(parents=True, exist_ok=True)
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             shutil.copy2(source, target)
 
 

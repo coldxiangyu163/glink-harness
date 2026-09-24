@@ -56,6 +56,7 @@ import base64
 import codecs
 import hashlib
 import json
+import logging
 import re
 import shutil
 import time
@@ -67,6 +68,8 @@ from ..artifacts import ArtifactError, ArtifactTree
 from ..config import ConfigError, HostConfig
 from .agent_env import IMAGE_PACKAGE_GUARD, AgentRuntime
 from .framing import strip_trailing_cr
+
+logger = logging.getLogger("pi_glink.kernel.e2b_env")
 
 #: Sandbox paths (E2B runs as a non-root user with /home/user as home).
 SANDBOX_HOME = "/home/user"
@@ -89,10 +92,26 @@ _EXIT_FILE = f"{SANDBOX_HOME}/pi-exit-code.txt"
 #: One uploaded config file / recovered artifact may not exceed this.
 UPLOAD_MAX_BYTES = 8 * 1024 * 1024
 ARTIFACT_MAX_BYTES = 32 * 1024 * 1024
+#: Ceiling for the sandbox's own event file. The file is only read when the
+#: live stream could not prove completeness, and it is sandbox content: the
+#: read is bounded by the SDK's entry metadata (or a streamed read) before a
+#: byte is loaded. A real run's timeline is far below this.
+EVENTS_MAX_BYTES = 32 * 1024 * 1024
+#: Ceiling for the diagnostic stderr copy (a tail, not a deliverable).
+STDERR_MAX_BYTES = 1024 * 1024
 
 
 class SandboxError(RuntimeError):
     """Raised when the sandbox cannot be created or the run cannot start."""
+
+
+class EventCatchUpFailed(SandboxError):
+    """The event file could not prove what the run produced.
+
+    Raised when the live stream dropped (or never existed) and the bounded
+    file read that is the completeness authority failed: unreadable, absent or
+    over the documented ceiling. The run is then unresolved, never finished.
+    """
 
 
 class LFLineFramer:
@@ -382,7 +401,14 @@ class E2BSandboxClient:
 
             # File catch-up: exactly the records the live stream did not hand
             # over (normally none; after a drop, the rest of the run).
-            for raw in self.fetch_event_lines(skip=delivered):
+            # ``required`` is the fail-closed boundary: a stream that ended on
+            # its own delivered the whole timeline and the exit marker, so the
+            # file is redundant; a dropped stream (or no stream interface at
+            # all) leaves the file as the only completeness authority, and an
+            # unreadable/oversized file must fail the run instead of producing
+            # a conclusion nobody can prove.
+            proved_by_stream = stream_error is None and iterator is not None
+            for raw in self.fetch_event_lines(skip=delivered, required=not proved_by_stream):
                 record(raw)
         except _RunCancelled:
             return SandboxRunResult(exit_code=None, stderr_tail="", delivered_lines=delivered)
@@ -474,7 +500,7 @@ class E2BSandboxClient:
         """
         return [line for line in self.fetch_event_lines() if line.strip()]
 
-    def fetch_event_lines(self, *, skip: int = 0) -> list[str]:
+    def fetch_event_lines(self, *, skip: int = 0, required: bool = False) -> list[str]:
         """Every LF-framed record after ``skip`` complete lines.
 
         Framing is LF-only (``pi`` documents strict JSONL): ``splitlines`` would
@@ -483,13 +509,22 @@ class E2BSandboxClient:
         the same unit the stream framer counts. A final record without LF is
         still a record: the live stream never terminated it, and this file is
         the one place that can.
+
+        The read is bounded before a byte is loaded (:data:`EVENTS_MAX_BYTES`).
+        ``required=True`` means the file is the completeness authority: a
+        failure to read it raises :class:`EventCatchUpFailed` instead of
+        quietly returning an empty timeline.
         """
         sandbox = self._require_sandbox()
-        try:
-            content = sandbox.files.read(_EVENTS_FILE)
-        except Exception:  # noqa: BLE001 - absent stream means no frames
+        data, failure = _read_file_bounded(sandbox, _EVENTS_FILE, EVENTS_MAX_BYTES)
+        if data is None:
+            if required:
+                raise EventCatchUpFailed(f"事件日志补读失败: {failure}")
+            logger.warning(
+                "事件日志未读取（%s）；实时流已完整交付并取得退出标记，结论不受影响", failure
+            )
             return []
-        text = content.decode("utf-8", "replace") if isinstance(content, bytes) else str(content)
+        text = data.decode("utf-8", "replace")
         lines = text.split("\n")
         if lines and lines[-1] == "":
             # The final LF terminates the previous record; it is not a record.
@@ -497,12 +532,13 @@ class E2BSandboxClient:
         return [strip_trailing_cr(line) for line in lines[max(skip, 0):]]
 
     def fetch_stderr_tail(self, limit: int = 20) -> str:
+        """The last stderr lines, bounded before the read; empty on any failure."""
         sandbox = self._require_sandbox()
-        try:
-            content = sandbox.files.read(_STDERR_FILE)
-        except Exception:  # noqa: BLE001
+        data, failure = _read_file_bounded(sandbox, _STDERR_FILE, STDERR_MAX_BYTES)
+        if data is None:
+            logger.debug("stderr 尾部未读取: %s", failure)
             return ""
-        text = content.decode("utf-8", "replace") if isinstance(content, bytes) else str(content)
+        text = data.decode("utf-8", "replace")
         return "\n".join(text.split("\n")[-limit:])
 
     def recover_artifacts(self, destination: Path) -> tuple[list[Path], list[str]]:
@@ -536,15 +572,30 @@ class E2BSandboxClient:
                 if "/" in name or "\\" in name or name in {".", ".."}:
                     failures.append(f"跳过非法产物名: {name!r}")
                     continue
+                kind = _entry_kind(entry)
+                if kind == "dir":
+                    # Directories are not deliverables; only regular entries are
+                    # recovered (and an unreadable regular entry is reported).
+                    continue
+                if kind == "symlink":
+                    # The host never follows links — the same rule ArtifactTree
+                    # enforces on every read and write. A linked artifact is
+                    # skipped rather than resolved and is not a run failure.
+                    continue
                 if name.startswith("."):
                     continue
-                try:
-                    content = sandbox.files.read(path)
-                except Exception:  # noqa: BLE001 - directories and unreadable entries
-                    continue
-                data = content if isinstance(content, bytes) else str(content).encode("utf-8")
-                if len(data) > ARTIFACT_MAX_BYTES:
-                    failures.append(f"产物超过上限: {name}")
+                # Bound the read with the listing's own metadata before loading
+                # the entry; an entry whose size the SDK does not report falls
+                # back to a streamed, bounded read.
+                known = getattr(entry, "size", None)
+                data, failure = _read_file_bounded(
+                    sandbox,
+                    path,
+                    ARTIFACT_MAX_BYTES,
+                    known_size=known if isinstance(known, int) else None,
+                )
+                if data is None:
+                    failures.append(f"产物不可读取或超过上限: {name}: {failure}")
                     continue
                 try:
                     tree.replace(name, data, max_bytes=ARTIFACT_MAX_BYTES)
@@ -701,6 +752,184 @@ def _default_sandbox_factory() -> Callable[..., Any]:
         return Sandbox.create(**kwargs)
 
     return factory
+
+
+def _entry_kind(entry: Any) -> str:
+    """The SDK's entry kind as a plain lowercase string.
+
+    ``EntryInfo.type`` is :class:`e2b.sandbox.filesystem.filesystem.FileType`, an
+    ``Enum`` whose string form is ``"FileType.DIR"``; an older payload or a test
+    double may hand back the plain value instead. Both shapes resolve to the same
+    kind, and an absent type means a regular file (the listing's default).
+    """
+    raw = getattr(entry, "type", None)
+    value = getattr(raw, "value", raw)
+    if isinstance(value, str) and value:
+        return value.strip().lower()
+    return "file"
+
+
+def _entry_size(sandbox: Any, path: str) -> int | None:
+    """The SDK-reported size of one sandbox entry, when the SDK exposes it."""
+    files = getattr(sandbox, "files", None)
+    get_info = getattr(files, "get_info", None)
+    if not callable(get_info):
+        return None
+    try:
+        info = get_info(path)
+    except Exception:  # noqa: BLE001 - absence is the caller's decision
+        return None
+    size = getattr(info, "size", None)
+    return int(size) if isinstance(size, int) else None
+
+
+def _stream_reader(sandbox: Any, path: str) -> tuple[Any, str | None]:
+    """``(reader, failure)`` for the SDK's chunked read of one file.
+
+    ``(None, None)`` means the SDK has no streaming overload; a real read error
+    (missing file, transport failure) is returned as a failure reason instead of
+    being mistaken for unsupported behaviour.
+    """
+    files = getattr(sandbox, "files", None)
+    read = getattr(files, "read", None)
+    if not callable(read):
+        return None, None
+    try:
+        return read(path, format="stream"), None
+    except TypeError:
+        # An SDK (or test double) without the streaming overload: the caller
+        # falls back to the size metadata as its only pre-read bound.
+        return None, None
+    except Exception as exc:  # noqa: BLE001 - surfaced as a failure reason
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _read_file_bounded(
+    sandbox: Any,
+    path: str,
+    max_bytes: int,
+    *,
+    known_size: int | None = None,
+) -> tuple[bytes | None, str | None]:
+    """Read one sandbox file without ever loading more than ``max_bytes``.
+
+    Sandbox content is untrusted input, so the ceiling is enforced *before* the
+    bytes are loaded: entry metadata (``files.get_info`` / a listing's ``size``)
+    is consulted first, and a streamed read is abandoned as soon as the ceiling
+    is crossed. When the SDK exposes neither, the whole-file read is refused
+    instead of guessing. Returns ``(data, None)``, or ``(None, reason)``.
+
+    (The metadata/streaming contract is pinned against the fake SDK in the
+    regressions; the real E2B SDK exposes ``EntryInfo.size`` and a
+    ``format="stream"`` reader, which still needs live verification.)
+    """
+    size = known_size if known_size is not None else _entry_size(sandbox, path)
+    if size is not None and size > max_bytes:
+        return None, f"文件超过上限（{size} > {max_bytes} 字节）"
+    stream, failure = _stream_reader(sandbox, path)
+    if failure is not None:
+        return None, failure
+    if stream is not None:
+        chunks: list[bytes] = []
+        total = 0
+        try:
+            for chunk in stream:
+                data = (
+                    bytes(chunk)
+                    if isinstance(chunk, (bytes, bytearray))
+                    else str(chunk).encode("utf-8")
+                )
+                total += len(data)
+                if total > max_bytes:
+                    return None, f"流式读取超过上限（> {max_bytes} 字节）"
+                chunks.append(data)
+        except Exception as exc:  # noqa: BLE001 - surfaced as a failure reason
+            return None, f"{type(exc).__name__}: {exc}"
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - cleanup must not mask the result
+                    pass
+        return b"".join(chunks), None
+    if size is None:
+        return None, "SDK 未提供文件大小且不支持流式读取，拒绝整份载入"
+    try:
+        content = sandbox.files.read(path)
+    except Exception as exc:  # noqa: BLE001 - surfaced as a failure reason
+        return None, f"{type(exc).__name__}: {exc}"
+    data = content if isinstance(content, (bytes, bytearray)) else str(content).encode("utf-8")
+    if len(data) > max_bytes:
+        return None, f"文件超过上限（{len(data)} > {max_bytes} 字节）"
+    return bytes(data), None
+
+
+def _default_kill(api_key: str) -> Callable[[str], Any]:
+    def kill(sandbox_id: str) -> Any:
+        from e2b import Sandbox
+
+        # The credential comes from the frozen host configuration (the same
+        # source ``Sandbox.create`` receives), never from the process
+        # environment: a deployment that only filled ``.env`` must be able to
+        # authenticate the probe.
+        return Sandbox.kill(sandbox_id, api_key=api_key)
+
+    return kill
+
+
+def confirm_sandbox_absent(
+    sandbox_id: str,
+    *,
+    api_key: str = "",
+    kill_factory: Callable[[str], Any] | None = None,
+) -> tuple[bool, str]:
+    """Confirm by the persisted sandbox id that the sandbox is gone.
+
+    ``Sandbox.kill(sandbox_id)`` is the SDK's single-id operation: it returns
+    ``True`` when the sandbox existed and is now terminated, and ``False`` when
+    it was not found. Only the persisted identity is ever addressed — no
+    listing, no name pattern, no other sandbox.
+
+    Release is confirmed **only** by the SDK's own contract: a ``False`` return,
+    or a not-found exception *type*. Every other failure — authentication, a
+    gateway, a timeout, an unparseable answer — is uncertainty, so the hold
+    stands; no exception message is ever read as evidence of release.
+    """
+    if not sandbox_id:
+        return False, "缺少持久化的 sandbox_id"
+    kill = kill_factory or _default_kill(api_key)
+    try:
+        killed = kill(sandbox_id)
+    except Exception as exc:  # noqa: BLE001 - uncertainty keeps the hold
+        if _is_not_found(exc):
+            return True, f"SDK 确认沙箱不存在: {type(exc).__name__}"
+        return False, f"沙箱查询失败: {type(exc).__name__}: {exc}"
+    if killed is False:
+        return True, "SDK 确认沙箱不存在"
+    if killed is True:
+        return True, "已按 sandbox_id 终止沙箱"
+    return False, f"SDK 返回无法判定的结果: {killed!r}"
+
+
+def _not_found_types() -> tuple[type[BaseException], ...]:
+    """The SDK's not-found exception classes (empty when the SDK is unavailable)."""
+    try:
+        from e2b import NotFoundException, SandboxNotFoundException
+    except Exception:  # noqa: BLE001 - the SDK is an optional dependency
+        return ()
+    return (SandboxNotFoundException, NotFoundException)
+
+
+def _is_not_found(exc: BaseException) -> bool:
+    """True only for the SDK's not-found exception types.
+
+    Deliberately type-based: an authentication or gateway error whose text
+    happens to mention "404" or "not found" must never confirm a release of a
+    sandbox that may still be running and billing.
+    """
+    not_found = _not_found_types()
+    return bool(not_found) and isinstance(exc, not_found)
 
 
 def sandbox_available() -> tuple[bool, str]:

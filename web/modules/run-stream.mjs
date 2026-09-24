@@ -138,6 +138,18 @@ export function applyEvents(model, events) {
 }
 
 /** Subscribe to a run's SSE stream with reconnect-aware status reporting. */
+
+/**
+ * Bounded reconnect delays for a stream the server refused outright.
+ *
+ * `EventSource` reconnects network drops by itself, but a non-200 answer — an
+ * unknown run, or the host's `429 stream_limit` (whose JSON body the browser
+ * cannot read) — closes it for good. The refusal is temporary by nature, so the
+ * subscription retries a few times before reporting `failed`; it must never
+ * spin forever on a run that really is gone.
+ */
+export const STREAM_RETRY_DELAYS_MS = [1500, 4000, 10000];
+
 export function createRunSubscription({
   runId,
   eventsUrl,
@@ -145,10 +157,15 @@ export function createRunSubscription({
   onEvent,
   onStatus,
   onError,
+  retryDelaysMs = STREAM_RETRY_DELAYS_MS,
+  schedule = (callback, delayMs) => setTimeout(callback, delayMs),
+  cancelSchedule = (handle) => clearTimeout(handle),
 }) {
   let source = null;
   let closed = false;
   let status = 'idle';
+  let attempt = 0;
+  let retryHandle = null;
 
   const report = (nextStatus) => {
     if (closed || status === nextStatus) return;
@@ -159,11 +176,29 @@ export function createRunSubscription({
   const open = () => {
     report('connecting');
     source = eventSourceFactory(eventsUrl(runId));
-    source.onopen = () => report('live');
-    // EventSource retries network drops by itself (readyState CONNECTING), but a
-    // non-200 answer — an unknown or purged run — closes it for good. Only the
-    // first is "reconnecting"; the second must not spin forever.
-    source.onerror = () => report(source?.readyState === 2 ? 'failed' : 'reconnecting');
+    source.onopen = () => {
+      attempt = 0;
+      report('live');
+    };
+    source.onerror = () => {
+      // readyState 2 (CLOSED) means the connection was failed rather than
+      // dropped: retry a bounded number of times, then report the failure.
+      if (source?.readyState !== 2) {
+        report('reconnecting');
+        return;
+      }
+      if (attempt >= retryDelaysMs.length) {
+        report('failed');
+        return;
+      }
+      const delay = retryDelaysMs[attempt];
+      attempt += 1;
+      report('reconnecting');
+      retryHandle = schedule(() => {
+        retryHandle = null;
+        if (!closed) open();
+      }, delay);
+    };
     source.onmessage = (message) => {
       try {
         const event = JSON.parse(message.data);
@@ -197,6 +232,10 @@ export function createRunSubscription({
     },
     close() {
       closed = true;
+      if (retryHandle !== null) {
+        cancelSchedule(retryHandle);
+        retryHandle = null;
+      }
       source?.close();
       source = null;
       status = 'closed';
@@ -262,14 +301,24 @@ function closeCurrentBlocks(model) {
 
 function applyFinalMessage(model, payload) {
   const text = typeof payload.text === 'string' ? payload.text : '';
+  const truncated = payload.truncated === true;
   const last = lastItem(model);
   if (text === '') return model;
   if (last && last.kind === 'text' && !last.closed) {
     // The streamed text and pi's authoritative message agree in practice; use
     // pi's copy so a dropped delta cannot leave a truncated answer on screen.
-    return replaceLast(model, { ...last, text, closed: true });
+    // The exception is a frame the host itself clipped (`truncated: true`): it
+    // carries less than the stream already delivered, so the longer streamed
+    // body stays and the item is only closed.
+    const keepStreamed = truncated && last.text.length > text.length;
+    return replaceLast(model, {
+      ...last,
+      text: keepStreamed ? last.text : text,
+      closed: true,
+      truncated,
+    });
   }
-  return appendItem(model, { kind: 'text', turn: model.turn, text, closed: true });
+  return appendItem(model, { kind: 'text', turn: model.turn, text, closed: true, truncated });
 }
 
 function startTool(model, payload) {

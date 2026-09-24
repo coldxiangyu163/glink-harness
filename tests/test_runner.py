@@ -531,17 +531,34 @@ class _PoorlyClosingSandbox:
             def write(self, path: str, content: object) -> None:
                 pass
 
-            def read(self, path: str) -> bytes:
+            def read(self, path: str, format: str | None = None) -> Any:
                 if path == "/home/user/events.jsonl":
-                    return b'{"type": "agent_settled"}\n'
-                if path == "/home/user/workspace/report.md":
-                    return b"# report\n"
-                raise FileNotFoundError(path)
+                    data: Any = b'{"type": "agent_settled"}\n'
+                elif path == "/home/user/workspace/report.md":
+                    data = b"# report\n"
+                else:
+                    raise FileNotFoundError(path)
+                if format == "stream":
+                    raw = data if isinstance(data, bytes) else data.encode("utf-8")
+                    return iter([raw])
+                return data
+
+            def get_info(self, path: str) -> Any:
+                data = self.read(path)
+                size = len(data) if isinstance(data, bytes) else len(data.encode("utf-8"))
+
+                class _Info:
+                    pass
+
+                info = _Info()
+                info.size = size
+                return info
 
             def list(self, path: str) -> list:
                 class _Entry:
                     name = "report.md"
                     path = "/home/user/workspace/report.md"
+                    type = "file"
 
                 return [_Entry()]
 
@@ -965,3 +982,22 @@ def test_two_concurrent_followups_of_one_parent_admit_exactly_one_child(
     seeded = seeded_file.read_text(encoding="utf-8")
     assert secret not in seeded and "[REDACTED]" in seeded
     assert manager.shutdown(timeout=10) == []
+
+
+def test_run_data_directories_are_created_private(tmp_path: Path) -> None:
+    """The workspace, runtime config and session directories are host data."""
+    import stat  # noqa: PLC0415
+
+    manager, store = build_manager(tmp_path, write_report=True)
+    record = manager.start("权限")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final.status == FINISHED
+
+    run_dir = store.run_dir(record.run_id)
+    for path in (
+        Path(final.workspace),
+        run_dir / "pi-agent",
+        Path(manager.config.session_dir) / record.run_id,
+        manager.config.workspace_root,
+    ):
+        assert stat.S_IMODE(path.stat().st_mode) == 0o700, f"{path} 应为 0700"

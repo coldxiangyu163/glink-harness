@@ -284,3 +284,59 @@ def test_event_stream_for_unknown_run_is_404(server: PiGlinkServer) -> None:
     status, _, body = _get(server, "/api/runs/absent/events")
     assert status == 404
     assert json.loads(body)["error"] == "unknown_run"
+
+
+# -- configuration boundaries (GLINK-HARDEN-01) --------------------------------
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expect"),
+    [
+        ("LOCAL_WEB_PORT", "-1", "LOCAL_WEB_PORT"),
+        ("LOCAL_WEB_PORT", "70000", "LOCAL_WEB_PORT"),
+        ("PI_GLINK_MAX_GLOBAL_RUNS", "0", "PI_GLINK_MAX_GLOBAL_RUNS"),
+        ("PI_GLINK_MAX_TENANT_RUNS", "-1", "PI_GLINK_MAX_TENANT_RUNS"),
+        ("LOCAL_WEB_TASK_TIMEOUT_SECONDS", "0", "LOCAL_WEB_TASK_TIMEOUT_SECONDS"),
+        ("OPENAI_CONTEXT_WINDOW", "0", "OPENAI_CONTEXT_WINDOW"),
+        ("OPENAI_MAX_TOKENS", "-5", "OPENAI_MAX_TOKENS"),
+        ("PI_GLINK_LOGIN_MAX_ATTEMPTS", "0", "PI_GLINK_LOGIN_MAX_ATTEMPTS"),
+        ("PI_GLINK_SESSION_IDLE_SECONDS", "0", "PI_GLINK_SESSION_IDLE_SECONDS"),
+        ("PI_GLINK_ASSERTION_SKEW_SECONDS", "-1", "PI_GLINK_ASSERTION_SKEW_SECONDS"),
+        ("LOCAL_WEB_DOCKER_PIDS_LIMIT", "-1", "LOCAL_WEB_DOCKER_PIDS_LIMIT"),
+        ("LOCAL_WEB_E2B_TIMEOUT_SECONDS", "-1", "LOCAL_WEB_E2B_TIMEOUT_SECONDS"),
+    ],
+)
+def test_out_of_range_integer_configuration_is_refused_with_the_key_name(
+    key: str, value: str, expect: str
+) -> None:
+    with pytest.raises(ConfigError, match=expect):
+        build_config({key: value}, REPO_ROOT)
+
+
+def test_zero_port_stays_valid_as_the_ephemeral_port_request() -> None:
+    assert build_config({"LOCAL_WEB_PORT": "0"}, REPO_ROOT).port == 0
+    with pytest.raises(ConfigError, match="654?35|65535"):
+        build_config({"LOCAL_WEB_PORT": "65536"}, REPO_ROOT)
+
+
+def test_the_cli_revalidates_host_and_port_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A ``--host``/``--port`` override must pass the same boundary checks."""
+    from pi_glink.app import main as app_main  # noqa: PLC0415
+
+    config = build_config(
+        {
+            "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
+            "LOCAL_WEB_PORT": "0",
+            "OPENAI_MODEL": "test-model",
+        },
+        REPO_ROOT,
+    )
+    monkeypatch.setattr("pi_glink.app.load_config", lambda: config)
+
+    assert app_main(["--host", "0.0.0.0"]) == 2
+    assert "loopback" in capsys.readouterr().err
+    assert app_main(["--port", "70000"]) == 2
+    assert "LOCAL_WEB_PORT" in capsys.readouterr().err
+    assert config.host == "127.0.0.1" and config.port == 0, "配置对象不得被就地改写"
