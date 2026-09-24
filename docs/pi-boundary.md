@@ -16,7 +16,7 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | packages | docs/packages.md | `npm:pi-web-access`（检索能力全部来自它） |
 | extensions | docs/extensions.md | 目录预留（`agent/extensions/`），当前无扩展；有需求时只落在这里 |
 | skills | docs/skills.md | 目录预留（`agent/skills/`） |
-| prompt templates | docs/prompt-templates.md | 目录预留（`agent/prompts/`） |
+| prompt templates | docs/prompt-templates.md | `agent/prompts/deepresearch.md`：`/deepresearch <题目>` 显式入口，展开后只叠加更严格的覆盖声明、核查留痕与二次来源标注；通用研究约定仍走 `--append-system-prompt` |
 | `AGENTS.md` | docs/quickstart.md 等 | 目录预留（`agent/AGENTS.md`），当前约定走 §下一条 |
 | `--append-system-prompt` | `pi --help` | `agent/research-prompt.md` → `kernel/runner.py::_extra_argv`，内核系统提示词本身不改 |
 | headless 协议 | docs/rpc.md、docs/json.md | `--mode rpc`（本机 / Docker 面，`kernel/rpc.py`）；`--mode json`（E2B 面，`kernel/e2b_env.py`）；两面都只按 LF 分帧（`kernel/framing.py`，共享语料 `tests/fixtures/lf-framing.json`） |

@@ -342,7 +342,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `app` |
 | `host/pi_glink/kernel/` | 接入层 | `rpc` / `framing` / `projection` / `agent_env` / `execution` / `docker_env` / `e2b_env` / `runner` |
 | `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
-| `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`、扩展位 |
+| `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`、`prompts/deepresearch.md`、扩展位 |
 | `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |
 | `docker/` | 执行面 | `Dockerfile.worker`（容器）、`e2b/Dockerfile.e2b`（模板） |
 | `scripts/` | 运维 | 启动、测试、真实 run 冒烟、E2B 模板构建 |
