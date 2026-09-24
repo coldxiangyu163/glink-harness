@@ -54,6 +54,14 @@ from ..store import (
     RunRecord,
     RunStore,
 )
+from .acp_env import (
+    ACP_RUNTIME_DIRNAME,
+    AcpRuntime,
+    build_acp_argv,
+    build_acp_env,
+    prepare_acp_runtime,
+)
+from .acp_projection import ACP_STOP_REASONS, AcpProjector
 from .agent_env import (
     AgentRuntime,
     RunCredentials,
@@ -243,7 +251,7 @@ class _Execution:
     phase: str = _OPEN
     cancel_requested: bool = False
     adapter: ExecutionAdapter | None = None
-    runtime: AgentRuntime | None = None
+    runtime: AgentRuntime | AcpRuntime | None = None
     projector: Projector | None = None
     #: Set once the finalizer finished (committed or not).
     finalized: threading.Event = field(default_factory=threading.Event)
@@ -371,11 +379,19 @@ class RunManager:
         # refusal happens before a credential is resolved, before the parent's
         # session is read and before any run directory or execution face exists,
         # and the same call serves first turns and follow-ups on every face.
-        allowed_commands = prompt_template_names(self.config.agent_config_dir)
+        allowed_commands = self._allowed_prompt_commands()
         if prompt_names_unsupported_command(text, allowed_commands):
             raise UnsupportedCommand(allowed_commands)
+        if self.config.harness == "acp" and parent_run_id is not None:
+            # M1 has no ACP continuation: ``session/resume`` is not implemented
+            # and an ACP run stores no host session file to seed from. An
+            # explicit refusal beats starting a fresh session and presenting it
+            # as the parent's next turn (plan §4.4).
+            raise FollowupUnavailable("session_unavailable")
         credentials = self._credentials_for_context(context)
-        if not credentials.model_api_key:
+        if self.config.harness == "pi" and not credentials.model_api_key:
+            # The ACP family does not use the host's model credential: the agent
+            # brings its own model configuration (injection points are M2 work).
             raise ConfigError(
                 "OPENAI_API_KEY is not configured; set it in .env before starting a run"
             )
@@ -431,6 +447,20 @@ class RunManager:
             daemon=True,
         ).start()
         return record
+
+    def _allowed_prompt_commands(self) -> tuple[str, ...]:
+        """The ``/`` commands this host admits for the configured harness.
+
+        pi dispatches extension commands and expands prompt templates, so the
+        allowlist is the rendered prompt-template names. An ACP agent's slash
+        commands (advertised through ``available_commands_update``) are its own
+        surface and none of them are routed by this host: that family's
+        allowlist is empty by construction, derived from the harness instead of
+        a template-directory lookup (plan §4.3).
+        """
+        if self.config.harness == "acp":
+            return ()
+        return prompt_template_names(self.config.agent_config_dir)
 
     def _credentials_for_context(self, context: TenantContext | None) -> RunCredentials:
         """Select the credentials one run may render (caller holds no lock).
@@ -1292,11 +1322,33 @@ class RunManager:
         if outcome.error:
             return _Verdict(FAILED, outcome.stop_reason or "execution_error", outcome.error)
         stop = execution.model_stop_reason
-        if stop == "error":
+        if self.config.harness == "acp":
+            # ACP's own ``StopReason`` vocabulary, recorded verbatim in
+            # ``modelStopReason``. The verdict is still decided only here:
+            # ``max_tokens`` becomes the product's ``length`` (finished, but the
+            # delivery is incomplete), ``refusal`` fails as a model error,
+            # ``cancelled`` takes the cancellation path; an unknown or missing
+            # value fails closed instead of claiming a normal finish. Only
+            # ``end_turn`` falls through to the delivery policy below.
+            if stop is None:
+                return _Verdict(
+                    FAILED, "execution_error", "ACP session/prompt 没有返回 stopReason"
+                )
+            if stop not in ACP_STOP_REASONS:
+                return _Verdict(FAILED, "execution_error", f"未知的 ACP stopReason: {stop!r}")
+            if stop == "refusal":
+                return _Verdict(FAILED, "model_error", "ACP agent 拒绝继续（stopReason=refusal）")
+            if stop == "cancelled":
+                return _Verdict(CANCELLED, "abort", None)
+            if stop == "max_tokens":
+                return _Verdict(FINISHED, "length", None)
+            if stop == "max_turn_requests":
+                return _Verdict(FINISHED, "max_turn_requests", None)
+        elif stop == "error":
             return _Verdict(FAILED, "model_error", execution.model_error or "模型返回了错误结果")
-        if stop == "aborted":
+        elif stop == "aborted":
             return _Verdict(FAILED, "aborted", execution.model_error or "模型输出被中断")
-        if stop == "length":
+        elif stop == "length":
             # The execution succeeded, but the answer was cut off at the output
             # limit. That is a delivery fact the record must carry.
             return _Verdict(FINISHED, "length", None)
@@ -1366,18 +1418,37 @@ class RunManager:
         except (ArtifactError, OSError) as exc:
             raise FollowupUnavailable("report_unavailable") from exc
 
-    def _prepare_runtime(self, execution: _Execution) -> AgentRuntime:
-        """Render the run's own pi configuration and session directory.
+    def _prepare_runtime(self, execution: _Execution) -> AgentRuntime | AcpRuntime:
+        """Render the run's own per-harness configuration and session directory.
 
-        One run, one runtime directory: nothing in ``data_root/pi-agent`` is
+        pi: one run, one runtime directory — nothing in ``data_root/pi-agent`` is
         shared or mutated by a run any more, so two runs cannot overwrite each
         other's credentials, extensions or pi session state. The session
         directory is the run's subdirectory of the configured session root
         (``PI_CODING_AGENT_SESSION_DIR``), which keeps that setting meaningful
         while keeping two runs apart.
+
+        ACP: the run gets its own agent state root (:mod:`acp_env`), which the
+        agent process sees as ``HOME``; no host credential is rendered into it.
         """
         run_id = execution.record.run_id
         run_dir = self.store.run_dir(run_id)
+        if self.config.harness == "acp":
+            runtime = prepare_acp_runtime(
+                self.config, runtime_dir=run_dir / ACP_RUNTIME_DIRNAME
+            )
+            execution.runtime = runtime
+            if execution.session_seed is not None:
+                # Not reachable through admission (ACP follow-ups are refused
+                # there); the guard keeps a seeded session from ever being
+                # presented to an ACP agent as a continuation it did not resume.
+                raise FollowupUnavailable("session_unavailable")
+            if execution.redactor is None:
+                execution.redactor = self._redactor_for(
+                    execution.credentials or RunCredentials.from_host(self.config)
+                )
+            execution.projector = AcpProjector(execution.redactor)
+            return runtime
         runtime = prepare_agent_dir(
             self.config,
             runtime_dir=run_dir / RUNTIME_DIRNAME,
@@ -1440,6 +1511,7 @@ class RunManager:
         )
         return build_adapter(
             spec,
+            harness=self.config.harness,
             executor=self.config.executor,
             client_factory=self._client_factory,
             on_frame=lambda frame: self._on_frame(execution, frame),
@@ -1448,6 +1520,24 @@ class RunManager:
             rpc_plan=self._rpc_plan,
             docker_plan=self._docker_plan,
             docker_stop=docker_stop_argv,
+            acp_plan=self._acp_plan,
+        )
+
+    def _acp_plan(
+        self, spec: ExecutionSpec
+    ) -> tuple[list[str], dict[str, str], Path | None]:
+        """Launch inputs for the ACP agent: argv, filtered env, cwd.
+
+        The argv comes from the frozen ``PI_GLINK_ACP_COMMAND`` and is never
+        shell-expanded; the environment is the pi face's minimal passthrough
+        list plus this run's own ``HOME`` (plan §4.5).
+        """
+        if not isinstance(spec.runtime, AcpRuntime):
+            raise ConfigError("ACP harness 的运行期配置没有按 AcpRuntime 渲染")
+        return (
+            build_acp_argv(spec.config),
+            build_acp_env(spec.config, spec.runtime),
+            spec.workspace,
         )
 
     def _rpc_plan(
@@ -1584,6 +1674,12 @@ class RunManager:
             final = frame.get("finalError")
             if isinstance(final, str) and final.strip():
                 execution.model_error = final
+        elif frame_type == "acp_prompt_result":
+            # ``session/prompt``'s answer: the ACP adapter translates it into
+            # this frame, and the stop reason is recorded verbatim (the ACP
+            # vocabulary is mapped to the product verdict in ``_decide``).
+            stop = frame.get("stopReason")
+            execution.model_stop_reason = stop if isinstance(stop, str) and stop else None
 
     def _accumulate_usage(
         self, execution: _Execution, frame: Mapping[str, Any], payload: Mapping[str, Any]
@@ -1598,6 +1694,15 @@ class RunManager:
         snapshot = payload.get("usage")
         if not isinstance(snapshot, Mapping):
             return None
+        if self.config.harness == "acp":
+            # ACP's usage_update is a cumulative context snapshot (``used`` of
+            # ``size`` plus a session cost), not pi's per-response usage: the
+            # honest conversion keeps that view and replaces the total instead
+            # of summing snapshots (which would fabricate a growing number).
+            # The payload's ``basis`` marker carries the distinction into the
+            # run record.
+            execution.usage_total = dict(snapshot)
+            return dict(payload)
         key = self._usage_key(frame)
         if key is not None:
             if key in execution.usage_keys:
