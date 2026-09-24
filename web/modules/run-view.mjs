@@ -472,44 +472,9 @@ export function createRunView({
 
   /* Connection & outcome states (标准库 ConnectionState)：每一态都凑齐四件 ——
    * 图标 + 标题 + 说明 + 可执行的下一步。停止是中性（不是错误，不用 ×），
-   * 只有真正的失败用 destructive，网络慢用 warning。 */
+   * 只有真正的失败用 destructive，网络慢用 warning。纯函数、可单测。 */
   function outcomeSpec(model) {
-    if (connection === 'unavailable') {
-      return {
-        key: 'unavailable', tone: 'failed', icon: 'alert-circle', live: 'alert',
-        title: '过程记录暂时读不到',
-        text: model.hasReport
-          ? '这项研究的过程记录没能加载，生成的报告不受影响，可以直接打开。'
-          : '这项研究的过程记录没能加载。可以重试一次。',
-        actions: [['重试', 'retry'], ...(model.hasReport ? [['打开报告', 'report']] : [])],
-      };
-    }
-    if (connection === 'reconnecting' && model.status === 'running') {
-      return {
-        key: 'slow', tone: 'slow', icon: 'alert-circle', live: 'status',
-        title: '连接中断，正在重连',
-        text: '研究仍在后台进行，重新连上后会补齐这段时间的过程。',
-        actions: [],
-      };
-    }
-    if (model.status === 'cancelled') {
-      return {
-        key: 'stopped', tone: 'stopped', icon: 'dashed-circle', live: 'status',
-        title: '已停止研究',
-        text: '这不是错误。已完成的步骤和内容都保留在上面，可以用同一个问题重新开始。',
-        actions: [['重新开始', 'rerun']],
-      };
-    }
-    if (model.status === 'failed') {
-      return {
-        key: `failed:${model.error ?? ''}`, tone: 'failed', icon: 'alert-circle', live: 'alert',
-        title: '这次研究没有完成',
-        text: '服务没有返回完整结果。已经生成的部分保留在上面，重试不会覆盖它。',
-        actions: [['重试', 'rerun']],
-        detail: model.error ? displayPath(model.error) : '',
-      };
-    }
-    return null;
+    return outcomeState(model, connection);
   }
 
   function drawOutcome(model) {
@@ -585,4 +550,57 @@ export function createRunView({
       delete root.dataset.status;
     },
   };
+}
+
+/* Connection & outcome states (标准库 ConnectionState)：每一态都凑齐四件 ——
+ * 图标 + 标题 + 说明 + 可执行的下一步。停止是中性（不是错误，不用 ×），
+ * 只有真正的失败用 destructive，网络慢用 warning。纯函数，便于单测。 */
+export function outcomeState(model, connection) {
+  if (connection === 'unavailable') {
+    return {
+      key: 'unavailable', tone: 'failed', icon: 'alert-circle', live: 'alert',
+      title: '过程记录暂时读不到',
+      text: model.hasReport
+        ? '这项研究的过程记录没能加载，生成的报告不受影响，可以直接打开。'
+        : '这项研究的过程记录没能加载。可以重试一次。',
+      actions: [['重试', 'retry'], ...(model.hasReport ? [['打开报告', 'report']] : [])],
+    };
+  }
+  if (connection === 'reconnecting' && model.status === 'running') {
+    return {
+      key: 'slow', tone: 'slow', icon: 'alert-circle', live: 'status',
+      title: '连接中断，正在重连',
+      text: '研究仍在后台进行，重新连上后会补齐这段时间的过程。',
+      actions: [],
+    };
+  }
+  if (model.status === 'cancelled') {
+    return {
+      key: 'stopped', tone: 'stopped', icon: 'dashed-circle', live: 'status',
+      title: '已停止研究',
+      text: '这不是错误。已完成的步骤和内容都保留在上面，可以用同一个问题重新开始。',
+      actions: [['重新开始', 'rerun']],
+    };
+  }
+  if (model.status === 'failed') {
+    return {
+      key: `failed:${model.error ?? ''}`, tone: 'failed', icon: 'alert-circle', live: 'alert',
+      title: '这次研究没有完成',
+      text: '服务没有返回完整结果。已经生成的部分保留在上面，重试不会覆盖它。',
+      actions: [['重试', 'rerun']],
+      detail: model.error ? displayPath(model.error) : '',
+    };
+  }
+  if (model.status === 'finished' && model.stopReason === 'length') {
+    // The run finished, but the model was cut off at its output limit: the
+    // delivery is incomplete, and saying only "已完成" would claim more than
+    // the facts support.
+    return {
+      key: 'incomplete', tone: 'slow', icon: 'alert-circle', live: 'status',
+      title: '交付不完整',
+      text: '模型在输出长度上限处被截断，上面的回答和报告可能不完整。可以继续追问补齐，或重新开始。',
+      actions: [['重新开始', 'rerun']],
+    };
+  }
+  return null;
 }

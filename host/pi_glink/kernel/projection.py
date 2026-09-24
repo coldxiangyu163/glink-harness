@@ -156,12 +156,25 @@ def _message_update(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]
     return [(event_type, {"text": _clip_text(text, DELTA_LIMIT)})]
 
 
+#: How much of an assistant message's authoritative text the event log keeps.
+#: The streamed deltas already carried the whole answer to the browser; this
+#: bound exists so one frame cannot blow up ``events.jsonl`` and the replay ring.
+#: When it clips, the payload says so (``truncated: true``) and the front-end
+#: keeps the longer streamed body instead of replacing it with less.
+ASSISTANT_TEXT_LIMIT = TOOL_TEXT_LIMIT * 4
+
+
 def _message_end(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     message = frame.get("message")
     if not isinstance(message, Mapping) or message.get("role") != "assistant":
         return []
     text = extract_text(message.get("content"))
-    payload: dict[str, Any] = {"text": _clip_text(text, TOOL_TEXT_LIMIT * 4)}
+    clipped, was_truncated = _clip_text_flagged(text, ASSISTANT_TEXT_LIMIT)
+    payload: dict[str, Any] = {"text": clipped}
+    if was_truncated:
+        # The authoritative copy is incomplete: a client that already holds a
+        # longer streamed body must not treat this as the whole answer.
+        payload["truncated"] = True
     stop_reason = message.get("stopReason") or message.get("stop_reason")
     if isinstance(stop_reason, str):
         payload["stopReason"] = stop_reason
@@ -365,10 +378,16 @@ def _project_arg_value(value: Any) -> Any:
 
 
 def _clip_text(text: str, limit: int) -> str:
+    return _clip_text_flagged(text, limit)[0]
+
+
+def _clip_text_flagged(text: str, limit: int) -> tuple[str, bool]:
+    """``(clipped, was_truncated)`` — callers that must not lie about
+    completeness use the flag instead of guessing from the marker text."""
     if len(text) <= limit:
-        return text
+        return text, False
     head = text[:limit]
-    return f"{head}\n…[truncated {len(text) - limit} chars]"
+    return f"{head}\n…[truncated {len(text) - limit} chars]", True
 
 
 def project_frames(

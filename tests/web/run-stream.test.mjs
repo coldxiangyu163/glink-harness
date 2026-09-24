@@ -402,3 +402,38 @@ test('a dropped connection still reports reconnecting, not failed', () => {
   assert.equal(h.statuses.at(-1), 'reconnecting');
   assert.equal(h.scheduled.length, 0, '不重复调度：浏览器自己会重连');
 });
+
+/* The host clips an oversized authoritative message; the streamed deltas are
+ * still the more complete record of what the model said (GLINK-INTEG-01). */
+const LONG_ANSWER = '答'.repeat(20000);
+const CLIPPED_ANSWER = `${LONG_ANSWER.slice(0, 16000)}\n…[truncated 4000 chars]`;
+
+test('a truncated authoritative frame never shortens a longer streamed answer', () => {
+  let model = createRunModel({ runId: 'r1', prompt: '问题' });
+  model = applyEvent(model, frame(1, 'assistant_delta', { text: LONG_ANSWER }));
+  model = applyEvent(model, frame(2, 'assistant_message', { text: CLIPPED_ANSWER, truncated: true }));
+
+  const answer = model.items.filter((item) => item.kind === 'text').at(-1);
+  assert.equal(answer.text, LONG_ANSWER, '更完整的流式正文必须保留');
+  assert.equal(answer.text.length, 20000);
+  assert.equal(answer.closed, true, '终帧仍然收口');
+  assert.equal(answer.truncated, true);
+});
+
+test('an untruncated authoritative frame still replaces the streamed text', () => {
+  let model = createRunModel({ runId: 'r1', prompt: '问题' });
+  model = applyEvent(model, frame(1, 'assistant_delta', { text: '流式正文' }));
+  model = applyEvent(model, frame(2, 'assistant_message', { text: '权威正文' }));
+
+  const answer = model.items.filter((item) => item.kind === 'text').at(-1);
+  assert.equal(answer.text, '权威正文', 'pi 的权威副本优先');
+  assert.equal(answer.truncated, false);
+});
+
+test('a truncated frame still lands when nothing was streamed before it', () => {
+  let model = createRunModel({ runId: 'r1', prompt: '问题' });
+  model = applyEvent(model, frame(1, 'assistant_message', { text: CLIPPED_ANSWER, truncated: true }));
+  const answer = model.items.filter((item) => item.kind === 'text').at(-1);
+  assert.equal(answer.text, CLIPPED_ANSWER);
+  assert.equal(answer.truncated, true);
+});

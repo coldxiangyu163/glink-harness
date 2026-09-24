@@ -156,6 +156,14 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
   “the accumulated output so far (not just the delta)”，客户端每次**替换**显示；
   投影层原样传递该快照，前端若按增量拼接会重复展示前缀（真实 run `ebf75f590601`：
   bash 更新长度 `0 → 53 → 495`，见 `docs/evidence/tool-stream-semantics.txt`）。
+* **权威回答帧可能被截断，截断时会声明**：`assistant_message.text` 只保留
+  `ASSISTANT_TEXT_LIMIT`（16000 字符）并带上 `truncated: true`；保留上限而不取消，是因为回答、
+  脚本与工具输出都可能很长，单帧不受限会让 `events.jsonl` 与重放环形窗口膨胀（事件日志是
+  历史事实源，不因 TTL 删除），而流式 delta 已经把完整正文交给浏览器。前端因此只在
+  **非截断**的权威帧上用 pi 的副本覆盖流式正文；截断帧且流式正文更长时保留流式正文，
+  仅关闭该内容块并标记 `truncated`（重放历史亦然），避免“终帧比流式更短”把回答改短。
+* **`stopReason=length` 是交付不完整**：run 仍为 `finished`，但前端在结论区显示“交付不完整”
+  提示而不是当作普通完成（§4 的终态判定表）。
 * **工具终态跟随 run**：未收到自身 `tool_finished` 的工具不会默认标 `done`——
   run 正常收尾为 `done`，失败为 `interrupted`，取消为 `cancelled`；已拿到终态帧的工具保持原状态。
 
@@ -194,7 +202,7 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 | 执行超时、内核在接受指令后退出、协议/执行错误 | `failed`（`timeout` / `kernel_exit` / `execution_error`） |
 | 最终 assistant `stopReason=error`（重试后仍失败） | `failed` / `model_error`，错误取自 `errorMessage`/`finalError` |
 | 最终 assistant `stopReason=aborted`（非用户取消） | `failed` / `aborted` |
-| 最终 assistant `stopReason=length` | `finished`，但 `model_stop_reason=length`、`stop_reason=length`，明确标注交付不完整 |
+| 最终 assistant `stopReason=length` | `finished`，但 `model_stop_reason=length`、`stop_reason=length`，明确标注交付不完整（前端以结论区的“交付不完整”提示呈现，不当作普通完成） |
 | 中间一次错误后重试成功 | `finished`（只看最终消息，不把可恢复错误永久判失败） |
 | 正常结束但没有 `report.md` | `finished` / `stop_reason=no_report`（被拒为 `report_rejected`） |
 
@@ -311,8 +319,13 @@ U+2028/U+2029 不拆帧，与 RPC 面共用 `tests/fixtures/lf-framing.json` 语
 **完整行数**计：正常结束时文件与流一致、不重复投递；流中途断开（未收到 end）不算 run 失败，
 宿主等命令结束后（命令在管道后把退出码写入 `/home/user/pi-exit-code.txt`）只从文件补发该计数
 之后的帧。非零退出码由 SDK `CommandExitException` 映射为 `kernel_exit` + stderr tail，不退化成
-`execution_error`。宿主侧离线验证已完成（fake handle 分块推送：行跨块/UTF-8 跨块、断流补齐、
-取消、非零退出码、命令字符串）；**真实 E2B 沙箱的实时性尚未验收**。沙箱内的 JSONL 按 LF 分帧；
+`execution_error`。**补读是 fail-closed 的**：流已中断（或本来就没有流式接口）时，文件是唯一完整的
+证据，读不到、不存在或超过事件文件上限（`EVENTS_MAX_BYTES` = 32 MiB）都以 `execution_error` 失败，
+不得判 `finished`；流自己正常结束并拿到退出标记时，已交付行数与退出标记就是完整性证明，文件读取失败
+不改变结论。沙箱文件读取（事件流、stderr 尾部、产物）都先按 SDK 条目元数据或分块读取在**读取前**
+限幅，SDK 既不提供大小也不支持分块时拒绝整份载入，不将沙箱内容无界读入宿主内存。宿主侧离线验证已完成
+（fake handle 分块推送：行跨块/UTF-8 跨块、断流补齐、取消、非零退出码、命令字符串）；**真实 E2B 沙箱的
+实时性尚未验收**。沙箱内的 JSONL 按 LF 分帧；
 配置交付带有 `(相对路径, sha256)` 清单，`AGENTS.md`、`settings.json`、`extensions/`、`skills/`、
 `prompts/` 与生成文件都按同一路径语义送达。该接口此前的误读与更正过程记录在
 `docs/evidence/e2b-run.txt` 末尾。

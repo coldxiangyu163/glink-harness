@@ -112,6 +112,12 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
   let disposed = false;
   /** The identity behind the workbench (null before login / after expiry). */
   let identity = null;
+  /* Identity generation: login, re-authentication, expiry and logout each bump
+   * it, so a response that started under an older identity is dropped instead
+   * of rendering the previous account's data. The navigation token only covers
+   * navigations, not a session change while a request is in flight. */
+  let identityGeneration = 0;
+  const identityStale = (generation) => disposed || generation !== identityGeneration;
   /** Which unauthenticated face is on screen (gateway/accounts/login). */
   let authFaceMode = null;
   /** True once the workbench shell has been revealed for a session. */
@@ -383,9 +389,11 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
    * working; a healthy service is silent. Engine names and execution surfaces
    * are operator facts and never appear here. */
   async function refreshService() {
+    const generation = identityGeneration;
     let message = '';
     try {
       const [health, config] = await Promise.all([api.health(), api.config()]);
+      if (identityStale(generation)) return;
       modelName = config?.model ?? '';
       // ``config`` is the authenticated view: in multi-tenant mode it answers
       // for this caller's own tenant credential. The unauthenticated health
@@ -394,9 +402,11 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       if (!health?.pi?.available) message = '研究引擎暂时不可用，暂时无法发起研究。请联系管理员。';
       else if (!config?.configured?.model) message = '模型服务还没有配置，暂时无法发起研究。请联系管理员完成配置。';
     } catch (error) {
+      if (identityStale(generation)) return;
       if (handleSessionFailure(error)) return;
       message = '服务暂时连不上。请确认服务在运行，然后刷新页面。';
     }
+    if (identityStale(generation)) return;
     serviceAlertText.textContent = message;
     serviceAlert.dataset.tip = message;
     sidebarFoot.hidden = !message;
@@ -535,11 +545,14 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
   }
 
   async function refreshRuns() {
+    const generation = identityGeneration;
     try {
       const { runs } = await api.listRuns();
+      if (identityStale(generation)) return [];
       renderRunList(runs);
       return runs;
     } catch (error) {
+      if (identityStale(generation)) return [];
       if (handleSessionFailure(error)) return [];
       showToast('研究记录暂时读取失败，请稍后刷新。', 'error');
       return [];
@@ -555,14 +568,17 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       showToast('这项研究还在进行，请等它完成或先停止。', 'warning');
       return;
     }
+    const generation = identityGeneration;
     setSending(true);
     try {
       const { run } = await api.startRun(prompt, promptOverride === undefined ? current?.runId : undefined);
+      if (identityStale(generation)) return;
       if (promptOverride === undefined) input.value = '';
       updatePromptCount();
       await openRun(run.runId);
       await refreshRuns();
     } catch (error) {
+      if (identityStale(generation)) return;
       if (handleSessionFailure(error)) return;
       const refusal = error?.code === 'run_busy' || error?.code === 'resources_unreleased';
       showToast(startErrorMessage(error), refusal ? 'warning' : 'error');
@@ -754,11 +770,14 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
   async function stopRun() {
     if (!current) return;
     const { runId } = current;
+    const generation = identityGeneration;
     stopButton.disabled = true;
     try {
       await api.stopRun(runId);
+      if (identityStale(generation)) return;
       if (current?.runId === runId) showToast('正在停止，已完成的内容会保留。', 'info');
     } catch (error) {
+      if (identityStale(generation)) return;
       if (handleSessionFailure(error)) return;
       // The host decides a stop at the run's commit point: past it, the run's
       // committed outcome stands and arrives on the stream as its terminal frame.
@@ -800,11 +819,12 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
 
   async function openReport(runId) {
     const token = nav.token;
+    const generation = identityGeneration;
     try {
       const response = await fetch(api.reportUrl(runId));
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const text = await response.text();
-      if (disposed || !nav.isCurrent(token) ||
+      if (identityStale(generation) || !nav.isCurrent(token) ||
         (current?.runId !== runId && !current?.history?.some((past) => past.runId === runId))) return;
       previewTitle.textContent = 'report.md';
       previewTitle.title = 'report.md';
@@ -815,6 +835,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       previewBody.scrollTop = 0;
       setSlot('report');
     } catch (error) {
+      if (identityStale(generation)) return;
       if (handleSessionFailure(error)) return;
       showToast('报告暂时打不开，请稍后重试。', 'error');
     }
@@ -1021,6 +1042,8 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
   /** Reveal the workbench for an authenticated (or local) identity. */
   async function enterSession(me) {
     if (disposed) return;
+    identityGeneration += 1;
+    const generation = identityGeneration;
     identity = me ?? null;
     setCsrfToken(me?.csrfToken ?? null);
     account.setIdentity(identity);
@@ -1036,6 +1059,8 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
     }
     await refreshService();
     await refreshRuns();
+    // A session change while those were in flight must not reveal this shell.
+    if (identityStale(generation)) return;
     showView('home');
     shell.hidden = false;
     entered = true;
@@ -1044,6 +1069,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
 
   /** Drop the identity and everything derived from it, then show login again. */
   function sessionExpired(notice) {
+    identityGeneration += 1;
     closeCurrent();
     latestRuns = [];
     renderRunList([]);
@@ -1071,9 +1097,10 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
   /** Re-check the session (visibility change, dead SSE stream). */
   async function verifySession() {
     if (!identity || disposed) return;
+    const generation = identityGeneration;
     try {
       const me = await api.me();
-      if (disposed) return;
+      if (identityStale(generation)) return;
       setCsrfToken(me?.csrfToken ?? null);
       identity = me;
       account.setIdentity(me);

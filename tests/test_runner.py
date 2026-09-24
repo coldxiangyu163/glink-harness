@@ -531,12 +531,28 @@ class _PoorlyClosingSandbox:
             def write(self, path: str, content: object) -> None:
                 pass
 
-            def read(self, path: str) -> bytes:
+            def read(self, path: str, format: str | None = None) -> Any:
                 if path == "/home/user/events.jsonl":
-                    return b'{"type": "agent_settled"}\n'
-                if path == "/home/user/workspace/report.md":
-                    return b"# report\n"
-                raise FileNotFoundError(path)
+                    data: Any = b'{"type": "agent_settled"}\n'
+                elif path == "/home/user/workspace/report.md":
+                    data = b"# report\n"
+                else:
+                    raise FileNotFoundError(path)
+                if format == "stream":
+                    raw = data if isinstance(data, bytes) else data.encode("utf-8")
+                    return iter([raw])
+                return data
+
+            def get_info(self, path: str) -> Any:
+                data = self.read(path)
+                size = len(data) if isinstance(data, bytes) else len(data.encode("utf-8"))
+
+                class _Info:
+                    pass
+
+                info = _Info()
+                info.size = size
+                return info
 
             def list(self, path: str) -> list:
                 class _Entry:

@@ -424,3 +424,77 @@ test('the service alert follows the tenant-aware /api/config, not the host-level
   );
   assert.equal(unconfiguredTenant.dom.getElement('sidebar-foot').hidden, false);
 });
+
+
+test('an in-flight history response from an ended session never renders', async (t) => {
+  // The bug this pins: refreshRuns() was not tied to the identity that started
+  // it, so a listRuns answer that landed after sessionExpired() painted the
+  // previous account's runs onto the login screen.
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  let calls = 0;
+  const h = harness({
+    me: async () => ({ ...ACCOUNTS_ME }),
+    api: {
+      listRuns: async () => {
+        calls += 1;
+        if (calls === 1) return { runs: [runView('run-1', '旧租户研究')] };
+        await gate;
+        return { runs: [runView('run-2', '过期请求的响应')] };
+      },
+    },
+  });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  assert.equal(h.workspace.runs.length, 1);
+  const listedRuns = (h) =>
+    Array.from(h.dom.getElement('run-list').children).filter((child) => child.dataset?.runId);
+  assert.equal(listedRuns(h).length, 1, '先渲染旧租户的一条研究');
+
+  const pending = h.workspace.refreshRuns();
+  await tick();
+  h.workspace.sessionExpired('登录状态已过期，请重新登录。');
+  release();
+  await pending;
+
+  assert.deepEqual(h.workspace.runs, [], '过期身份的响应必须被丢弃');
+  assert.equal(listedRuns(h).length, 0, '登录面上不得出现旧租户的研究条目');
+  assert.equal(h.dom.getElement('app-shell').hidden, true);
+  assert.equal(h.workspace.identity, null);
+
+  // A new login is a new generation, and its own history renders again.
+  await h.workspace.enterSession({ ...ACCOUNTS_ME });
+  assert.deepEqual(h.workspace.runs.map((run) => run.runId), ['run-2']);
+  assert.equal(h.dom.getElement('app-shell').hidden, false);
+});
+
+test('a run accepted for an ended session never opens on the login screen', async (t) => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const h = harness({
+    me: async () => ({ ...ACCOUNTS_ME }),
+    api: {
+      startRun: async (prompt) => {
+        await gate;
+        return { run: runView('late-run', prompt) };
+      },
+    },
+  });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+
+  const pending = h.workspace.startRun('登录期间提交');
+  await tick();
+  h.workspace.sessionExpired('已退出登录。');
+  release();
+  await pending;
+
+  assert.equal(h.workspace.runId, null, '过期身份的 run 不得打开');
+  assert.equal(h.workspace.identity, null);
+  assert.equal(h.dom.getElement('app-shell').hidden, true);
+  assert.equal(h.dom.location.pathname, '/login');
+});

@@ -317,6 +317,20 @@ class _Handle:
         return _Result(self._exit_code)
 
 
+class _Stream:
+    """Stand-in for the SDK's ``format="stream"`` reader (chunks + close)."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+        self.closed = False
+
+    def __iter__(self) -> Any:
+        return iter(self._chunks)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class FakeFiles:
     def __init__(self, sandbox: "FakeSandbox") -> None:
         self._sandbox = sandbox
@@ -329,17 +343,44 @@ class FakeFiles:
             content.decode("utf-8") if isinstance(content, bytes) else str(content)
         )
 
-    def read(self, path: str) -> bytes:
+    def read(self, path: str, format: str | None = None) -> Any:
         if path in self._sandbox.readable:
             value = self._sandbox.readable[path]
-            return value if isinstance(value, bytes) else value.encode("utf-8")
-        raise FileNotFoundError(path)
+            data = value if isinstance(value, bytes) else value.encode("utf-8")
+        else:
+            raise FileNotFoundError(path)
+        if format == "stream":
+            return _Stream([data])
+        return data
+
+    def get_info(self, path: str) -> Any:
+        """The SDK's entry metadata: the host bounds the read by ``size`` first."""
+        if path not in self._sandbox.readable:
+            raise FileNotFoundError(path)
+        value = self._sandbox.readable[path]
+        size = len(value) if isinstance(value, bytes) else len(value.encode("utf-8"))
+
+        class Info:
+            pass
+
+        info = Info()
+        info.size = size
+        return info
 
     def list(self, path: str) -> list[Any]:
+        readable = self._sandbox.readable
+
         class Entry:
             def __init__(self, name: str) -> None:
                 self.name = name
                 self.path = f"{path}/{name}"
+                content = readable.get(self.path)
+                if content is None:
+                    self.size = 0
+                elif isinstance(content, bytes):
+                    self.size = len(content)
+                else:
+                    self.size = len(content.encode("utf-8"))
 
         names = (
             self._sandbox.session_files
@@ -364,7 +405,8 @@ class FakeSandbox:
         self.sandbox_id = "fake-sandbox"
         self.dirs: list[str] = []
         self.written: dict[str, str] = {}
-        self.readable: dict[str, Any] = {}
+        # A real sandbox always writes its event file (the command tees into it).
+        self.readable: dict[str, Any] = {"/home/user/events.jsonl": ""}
         self.workspace_files: tuple[str, ...] = []
         self.session_files: tuple[str, ...] = ()
         self.command = ""

@@ -29,7 +29,10 @@ from pi_glink.events import EventBus
 from pi_glink.kernel import agent_env, e2b_env
 from pi_glink.kernel.e2b_env import (
     ARTIFACT_MAX_BYTES,
+    EVENTS_MAX_BYTES,
+    STDERR_MAX_BYTES,
     E2BSandboxClient,
+    EventCatchUpFailed,
     SandboxError,
     parse_json_stream_line,
 )
@@ -51,6 +54,20 @@ _FAKE_EVENTS = [
 ]
 
 
+class _Stream:
+    """Stand-in for the SDK's ``format="stream"`` reader (chunks + close)."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+        self.closed = False
+
+    def __iter__(self) -> Any:
+        return iter(self._chunks)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class FakeFiles:
     def __init__(self, sandbox: "FakeSandbox") -> None:
         self._sandbox = sandbox
@@ -62,17 +79,50 @@ class FakeFiles:
         text = content.decode("utf-8") if isinstance(content, bytes) else str(content)
         self._sandbox.written[path] = text
 
-    def read(self, path: str) -> bytes:
+    def read(self, path: str, format: str | None = None) -> Any:
+        self._sandbox.reads.append(path)
         if path in self._sandbox.readable:
             value = self._sandbox.readable[path]
-            return value if isinstance(value, bytes) else value.encode("utf-8")
-        raise FileNotFoundError(path)
+            data = value if isinstance(value, bytes) else value.encode("utf-8")
+        else:
+            raise FileNotFoundError(path)
+        if format == "stream":
+            return _Stream([data])
+        return data
+
+    def get_info(self, path: str) -> Any:
+        """The SDK's entry metadata: the host bounds the read by ``size`` first."""
+        if path not in self._sandbox.readable:
+            raise FileNotFoundError(path)
+        value = self._sandbox.readable[path]
+        size = self._sandbox.sizes.get(
+            path, len(value) if isinstance(value, bytes) else len(value.encode("utf-8"))
+        )
+
+        class Info:
+            pass
+
+        info = Info()
+        info.size = size
+        return info
 
     def list(self, path: str) -> list[Any]:
+        readable = self._sandbox.readable
+        sizes = self._sandbox.sizes
+
         class Entry:
             def __init__(self, name: str) -> None:
                 self.name = name
                 self.path = f"{path}/{name}"
+                content = readable.get(self.path)
+                if self.path in sizes:
+                    self.size = sizes[self.path]
+                elif content is None:
+                    self.size = 0
+                elif isinstance(content, bytes):
+                    self.size = len(content)
+                else:
+                    self.size = len(content.encode("utf-8"))
 
         names = self._sandbox.session_files if path == "/home/user/sessions" else self._sandbox.workspace_files
         return [Entry(name) for name in names]
@@ -135,12 +185,22 @@ class FakeSandbox:
         #: caller left the SDK default in place).
         self.command_timeout: float | None = None
         self.killed = False
+        #: Paths the host asked to read (the bounded-read regressions).
+        self.reads: list[str] = []
+        #: Entry sizes the SDK reports instead of the real content length.
+        self.sizes: dict[str, int] = {}
         if events is not None:
             self.readable["/home/user/events.jsonl"] = "\n".join(
                 json.dumps(event) for event in events
             )
         elif events_text is not None:
             self.readable["/home/user/events.jsonl"] = events_text
+        else:
+            # A real sandbox always writes the file (the command tees into it),
+            # so a run whose face never streamed still finds an empty timeline
+            # instead of an unresolved one. Tests that own the fail-closed case
+            # delete this entry explicitly.
+            self.readable["/home/user/events.jsonl"] = ""
         if report is not None:
             self.readable["/home/user/workspace/report.md"] = report
         self.files = FakeFiles(self)
@@ -1190,3 +1250,174 @@ def test_sandbox_command_streams_stdout_and_records_the_pipeline_exit_code(
     assert "$(rm -rf /)" not in command
     assert "`whoami`" not in command
     assert f"'{base64.b64encode(prompt.encode('utf-8')).decode('ascii')}'" in command
+
+
+# -- bounded reads and fail-closed catch-up (GLINK-INTEG-01) -------------------
+#
+# The sandbox's event file is the completeness authority when the live stream
+# dropped; an unreadable or oversized file must make the run unresolved rather
+# than produce a conclusion nobody can prove. Every sandbox read is bounded by
+# entry metadata (or a streamed read) *before* a byte is loaded.
+
+
+def test_a_dropped_stream_with_an_unreadable_event_file_fails_the_run(
+    tmp_path: Path,
+) -> None:
+    """The file decided the outcome and could not be read: fail, not finish."""
+    config = make_config(tmp_path)
+    records = [
+        {"type": "session", "id": "s"},
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "一"}},
+        {"type": "agent_settled"},
+    ]
+    lines = _record_lines(records)
+    sandbox = StreamingSandbox(
+        events_text="".join(lines),
+        chunks=(lines[0],),
+        drop_after=1,
+        marker="0",
+    )
+    del sandbox.readable[_EVENTS_PATH]  # the drop means only the file could prove the rest
+
+    manager, storage = _manager(config, sandbox, tmp_path)
+    record = manager.start("断流且补读失败")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final.status == "failed"
+    assert final.stop_reason == "execution_error", final.stop_reason
+    assert final.error and "补读失败" in final.error
+    assert _event_kinds(storage, record.run_id)[-1] == "run_failed"
+
+
+def test_an_oversized_event_file_fails_closed_without_loading_it(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    records = [{"type": "session", "id": "s"}, {"type": "agent_settled"}]
+    lines = _record_lines(records)
+    sandbox = StreamingSandbox(
+        events_text="".join(lines),
+        chunks=(lines[0],),
+        drop_after=1,
+        marker="0",
+    )
+    sandbox.sizes[_EVENTS_PATH] = EVENTS_MAX_BYTES + 1  # the metadata says "too big"
+    sandbox.reads.clear()
+
+    client = E2BSandboxClient(
+        config,
+        _prepare(config, tmp_path),
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: sandbox,
+    )
+    client.start()
+    with pytest.raises(EventCatchUpFailed) as refusal:
+        client.run_prompt("断流且事件文件超限")
+    client.close()
+
+    assert "超过上限" in str(refusal.value) or "补读失败" in str(refusal.value)
+    assert _EVENTS_PATH not in sandbox.reads, "超限的事件文件必须在读取前被拒绝"
+
+
+def test_a_healthy_stream_does_not_need_the_event_file(tmp_path: Path) -> None:
+    """A stream that ended on its own proved the timeline; the file is redundant."""
+    config = make_config(tmp_path)
+    records = [
+        {"type": "session", "id": "s"},
+        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "完整"}},
+        {"type": "agent_settled"},
+    ]
+    lines = _record_lines(records)
+    sandbox = StreamingSandbox(
+        events_text="".join(lines), chunks=tuple(lines), marker="0"
+    )
+    del sandbox.readable[_EVENTS_PATH]
+
+    client = E2BSandboxClient(
+        config,
+        _prepare(config, tmp_path),
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: sandbox,
+    )
+    client.start()
+    seen: list[str] = []
+    result = client.run_prompt("健康流", on_line=seen.append)
+    client.close()
+
+    assert seen == _delivered(lines)
+    assert result.exit_code == 0 and result.stream_error is None
+    assert result.delivered_lines == len(lines)
+
+
+def test_artifacts_are_bounded_by_listing_metadata_before_reading(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    sandbox = FakeSandbox(workspace_files=("report.md", "huge.bin"))
+    sandbox.readable["/home/user/workspace/report.md"] = "# 报告\n"
+    sandbox.readable["/home/user/workspace/huge.bin"] = b"small"
+    sandbox.sizes["/home/user/workspace/huge.bin"] = ARTIFACT_MAX_BYTES + 1  # metadata lies, read must not
+    sandbox.reads.clear()
+    client = E2BSandboxClient(
+        config,
+        _prepare(config, tmp_path),
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: sandbox,
+    )
+    client.start()
+    files, failures = client.recover_artifacts(tmp_path / "ws")
+    client.close()
+
+    assert {path.name for path in files} == {"report.md"}
+    assert any("上限" in failure for failure in failures)
+    assert "/home/user/workspace/huge.bin" not in sandbox.reads
+
+
+def test_a_sandbox_without_size_metadata_or_streaming_refuses_the_read(
+    tmp_path: Path,
+) -> None:
+    """Neither bound available: refuse the load instead of guessing."""
+    config = make_config(tmp_path)
+    sandbox = FakeSandbox()
+    sandbox.readable[_EVENTS_PATH] = "{}"
+
+    class PlainFiles:
+        def read(self, path: str) -> bytes:
+            raise AssertionError("不存在上限依据时不得整份载入沙箱文件")
+
+    sandbox.files = PlainFiles()  # type: ignore[assignment]
+    client = E2BSandboxClient(
+        config,
+        _prepare(config, tmp_path),
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: sandbox,
+    )
+    client.start()
+    try:
+        assert client.fetch_event_lines() == []
+        with pytest.raises(EventCatchUpFailed) as refusal:
+            client.fetch_event_lines(required=True)
+        assert "拒绝整份载入" in str(refusal.value)
+    finally:
+        client.close()
+
+
+def test_the_stderr_tail_stays_empty_when_the_read_is_refused(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    sandbox = FakeSandbox()
+    sandbox.sizes["/home/user/pi-stderr.txt"] = STDERR_MAX_BYTES + 1
+    sandbox.readable["/home/user/pi-stderr.txt"] = "trace"
+    sandbox.reads.clear()
+    client = E2BSandboxClient(
+        config,
+        _prepare(config, tmp_path),
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: sandbox,
+    )
+    client.start()
+    try:
+        assert client.fetch_stderr_tail() == ""
+        assert "/home/user/pi-stderr.txt" not in sandbox.reads
+    finally:
+        client.close()

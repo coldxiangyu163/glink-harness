@@ -301,14 +301,24 @@ function closeCurrentBlocks(model) {
 
 function applyFinalMessage(model, payload) {
   const text = typeof payload.text === 'string' ? payload.text : '';
+  const truncated = payload.truncated === true;
   const last = lastItem(model);
   if (text === '') return model;
   if (last && last.kind === 'text' && !last.closed) {
     // The streamed text and pi's authoritative message agree in practice; use
     // pi's copy so a dropped delta cannot leave a truncated answer on screen.
-    return replaceLast(model, { ...last, text, closed: true });
+    // The exception is a frame the host itself clipped (`truncated: true`): it
+    // carries less than the stream already delivered, so the longer streamed
+    // body stays and the item is only closed.
+    const keepStreamed = truncated && last.text.length > text.length;
+    return replaceLast(model, {
+      ...last,
+      text: keepStreamed ? last.text : text,
+      closed: true,
+      truncated,
+    });
   }
-  return appendItem(model, { kind: 'text', turn: model.turn, text, closed: true });
+  return appendItem(model, { kind: 'text', turn: model.turn, text, closed: true, truncated });
 }
 
 function startTool(model, payload) {
