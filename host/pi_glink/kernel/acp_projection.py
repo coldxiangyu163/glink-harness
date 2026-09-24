@@ -27,14 +27,11 @@ frame. Both are translated here so the runner's event path stays harness-blind.
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any, Callable, Mapping
 
 from .. import events
 from ..redaction import SecretRedactor, StreamRedactor
 from .projection import _project_args, extract_text
-
-logger = logging.getLogger("pi_glink.kernel.acp_projection")
 
 #: ACP ``StopReason`` values (protocol v1 schema). The runner translates these
 #: into the single product verdict table; an unknown value fails closed there.

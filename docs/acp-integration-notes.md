@@ -12,8 +12,8 @@
 | `合成实测` | 本仓库 M1 回归（`tests/test_kernel_acp*.py` + `tests/fixtures/fake_acp.py`）。**只证明宿主侧客户端/投影/生命周期行为，不证明任何真实 agent 的实现** |
 | `待 M2` | 需要真实 agent 与授权才能确认 |
 
-状态（2026-09-24）：M1 合成验证完成（GLINK-ACP-01，commit `0f42f38..da75b45`）。真实
-dsh / codex-acp / claude-code-acp 冒烟与真实模型调用属 M2，未执行。
+状态（2026-09-24）：M1 合成验证完成（GLINK-ACP-01，回归在 `tests/test_kernel_acp*.py`）。
+真实 dsh / codex-acp / claude-code-acp 冒烟与真实模型调用属 M2，未执行。
 
 ## 1. 协议事实（v1）
 
