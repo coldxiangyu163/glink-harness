@@ -9,9 +9,12 @@ settle", "kill on cancel" or "pull the report back".
 
 The frozen input is :class:`ExecutionSpec`: the run id, the kernel prompt, the
 system prompt, the per-run workspace, the per-run rendered configuration and
-the run's timeout. An adapter never re-reads global environment for data the
-spec already carries (image, template, credentials, paths), and never writes to
-another run's workspace.
+the run's timeout. ``harness`` (the pi kernel or an ACP agent) and ``executor``
+(the in-process, Docker or E2B transmission face) are orthogonal: the adapter
+count is "harness families × transmission faces", not one adapter per pair (see
+``docs/multi-harness-plan.md``). An adapter never re-reads global environment
+for data the spec already carries (image, template, credentials, paths), and
+never writes to another run's workspace.
 
 The contract is:
 
@@ -51,12 +54,16 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, TYPE_CHECKING
 
-from ..config import HostConfig
+from ..config import ConfigError, HostConfig
+from .acp_rpc import AcpRpcClient
 from .agent_env import AgentRuntime
 from .e2b_env import E2BSandboxClient, SandboxError, parse_json_stream_line
 from .rpc import PiRpcClient, PiRpcError
+
+if TYPE_CHECKING:  # pragma: no cover - annotation only, avoids an import cycle
+    from .acp_env import AcpRuntime
 
 logger = logging.getLogger("pi_glink.kernel.execution")
 
@@ -71,7 +78,10 @@ class ExecutionSpec:
     """Everything an adapter may use, frozen when the run was accepted."""
 
     config: HostConfig
-    runtime: AgentRuntime
+    #: The per-run rendered configuration for this run's harness: pi's
+    #: :class:`AgentRuntime` for the pi family, the ACP state root for the ACP
+    #: family. A harness-specific plan reads its own shape.
+    runtime: AgentRuntime | AcpRuntime
     run_id: str
     prompt: str
     system_prompt: str
@@ -560,6 +570,7 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
 def build_adapter(
     spec: ExecutionSpec,
     *,
+    harness: str = "pi",
     executor: str,
     client_factory: Callable[..., PiRpcClient],
     on_frame: FrameCallback,
@@ -568,14 +579,42 @@ def build_adapter(
     rpc_plan: Callable[[ExecutionSpec], tuple[list[str], Mapping[str, str], Path | None]],
     docker_plan: Callable[[ExecutionSpec], tuple[list[str], Mapping[str, str], str]],
     docker_stop: Callable[[str], list[str]],
+    acp_plan: Callable[[ExecutionSpec], tuple[list[str], Mapping[str, str], Path | None]]
+    | None = None,
+    acp_client_factory: Callable[..., AcpRpcClient] | None = None,
 ) -> ExecutionAdapter:
-    """Compose the adapter for one run's frozen execution face.
+    """Compose the adapter for one run's frozen harness and execution face.
 
-    ``rpc_plan``/``docker_plan`` are the face-specific input builders kept in
-    the runner (they touch the run's rendered configuration); the adapter owns
-    everything after that. ``on_identity`` is called as soon as a face knows the
-    durable identity of the resource it created, before any later step can fail.
+    ``harness`` selects the adapter family (``pi`` or ``acp``), ``executor`` the
+    transmission face within it. ``rpc_plan``/``docker_plan``/``acp_plan`` are
+    the harness-and-face-specific input builders kept in the runner (they touch
+    the run's rendered configuration); the adapter owns everything after that.
+    ``on_identity`` is called as soon as a face knows the durable identity of
+    the resource it created, before any later step can fail.
     """
+    if harness == "acp":
+        # Imported here, not at module import: the ACP adapter depends on the
+        # contract defined in this module.
+        from .acp_execution import AcpExecutionAdapter
+
+        if executor != "inproc":
+            # M1 implements the ACP family on the in-process face only; the
+            # configuration refuses this combination at startup too, so this is
+            # the backstop for a directly constructed HostConfig.
+            raise ConfigError(
+                "PI_GLINK_HARNESS=acp 目前只支持 inproc 执行面（docker/e2b 见 M3）"
+            )
+        if acp_plan is None:
+            raise ConfigError("ACP adapter requires an acp_plan")
+        argv, env, cwd = acp_plan(spec)
+        return AcpExecutionAdapter(
+            spec,
+            argv=argv,
+            env=env,
+            cwd=cwd,
+            client_factory=acp_client_factory or AcpRpcClient,
+            on_frame=on_frame,
+        )
     if executor == "e2b":
         return E2BSandboxExecutionAdapter(
             spec, on_frame=on_frame, sandbox_factory=sandbox_factory, on_identity=on_identity
