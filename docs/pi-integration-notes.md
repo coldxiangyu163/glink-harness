@@ -113,3 +113,32 @@ result 一次；两者不同的工具仍保留两份内容。校验：
 `tests/web/run-stream.test.mjs` 的 `the audited run ebf75f590601 replays with replacement semantics (real fixture)`
 断言 `output + result` 只渲染 495 字符且前缀仅出现一次；浏览器回归以
 `toolsRenderingTextTwice === 0` 卡住同类回退（证据 `docs/evidence/browser-run.json`）。
+
+## 8. pi-subagents 0.40.0 验证（spike GLINK-SUB-01，未接入）
+
+结论：**0.40.0 没有配置开关可以禁止 async/detached 子 agent**，也没有相关环境变量；按 spike 门禁
+就此停止，未做凭据继承、取消传播、事件投影/脱敏与产物落点的 live 验证（agent/settings.json 未改）。
+本节的源码行号与事实来自 `npm install --prefix /tmp/glink-sub-spike/prefix pi-subagents@0.40.0`
+的发布包（integrity 与原始输出见 `docs/evidence/pi-subagents-spike.txt`）。
+
+配置面（`<PI_CODING_AGENT_DIR>/extensions/subagent/config.json`，路径见 `src/extension/config.ts:8-9`，
+`PI_CODING_AGENT_DIR` 由 `src/shared/utils.ts:95-100` 解析）只有 26 个键，其中 async 方向的只有
+`asyncByDefault`（默认 false，只改默认值）与 `forceTopLevelAsync`（把顶层 launch 强制改成 async）；
+不存在 force-foreground/disable-async 类键。模型面对 `subagent` 工具始终可见
+`async: boolean`（`src/extension/schemas.ts:316`），分派判定为
+`runsForeground = clarify === true || (async ?? asyncByDefault) !== true`
+（`src/runs/foreground/subagent-executor.ts:4467-4468`）；模型传 `async: true` 即走 detached
+子进程（`src/runs/background/async-execution.ts:454` `detached: true`，`env: {...process.env, ...}`）。
+pi-subagents 自带 skill 还明确建议每次启动都用 `async: true`
+（`skills/pi-subagents/references/execution-controls.md:122`）。
+
+可关闭的非必需面：`scheduledRuns` 需显式 `enabled: true` 才启用（`src/runs/background/scheduled-runs.ts:70`）；
+watchdog 默认 `enabled: false`（`src/watchdog/settings.ts:71-72`），LSP 诊断受 watchdog 约束；
+`intercomBridge` 未配置时 mode 解析为 `always`、可用 `mode: "off"` 关闭
+（`src/intercom/intercom-bridge.ts:77-80`）；`artifactDir` 可在 `project`/`session`/`temp` 间配置
+（`src/shared/types.ts:1632`）。
+
+复现：`scripts/spikes/pi_subagents/audit_async_switch.sh <pi-subagents-root>`（只读、离线；发现
+新增 async/前台开关时退出 1，0.40.0 实测退出 0）。注意 `~/.feynman/npm-global` 下的参考副本与 npm 发布
+包不是同一源码：23 个 `src/` 文件不同（参考副本多出 `modelOverrideFromParent`、`contextOverflow`、
+`finalizeToolResult` 等符号），两侧 version 都写 0.40.0；引用行号前先按实际安装包核对。

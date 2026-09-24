@@ -1,0 +1,204 @@
+pi-subagents 0.40.0 验证证据（GLINK-SUB-01，Q1 门禁）
+=====================================================
+日期: 2026-09-24（UTC）
+角色: GLINK-SUB-01 有界写 Worker（launcher pids / provider commandcode-oai / model deepseek/deepseek-v4.1-flash / thinking max）
+环境: macOS；Node v24.16.0；npm 11.13.0；PATH 中 pi 0.87.1
+范围: brief 的六问中只执行 Q1（async/detached 禁用开关）并给出 BLOCKER；按门禁停止 Q2–Q6 live 验证。
+真实模型/检索调用: 0 次。唯一的网络操作是按 brief 允许的 `npm install --prefix`（固定 0.40.0）。
+
+① 临时安装（仓库外前缀）
+------------------------
+命令:
+  npm install --prefix /tmp/glink-sub-spike/prefix pi-subagents@0.40.0 --no-audit --no-fund
+输出（重复执行时）:
+  changed 4 packages in 635ms
+退出码: 0
+registry: https://registry.npmmirror.com/pi-subagents/-/pi-subagents-0.40.0.tgz
+dist.integrity: sha512-DdFXqmRMLhCcGs32zN14hm4AztDuhG0b8yka8pzO+5GsYseifJnT/hfcqr/skPhtoDqA1qcQbucj1dciC0OQzg==
+npm ls --prefix /tmp/glink-sub-spike/prefix --depth=1:
+  pi-subagents@0.40.0
+   ├── UNMET OPTIONAL DEPENDENCY @earendil-works/pi-agent-core@*（peer，由 pi 提供）
+   ├── UNMET OPTIONAL DEPENDENCY @earendil-works/pi-ai@>=0.80.0
+   ├── UNMET OPTIONAL DEPENDENCY @earendil-works/pi-coding-agent@*
+   ├── UNMET OPTIONAL DEPENDENCY @earendil-works/pi-tui@*
+   ├── jiti@2.7.0
+   ├── typebox@1.1.38
+   └── yaml@2.8.3
+
+② Q1 审计（正例）：仓库脚本 scripts/spikes/pi_subagents/audit_async_switch.sh
+-----------------------------------------------------------------------------
+命令:
+  bash scripts/spikes/pi_subagents/audit_async_switch.sh \
+    /tmp/glink-sub-spike/prefix/node_modules/pi-subagents
+退出码: 0（NO_SWITCH）
+原始输出:
+
+=== pi-subagents config-surface audit ===
+root:    /tmp/glink-sub-spike/prefix/node_modules/pi-subagents
+version: 0.40.0
+
+--- 1. ExtensionConfig 全部键（src/shared/types.ts）---
+export interface ExtensionConfig {
+	asyncByDefault?: boolean;
+	/** Show the Claude Code-style navigable fleet. Defaults to true. */
+	fleetView?: boolean;
+	/** Place the persistent FleetView above or below the editor. Defaults to belowEditor. */
+	fleetViewPlacement?: FleetViewPlacement;
+	/** Show the legacy above-editor async runs widget. Defaults to true only when fleetView is disabled. */
+	asyncWidget?: boolean;
+	/** Tool description variant registered for the parent-facing subagent tool. Defaults to full. */
+	toolDescriptionMode?: ToolDescriptionMode;
+	forceTopLevelAsync?: boolean;
+	waitTool?: WaitToolConfig;
+	defaultSessionDir?: string;
+	singleRunOutputBaseDir?: string;
+	maxSubagentDepth?: number;
+	/** Optional cumulative session cap. Unset or 0 means unlimited. */
+	maxSubagentSpawnsPerSession?: number;
+	/** Global cap on simultaneously-running subagent tasks within a single run. Defaults to 20. */
+	globalConcurrencyLimit?: number;
+	control?: ControlConfig;
+	completionBatch?: CompletionBatchConfig;
+	turnBudget?: TurnBudgetConfig;
+	toolBudget?: ToolBudgetConfig;
+	usageBudget?: UsageBudgetConfig;
+	parallel?: TopLevelParallelConfig;
+	chain?: ExtensionChainConfig;
+	worktreeSetupHook?: string;
+	worktreeSetupHookTimeoutMs?: number;
+	worktreeBaseDir?: string;
+	/** Where to store subagent artifact files. Defaults to "project" (cwd/.pi-subagents). Set to "session" for pi session dir, or "temp" for OS temp. */
+	artifactDir?: ArtifactDirPreference;
+	intercomBridge?: IntercomBridgeConfig;
+	proactiveSkillSubagents?: ProactiveSkillSubagentsConfig | false;
+	scheduledRuns?: ScheduledRunsConfig;
+}
+
+键列表: asyncByDefault fleetView fleetViewPlacement asyncWidget toolDescriptionMode forceTopLevelAsync waitTool defaultSessionDir singleRunOutputBaseDir maxSubagentDepth maxSubagentSpawnsPerSession globalConcurrencyLimit control completionBatch turnBudget toolBudget usageBudget parallel chain worktreeSetupHook worktreeSetupHookTimeoutMs worktreeBaseDir artifactDir intercomBridge proactiveSkillSubagents scheduledRuns
+
+--- 2. 疑似“禁止 async / 强制前台”的配置键 ---
+none
+
+--- 3. 强制 async 方向的键（反向开关，仅说明配置面只能把 launch 推向 async）---
+asyncByDefault
+forceTopLevelAsync
+
+--- 4. 模型可见的 subagent 工具 async 参数（src/extension/schemas.ts）---
+316:	async: Type.Optional(Type.Boolean({ description: "Run in background (default: false, or per config)" })),
+
+--- 5. 前台/异步分派逻辑（src/runs/foreground/subagent-executor.ts）---
+4468:		const runsForeground = dispatchParams.clarify === true || (dispatchParams.async ?? deps.asyncByDefault) !== true;
+4467:		const dispatchParams = applyForceTopLevelAsyncOverride(requestParams, depth, deps.config.forceTopLevelAsync === true);
+
+--- 6. async launch 的 detached 进程与父环境继承（src/runs/background/async-execution.ts）---
+454:			detached: true,
+458:				...process.env,
+
+--- 7. 非必需面默认值/开关 ---
+[scheduledRuns] 默认关闭，需显式 enabled:true
+70:	return config.scheduledRuns?.enabled === true;
+[watchdog] 默认关闭（DEFAULT_WATCHDOG_CONFIG）
+71:export const DEFAULT_WATCHDOG_CONFIG: ResolvedWatchdogConfig = {
+72-	enabled: false,
+73-	delivery: "held",
+[intercomBridge] 未配置时 mode 解析为 always
+77:export function resolveIntercomBridgeMode(value: unknown): IntercomBridgeMode {
+78-	if (value === "off" || value === "always" || value === "fork-only") return value;
+79-	return "always";
+80-}
+[artifactDir] project/session/temp 可配
+1632:	artifactDir?: ArtifactDirPreference;
+
+--- 8. 环境变量 kill switch 扫描（期望 none）---
+none
+
+VERDICT: version=0.40.0 keys=26
+NO_SWITCH：配置面与环境中均无“禁止 async / 强制前台同步”的开关；模型传入 async:true 即走 detached 路径。
+
+③ 审计脚本负例（证明检查器会对“存在开关”变红）
+---------------------------------------------
+fixture: /tmp/glink-sub-spike/negative-fixture（package.json version=9.9.9-negative-control；
+  src/shared/types.ts 的 ExtensionConfig 里含 `disableAsync?: boolean`）
+命令:
+  bash scripts/spikes/pi_subagents/audit_async_switch.sh /tmp/glink-sub-spike/negative-fixture
+退出码: 1
+关键输出:
+  --- 2. 疑似“禁止 async / 强制前台”的配置键 ---
+  FOUND: disableAsync
+  VERDICT: version=9.9.9-negative-control keys=2
+  SWITCH_FOUND：发现疑似强制前台/禁用 async 的开关；BLOCKER 结论对该版本不成立，需重开 spike 实测。
+
+④ 直查开关名的补充负例（npm 发布包内）
+-------------------------------------
+命令: grep -rniE 'forceforeground|disableasync|asyncdisabled|allowasync' src
+输出: 空；退出码 1
+命令: grep -rniE '(NO_ASYNC|DISABLE_ASYNC|FORCE_FOREGROUND|SYNC_ONLY)' src
+输出: 空；退出码 1
+
+⑤ 关键源码事实（npm 发布包，原文摘录）
+-------------------------------------
+src/runs/background/top-level-async.ts:1-13（forceTopLevelAsync 只会把 async 改 true；foregroundOnly 只是内部参数，
+不在模型 schema 里）:
+  export function applyForceTopLevelAsyncOverride<T extends AsyncOverrideParams>(
+  	params: T, depth: number, forceTopLevelAsync: boolean,
+  ): T {
+  	if (params.foregroundOnly || !(depth === 0 && forceTopLevelAsync)) return params;
+  	return { ...params, async: true, clarify: false };
+  }
+
+src/runs/foreground/subagent-executor.ts:4467-4468（模型 async:true 即不走前台分支）:
+  const dispatchParams = applyForceTopLevelAsyncOverride(requestParams, depth, deps.config.forceTopLevelAsync === true);
+  const runsForeground = dispatchParams.clarify === true || (dispatchParams.async ?? deps.asyncByDefault) !== true;
+
+src/runs/background/async-execution.ts:452-460（detached 子进程 + 继承父环境）:
+  const proc = spawn(nodeCommand, [jitiCliPath, runner, cfgPath], {
+  	cwd, detached: true, stdio: ["ignore", stdoutFd ?? "ignore", stderrFd ?? "ignore"],
+  	env: { ...process.env, ...(piPackageRoot ? { [PI_CODING_AGENT_PACKAGE_ROOT_ENV]: piPackageRoot } : {}) },
+  });
+
+src/extension/config.ts:8-9（扩展配置文件路径；PI_CODING_AGENT_DIR 由 src/shared/utils.ts:95-100 解析）:
+  export function getConfigPath(): string {
+  	return path.join(getAgentDir(), "extensions", "subagent", "config.json");
+  }
+src/extension/index.ts:197（asyncByDefault 只改默认值，默认 false）:
+  const asyncByDefault = config.asyncByDefault === true;
+
+pi-subagents 自带 skill（skills/pi-subagents/references/execution-controls.md:122）明确建议：
+  "Prefer async mode for every subagent launch. Set `async: true` no matter the task..."
+
+⑥ 参考副本 ≠ npm 发布包（brief 行号来源校正）
+-------------------------------------------
+命令: diff -rq ~/.feynman/npm-global/lib/node_modules/pi-subagents/src \
+                /tmp/glink-sub-spike/prefix/node_modules/pi-subagents/src
+结果: 23 个文件不同；两侧 package.json version 都是 0.40.0。
+仅出现在参考副本、npm 发布包没有的符号（grep -rl 文件数）:
+  modelOverrideFromParent: REF=6 NPM=0
+  contextOverflow:         REF=6 NPM=0
+  finalizeToolResult:      REF=3 NPM=0
+  buildSubagentToolPromptMetadata: REF=2 NPM=0
+Q1 相关文件两侧一致（内容哈希相同或逻辑一致）: shared/types.ts 的 ExtensionConfig 键集、
+extension/config.ts、top-level-async.ts、scheduled-runs.ts、watchdog/settings.ts、
+intercom/intercom-bridge.ts；前台/异步分派逻辑两侧相同（参考副本 4487-4488，npm 4467-4468）。
+结论: Q1 的 BLOCKER 对两份源码都成立；但后续以 brief 行号引用参考副本时需按实际安装包重定位
+（例如 npm 包的三处 spawn 分别在 execution.ts:451、subagent-runner.ts:468、async-execution.ts:458）。
+
+⑦ 结论（Q1）
+------------
+FAIL/BLOCKER: pi-subagents 0.40.0 不存在“强制前台同步、禁止 async/detached”的配置或设置开关；
+反向开关（asyncByDefault / forceTopLevelAsync）只能把 launch 推向 async。模型面对 subagent 工具
+可见 async: boolean，传 true 即走 detached 子进程（继承父环境）。按 brief 门禁停止 Q2–Q6。
+非必需面: scheduledRuns 默认关闭；watchdog 默认关闭（LSP 随之）；intercomBridge 默认解析为
+"always"、可用 mode:"off" 关闭；artifactDir 可配 project/session/temp。
+可选替代（本 spike 未验证、超出 Q1 问题范围、需新任务）: pi-glink 自有扩展经官方 tool_call 钩子
+改写/拒绝 async:true。该方案不是 pi-subagents 的配置开关，且会新增 pi-glink 侧代码与测试义务。
+
+⑧ 未覆盖项
+-----------
+Q2 凭据/环境继承实测、Q3 RPC 取消传播、Q4 事件投影与脱敏、Q5 产物落点回收、Q6 容器安装时机——
+均因 Q1 门禁未执行。agent/settings.json 未修改，无真实模型/检索调用，无宿主常驻服务启动。
+
+⑨ 临时资源与清理
+-----------------
+/tmp/glink-sub-spike/（prefix 安装、negative-fixture、日志）为本任务自建，位于仓库外；
+如需清理: rm -rf /tmp/glink-sub-spike（本文件已固化全部结论与原始输出）。
+无后台进程遗留（未启动 pi、mock 或宿主服务）。
