@@ -230,6 +230,62 @@ def test_tool_args_keep_arrays_for_multi_query_tools() -> None:
     assert all(len(item) < 800 and "truncated" in item for item in queries)
 
 
+def test_subagent_tool_card_projects_bounded_args_and_redacts_output() -> None:
+    """GLINK-SUB-02：子代理派发在主 run 事件流里就是一张普通工具卡片。
+
+    投影层不为 ``subagent`` 做特例：它走同一套事件映射（tool_started/updated/
+    finished）、同一套参数有界投影（数组保持有界数组，不压成单串）与同一个脱敏边界。
+    这里钉住的是「至少作为工具卡片出现」：卡片本身、参数数组形态，以及子代理回显的
+    凭据不能从工具卡片泄露。
+
+    已知取舍（不在本任务的改动范围）：参数数组里的**对象**元素按现有契约经
+    ``extract_text`` 退化（`tasks` 里只有 agent/task 字段时为空白字符串）。卡片仍能
+    从终帧 ``result`` 读到子代理的结论文本，所以不做投影层特例。
+    """
+    from pi_glink.redaction import SecretRedactor
+
+    secret = "sk-subagent0123456789abcdef"
+    redactor = SecretRedactor([secret])
+    (kind, payload), = project_event(
+        {
+            "type": "tool_execution_start",
+            "toolCallId": "sub-1",
+            "toolName": "subagent",
+            "args": {
+                "tasks": [
+                    {"agent": "researcher", "task": "法域 A 取证"},
+                    {"agent": "researcher", "task": "法域 B 取证"},
+                ],
+                "async": False,
+                "concurrency": 2,
+            },
+        },
+        redactor,
+    )
+    assert kind == "tool_started"
+    assert payload["toolName"] == "subagent"
+    assert payload["args"]["concurrency"] == 2
+    assert payload["args"]["async"] is False
+    assert isinstance(payload["args"]["tasks"], list), "数组形态保留给前端"
+    assert len(payload["args"]["tasks"]) == 2, "两个并行子任务不被压成一项"
+    assert all(isinstance(item, str) for item in payload["args"]["tasks"])
+
+    (kind, payload), = project_event(
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "sub-1",
+            "toolName": "subagent",
+            "result": {"content": [{"type": "text", "text": f"researcher 越权读到了 {secret}"}]},
+            "isError": False,
+        },
+        redactor,
+    )
+    assert kind == "tool_finished"
+    rendered = json.dumps(payload, ensure_ascii=False)
+    assert secret not in rendered, "子代理回显同样走出站脱敏"
+    assert "[REDACTED]" in rendered
+
+
 def test_runner_only_frames_do_not_leak_to_the_product_stream() -> None:
     for frame_type in ("agent_settled", "message_start", "queue_update"):
         assert project_event({"type": frame_type}) == []

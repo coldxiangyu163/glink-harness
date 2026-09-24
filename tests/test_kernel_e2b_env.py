@@ -661,7 +661,10 @@ def test_sandbox_command_guards_the_prebaked_packages(tmp_path: Path) -> None:
     assert "exit 78" in command
     assert command.index(f"test -x {guard}") < command.index(f"{guard} pi --mode json")
     settings = json.loads((runtime.directory / "settings.json").read_text(encoding="utf-8"))
-    assert settings["packages"] == [f"{agent_env.IMAGE_PACKAGE_NODE_MODULES}/pi-web-access"]
+    assert settings["packages"] == [
+        f"{agent_env.IMAGE_PACKAGE_NODE_MODULES}/pi-web-access",
+        f"{agent_env.IMAGE_PACKAGE_NODE_MODULES}/pi-subagents",
+    ]
 
 
 # -- artifact recovery --------------------------------------------------------
