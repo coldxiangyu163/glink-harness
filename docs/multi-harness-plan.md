@@ -3,9 +3,11 @@
 [架构](architecture.md) · [工程约束](engineering.md) · [pi 边界](pi-boundary.md)
 
 本文记录「从单一 pi 内核走向多 harness 平台」的方向决定、目标架构、复用策略与里程碑。
-状态（2026-09-24）：**方向已经用户确认，M1（GLINK-ACP-01）在途**；仓库当前仍只有 pi 一个
-内核实现，本文落地前的所有 run 行为不变。本文是该方向的事实源：实现与本文出现偏差时回写
-本文，而不是让代码与文档各自漂移。
+状态（2026-09-24）：方向已经用户确认；**M1（GLINK-ACP-01）已完成合成验证**
+（commit `0f42f38..da75b45`；协议事实、映射口径与实测边界见
+[ACP 集成笔记](acp-integration-notes.md)）。宿主默认 harness 仍是 `pi`，ACP 族只在显式配置下
+启用且限 inproc；真实 agent 与真实模型调用（M2）未执行。本文是该方向的事实源：实现与本文
+出现偏差时回写本文，而不是让代码与文档各自漂移。
 
 ## 1. 决定与定位
 
@@ -123,12 +125,29 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 
 | 里程碑 | 内容 | 验收 | 状态 |
 |---|---|---|---|
-| M1（GLINK-ACP-01） | ACP 族 inproc 骨架：ACP stdio JSON-RPC 客户端（复用 LF 分帧）、projector、harness 注册与配置级选择（默认仍为 pi，不动 API/前端）、run 全生命周期接入（受理/流式/取消/终态/产物回收）、fail-closed 权限应答、合成 fake ACP server 测试 | `bash scripts/check.sh` 全绿；合成测试覆盖 §4.1 映射、取消、stopReason 判定、权限拒绝、门禁；现有 pi 三面测试零回归 | 在途 |
+| M1（GLINK-ACP-01） | ACP 族 inproc 骨架：ACP stdio JSON-RPC 客户端（复用 LF 分帧）、projector、harness 注册与配置级选择（默认仍为 pi，不动 API/前端）、run 全生命周期接入（受理/流式/取消/终态/产物回收）、fail-closed 权限应答、合成 fake ACP server 测试 | `bash scripts/check.sh` 全绿；合成测试覆盖 §4.1 映射、取消、stopReason 判定、权限拒绝、门禁；现有 pi 三面测试零回归 | 已完成（合成验证；实现口径与待实测项见 [ACP 集成笔记](acp-integration-notes.md)） |
 | M2 | 真实冒烟：`dsh acp` 与 `codex-acp` 各跑一次真实研究 run（inproc）；产出 `docs/acp-integration-notes.md` 实测记录（能力矩阵、凭据注入点、usage 口径、版本事实） | 真实 run 报告产物 + 集成笔记 | 未开始，**需真实凭据与模型调用授权** |
 | M3 | docker / e2b 执行面扩展；e2b 双向 stdio（`stdin=True` + `send_stdin`，SDK 2.x 已具备）帧完整性实测先行；模板钉版 | 三面 smoke | 未开始 |
 | M4 | claude-code-acp 接入；能力矩阵补齐；如需，前端 harness 标识与按 run 选择 harness 的 API | 按当时验收 | 未开始 |
 
 每个里程碑独立验收、独立提交边界；里程碑之间允许因实测结论回写本文。
+
+### M1 落地偏差（相对 §3–§4；详细口径见 [ACP 集成笔记](acp-integration-notes.md)）
+
+* **配置开关**：`PI_GLINK_HARNESS=pi|acp`（默认 `pi`）+ `PI_GLINK_ACP_COMMAND`；只在配置层，
+  无 API/前端参数，`public_view()` 不暴露 harness。ACP 与 docker/e2b 组合在启动即拒绝
+  （M3 做传输面）。
+* **续接（§4.4）**：M1 不实现 ACP 的 `session/resume`；ACP run 不落会话文件，追问在准入层以
+  `session_unavailable` 拒绝，适配器也不会以新会话冒充追问。
+* **用量（§4.1）**：`usage_update` 保留 ACP 的「上下文窗口占用 + 累计成本」视角，投影为
+  `used/size + cost` 并标注 `basis: "acp_usage_update"`；不做逐请求 token 求和，终态记录采用
+  最后一个快照（替换而非累加）。
+* **状态目录（§4.4/§4.5）**：inproc 面每 run 渲染 `runs/<id>/acp-agent/home` 作为子进程
+  `HOME`，不注入任何宿主凭据；各 agent 是否还认专用变量（`CODEX_HOME` 等）与凭据注入点
+  逐 harness 实测属 M2。
+* **未投影的更新**：`user_message_chunk`、`current_mode_update`、`session_info_update` 等
+  §4.1 未定义的变体不猜语义，按类型一次性记 `kernel_status` 提示；`max_turn_requests` 以原词
+  进入 `stopReason`（前端目前只对 `length` 提示「交付不完整」）。
 
 ## 7. 风险与纪律
 
