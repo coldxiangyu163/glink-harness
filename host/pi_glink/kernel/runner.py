@@ -341,13 +341,21 @@ class RunManager:
     def _credentials_for_context(self, context: TenantContext | None) -> RunCredentials:
         """Select the credentials one run may render (caller holds no lock).
 
-        Multi-tenant mode requires a verified context and the tenant's own
-        model key; a missing entry is a refusal, never a fallback to the host's
-        global ``.env`` key or to another tenant's credential file.
+        Multi-tenant mode requires a verified context. Under the default
+        ``tenant`` policy the run needs the tenant's own model key; a missing
+        entry is a refusal, never a fallback to the host's global ``.env`` key
+        or to another tenant's credential file. Under the explicit ``shared``
+        policy every tenant renders the one host-frozen credential instead.
         """
         if self.config.multi_tenant:
             if context is None:
                 raise TenantNotConfigured("多租户模式需要已验证的租户身份")
+            if self.config.shared_model_credentials:
+                shared = RunCredentials.from_shared_host(self.config)
+                if not shared.model_api_key:
+                    # Defensive: the configuration refuses this at startup.
+                    raise TenantNotConfigured("宿主未冻结共享模型凭据")
+                return shared
             if self._credential_store is None:
                 raise TenantNotConfigured("宿主未加载租户凭据配置")
             tenant = self._credential_store.require(context.tenant_id)
@@ -454,9 +462,17 @@ class RunManager:
         """The redaction boundary appropriate for an already-persisted run.
 
         Used by the report download: a multi-tenant report is masked against
-        the record's own tenant credentials, never another tenant's.
+        the record's own tenant credentials, never another tenant's. Under the
+        explicit ``shared`` policy the credential is the host-level one, which
+        is already part of ``self.redactor`` (and is never a tenant secret), so
+        no tenant entry is consulted — the shared key must mask even when the
+        tenant entry has no key at all.
         """
-        if not self.config.multi_tenant or self._credential_store is None:
+        if (
+            not self.config.multi_tenant
+            or self.config.shared_model_credentials
+            or self._credential_store is None
+        ):
             return self.redactor
         tenant = self._credential_store.get(record.tenant_id)
         if tenant is None:

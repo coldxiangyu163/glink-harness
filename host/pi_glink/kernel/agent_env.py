@@ -94,11 +94,14 @@ class RunCredentials:
     """The credentials one run may render, and where they came from.
 
     ``origin`` is ``"host"`` in the single-user surface (the frozen
-    configuration and, for search, the operator's own pi file) and
-    ``"tenant"`` in multi-tenant mode, where **only** the run's tenant may
-    supply values: there is no fallback to the host's global ``.env`` key or to
-    the operator's ``~/.pi`` search configuration. The dataclass keeps the
-    values out of ``repr`` so an accidental log line cannot print them.
+    configuration and, for search, the operator's own pi file), ``"tenant"``
+    in multi-tenant mode when **only** the run's tenant may supply values, and
+    ``"shared"`` when the host provides one frozen credential for every tenant
+    (the explicit SaaS policy). ``tenant`` and ``shared`` both refuse to fall
+    back to the host's global ``.env`` key or to the operator's ``~/.pi``
+    search configuration — ``shared`` *is* the host configuration, but without
+    the operator's personal search file. The dataclass keeps the values out of
+    ``repr`` so an accidental log line cannot print them.
     """
 
     model_api_key: str = field(repr=False, default="")
@@ -108,11 +111,28 @@ class RunCredentials:
 
     @classmethod
     def from_host(cls, config: HostConfig) -> "RunCredentials":
+        """The single-user local surface: the frozen host configuration."""
         return cls(
             model_api_key=config.openai_api_key,
             web_search_key=config.web_search_key,
             web_search_config_path=config.web_search_config_path,
             origin="host",
+        )
+
+    @classmethod
+    def from_shared_host(cls, config: HostConfig) -> "RunCredentials":
+        """The explicit SaaS ``shared`` policy: one host-frozen credential.
+
+        Every tenant renders this credential; no tenant entry is consulted.
+        ``web_search_config_path`` stays ``None`` on purpose: the shared policy
+        may use the host's own ``PI_GLINK_WEB_SEARCH_KEY``, but it must never
+        substitute the operator's personal ``~/.pi/web-search.json``.
+        """
+        return cls(
+            model_api_key=config.openai_api_key,
+            web_search_key=config.web_search_key,
+            web_search_config_path=None,
+            origin="shared",
         )
 
 
@@ -358,6 +378,9 @@ def _seed_web_search_config(credentials: RunCredentials, directory: Path) -> Pat
     and an explicit ``web_search_config_path`` of ``None``: only the run's own
     tenant key may be rendered, and a tenant without one gets no search
     credential (keyless fallback) instead of another tenant's or the operator's.
+    The explicit SaaS ``shared`` policy is the same except that its search key
+    comes from the host's ``PI_GLINK_WEB_SEARCH_KEY``: any origin other than
+    ``host`` must never inherit the operator's personal file.
 
     Having no credential at all is a supported state: pi-web-access still works
     through keyless Exa MCP search, and the run contract does not require a key.
@@ -373,9 +396,9 @@ def _seed_web_search_config(credentials: RunCredentials, directory: Path) -> Pat
         target.chmod(0o600)
         return target
     source = credentials.web_search_config_path
-    if credentials.origin == "tenant":
-        # Multi-tenant: a tenant never inherits the operator's own credential
-        # file, even if a caller hands one in by mistake.
+    if credentials.origin != "host":
+        # Multi-tenant (per-tenant or shared): never inherit the operator's own
+        # credential file, even if a caller hands one in by mistake.
         source = None
     if source is not None and source.is_file():
         shutil.copy2(source, target)

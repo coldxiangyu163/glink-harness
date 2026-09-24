@@ -15,7 +15,7 @@
 | 请求授权 | 多租户下除健康探测外所有 `/api/*` 验签；未认证 401、权限不足 403、未知/异租户/legacy 同形 404；SSE 在响应头之前验权并在断言过期时结束 | `app.py::HostRequestHandler` |
 | run 归属 | 受理时原子写 `tenant_id`/`creator_user_id`；`get_for`/`list_for` 按租户过滤；同租户 creator/admin 才能取消 | `store.py`、`kernel/runner.py` |
 | 并发准入 | 仅多租户 Docker/E2B 并发，默认全局 4 / 单租户 2，原子检查与预留，超额 429，无队列；资源台账全局 fail-closed | `kernel/runner.py::RunManager._check_admission` |
-| 租户凭据 | 仓库外 0600 租户文件提供 `modelApiKey`（必需）/`webSearchKey`（可选）；缺模型 key 拒绝准入，无任何回退 | `tenancy.py`、`kernel/agent_env.py` |
+| 租户凭据 | 默认每租户条目提供 `modelApiKey`（必需）/`webSearchKey`（可选）；显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时改为宿主冻结的一套模型凭据，租户条目只为无凭据登记 | `tenancy.py`、`kernel/agent_env.py` |
 | 脱敏边界 | 每 run 一个 redactor（宿主已知秘密 + 本 run 凭据），事件/日志/报告/工作区/会话/下载都经过它 | `kernel/runner.py`、`redaction.py` |
 | 执行资源上限 | Docker 容器实例限 cpu/memory/pids 并降权；E2B 只限生命周期（SDK 不暴露 cpu/内存） | `kernel/docker_env.py`、`kernel/e2b_env.py` |
 | 历史数据 | 无 owner 的旧记录在多租户读面完全不可见、不迁移、不改写；本地模式按旧口径读取 | `store.py`、`app.py` |
@@ -85,12 +85,25 @@ outbox 模式，事务内写 `events` 后投递到共享流供多宿主 SSE 与�
 
 ## 5. 凭据策略（已实现的最小版本）
 
+默认 `PI_GLINK_MODEL_CREDENTIALS=tenant`：
+
 - 每租户从仓库外 0600 文件读取 `modelApiKey`（必需）与 `webSearchKey`（可选），渲染到本 run 的运行期
   `auth.json` / `web-search.json`；缺模型 key 拒绝准入，缺搜索 key 走无 key 检索。
 - 无任何回退路径：宿主全局 `.env`、操作员 `~/.pi/web-search.json`、其他租户条目都不会被使用。
-- E2B 平台 key 属于宿主资源管理，不是租户模型 key。
-- 每 run 的 redactor 只含本 run 凭据；不同租户的秘密不会互相进入对方的事件、日志或产物。
-- 短期凭据代理/STS、轮换、额度与审计（D4 的更大选项）仍未实现，属于后续新增部署组件。
+
+显式 `PI_GLINK_MODEL_CREDENTIALS=shared`（SaaS 统一供模型，已实现）：
+
+- 宿主启动时冻结 `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`，任一缺失即拒绝启动；
+- 每个 run 使用同一套宿主共享凭据（`RunCredentials(origin="shared")`），租户条目不再参与凭据选择，
+  也不得包含 `modelApiKey`/`webSearchKey`；`PI_GLINK_TENANT_CONFIG_FILE` 可省略，或只作无凭据登记；
+- 可选搜索 key 只来自宿主级 `PI_GLINK_WEB_SEARCH_KEY`，不会用操作员本机文件顶替；
+- 每 run 脱敏边界包含共享 key；报告下载的 `redactor_for_record` 在 shared 下走宿主/共享边界，
+  不因租户条目无 key 而漏脱敏；owner、配额与审计语义与 tenant 模式完全一致；
+- 这是 SaaS 部署的显式选择，绝不做 tenant/local 的隐式兜底；回退时改回 tenant 并为各租户补回 key。
+
+两种策略共同保留的边界：E2B 平台 key 属于宿主资源管理，不是租户模型 key；每 run 的 redactor 只含
+本 run 实际使用的凭据；共享 key 仍是宿主可读、可被工具回显或经网络外传的资源秘密，只承诺现有脱敏
+回显保护与沙箱执行隔离，不宣称 key 不可能泄露。短期凭据代理/STS、轮换、额度与审计仍未实现。
 
 ## 6. 历史数据归属
 
@@ -103,7 +116,8 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
 - **迁移**：任何模式都不再允许绑定非 loopback：无认证公网模式被移除，历史的 `LOCAL_WEB_ALLOW_REMOTE`
   不再生效；远端访问必须经过本机认证网关注入身份（`PI_GLINK_TENANCY=multitenant`）。
 - **回退**：关闭 `PI_GLINK_TENANCY` 回到单用户模式，或把 `PI_GLINK_AUTH_MODE` 从 `accounts`
-  切回 `gateway`；新旧 run 记录都保留，账号库保留只读、不自动改写历史、不降低 owner 校验；
+  切回 `gateway`；如使用 `shared`，也可把 `PI_GLINK_MODEL_CREDENTIALS` 改回 `tenant` 并为每个租户
+  补回 `modelApiKey`。新旧 run 记录都保留，账号库保留只读、不自动改写历史、不降低 owner 校验；
   多租户密钥文件/账号库在切回后不再被读取。
 - **配置范例**：见 `.env.example`，全部使用虚构占位符（含 `accounts` 模式的开关、会话/限速参数与
   离线签发首位管理员邀请的命令）。
@@ -111,7 +125,8 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
 ## 8. 仍需裁决的问题
 
 - **D3 存储**：何时引入 SQLite/Postgres 与对象存储；是否允许历史导入写回。
-- **D4 凭据增强**：是否建设短期凭据代理/STS；轮换、吊销、额度与告警；是否支持 BYOK。
+- **D4 凭据增强**：是否建设短期凭据代理/STS；轮换、吊销、额度与告警；是否支持 BYOK。SaaS 统一共享
+  模型凭据（`PI_GLINK_MODEL_CREDENTIALS=shared`）已按 GLINK-SAAS-01 落地，它不是短期代理也不是 BYOK。
 - **D6 开通流程**：首位管理员的离线签发与后续管理员邀请已经落地（`--create-invite` /
   `POST /api/admin/invitations`）；**仍未裁决**：租户本身的创建/停用运维入口（当前停用通过账号库
   状态位生效，没有 HTTP 管理接口）、停用后的事件流与运行中 run 处置口径、邮件交付与密码重置。
@@ -151,6 +166,20 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
 4. **实时失效**：注销/停用/绝对过期发生在 SSE 流动期间时，流在轮询间隔内结束，而 run 本身不被取消。
 5. **浏览器**：隔离 fixture（临时账号库 + fake 执行面）上人工用 ego-browser 走过登录/邀请注册/账号
    菜单/运行与报告/跨租户 404/窄栏与注销，证据为用户临时目录中的截图（见 engineering.md 的浏览器段）。
+
+**SaaS 共享模型凭据（`PI_GLINK_MODEL_CREDENTIALS=shared`）的合成矩阵**
+（`tests/test_saas_shared_model.py`）：
+
+1. **配置门禁**：缺 `OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL`、非多租户模式、未知取值一律
+   拒绝启动；租户条目混入 `modelApiKey`/`webSearchKey` 拒绝；租户文件可省略或为空。
+2. **凭据交付**：共享 key 只进每 run `auth.json`（0600）与（可选）宿主级 `web-search.json`；Docker
+   argv/环境、E2B `Sandbox.create` 环境与命令、沙箱命令环境均不含 key；沙箱 kill 后凭据随沙箱销毁；
+   `sandbox_id` 对账与报告回收入 run 记录。
+3. **脱敏与回显**：事件日志、报告副本、下载内容均不含共享 key；`redactor_for_record` 在 shared 下
+   包含共享 key；客户端提交 `modelApiKey`/`model`/`baseUrl`/`apiKey`/`webSearchKey` 字段返回 400，
+   query/header 不能改模型。
+4. **多租户不变**：两租户共享同一宿主模型配置，但列表/详情/报告/SSE/取消/追问跨租户 404，配额仍按
+   租户计数；`--create-invite` 在 shared 下校验宿主配置而非租户条目。
 
 **未覆盖的真实环境验收**：真实网关注入与密钥轮换、真实 HTTPS/TLS 代理与外部 Origin、邮件交付、
 Docker/E2B live 资源上限执行、N 租户 × M 并发负载、生产数据扫描与上线演练。合成矩阵通过不等于

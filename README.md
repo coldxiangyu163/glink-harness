@@ -1,6 +1,6 @@
 # pi-glink
 
-以 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 为执行内核的研究工作台：本机 / Docker / E2B 三种执行面共享同一套 run 生命周期。默认 `local` 模式仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用**单宿主多租户**—— 身份入口二选一：本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`PI_GLINK_AUTH_MODE=accounts`）；两者都只在可信服务端生成租户上下文，Docker/E2B 可并发（默认全局 4 / 单租户 2），每租户只使用自己的模型凭据。多租户目前只经过**合成验证**（临时密钥文件、自签断言、fake 执行面、临时数据根），没有真实网关、Docker/E2B live 或生产数据验收，不能把“合成矩阵通过”当作多租户已经安全上线。方向、当前实现与尚未覆盖的边界见 [架构](docs/architecture.md) 与 [多租户方案](docs/multitenancy-plan.md)；前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按 pi 的原生事件语义重写。
+以 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 为执行内核的研究工作台：本机 / Docker / E2B 三种执行面共享同一套 run 生命周期。默认 `local` 模式仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用**单宿主多租户**—— 身份入口二选一：本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`PI_GLINK_AUTH_MODE=accounts`）；两者都只在可信服务端生成租户上下文，Docker/E2B 可并发（默认全局 4 / 单租户 2）。模型凭据默认仍是每租户自备（`PI_GLINK_MODEL_CREDENTIALS=tenant`）；SaaS 部署可显式选择 `shared`，由宿主冻结一套模型凭据统一提供，租户条目只保留身份/组织语义。多租户目前只经过**合成验证**（临时密钥文件、自签断言、fake 执行面、临时数据根），没有真实网关、Docker/E2B live 或生产数据验收，不能把“合成矩阵通过”当作多租户已经安全上线。方向、当前实现与尚未覆盖的边界见 [架构](docs/architecture.md) 与 [多租户方案](docs/multitenancy-plan.md)；前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按 pi 的原生事件语义重写。
 
 **当前状态：本机 / Docker / E2B 三种执行面均已跑通真实 run**，验收记录见 [docs/acceptance.md](docs/acceptance.md)，证据在 `docs/evidence/`。除前端静态资源源自 Glink 工作台外，本仓库不引用 FrontierAgent 的任何运行模块。
 
@@ -139,7 +139,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 ## 多租户（单宿主，`PI_GLINK_TENANCY=multitenant`）
 
-身份入口由 `PI_GLINK_AUTH_MODE` 显式选择，默认 `gateway` 保持原语义；`accounts` 增加站内邀请注册、登录与服务端会话。两种模式都只在服务端生成 `TenantContext`，run/list/详情/报告/SSE/取消/追问走同一套 owner 与配额校验；`local` 完全保持旧行为，不显示任何登录或组织界面。
+身份入口由 `PI_GLINK_AUTH_MODE` 显式选择，默认 `gateway` 保持原语义；`accounts` 增加站内邀请注册、登录与服务端会话。模型凭据来源由 `PI_GLINK_MODEL_CREDENTIALS` 显式选择（默认 `tenant`，SaaS 用 `shared`，见下）。两种入口都只在服务端生成 `TenantContext`，run/list/详情/报告/SSE/取消/追问走同一套 owner 与配额校验；`local` 完全保持旧行为，不显示任何登录或组织界面。
 
 ### 身份入口 A：网关断言（默认，`PI_GLINK_AUTH_MODE=gateway`）
 
@@ -159,9 +159,10 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   `meta.json`）在列表/详情/SSE/报告/取消上都得到同一个 404，且不产生副作用；旧数据不迁移、不修改。
   追问（`parentRunId`）同样先过租户门禁：异租户/未知/legacy 父 run 统一 `404 unknown_run`，在确认
   所有者之前不读取其 session、报告、状态或子 run 计数，也不会把它的会话或报告复制给新 run。
-- **凭据**：每 run 的模型 key（与可选搜索 key）来自该租户在 `tenants.json` 中的条目，缺
+- **凭据**：默认每 run 的模型 key（与可选搜索 key）来自该租户在 `tenants.json` 中的条目，缺
   `modelApiKey` 直接拒绝准入；绝不回退宿主全局 `OPENAI_API_KEY`、操作员 `~/.pi/web-search.json`
-  或别的租户。E2B 平台 key 属于宿主资源管理，不是租户模型 key。每 run 的脱敏边界只包含本 run
+  或别的租户。显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时改用宿主冻结的共享凭据（见下文“模型
+  凭据策略”）。E2B 平台 key 属于宿主资源管理，不是租户模型 key。每 run 的脱敏边界只包含本 run
   凭据，不会把不同租户的秘密互相写入事件、日志或产物。
 - **并发**：仅本模式的 Docker/E2B 可并发，默认全局上限 4、单租户 2，超额立即返回
   `429 quota_exceeded`（带 `scope` 与 `limit`，不含任何 run id），没有排队。准入检查与槽位预留
@@ -189,8 +190,10 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   停止宿主后迁移并 `chmod 600`。宿主仍只监听 loopback，生产必须由 TLS 终止代理提供 HTTPS。
 - **引导**：首位管理员由操作员在**宿主停止**时离线签发（取得 data-root ownership 后）：
   `python -m pi_glink.app --create-invite --tenant tenant-alpha --tenant-name 组织甲 --email admin@example.com --role admin`。
-  命令要求该租户已在 `tenants.json` 里配置模型密钥（缺 key 拒绝），邀请码只打印一次、数据库只存摘要。
-  注册**只创建账号，不创建租户、不授予模型凭据**；后续管理员登录后在账号菜单里给本租户邮箱发一次性邀请。
+  默认（`tenant`）策略下该租户必须已在 `tenants.json` 里配置模型密钥（缺 key 拒绝）；
+  `shared` 策略下只校验宿主冻结的共享模型配置，租户条目可以不存在（首个邀请创建组织记录）。
+  邀请码只打印一次、数据库只存摘要。注册**只创建账号，不创建租户、不授予模型凭据**；后续管理员
+  登录后在账号菜单里给本租户邮箱发一次性邀请。
 - **会话**：`hashlib.scrypt`（随机盐、逐行记录参数、恒时比较）保存口令；登录成功后服务端签发高熵令牌，
   数据库只存摘要，浏览器只拿 `HttpOnly` + `SameSite=Lax`（HTTPS 下 `Secure`）cookie。会话有绝对有效期
   与空闲有效期，停用用户/租户、注销立即失效；SSE 长连接在每次轮询都重新校验，失效即断开。
@@ -209,6 +212,32 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 > 时按旧 local 流程初始化（旧历史照常显示）；401、网络错误、多租户或含糊配置一律 fail-closed，
 > 不会因此绕过账号身份。宿主重启后该兼容分支即失效。
 
+### 模型凭据策略：`PI_GLINK_MODEL_CREDENTIALS`（默认 `tenant`）
+
+多租户模型的“谁提供模型 key”是显式配置，不是隐式兜底：
+
+- **`tenant`（默认，现行为）**：每个租户在 `tenants.json` 里配置自己的 `modelApiKey`（可选
+  `webSearchKey`）；缺模型 key 的租户拒绝准入，绝不回退宿主 `OPENAI_API_KEY`、操作员
+  `~/.pi/web-search.json` 或别的租户。既有部署不需要改任何东西。
+- **`shared`（显式 SaaS 策略）**：宿主在启动时冻结一套 `OPENAI_API_KEY` / `OPENAI_BASE_URL` /
+  `OPENAI_MODEL` 供所有租户使用；可选搜索 key 只来自宿主级 `PI_GLINK_WEB_SEARCH_KEY`，不会
+  读取操作员 `~/.pi/web-search.json` 顶替。租户条目不再需要模型 key，也**不得**包含
+  `modelApiKey` / `webSearchKey`（混用即拒绝启动）；`PI_GLINK_TENANT_CONFIG_FILE` 可省略，
+  或只作为无凭据的租户登记。三件套缺任一、或把 `shared` 用在非多租户模式，宿主一律拒绝启动，
+  绝不静默回退 `tenant` 或 `local`。
+- **执行隔离**：SaaS 部署首选 `LOCAL_WEB_EXECUTOR=e2b`（Docker 同样允许；`inproc` 在两种策略
+  下都被拒绝）。共享 key 仍只经每个 run 的运行期 `auth.json`（0600，随沙箱销毁）交付，不进沙箱
+  进程环境、命令行、页面或事件/报告；每 run 脱敏边界包含共享 key 与宿主已知秘密，
+  `redactor_for_record` 在 `shared` 下走宿主/共享边界，不会因租户条目没有 key 而漏脱敏。
+  这仍是回显保护 + 沙箱执行隔离，不承诺 key 不可能被宿主可读、工具回显或网络外传。
+- **部署最小步骤（accounts + shared + e2b）**：配置 `E2B_API_KEY`、共享模型三件套与（可选）
+  `PI_GLINK_WEB_SEARCH_KEY`；开启 `PI_GLINK_TENANCY=multitenant`、`PI_GLINK_AUTH_MODE=accounts`、
+  `PI_GLINK_MODEL_CREDENTIALS=shared`、`LOCAL_WEB_EXECUTOR=e2b`，并指定仓库外的 0700 账号库目录；
+  生产由 TLS 终止代提供 HTTPS 并设置 `PI_GLINK_PUBLIC_ORIGIN`；宿主停止时用 `--create-invite`
+  签发首位管理员邀请。真实 HTTPS/邮件/E2B live 验收不在本期范围。
+- **回退**：把 `PI_GLINK_MODEL_CREDENTIALS` 改回 `tenant` 并为每个租户补回 `modelApiKey`，或
+  关闭 `PI_GLINK_TENANCY` 回到单用户；账号库与 run 历史保留只读，不自动改写、不降低 owner 校验。
+
 > 隔离范围：宿主 API 授权、run 归属、凭据交付与 redaction 在宿主侧完成；容器/沙箱提供执行环境
 > 隔离，但不构成对宿主 API 或存储的替代边界。合成验收覆盖账号存储/会话/CSRF/跨租户与 fake 执行面；
 > 真实网关、真实 HTTPS/TLS 代理、邮件交付、Docker/E2B live 与生产数据仍未验证，上线前仍需按
@@ -223,6 +252,9 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 1. 有 `PI_GLINK_WEB_SEARCH_KEY` 时渲染为 `{"exaApiKey": …}`；
 2. 否则复制操作员本机的 `~/.pi/agent/web-search.json`（或 `~/.pi/web-search.json`）；
 3. 都没有也能工作：pi-web-access 会回退到无密钥的 Exa MCP 检索。
+
+多租户下不会读取操作员本机文件：默认 `tenant` 策略只渲染该租户条目的 `webSearchKey`（缺省则无
+key 检索）；显式 `shared` 策略只渲染宿主级 `PI_GLINK_WEB_SEARCH_KEY`。
 
 本仓库不包含 Serper / Jina 链路。检索证据见 [docs/evidence/local-web-search.txt](docs/evidence/local-web-search.txt)。
 

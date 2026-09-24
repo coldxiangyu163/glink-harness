@@ -2,9 +2,10 @@
 
 **状态：设计已批准并落地（GLINK-AUTH-01）。** `PI_GLINK_TENANCY=multitenant` 下身份入口显式二选一：
 `PI_GLINK_AUTH_MODE=gateway`（默认，仍只接受认证网关注入的签名断言）或
-`PI_GLINK_AUTH_MODE=accounts`（站内邀请注册 + 登录 + 服务端会话）。默认 `local` 模式没有账号，也不
-显示任何登录或组织界面。浏览器仍不能提交 `tenantId` 冒充身份：两种入口都只在服务端生成
-`TenantContext`。
+`PI_GLINK_AUTH_MODE=accounts`（站内邀请注册 + 登录 + 服务端会话）。模型凭据来源另由
+`PI_GLINK_MODEL_CREDENTIALS` 显式选择（默认 `tenant`，每租户自己的 key；`shared` 为 SaaS 统一供模型，
+见下）。默认 `local` 模式没有账号，也不显示任何登录或组织界面。浏览器仍不能提交 `tenantId` 冒充身份：
+两种入口都只在服务端生成 `TenantContext`。
 
 实现与证据：`host/pi_glink/accounts.py`（SQLite/WAL 的租户/用户/邀请/会话与限速）、
 `host/pi_glink/auth.py`（登录/注册/注销、cookie 与 CSRF）、`host/pi_glink/app.py`（`/api/me`、
@@ -25,7 +26,7 @@ workspace-session,api-client}.test.mjs`；隔离 fixture（临时账号库 + fak
 站内会话 cookie ┘
 ```
 
-站内账号以仓库外 SQLite（WAL）管理用户、租户、邀请和会话；不借此重写现有 run/events 文件存储。首位租户管理员由操作员通过离线命令创建邀请；管理员登录后可生成限定租户、邮箱、角色且一次有效的邀请，安全渠道自行交付。用户在邀请注册页设置密码，注册成功后登录；未经邀请不能创建账号或租户。注册**不**自动获得模型凭据，管理员仍按现有 `0600` 租户配置提供模型 key，缺失时工作台提示“模型服务尚未配置”，不能回退到其他租户的 key。
+站内账号以仓库外 SQLite（WAL）管理用户、租户、邀请和会话；不借此重写现有 run/events 文件存储。首位租户管理员由操作员通过离线命令创建邀请；管理员登录后可生成限定租户、邮箱、角色且一次有效的邀请，安全渠道自行交付。用户在邀请注册页设置密码，注册成功后登录；未经邀请不能创建账号或租户。注册**不**自动获得模型凭据：默认 `PI_GLINK_MODEL_CREDENTIALS=tenant` 下管理员仍按现有 `0600` 租户配置提供模型 key，缺失时工作台提示“模型服务尚未配置”，不能回退到其他租户的 key；显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 下模型由宿主统一冻结提供（租户条目不再需要、也不得包含模型/搜索 key，邀请引导只校验宿主配置），工作台不显示任何上游 URL 或“用户可配置模型”的控件。
 
 服务端只在鉴权通过后生成 `TenantContext`：本地模式不生成；网关模式沿用 HMAC 验签；站内模式校验不可预测、只存哈希的会话令牌，并从服务端账号记录读取 `tenantId/userId/role/status`。密码用随机盐的内存困难哈希、恒定时间比较；cookie 使用 `HttpOnly`、`Secure`（仅经 HTTPS 网关）、`SameSite`，登录/注册限速，状态变更必须防 CSRF。停用账号/租户立即使会话失效，SSE 需在会话失效时断开，已有 run 的取消、资源清理仍走原归属规则。账号库、run 历史、模型凭据不共享迁移；旧无 owner 的历史继续只在 local 模式可见。
 

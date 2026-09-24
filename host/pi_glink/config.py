@@ -25,6 +25,13 @@ TENANCY_MODES = ("local", "multitenant")
 #: contract (default); ``accounts`` adds the in-app invitation/login surface
 #: with server-side sessions. Both end in the same server-side TenantContext.
 AUTH_MODES = ("gateway", "accounts")
+#: Where a multi-tenant run's model credential comes from. ``tenant`` keeps the
+#: original contract (a per-tenant ``modelApiKey`` in the credential file, a
+#: missing key refuses admission); ``shared`` is the explicit SaaS policy where
+#: the host freezes one credential at startup and every tenant uses it. The
+#: shared policy is deliberately opt-in: it is never a global fallback for a
+#: misconfigured ``tenant`` deployment.
+MODEL_CREDENTIAL_POLICIES = ("tenant", "shared")
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _DEFAULT_PORT = 7860
 _DEFAULT_MAX_GLOBAL_RUNS = 4
@@ -77,6 +84,10 @@ class HostConfig:
     #: Multi-tenant identity entry: ``gateway`` (signed assertion, default) or
     #: ``accounts`` (in-app invitation registration + login + server sessions).
     auth_mode: str = "gateway"
+    #: Model credential policy: ``tenant`` (default, per-tenant key file) or
+    #: ``shared`` (one host-frozen credential for every tenant; only valid in
+    #: multi-tenant mode, where it is an explicit opt-in).
+    model_credentials: str = "tenant"
     #: Gateway assertion signing key; required and owner-only in gateway mode.
     gateway_secret_file: Path | None = None
     #: Accounts database; default ``<data_root>/accounts/accounts.db``, must
@@ -130,6 +141,11 @@ class HostConfig:
     def identity_mode(self) -> str:
         """The effective identity entry: ``local``, ``gateway`` or ``accounts``."""
         return self.auth_mode if self.multi_tenant else "local"
+
+    @property
+    def shared_model_credentials(self) -> bool:
+        """True when the host provides one frozen model credential for every tenant."""
+        return self.model_credentials == "shared"
 
     @property
     def accounts_enabled(self) -> bool:
@@ -202,6 +218,7 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     executor = _text(values, "LOCAL_WEB_EXECUTOR", "inproc").lower()
     tenancy_mode = _text(values, "PI_GLINK_TENANCY", "local").lower()
     auth_mode = _text(values, "PI_GLINK_AUTH_MODE", "gateway").lower()
+    model_credentials = _text(values, "PI_GLINK_MODEL_CREDENTIALS", "tenant").lower()
 
     if executor not in EXECUTORS:
         raise ConfigError(
@@ -214,6 +231,17 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     if auth_mode not in AUTH_MODES:
         raise ConfigError(
             f"PI_GLINK_AUTH_MODE must be one of {', '.join(AUTH_MODES)}; got {auth_mode!r}"
+        )
+    if model_credentials not in MODEL_CREDENTIAL_POLICIES:
+        raise ConfigError(
+            "PI_GLINK_MODEL_CREDENTIALS must be one of "
+            f"{', '.join(MODEL_CREDENTIAL_POLICIES)}; got {model_credentials!r}"
+        )
+    if model_credentials == "shared" and tenancy_mode != "multitenant":
+        # The shared policy exists for the multi-tenant SaaS deployment; it must
+        # never be a way to label a single-user host as something else.
+        raise ConfigError(
+            "PI_GLINK_MODEL_CREDENTIALS=shared 需要 PI_GLINK_TENANCY=multitenant"
         )
     if auth_mode == "accounts" and tenancy_mode != "multitenant":
         # Never a silent downgrade to the unauthenticated local surface: the
@@ -231,9 +259,28 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
             "远端访问必须由本机认证网关反代（PI_GLINK_TENANCY=multitenant）"
         )
     if tenancy_mode == "multitenant":
-        _require_multitenant(values, executor, auth_mode)
+        _require_multitenant(values, executor, auth_mode, model_credentials)
 
     api_key = _text(values, "OPENAI_API_KEY", "")
+    base_url = _text(values, "OPENAI_BASE_URL", "")
+    model = _text(values, "OPENAI_MODEL", "")
+    if model_credentials == "shared":
+        # Fail closed at startup: a "shared" deployment that cannot name its
+        # credential source must not boot and later fall back to a tenant entry
+        # or to the single-user local configuration.
+        missing = [
+            name
+            for name, value in (
+                ("OPENAI_API_KEY", api_key),
+                ("OPENAI_BASE_URL", base_url),
+                ("OPENAI_MODEL", model),
+            )
+            if not value
+        ]
+        if missing:
+            raise ConfigError(
+                "PI_GLINK_MODEL_CREDENTIALS=shared 需要宿主冻结 " + "、".join(missing)
+            )
     e2b_key = _text(values, "E2B_API_KEY", "")
     data_root = _path(values, "LOCAL_WEB_DATA_ROOT", Path.home() / ".pi-glink")
     agent_config_dir = _path(
@@ -257,8 +304,8 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         agent_config_dir=agent_config_dir,
         session_dir=_path(values, "PI_CODING_AGENT_SESSION_DIR", data_root / "sessions"),
         workspace_root=_path(values, "PI_GLINK_WORKSPACE_ROOT", data_root / "workspaces"),
-        openai_base_url=_text(values, "OPENAI_BASE_URL", ""),
-        openai_model=_text(values, "OPENAI_MODEL", ""),
+        openai_base_url=base_url,
+        openai_model=model,
         openai_api_key=api_key,
         context_window=_integer(
             values, "OPENAI_CONTEXT_WINDOW", _DEFAULT_CONTEXT_WINDOW
@@ -279,6 +326,7 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         ),
         tenancy_mode=tenancy_mode,
         auth_mode=auth_mode,
+        model_credentials=model_credentials,
         gateway_secret_file=_optional_path(values, "PI_GLINK_GATEWAY_SECRET_FILE", None),
         accounts_db=accounts_db,
         public_origin=public_origin,
@@ -311,23 +359,27 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     )
 
 
-def _require_multitenant(values: Mapping[str, str], executor: str, auth_mode: str) -> None:
+def _require_multitenant(
+    values: Mapping[str, str], executor: str, auth_mode: str, model_credentials: str
+) -> None:
     """Reject a multi-tenant configuration that cannot be safe.
 
     The host only ever binds loopback (the local gateway proxies to it) and the
     execution face must be a container/sandbox (the in-process face shares the
     host's filesystem and is a single-user debug entry), and the credential
-    file must be configured. Gateway mode additionally needs the assertion
-    audience and signing key. Missing material is a startup refusal, never a
-    fallback to the unauthenticated local surface; the files themselves are
-    loaded and permission-checked by :func:`pi_glink.tenancy.build_tenancy`
-    before the host binds a port.
+    file must be configured — except under the explicit ``shared`` policy,
+    where the tenant file no longer stores credentials and is therefore
+    optional. Gateway mode additionally needs the assertion audience and
+    signing key. Missing material is a startup refusal, never a fallback to the
+    unauthenticated local surface; the files themselves are loaded and
+    permission-checked by :func:`pi_glink.tenancy.build_tenancy` before the host
+    binds a port.
     """
     if executor == "inproc":
         raise ConfigError(
             "PI_GLINK_TENANCY=multitenant 要求 Docker/E2B 执行面；inproc 仅用于本地单用户调试"
         )
-    required = ["PI_GLINK_TENANT_CONFIG_FILE"]
+    required = [] if model_credentials == "shared" else ["PI_GLINK_TENANT_CONFIG_FILE"]
     if auth_mode == "gateway":
         required += ["PI_GLINK_GATEWAY_SECRET_FILE", "PI_GLINK_TENANCY_AUDIENCE"]
     for key in required:

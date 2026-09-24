@@ -78,6 +78,27 @@ _AUTH_POST_PATHS = frozenset(
         "/api/invitations/check",
     }
 )
+#: Run-body fields a client must never use to pick a model or supply a
+#: credential. The provider is a server-side decision in every mode (the local
+#: ``OPENAI_*`` configuration or the explicit multi-tenant policy), so these
+#: names are refused outright instead of being silently ignored. Identity-ish
+#: fields stay ignored (and are pinned by a regression) because they never
+#: feed ``TenantContext``.
+_FORBIDDEN_RUN_BODY_FIELDS = frozenset(
+    {
+        "model",
+        "modelid",
+        "provider",
+        "apikey",
+        "modelapikey",
+        "baseurl",
+        "openaiapikey",
+        "openaibaseurl",
+        "openaimodel",
+        "websearchkey",
+        "credentials",
+    }
+)
 
 
 class PiGlinkServer(ThreadingHTTPServer):
@@ -605,17 +626,29 @@ class HostRequestHandler(BaseHTTPRequestHandler):
     def _public_config(self, context: TenantContext | None) -> dict[str, Any]:
         """Public configuration for the requesting identity.
 
-        ``configured.model`` answers "can this caller start a run": in local
-        mode that is the host's key, in multi-tenant mode the caller's own
-        tenant credential — never whether another tenant has one.
+        ``configured.model`` answers "can this caller start a run". In local
+        mode that is the host's key; under the default multi-tenant policy it
+        is the caller's own tenant credential; under the explicit ``shared``
+        policy it is the one host-frozen credential every tenant uses — never
+        whether another tenant has a key. No credential value, and no
+        user-configurable model control, is part of this payload.
         """
         view = dict(self.server.config.public_view())
         if context is not None and self.server.tenancy is not None:
-            tenant = self.server.tenancy.credentials.get(context.tenant_id)
-            view["configured"] = {
-                **view["configured"],
-                "model": bool(tenant is not None and tenant.model_api_key),
-            }
+            if self.server.config.shared_model_credentials:
+                view["configured"] = {
+                    **view["configured"],
+                    "model": bool(
+                        self.server.config.has_openai_key
+                        and self.server.config.openai_model
+                    ),
+                }
+            else:
+                tenant = self.server.tenancy.credentials.get(context.tenant_id)
+                view["configured"] = {
+                    **view["configured"],
+                    "model": bool(tenant is not None and tenant.model_api_key),
+                }
         return view
 
     def _handle_static(self, path: str, *, head_only: bool) -> None:
@@ -658,6 +691,23 @@ class HostRequestHandler(BaseHTTPRequestHandler):
             return
         body = self._read_json_body()
         if body is None:
+            return
+        # The model and its credential are server-side decisions: a client that
+        # tries to select or supply either one is refused before any execution
+        # face exists, instead of quietly running with an ignored field.
+        supplied = sorted(
+            name for name in body if name.strip().lower() in _FORBIDDEN_RUN_BODY_FIELDS
+        )
+        if supplied:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "error": "invalid_request",
+                    "message": "模型与凭据只能由服务端配置，客户端字段不被接受",
+                    "fields": supplied,
+                },
+                head_only=False,
+            )
             return
         prompt = body.get("prompt")
         if not isinstance(prompt, str):
@@ -1421,12 +1471,23 @@ def _create_invite_command(config: HostConfig, args: argparse.Namespace) -> int:
             print("配置错误 / configuration error: 账号库不可用", file=sys.stderr)
             return 2
         tenant = (args.tenant or "").strip()
-        try:
-            credentials = tenancy.credentials.require(tenant)
-        except TenantNotConfigured as exc:
-            print(f"拒绝创建邀请: {exc}", file=sys.stderr)
-            return 2
-        assert credentials is not None
+        if config.shared_model_credentials:
+            # The explicit SaaS policy: the invite only needs the frozen host
+            # model configuration. No tenant entry and no per-tenant key is
+            # consulted (the tenant registry is created on first invitation).
+            if not (config.openai_api_key and config.openai_base_url and config.openai_model):
+                print(
+                    "配置错误 / configuration error: PI_GLINK_MODEL_CREDENTIALS=shared "
+                    "需要宿主冻结 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL",
+                    file=sys.stderr,
+                )
+                return 2
+        else:
+            try:
+                tenancy.credentials.require(tenant)
+            except TenantNotConfigured as exc:
+                print(f"拒绝创建邀请: {exc}", file=sys.stderr)
+                return 2
         existing = tenancy.accounts.get_tenant(tenant)
         display = (args.tenant_name or "").strip() or (existing.name if existing else tenant)
         tenancy.accounts.upsert_tenant(tenant, display)
