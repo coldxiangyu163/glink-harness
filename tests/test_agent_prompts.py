@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from pi_glink.config import build_config
@@ -58,6 +59,23 @@ _GATE_PHRASES = (
 #: runtime's capability surface (no subagents, no Feynman alpha tools).
 _FORBIDDEN_TEMPLATE_REFERENCES = ("subagent", "alpha_search", "memory_remember", "Task")
 
+#: The runtime's tool surface: pi's default built-in tools (read/bash/edit/write,
+#: per pi's docs/cli.md — the host passes no --tools/defaultTools) plus the
+#: pi-web-access tools.
+_AVAILABLE_TOOL_ANCHORS = (
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "web_search",
+    "fetch_content",
+    "get_search_content",
+)
+
+#: Built-in tools pi does not enable in this runtime. grep/rg/diff are text
+#: commands run through bash, not tools the model can call.
+_UNAVAILABLE_TOOL_PATTERN = re.compile(r"\b(?:find|ls|glob)\b")
+
 
 def _contract_text() -> str:
     return CONTRACT_PATH.read_text(encoding="utf-8")
@@ -91,10 +109,17 @@ def test_contract_keeps_the_deep_flow_obligations_without_a_gate() -> None:
 
 
 def test_contract_and_template_only_name_tools_the_runtime_provides() -> None:
-    """pi-glink ships pi's built-in tools plus pi-web-access; nothing else."""
+    """pi-glink ships pi's default toolset plus pi-web-access; nothing else."""
     text = _contract_text() + DEEPRESEARCH_PATH.read_text(encoding="utf-8")
-    for tool in ("web_search", "fetch_content", "get_search_content", "read", "grep"):
+    for tool in _AVAILABLE_TOOL_ANCHORS:
         assert tool in text, tool
+    # File search and listing are shell work here, not tools: naming find/ls/glob
+    # as tools would send the model after tools it cannot call.
+    match = _UNAVAILABLE_TOOL_PATTERN.search(text)
+    assert match is None, match.group(0)
+    assert "`grep` 工具" not in text
+    # The text commands the contract does name are explicitly delegated to bash.
+    assert "用 `bash`" in text and "`rg`" in text and "`diff`" in text
     for forbidden in _FORBIDDEN_TEMPLATE_REFERENCES:
         assert forbidden not in text, forbidden
 
