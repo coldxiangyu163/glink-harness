@@ -25,6 +25,19 @@ reaches the provider as a literal string and every request fails with
     ├── web-search.json      generated: pi-web-access credential (0600), if configured
     └── settings.json, AGENTS.md, extensions/, …   copied from the template
 
+**Container faces load prebaked packages from the image.** Docker and E2B run
+inside the self-contained worker image built from ``docker/Dockerfile.worker`` /
+``docker/e2b/Dockerfile.e2b``. Those images preinstall the pi packages into
+``/opt/pi-packages`` (see :data:`IMAGE_PACKAGE_ROOT`), and the renderer rewrites
+each ``npm:`` declaration of a prebaked package to its image-local path — the
+documented local-package form, which pi loads "from the resolved path without
+copying". A container run therefore never runs ``npm install`` against the
+registry: the per-run cost and the dependency on registry reachability are gone,
+and the version pin is enforced where the image is built. The in-process face
+keeps the (now pinned) ``npm:`` declaration and installs into its own runtime
+directory. ``agent/settings.json`` is the repository template; only the per-run
+copy is rewritten.
+
 **The model credential lives in ``auth.json``, not in the process environment.**
 That is pi's official credential store — the same file ``/login`` writes — and
 using it keeps the key out of the kernel's environment, where its shell tool
@@ -63,6 +76,29 @@ TEMPLATE_ENTRIES = ("settings.json", "AGENTS.md", "extensions", "skills", "promp
 #: Backwards-compatible private alias (the list is part of the module contract
 #: for the E2B upload manifest, so it is exported under a public name).
 _TEMPLATE_ENTRIES = TEMPLATE_ENTRIES
+#: Faces that run pi inside a self-contained image/template. They load pi
+#: packages from the image (see :data:`CONTAINER_LOCAL_PACKAGES`) instead of
+#: installing them into the mounted runtime directory on every run.
+CONTAINER_EXECUTORS = ("docker", "e2b")
+#: Image-local pi package root, installed at build time by both
+#: ``docker/Dockerfile.worker`` and ``docker/e2b/Dockerfile.e2b``. It is
+#: deliberately outside ``PI_CODING_AGENT_DIR``: the runtime directory is a
+#: host mount (Docker) or an upload (E2B) that is re-rendered every run, so
+#: anything preinstalled there would be shadowed or rebuilt.
+IMAGE_PACKAGE_ROOT = "/opt/pi-packages"
+IMAGE_PACKAGE_NODE_MODULES = f"{IMAGE_PACKAGE_ROOT}/node_modules"
+#: Guard script both images carry. pi silently ignores a local package path
+#: that does not exist, so the container faces run this script first; it fails
+#: with exit 78 when a package the runtime settings point at is missing. The
+#: Docker face uses it as ``--entrypoint`` (a pre-change image fails at
+#: ``docker run`` itself), the E2B face calls it inside the command chain.
+IMAGE_PACKAGE_GUARD = f"{IMAGE_PACKAGE_ROOT}/check-packages.sh"
+#: Packages the container faces may load from the image: an ``npm:`` entry
+#: naming one of these is rendered as its image-local path. ``pi-subagents`` is
+#: installed in both images for future use but is deliberately **not** listed
+#: here: GLINK-SUB-01 found no way to disable async/detached subagents, so the
+#: product must not auto-load it (see docs/pi-integration-notes.md §8).
+CONTAINER_LOCAL_PACKAGES = ("pi-web-access",)
 
 #: Environment names handed to the pi process verbatim.
 #:
@@ -182,6 +218,8 @@ def prepare_agent_dir(
     directory.mkdir(parents=True, exist_ok=True)
     sessions.mkdir(parents=True, exist_ok=True)
     _sync_template(config.agent_config_dir, directory)
+    if config.executor in CONTAINER_EXECUTORS:
+        _map_prebaked_packages(directory)
     _seed_web_search_config(source, directory)
     _write_auth_json(source, directory)
 
@@ -225,6 +263,98 @@ def template_manifest(template_dir: Path) -> list[tuple[str, Path, bool]]:
         else:
             manifest.append((entry, source, False))
     return manifest
+
+
+def local_package_source(source: str) -> str | None:
+    """The image-local path for a prebaked ``npm:`` package, else ``None``.
+
+    Only the documented npm spec form is recognized: ``npm:<name>`` with an
+    optional ``@<range>`` (scoped names included). Ranges are accepted because
+    the image copy *is* the pinned version (the repository pins it in the
+    Dockerfile and in ``agent/settings.json``, tied together by
+    ``tests/test_repository_boundaries.py``); the path itself carries no version
+    so the mapping cannot drift when the pin moves.
+    """
+    if not isinstance(source, str) or not source.startswith("npm:"):
+        return None
+    name = _npm_package_name(source[len("npm:"):].strip())
+    if name not in CONTAINER_LOCAL_PACKAGES:
+        return None
+    return f"{IMAGE_PACKAGE_NODE_MODULES}/{name}"
+
+
+def _npm_package_name(spec: str) -> str:
+    """The package name part of an npm spec (``@scope/name[@range]``)."""
+    if spec.startswith("@"):
+        slash = spec.find("/")
+        if slash <= 1:
+            return spec
+        at = spec.find("@", slash)
+        return spec[:at] if at > 0 else spec
+    at = spec.find("@")
+    return spec[:at] if at > 0 else spec
+
+
+def _map_prebaked_packages(directory: Path) -> Path | None:
+    """Point a container-face ``settings.json`` at the image-local packages.
+
+    The runtime directory is a copy of the reviewed template, so the rewrite
+    happens per run and never touches the repository template. Every ``npm:``
+    entry naming a prebaked package becomes its image path — the documented
+    local-package source, "loaded from the resolved path without copying":
+    no ``npm install`` runs inside the container and the run does not depend on
+    the registry. Entries that name anything else (other npm packages, git
+    sources, local paths) are left exactly as declared; this function narrows
+    nothing and invents nothing.
+
+    A malformed ``settings.json`` is a clear failure instead of a silent
+    fallback: pi would reject the file anyway, and a run that quietly lost its
+    search extension is worse than a refused one.
+    """
+    path = directory / "settings.json"
+    if not path.is_file():
+        return None
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"容器面无法改写 settings.json: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ConfigError("容器面 settings.json 必须是 JSON 对象")
+    packages = document.get("packages")
+    if not isinstance(packages, list) or not packages:
+        return None
+    rewritten: list[Any] = []
+    changed = False
+    for entry in packages:
+        replacement, mapped = _map_package_entry(entry)
+        rewritten.append(replacement)
+        changed = changed or mapped
+    if not changed:
+        return None
+    document["packages"] = rewritten
+    path.write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return path
+
+
+def _map_package_entry(entry: Any) -> tuple[Any, bool]:
+    """One ``packages`` entry, rewritten to its image path when prebaked.
+
+    The object form (``{"source": …, "skills": []}``) keeps its filters: only
+    the source is replaced, and the entry is copied instead of mutated because
+    it came straight from the parsed document.
+    """
+    if isinstance(entry, str):
+        local = local_package_source(entry)
+        return (local, True) if local is not None else (entry, False)
+    if isinstance(entry, dict) and isinstance(entry.get("source"), str):
+        local = local_package_source(entry["source"])
+        if local is not None:
+            rewritten = dict(entry)
+            rewritten["source"] = local
+            return rewritten, True
+    return entry, False
 
 
 def build_pi_argv(

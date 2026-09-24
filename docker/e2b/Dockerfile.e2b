@@ -5,21 +5,45 @@
 #   * E2B 面的 SDK 不提供双向流，改用 `pi --mode json "<prompt>"` 的单向事件流
 #     （objective 里的“如遇协议缺口退回 --mode json”正是这条）。
 #
-# 构建（需要 E2B_API_KEY）：
-#   npx -y @e2b/cli@2.18.0 template create pi-glink-worker \
-#     --path docker/e2b --dockerfile Dockerfile.e2b \
-#     --cpu-count 2 --memory-mb 4096 \
-#     --cmd 'sleep infinity' --ready-cmd 'true'
+# 构建（需要 E2B_API_KEY；GLINK-PKG-01 的候选→自检→移 tag 流程见 scripts/build-e2b-template.py）：
+#   .venv/bin/python scripts/build-e2b-template.py --tag candidate
+#   .venv/bin/python scripts/build-e2b-template.py --promote-from candidate
+#
+# 预装 pi 包：与 docker/Dockerfile.worker 同一布局（/opt/pi-packages +
+# check-packages.sh）与同一安装方式（--legacy-peer-deps，与 pi 自己的 npm
+# 安装一致，避免自动装入一份版本不一致的 @earendil-works/pi-* peer）；
+# 沙箱命令在启动 pi 前先跑守卫，包缺失即 exit 78。
 # Node 固定为官方镜像的精确版本 tag（与 docker/Dockerfile.worker 同一版本）：
 FROM node:24.21.0-bookworm-slim
 
 ARG PI_VERSION=0.86.1
+# 与 agent/settings.json 的 pin 一致（tests/test_repository_boundaries.py 卡住）。
+ARG PI_WEB_ACCESS_VERSION=0.31.0
+# 只预装、不默认加载：GLINK-SUB-01 判定 pi-subagents 无法禁用 async/detached。
+ARG PI_SUBAGENTS_VERSION=0.40.0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        bash ca-certificates curl git ripgrep \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+    && mkdir -p /opt/pi-packages \
+    && npm install --prefix /opt/pi-packages --legacy-peer-deps --no-fund --no-audit --ignore-scripts \
+         "pi-web-access@${PI_WEB_ACCESS_VERSION}" "pi-subagents@${PI_SUBAGENTS_VERSION}" \
+    && printf '%s\n' \
+         '#!/bin/sh' \
+         '# 容器面从 /opt/pi-packages 加载预装包；pi 会静默跳过不存在的本地包，' \
+         '# 所以缺包必须明确失败（exit 78），不能让研究 run 静默丢掉 web_search。' \
+         'set -eu' \
+         'for pkg in pi-web-access; do' \
+         '  if [ ! -f "/opt/pi-packages/node_modules/$pkg/package.json" ]; then' \
+         '    echo "pi-glink: 镜像内预装包缺失: $pkg（宿主与镜像声明不一致，请重建镜像/模板）" >&2' \
+         '    exit 78' \
+         '  fi' \
+         'done' \
+         'exec "$@"' \
+         > /opt/pi-packages/check-packages.sh \
+    && chmod 0755 /opt/pi-packages/check-packages.sh \
     && npm cache clean --force
 
 # E2B 沙箱以非 root 用户运行，家目录是 /home/user。

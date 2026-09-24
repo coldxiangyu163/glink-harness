@@ -1,0 +1,155 @@
+pi 包预装证据 / prebaked pi packages evidence (GLINK-PKG-01)
+============================================================
+日期: 2026-09-24
+宿主: macOS arm64；开发 Node v24.16.0 / 宿主 pi 0.87.1；隔离安装 pi 0.86.1 做版本对照
+执行面: Docker（colima 29.2.1，Docker 29.2.1）+ E2B（真实沙箱）
+范围: 无模型调用、无检索调用；不重启 7861 服务
+临时目录: $HOME/glink-pkg-evidence（colima 默认不共享 macOS /tmp，
+          早期一次 /tmp 挂载实际挂到 VM 内空目录，已弃用该路径，全部证据改用 $HOME）
+
+改动摘要
+--------
+* agent/settings.json：`npm:pi-web-access` → `npm:pi-web-access@0.31.0`（inproc 面仍运行期安装，只是 pin 住）。
+* host/pi_glink/kernel/agent_env.py：docker/e2b 面渲染 settings.json 时把 npm: 声明映射为
+  镜像内本地包 `/opt/pi-packages/node_modules/<name>`（pi 官方 local package，不从 registry 安装）。
+* host/pi_glink/kernel/docker_env.py：`--entrypoint /opt/pi-packages/check-packages.sh`（镜像内守卫）。
+* host/pi_glink/kernel/e2b_env.py：命令链先验证守卫存在，再由守卫验证包存在，然后才 exec pi。
+* docker/Dockerfile.worker、docker/e2b/Dockerfile.e2b：ARG 精确 pin + `npm install --prefix
+  /opt/pi-packages --legacy-peer-deps` + 写守卫脚本。
+
+1. 问题与直接证据（宿主，无模型调用）
+-------------------------------------
+历史 run 的 `<数据根>/runs/<id>/pi-agent/npm/package.json`（未 pin）:
+
+  {"name":"pi-extensions","private":true,"dependencies":{"pi-web-access":"^0.31.0"}}
+
+隔离配置目录下计时（`pi --mode rpc` + `get_state`，不触发任何模型请求）：
+
+  A  npm:pi-web-access@0.31.0（旧行为）       A/npm/ 生成，pi 在启动时现场 npm install
+  B  /tmp/…/pi-web-access（本地路径）          无 npm/，get_commands 显示扩展已加载
+  C  /nonexistent/pi-web-access（路径不存在）  rc=0、stderr 为空、无任何警告
+
+C 是守卫存在的理由：**pi 对不存在的 local package 完全静默**，直接渲染本地路径
+而不做检查，会静默丢掉 web_search。
+
+宿主实测（pi 0.87.1）:
+
+  A npm pin     elapsed≈3.96s，stderr: "added 210 packages in 2s"
+  B local path  elapsed≈1.29s，stderr 空，get_commands 含 websearch/curator/…
+  C missing     elapsed≈0.32s，stderr 空
+
+2. 镜像构建（候选先建，未自检前不动生产 tag）
+---------------------------------------------
+Docker（网络受限环境用与现网一致的镜像源；构建约 4.5 分钟，重跑走 layer cache）:
+
+  docker build -t pi-glink-worker:candidate -f docker/Dockerfile.worker \
+    --build-arg DEBIAN_MIRROR=mirrors.aliyun.com \
+    --build-arg NPM_REGISTRY=https://registry.npmmirror.com .
+
+  old latest (rollback)  sha256:8abba5b6affeb0fd55d006ef3c58af73010545f8ba6ae5d9718810fe5fc054c9
+  candidate (promoted)   sha256:afe866ac0006d734d278061a21c3e4cb2e82424344ff6c85e99e338514a11c63
+
+E2B（Python SDK，`scripts/build-e2b-template.py --tag candidate --logs`）:
+
+  buildId    e7063306-25a9-4a40-b118-4dcf3c8c7079（tags=['candidate']，构建 1m1s）
+  构建前/后 default 仍指向旧生产 build 2bec2f1d-ec5a-41c1-a175-62ae12ad97dc；
+  脚本先把旧 default 标成 `previous` 作为回滚句柄，服务端若把 default 移向新 build 会立即移回。
+  自检通过后 `--promote-from candidate` 才把 default 移过去（见 §5）。
+
+3. 候选自检（Docker，真实容器；生产 tag 前）
+--------------------------------------------
+  $ docker run --rm --entrypoint /opt/pi-packages/check-packages.sh pi-glink-worker:candidate pi --version
+  0.86.1                                                        (rc=0)
+
+  预装包与工具:
+    pi-web-access 0.31.0
+    pi-subagents  0.40.0
+    -rwxr-xr-x /opt/pi-packages/check-packages.sh
+    /usr/bin/bash  /usr/bin/tee
+
+  守卫在包缺失时（把包目录用空目录盖住，等价于镜像包被删）:
+    $ … check-packages.sh pi --version
+    pi-glink: 镜像内预装包缺失: pi-web-access（宿主与镜像声明不一致，请重建镜像/模板）
+    (rc=78)
+
+  容器面 settings（executor=docker 渲染）× PATH 上放一个调用即失败的假 npm:
+    commands: ['websearch','curator','google-account','search','llama','deepresearch']
+    package source: /opt/pi-packages/node_modules/pi-web-access
+    path: /opt/pi-packages/node_modules/pi-web-access/dist/index.js
+    stderr: "[pi-web-access] Dynamic tool activation requires Pi 0.86.1 or newer;
+             web tools remain eagerly available."   ← 与旧 npm 安装路径同一条回退，行为一致
+    假 npm 调用次数: 0；挂载的 /config 下没有生成 npm/；整次 docker run 2.4–2.7s
+
+  npm pin（旧行为，同一容器、空配置目录）:
+    elapsed≈49.3s（npm 49s），/config/npm/ 87MB
+
+  新宿主 + 旧镜像（旧 latest 的 entrypoint 不存在）:
+    docker: … exec: "/opt/pi-packages/check-packages.sh": no such file or directory  (rc=127)
+
+4. 候选自检（E2B，真实沙箱；生产 tag 前）
+-----------------------------------------
+用真实适配器 `E2BSandboxClient.start()/upload_config()`（template=pi-glink-worker:candidate），
+只跑一次性命令，不调用模型。candidate sandbox id: izj764f1y2xobclmkm4f7（已 kill）。
+
+  pi --version                0.86.1
+  pi-web-access / pi-subagents 0.31.0 / 0.40.0；守卫 -rwxr-xr-x；bash/tee 可用
+  upload manifest             auth.json / models.json / prompts/deepresearch.md / settings.json
+
+  本地包路径 + 假 npm（PATH 前置）:
+    pi --mode rpc（get_state + get_commands） 3.4s，rc=0
+    commands: ['websearch','curator','google-account','search','llama','deepresearch']
+    package source: /opt/pi-packages/node_modules/pi-web-access
+    stderr: 只有上面的 [pi-web-access] 回退提示；"NPM INVOKED" 0 次；
+    /home/user/config/npm 不存在
+
+  npm pin（同沙箱、新上传的配置）:
+    16.5s（其中 npm "added 210 packages … in 11s"），/home/user/config/npm 85MB
+    ← 与用户观测的 15–16s 沙箱就绪→agent_start 吻合
+
+  守卫缺包（sudo 移走包目录再移回）:
+    guard_rc=78 + "镜像内预装包缺失: pi-web-access…"，restored=0
+
+  旧模板（pi-glink-worker:previous）+ 新宿主命令前缀:
+    rc=78，stderr: "pi-glink: 沙箱模板缺少预装包守卫 /opt/pi-packages/check-packages.sh"
+
+  两次沙箱 close failures 均为 []（cleanup.released 语义的适配器级事实）。
+
+  生产模板（promote 后的 `pi-glink-worker`）独立复查:
+    ls /opt/pi-packages/node_modules/@earendil-works  → No such file or directory（无 peer 副本）
+    /opt/pi-packages/node_modules 下 196 个顶层条目；check-packages.sh 存在
+
+5. 发布与回滚（自检通过之后）
+-----------------------------
+  E2B  $ .venv/bin/python scripts/build-e2b-template.py --promote-from candidate
+       default -> build e7063306-25a9-4a40-b118-4dcf3c8c7079
+       tag candidate -> e7063306…   tag default -> e7063306…   tag previous -> 2bec2f1d…
+       回滚: --promote-from previous
+
+  Docker  docker tag pi-glink-worker:latest pi-glink-worker:previous     # 保留旧镜像
+          docker tag pi-glink-worker:candidate pi-glink-worker:latest
+          latest/candidate -> afe866ac0006；previous -> 8abba5b6affe
+          回滚: docker tag pi-glink-worker:previous pi-glink-worker:latest
+          生产 tag 复验: pi --version=0.86.1；守卫通过；扩展从 /opt/… 加载；假 npm 0 次
+
+6. 为什么预装用 --legacy-peer-deps
+----------------------------------
+第一次候选构建用默认 npm 语义，npm 自动装入了 peer：
+
+  /opt/pi-packages/node_modules/@earendil-works/{pi-ai,pi-coding-agent,pi-tui,pi-telemetry} 0.87.1
+
+镜像内 pi 是 0.86.1，pi-web-access 的 `supportsDynamicTools()` 会从这份**副本**解析宿主
+版本，从而把 web tools 从"eagerly available"切到动态激活路径（与产品当前行为不一致，
+且扩展会从与内核不同版本的 pi-ai 副本导入）。pi 自己的 npm 托管安装正是为此关闭 peer 解析：
+`dist/core/package-manager.js::getNpmInstallArgs` → `["install", …, "--prefix", installRoot,
+"--legacy-peer-deps"]`（注释原文：Disable peer dependency resolution for managed installs …）。
+改为 `--legacy-peer-deps` 后，/opt/pi-packages 下不再有 @earendil-works 副本，扩展回到
+与 npm 运行时安装相同的 eager 回退（stderr 的提示行两者一致）。
+
+7. 未覆盖 / 边界
+----------------
+* 未做真实模型调用、真实检索调用；未重启 7861 上的用户服务。
+* E2B 面的实时事件流（GLINK-E2B-LIVE-01 的 CommandHandle 实时性）本次未验收；
+  本次只验证"扩展加载 + 无运行期安装 + 守卫失败路径"。
+* 部署版本漂移（宿主 checkout 与镜像 build 不同步）由发布顺序与仓库边界测试约束，
+  运行时只保证"设置了本地路径、且镜像守卫通过"；真正的版本一致靠同一 commit 重建。
+* 旧模板/旧镜像仍可被显式回滚 tag 取回；多租户并发下的镜像切换不在本次范围。

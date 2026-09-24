@@ -11,9 +11,9 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 
 | 扩展点 | 文档 | 本仓库的用法（实际文件） |
 |---|---|---|
-| `settings.json` | docs/settings.md | `agent/settings.json`：`defaultThinkingLevel: "medium"`、`packages: ["npm:pi-web-access"]` |
+| `settings.json` | docs/settings.md | `agent/settings.json`：`defaultThinkingLevel: "medium"`、`packages: ["npm:pi-web-access@0.31.0"]`（精确 pin；docker/e2b 面渲染时改写为镜像内本地包路径，见 §3） |
 | `models.json`（自定义 provider） | docs/models.md | 宿主渲染到每个 run 自己的运行期目录（`kernel/agent_env.py::_models_document`）：`baseUrl` 与模型 id 字面量、**不含 `apiKey`**（凭据写运行期 `auth.json`）、`compat.thinkingFormat: "openrouter"`；**不写 `cost` 价格表**，因为宿主不知道操作员费率，伪造价格会让 pi 报出假计费 |
-| packages | docs/packages.md | `npm:pi-web-access`（检索能力全部来自它） |
+| packages | docs/packages.md | `npm:pi-web-access@0.31.0`（检索能力全部来自它；inproc 运行期安装，docker/e2b 从 `/opt/pi-packages` 本地加载）；`pi-subagents@0.40.0` 只预装、不加载（§5） |
 | extensions | docs/extensions.md | 目录预留（`agent/extensions/`），当前无扩展；有需求时只落在这里 |
 | skills | docs/skills.md | 目录预留（`agent/skills/`） |
 | prompt templates | docs/prompt-templates.md | `agent/prompts/deepresearch.md`：`/deepresearch <题目>` 显式入口，强制深入流程并叠加更严格的覆盖声明、核查留痕与二次来源收紧；通用工作约定仍走 `--append-system-prompt` |
@@ -48,8 +48,9 @@ pi 的版本在三处被固定，升级只改这三处 + 回归：
 
 | 位置 | 事实 |
 |---|---|
-| `docker/Dockerfile.worker` | `ARG PI_VERSION=0.86.1`（镜像内 pi 版本）；`FROM node:24.21.0-bookworm-slim`（Node 精确 tag） |
-| `docker/e2b/Dockerfile.e2b` | 同一 `ARG PI_VERSION`；同一 Node 精确 tag（E2B 模板内 pi / Node 版本） |
+| `docker/Dockerfile.worker` | `ARG PI_VERSION=0.86.1`（镜像内 pi 版本）；`FROM node:24.21.0-bookworm-slim`（Node 精确 tag）；`ARG PI_WEB_ACCESS_VERSION` / `ARG PI_SUBAGENTS_VERSION` 把包装到 `/opt/pi-packages` |
+| `docker/e2b/Dockerfile.e2b` | 同一 `ARG PI_VERSION`；同一 Node 精确 tag（E2B 模板内 pi / Node 版本）；同一包 ARG 与 `/opt/pi-packages` 布局 |
+| `agent/settings.json` | 包声明的真源：`npm:pi-web-access@0.31.0`。容器面的 `npm:` 改写为 `/opt/pi-packages/node_modules/<name>` 本地包；两者一致性与 Dockerfile ARG 由 `tests/test_repository_boundaries.py` 卡住 |
 | 本机 inproc 面 | 使用宿主安装的 pi；`PI_GLINK_PI_BIN` 可指向任意版本做隔离演练 |
 
 步骤：

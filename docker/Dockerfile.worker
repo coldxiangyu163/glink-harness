@@ -13,11 +13,23 @@
 #   docker build -t pi-glink-worker:latest -f docker/Dockerfile.worker \
 #     --build-arg DEBIAN_MIRROR=mirrors.aliyun.com \
 #     --build-arg NPM_REGISTRY=https://registry.npmmirror.com .
+#
+# 预装 pi 包（GLINK-PKG-01）：镜像把 pi-web-access / pi-subagents 装到
+# /opt/pi-packages，宿主把容器面 settings.json 的 npm: 声明渲染成该路径的
+# 本地包（pi 官方 local package，不从 registry 安装）。安装用
+# --legacy-peer-deps，与 pi 自己的 npm 安装一致：否则 npm 会自动装一份
+# @earendil-works/pi-* peer（版本往往与镜像内 pi 不同），扩展会从这份副本
+# 解析宿主 API 并切换到动态工具激活。check-packages.sh 是镜像内的守卫：
+# 包缺失时 exit 78，不让 pi 静默丢掉 web_search。
 # Node 固定在官方镜像的精确版本 tag（不用浮动 24-bookworm-slim）：
 # 容器内 `node -v` 实测 v24.21.0，与 E2B 模板一致。
 FROM node:24.21.0-bookworm-slim
 
 ARG PI_VERSION=0.86.1
+# 与 agent/settings.json 的 pin 一致（tests/test_repository_boundaries.py 卡住）。
+ARG PI_WEB_ACCESS_VERSION=0.31.0
+# 只预装、不默认加载：GLINK-SUB-01 判定 pi-subagents 无法禁用 async/detached。
+ARG PI_SUBAGENTS_VERSION=0.40.0
 ARG DEBIAN_MIRROR=deb.debian.org
 ARG NPM_REGISTRY=https://registry.npmjs.org
 
@@ -30,6 +42,23 @@ RUN if [ "${DEBIAN_MIRROR}" != "deb.debian.org" ]; then \
     && rm -rf /var/lib/apt/lists/* \
     && npm config set registry "${NPM_REGISTRY}" \
     && npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+    && mkdir -p /opt/pi-packages \
+    && npm install --prefix /opt/pi-packages --legacy-peer-deps --no-fund --no-audit --ignore-scripts \
+         "pi-web-access@${PI_WEB_ACCESS_VERSION}" "pi-subagents@${PI_SUBAGENTS_VERSION}" \
+    && printf '%s\n' \
+         '#!/bin/sh' \
+         '# 容器面从 /opt/pi-packages 加载预装包；pi 会静默跳过不存在的本地包，' \
+         '# 所以缺包必须明确失败（exit 78），不能让研究 run 静默丢掉 web_search。' \
+         'set -eu' \
+         'for pkg in pi-web-access; do' \
+         '  if [ ! -f "/opt/pi-packages/node_modules/$pkg/package.json" ]; then' \
+         '    echo "pi-glink: 镜像内预装包缺失: $pkg（宿主与镜像声明不一致，请重建镜像/模板）" >&2' \
+         '    exit 78' \
+         '  fi' \
+         'done' \
+         'exec "$@"' \
+         > /opt/pi-packages/check-packages.sh \
+    && chmod 0755 /opt/pi-packages/check-packages.sh \
     && npm cache clean --force
 
 # 运行期由宿主覆盖为挂载点；这里给出容器内默认值，便于单独调试。

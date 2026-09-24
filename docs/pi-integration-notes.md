@@ -63,7 +63,7 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
 
 - **配置目录解析**：pi-web-access 的 `utils.ts` 中 `getWebSearchConfigDir()` **优先读 `process.env.PI_CODING_AGENT_DIR`**，且不检查该目录下是否已有 `web-search.json`。这与 pi 本身的重定向一致，但也意味着：一旦宿主重定向了配置目录，操作员本机 ``~/.pi/agent/web-search.json` 就不再被读到，检索会静默退化成无凭据模式。
 - **凭据装配**：宿主在本 run 的运行期目录渲染 `web-search.json`：优先用 `PI_GLINK_WEB_SEARCH_KEY`（渲染为 `{"exaApiKey": …}`），否则复制操作员本机的 `~/.pi/agent/web-search.json`（或 `~/.pi/web-search.json`）。无凭据不是错误：pi-web-access 仍可用无密钥的 Exa MCP 检索；每次渲染都会重建或删除该文件，所以上一 run 的凭据不会残留。
-- **插件安装**：在 `agent/settings.json` 的 `packages` 里声明 `npm:pi-web-access`，pi 启动时把它装到 `<PI_CODING_AGENT_DIR>/npm/`（实测会在运行期目录下生成 `npm/node_modules/`）。
+- **插件安装**：在 `agent/settings.json` 的 `packages` 里声明 `npm:pi-web-access@0.31.0`（精确 pin）。inproc 面 pi 启动时把它装到 `<PI_CODING_AGENT_DIR>/npm/`；docker/e2b 面宿主把该声明改写成镜像内本地包 `/opt/pi-packages/node_modules/pi-web-access`，不在 run 里联网安装（实测与机制见 §9）。
 - **工具面**：实测一次检索 run 调用 `web_search`（1 次）+ `fetch_content`（3 次），事件流里以 `tool_started/tool_updated/tool_finished` 正常呈现，报告写入 10 个可核验 URL。见 `docs/evidence/local-web-search.txt`。
 
 ## 6. Docker / E2B 沙箱内的配置目录与凭据注入（已实测）
@@ -145,3 +145,41 @@ watchdog 默认 `enabled: false`（`src/watchdog/settings.ts:71-72`），LSP 诊
 新增 async/前台开关时退出 1，0.40.0 实测退出 0）。注意 `~/.feynman/npm-global` 下的参考副本与 npm 发布
 包不是同一源码：23 个 `src/` 文件不同（参考副本多出 `modelOverrideFromParent`、`contextOverflow`、
 `finalizeToolResult` 等符号），两侧 version 都写 0.40.0；引用行号前先按实际安装包核对。
+
+## 9. 容器面预装 pi 包与本地包加载（GLINK-PKG-01，已实测）
+
+**动机与实测**：E2B 每轮从沙箱就绪到 `agent_start` 固定约 15–16s（真实 run `4be8cb8ac9f4`、
+`160d10412704`，模型首字仅约 2s），根因是 `settings.json` 的 `packages: ["npm:pi-web-access"]`
+未 pin，pi 在每个 run 的 `PI_CODING_AGENT_DIR/npm` 里现场 `npm install`（历史 run 的
+`pi-agent/npm/package.json` 写 `pi-web-access ^0.31.0`）。容器内同配置对照（pi 0.86.1，
+无模型调用）：
+
+| `packages` 声明 | 沙箱内 `pi --mode rpc` 启动 | 运行期目录 |
+|---|---|---|
+| `npm:pi-web-access@0.31.0` | 16.5s（其中 npm “added 210 packages in 11s”） | `npm/` 85MB |
+| `/opt/pi-packages/node_modules/pi-web-access` | 3.4s | 无 `npm/` |
+
+**本地包是官方扩展点**：`docs/packages.md` 的 local source（原文 “Loaded from the resolved path
+without copying”）；`docs/settings.md`：“Resource paths in user settings resolve from the agent
+directory… Absolute paths and `~` are supported.” 实测 `get_commands` 的 `sourceInfo.source`
+就是该绝对路径，`origin: package`；宿主 0.87.1 与隔离安装的 0.86.1 行为一致。
+
+**pi 对不存在的本地包完全静默**：把 `packages` 指向 `/nonexistent/pi-web-access` 时 rc=0、
+stderr 为空、`get_commands` 里没有扩展资源。所以只把声明换成路径不够：两个镜像都带
+`/opt/pi-packages/check-packages.sh`（Docker 面作为容器 `--entrypoint`，E2B 面先验证守卫再交给
+守卫 exec pi），缺包 exit 78；否则研究 run 会静默丢掉 `web_search`。
+
+**安装方式必须跟 pi 自己的 npm 托管安装一致**：`dist/core/package-manager.js::getNpmInstallArgs`
+返回 `npm install … --prefix <root> --legacy-peer-deps`（注释原文：Disable peer dependency
+resolution for managed installs … so package managers do not install or solve host-provided
+`@earendil-works/pi-*` peers）。本仓第一次候选构建用默认 npm 语义，就装入了
+`@earendil-works/{pi-ai,pi-coding-agent,pi-tui,pi-telemetry}` 0.87.1，而镜像内 pi 是 0.86.1；
+pi-web-access 的 `supportsDynamicTools()` 会 `import.meta.resolve` 这份副本并据其版本把 web tools
+从 eagerly available 切到动态激活路径。加 `--legacy-peer-deps` 后 `/opt/pi-packages` 下不再有
+`@earendil-works` 副本，扩展回到与运行期 npm 安装相同的 eager 回退（两边 stderr 提示一致）。
+
+**版本真源**：`agent/settings.json` 的 pin、两个 Dockerfile 的 `ARG PI_WEB_ACCESS_VERSION` /
+`ARG PI_SUBAGENTS_VERSION` 由 `tests/test_repository_boundaries.py` 卡住一致（与 §3 的 PI_VERSION
+同口径）。候选构建/自检/tag 移动/回滚与完整输出见 `docs/evidence/prebaked-packages.txt`。
+`pi-subagents@0.40.0` 预装在镜像内但不写进 `packages`：§8 的 async/detached 问题仍未解决，
+默认加载仍被 BLOCKER 阻塞。

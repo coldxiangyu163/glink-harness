@@ -574,6 +574,30 @@ def test_sandbox_command_is_shell_safe_for_hostile_prompts(tmp_path: Path) -> No
     assert base64.b64decode(encoded_prompt).decode("utf-8") == prompt
 
 
+def test_sandbox_command_guards_the_prebaked_packages(tmp_path: Path) -> None:
+    """沙箱面同样从镜像内路径加载包；模板早于宿主/缺包时必须明确失败。
+
+    E2B 没有 docker 的 ``--entrypoint``，所以守卫是命令链的一环：先验证
+    守卫脚本存在（旧模板立刻 exit 78），再由守卫验证包存在，然后才 exec pi。
+    """
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    client = E2BSandboxClient(
+        config,
+        runtime,
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: FakeSandbox(),
+    )
+    command = client._command("问题", "")  # noqa: SLF001
+    guard = e2b_env.SANDBOX_PACKAGE_GUARD
+    assert f"test -x {guard}" in command
+    assert "exit 78" in command
+    assert command.index(f"test -x {guard}") < command.index(f"{guard} pi --mode json")
+    settings = json.loads((runtime.directory / "settings.json").read_text(encoding="utf-8"))
+    assert settings["packages"] == [f"{agent_env.IMAGE_PACKAGE_NODE_MODULES}/pi-web-access"]
+
+
 # -- artifact recovery --------------------------------------------------------
 
 

@@ -8,6 +8,7 @@ task acceptance evidence.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -107,6 +108,38 @@ def test_runtime_config_directory_carries_the_generated_models_file(config, tmp_
 def test_missing_docker_cli_reports_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(docker_env.shutil, "which", lambda _name: None)
     assert docker_env.is_available() is False
+
+
+def test_the_container_runs_behind_the_prebaked_package_guard(config, tmp_path: Path) -> None:
+    """容器面用镜像内本地路径加载包，守卫让它“缺失即失败”而不是静默降级。
+
+    新宿主 + 旧镜像时 entrypoint 不存在，容器直接启动失败；镜像内包被删同理。
+    没有这道守卫，pi 只会静默跳过缺失的本地包（web_search 消失）。
+    """
+    runtime = _prepare(config, tmp_path)
+    plan = docker_env.build_plan(
+        config,
+        runtime,
+        run_id="abc123",
+        workspace=tmp_path / "ws",
+        session_dir=runtime.session_dir,
+    )
+    argv = plan.argv
+    assert argv[argv.index("--entrypoint") + 1] == agent_env.IMAGE_PACKAGE_GUARD
+    assert argv.index("--entrypoint") < argv.index(plan.image)
+    settings = json.loads((runtime.directory / "settings.json").read_text(encoding="utf-8"))
+    assert settings["packages"] == [f"{agent_env.IMAGE_PACKAGE_NODE_MODULES}/pi-web-access"]
+
+
+def test_the_image_guard_covers_every_prebaked_package() -> None:
+    """镜像里的守卫脚本会检查每个容器面可加载的包，两边不许漂移。"""
+    import re
+
+    text = (REPO_ROOT / "docker/Dockerfile.worker").read_text(encoding="utf-8")
+    match = re.search(r"for pkg in ([^;\n]+); do", text)
+    assert match is not None, "Dockerfile 缺少预装包守卫脚本"
+    assert match.group(1).split() == list(agent_env.CONTAINER_LOCAL_PACKAGES)
+    assert agent_env.IMAGE_PACKAGE_GUARD in text
 
 
 def test_stop_argv_is_a_force_remove() -> None:

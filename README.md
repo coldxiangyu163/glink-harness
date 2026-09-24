@@ -18,6 +18,7 @@
 | Python | ≥ 3.12 | 宿主与内核接入层只用标准库，无运行时依赖 |
 | Node.js | 宿主开发 **v24.16.0**（nvm 固定，本机实测）；Docker / E2B 镜像 **v24.21.0**（`node:24.21.0-bookworm-slim` 精确 tag，实测） | 前端与 pi 的运行时；宿主用 nvm：`nvm install 24.16.0 && nvm use 24.16.0`；镜像/模板的 Node 版本在各自 Dockerfile 里 pin 到精确 tag（不用浮动 `node:24-bookworm-slim`） |
 | pi | 0.86.1（已实测） | `npm install -g @earendil-works/pi-coding-agent@0.86.1`；Docker / E2B 面的版本固定在各自 Dockerfile 的 `ARG PI_VERSION` |
+| pi 包 | `pi-web-access@0.31.0`（检索，三面）；`pi-subagents@0.40.0`（仅 Docker / E2B 镜像内预装、不加载） | `agent/settings.json` 是包声明真源（精确 pin）；Docker / E2B 从镜像内 `/opt/pi-packages` 本地加载，不在 run 里 `npm install`；一致性由 `tests/test_repository_boundaries.py` 卡住 |
 | pytest | ≥ 8（仅开发） | `uv pip install -e ".[dev]"` |
 | e2b SDK | ≥ 2（仅 E2B 执行面） | `uv pip install -e ".[e2b]"`（含代理网络需要的 `httpx[socks]`） |
 
@@ -44,12 +45,19 @@
 ### E2B 执行面
 
 ```bash
-# 首次：构建模板（本机网络需要代理时带上 HTTPS_PROXY）
-E2B_API_KEY=… HTTPS_PROXY=socks5h://127.0.0.1:1080 \
-  .venv/bin/python scripts/build-e2b-template.py --logs
+# 首次/升级：先构建候选 → 在真实沙箱自检 → 再把 default（宿主引用的 tag）移过去
+E2B_API_KEY=… .venv/bin/python scripts/build-e2b-template.py --tag candidate --logs
+E2B_API_KEY=… .venv/bin/python scripts/build-e2b-template.py --promote-from candidate
+# 回滚：候选构建前的生产 build 留了 previous tag
+E2B_API_KEY=… .venv/bin/python scripts/build-e2b-template.py --promote-from previous
 
 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 scripts/run-local-web.sh   # 用云沙箱跑 pi
 ```
+
+本机直连 E2B 不可达时，构建与宿主进程都需要代理（`HTTPS_PROXY=socks5h://127.0.0.1:1080`；
+CLI 的 Node fetch 不认 socks5，构建走 Python SDK + `httpx[socks]`）。
+
+发布顺序是**镜像/模板先于宿主**：新宿主会要求容器/沙箱内有预装包守卫，旧模板不满足时直接失败（不静默降级）。模板自带 `/opt/pi-packages`（pi-web-access + pi-subagents）与守卫脚本；宿主把运行期 `settings.json` 的 `npm:` 声明渲染成该目录的本地包，run 内不再“先装包再干活”。证据：[docs/evidence/prebaked-packages.txt](docs/evidence/prebaked-packages.txt)。
 
 模型凭据写在运行期 `auth.json`（pi 官方凭据存储，0600，仓库外），随本 run 的运行期配置上传到沙箱
 `/home/user/config/`；不进沙箱进程环境（沙箱内 `env | grep -c OPENAI_API_KEY` 实测 0），随沙箱销毁
@@ -63,17 +71,23 @@ LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 scripts/run-local-web.sh   # 用云�
 ### Docker 执行面
 
 ```bash
-docker build -t pi-glink-worker:latest -f docker/Dockerfile.worker .   # 首次
+# 首次/升级：先建候选并自检，再移动宿主引用的 latest（旧镜像先留 previous tag）
+docker build -t pi-glink-worker:candidate -f docker/Dockerfile.worker .
+docker tag pi-glink-worker:latest pi-glink-worker:previous
+docker tag pi-glink-worker:candidate pi-glink-worker:latest
 LOCAL_WEB_EXECUTOR=docker scripts/run-local-web.sh                     # 用容器跑 pi
 ```
 
-镜像自包含（`node:24.21.0-bookworm-slim` + 固定版本 pi，`node -v` 实测 v24.21.0）；宿主只挂载
-工作区（`/workspace`）、本 run 的运行期配置（`/config`）与 session 目录（`/sessions`）；模型凭据随
-`/config/auth.json` 进容器（不经环境变量或 argv）。镜像名在宿主启动时冻结，运行中的环境变量变化
-不会让已接收的 run 换镜像。容器内 pi 报告的会话路径（`/sessions/…`）由宿主映射回本 run 的
-`<会话根>/<id>/…` 后再做收尾脱敏。
+镜像自包含（`node:24.21.0-bookworm-slim` + 固定版本 pi + `/opt/pi-packages` 预装 pi 包，`node -v`
+实测 v24.21.0）；宿主只挂载工作区（`/workspace`）、本 run 的运行期配置（`/config`）与 session 目录
+（`/sessions`）；模型凭据随 `/config/auth.json` 进容器（不经环境变量或 argv）。宿主把 `settings.json`
+的 `npm:` 声明渲染成 `/opt/pi-packages` 本地包，并以镜像内守卫脚本作为容器 `--entrypoint`：镜像早于
+宿主或包缺失时容器明确失败（exit 78 / 127），不会静默丢掉 `web_search`。镜像名在宿主启动时冻结，
+运行中的环境变量变化不会让已接收的 run 换镜像。容器内 pi 报告的会话路径（`/sessions/…`）由宿主映射
+回本 run 的 `<会话根>/<id>/…` 后再做收尾脱敏。
 网络受限环境可用 `--build-arg DEBIAN_MIRROR=mirrors.aliyun.com --build-arg NPM_REGISTRY=https://registry.npmmirror.com`。
-证据：[docs/evidence/docker-run.txt](docs/evidence/docker-run.txt)。
+证据：[docs/evidence/docker-run.txt](docs/evidence/docker-run.txt)、
+[docs/evidence/prebaked-packages.txt](docs/evidence/prebaked-packages.txt)。
 
 执行面由 `LOCAL_WEB_EXECUTOR` 选择；三者消费同一份输入契约，事件流对外表现一致。
 
@@ -248,7 +262,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 ## 搜索
 
-检索能力全部来自 [pi-web-access](https://github.com/nicobailon/pi-web-access) 扩展，声明在 `agent/settings.json` 的 `packages` 里（`npm:pi-web-access`），pi 启动时会把它安装到运行期配置目录。
+检索能力全部来自 [pi-web-access](https://github.com/nicobailon/pi-web-access) 扩展，声明在 `agent/settings.json` 的 `packages` 里（`npm:pi-web-access@0.31.0`，精确 pin）。本机 inproc 面 pi 启动时把它安装到本 run 的运行期配置目录；Docker / E2B 面宿主把该声明改写成镜像内本地包 `/opt/pi-packages/node_modules/pi-web-access`（pi 官方 local package，"Loaded from the resolved path without copying"），run 内不再访问 registry、不再每 run 生成 `npm/`；镜像守卫在包缺失时明确失败（exit 78），不让 `web_search` 静默消失。实测对照与发布/回滚见 [docs/evidence/prebaked-packages.txt](docs/evidence/prebaked-packages.txt)。
 
 凭据由宿主渲染到**本 run 的**运行期配置目录的 `web-search.json`（权限 600）：
 

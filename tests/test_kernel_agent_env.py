@@ -10,10 +10,12 @@ import pytest
 from pi_glink.config import ConfigError, build_config
 from pi_glink.kernel.agent_env import (
     AUTH_FILENAME,
+    IMAGE_PACKAGE_NODE_MODULES,
     PROVIDER_ID,
     WEB_SEARCH_FILENAME,
     build_pi_argv,
     build_pi_env,
+    local_package_source,
     prepare_agent_dir,
     template_manifest,
 )
@@ -247,6 +249,131 @@ def test_template_manifest_lists_the_reviewable_entries(tmp_path: Path, template
 
 
 def test_template_settings_declare_the_web_access_package() -> None:
+    """声明的是精确版本：镜像 ARG 与模板 pin 的一致性由仓库边界测试卡住。"""
     settings = json.loads((REPO_ROOT / "agent" / "settings.json").read_text(encoding="utf-8"))
-    assert "npm:pi-web-access" in settings["packages"]
+    assert settings["packages"] == ["npm:pi-web-access@0.31.0"]
     assert settings["defaultThinkingLevel"] == "medium"
+
+
+# -- 容器面预装包：镜像内本地加载，不在 run 里联网安装（GLINK-PKG-01） ----------
+
+
+def _template_settings(template_dir: Path, packages: list[object]) -> None:
+    (template_dir / "settings.json").write_text(
+        json.dumps(
+            {"defaultThinkingLevel": "medium", "packages": packages},
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _rendered_settings(config, tmp_path: Path) -> dict:
+    runtime = _prepare(config, tmp_path)
+    return json.loads((runtime.directory / "settings.json").read_text(encoding="utf-8"))
+
+
+def test_container_faces_load_the_prebaked_package_from_the_image(
+    tmp_path: Path, template_dir: Path
+) -> None:
+    """Docker/E2B 的 packages 指向镜像内路径，pi 直接加载（不再每 run npm install）。"""
+    _template_settings(template_dir, ["npm:pi-web-access@0.31.0"])
+    expected = f"{IMAGE_PACKAGE_NODE_MODULES}/pi-web-access"
+    for executor in ("docker", "e2b"):
+        config = _config(tmp_path, template_dir, LOCAL_WEB_EXECUTOR=executor)
+        settings = _rendered_settings(config, tmp_path)
+        assert settings["packages"] == [expected]
+        # 其他设置项原样保留，只改 packages。
+        assert settings["defaultThinkingLevel"] == "medium"
+
+
+def test_inproc_face_keeps_the_pinned_npm_source(tmp_path: Path, template_dir: Path) -> None:
+    """本机 face 行为不变：仍是 pip 式的运行期安装，只是版本被钉住。"""
+    _template_settings(template_dir, ["npm:pi-web-access@0.31.0"])
+    config = _config(tmp_path, template_dir)  # 默认 executor=inproc
+    settings = _rendered_settings(config, tmp_path)
+    assert settings["packages"] == ["npm:pi-web-access@0.31.0"]
+
+
+def test_container_faces_leave_unmapped_entries_untouched(
+    tmp_path: Path, template_dir: Path
+) -> None:
+    """只改写预装包；其他来源原样保留，不猜、不静默改写。"""
+    _template_settings(
+        template_dir,
+        ["npm:pi-web-access@0.31.0", "npm:pi-subagents@0.40.0", "./local-tools", "git:github.com/x/y@v1"],
+    )
+    config = _config(tmp_path, template_dir, LOCAL_WEB_EXECUTOR="docker")
+    settings = _rendered_settings(config, tmp_path)
+    assert settings["packages"] == [
+        f"{IMAGE_PACKAGE_NODE_MODULES}/pi-web-access",
+        "npm:pi-subagents@0.40.0",
+        "./local-tools",
+        "git:github.com/x/y@v1",
+    ]
+
+
+def test_container_faces_keep_the_object_form_filters(tmp_path: Path, template_dir: Path) -> None:
+    """对象形式的 source 同样映射到镜像内路径，过滤字段不动。"""
+    _template_settings(
+        template_dir,
+        [{"source": "npm:pi-web-access@0.31.0", "skills": []}],
+    )
+    config = _config(tmp_path, template_dir, LOCAL_WEB_EXECUTOR="e2b")
+    settings = _rendered_settings(config, tmp_path)
+    assert settings["packages"] == [
+        {"source": f"{IMAGE_PACKAGE_NODE_MODULES}/pi-web-access", "skills": []}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("npm:pi-web-access", f"{IMAGE_PACKAGE_NODE_MODULES}/pi-web-access"),
+        ("npm:pi-web-access@0.31.0", f"{IMAGE_PACKAGE_NODE_MODULES}/pi-web-access"),
+        ("npm:pi-web-access@^0.31.0", f"{IMAGE_PACKAGE_NODE_MODULES}/pi-web-access"),
+        ("npm:pi-subagents@0.40.0", None),
+        ("npm:@scope/tools@1.0.0", None),
+        ("git:github.com/x/y@v1", None),
+        ("./local-tools", None),
+        ("/opt/pi-packages/node_modules/pi-web-access", None),
+    ],
+)
+def test_local_package_source_only_maps_prebaked_names(source: str, expected: str | None) -> None:
+    assert local_package_source(source) == expected
+
+
+def test_container_faces_refuse_a_malformed_settings_file(
+    tmp_path: Path, template_dir: Path
+) -> None:
+    """坏配置明确失败，而不是让容器静默以降级配置启动。"""
+    (template_dir / "settings.json").write_text("{not json\n", encoding="utf-8")
+    config = _config(tmp_path, template_dir, LOCAL_WEB_EXECUTOR="docker")
+    with pytest.raises(ConfigError, match="settings.json"):
+        _prepare(config, tmp_path)
+
+
+def test_missing_settings_file_is_not_an_error(tmp_path: Path, template_dir: Path) -> None:
+    """模板没有 settings.json 时没有可改写的 packages，渲染照常完成。"""
+    (template_dir / "settings.json").unlink()
+    config = _config(tmp_path, template_dir, LOCAL_WEB_EXECUTOR="e2b")
+    runtime = _prepare(config, tmp_path)
+    assert not (runtime.directory / "settings.json").exists()
+
+
+def test_repository_template_declares_only_prebaked_packages() -> None:
+    """模板里的每个 npm 包都必须能在容器面映射到镜像内副本。
+
+    否则容器面会退回运行期 npm install —— 这正是本次要消除的每 run 延迟。
+    版本 pin 的跨文件一致性在 test_repository_boundaries.py。
+    """
+    settings = json.loads((REPO_ROOT / "agent" / "settings.json").read_text(encoding="utf-8"))
+    sources = []
+    for entry in settings["packages"]:
+        sources.append(entry if isinstance(entry, str) else entry["source"])
+    assert sources, "模板必须声明检索扩展"
+    for source in sources:
+        assert source.startswith("npm:"), source
+        assert local_package_source(source) is not None, source

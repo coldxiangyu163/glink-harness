@@ -216,7 +216,7 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 | 内核进程位置 | 宿主机器 | 一次性容器 | 云沙箱 |
 | 协议 | `--mode rpc`（双向 JSONL） | `--mode rpc`（跨容器 stdio） | `--mode json`（单向流） |
 | 事件时序 | 实时 | 实时 | 实时（命令 stdout `tee` 到 JSONL 后逐 LF 行投递；断流按文件补齐，见 §5.2） |
-| 运行时来源 | 宿主安装的 Node v24.16.0 / pi | 镜像自包含（`pi-glink-worker:latest`，node v24.21.0 + pi 0.86.1；镜像名在启动时冻结） | 模板自包含（`pi-glink-worker`，node v24.21.0 + pi 0.86.1） |
+| 运行时来源 | 宿主安装的 Node v24.16.0 / pi | 镜像自包含（`pi-glink-worker:latest`，node v24.21.0 + pi 0.86.1 + `/opt/pi-packages` 预装 pi 包；镜像名在启动时冻结） | 模板自包含（`pi-glink-worker`，node v24.21.0 + pi 0.86.1 + `/opt/pi-packages` 预装 pi 包） |
 | 运行期配置 | `runs/<id>/pi-agent`（本 run 独占） | 同目录挂到 `/config` | 同一目录整棵上传到沙箱 `/home/user/config` |
 | 工作区 | `<data>/workspaces/<runId>` | 同左（挂到 `/workspace`） | 沙箱内 `/home/user/workspace`，结束后拉回宿主 |
 | 会话文件 | 会话根下的 `<id>/`（宿主可查） | 该目录挂到 `/sessions`；宿主按挂载映射回本 run 目录后脱敏 | 销毁前回收单个有界会话文件到本 run 目录，供下一轮使用；多文件或回收失败不可续接 |
@@ -287,6 +287,30 @@ U+2028/U+2029 不拆帧，与 RPC 面共用 `tests/fixtures/lf-framing.json` 语
 而真实研究 run 是分钟级，遗留默认会把内核在沙箱仍存活时杀掉（run 以 `execution_error` 结束于
 `TimeoutException`，报告与产物丢失）。命令上限与创建沙箱用的同一个计算值绑定，不会比沙箱寿命更长，
 也不会更短。
+
+### 5.3 容器面预装 pi 包（GLINK-PKG-01）
+
+`agent/settings.json` 是唯一的包声明真源（`packages` 里的 `npm:` 声明带精确版本）。三个面在渲染
+本 run 的 `pi-agent/settings.json` 时按面向分流：
+
+* **inproc** 保留 `npm:<name>@<pin>`，pi 启动时把它装到本 run 的运行期目录（行为不变，只是不再漂版本）；
+* **docker / e2b** 把每个命中预装名单的 `npm:` 声明改写为镜像内**本地包路径**
+  `/opt/pi-packages/node_modules/<name>`（pi 官方 local package，"Loaded from the resolved path
+  without copying"），因此容器/沙箱 run **不再访问 registry、不再每 run 生成 `npm/`**；
+  未列入预装名单的声明原样保留（本仓当前只有 `pi-web-access`；`pi-subagents` 只预装不加载）。
+
+版本一致性由发布物与仓库测试共同约束：两个 Dockerfile 用 `ARG PI_WEB_ACCESS_VERSION` /
+`ARG PI_SUBAGENTS_VERSION` 精确 pin 并安装到 `/opt/pi-packages`，
+`tests/test_repository_boundaries.py` 卡住两个 Dockerfile、模板 pin 三者一致（与 `PI_VERSION`
+同一口径）。预装安装用 `--legacy-peer-deps`，与 pi 自己的 npm 托管安装一致：否则 npm 会自动装入
+一份版本可能不同的 `@earendil-works/pi-*` peer，扩展会从副本解析宿主 API 并改变工具的激活方式。
+
+**包缺失必须是明确失败。** pi 对不存在的本地包路径完全静默（实测：rc=0、stderr 为空、无警告），
+所以两个镜像都带 `/opt/pi-packages/check-packages.sh`：Docker 面把它作为容器的
+`--entrypoint`（镜像早于宿主时容器起不来，退出 127；包被删时 exit 78），E2B 面在命令链里先验证
+守卫存在再交给守卫执行。崩溃语义与其它内核启动失败一致：Docker 面为 `kernel_exit`（退出码 78），
+E2B 面为 `kernel_exit` + stderr tail 里的中文原因。构建、候选 tag、回滚句柄与实测耗时见
+`docs/evidence/prebaked-packages.txt`，机制实测事实见 `docs/pi-integration-notes.md` §9。
 
 ## 6. 凭据流
 

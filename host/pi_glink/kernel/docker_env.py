@@ -30,7 +30,7 @@ from pathlib import Path, PurePosixPath
 from typing import Mapping, Sequence
 
 from ..config import DEFAULT_WORKER_IMAGE, HostConfig
-from .agent_env import PASSTHROUGH_ENV, AgentRuntime
+from .agent_env import IMAGE_PACKAGE_GUARD, PASSTHROUGH_ENV, AgentRuntime
 
 #: Default image; frozen at configuration time (see ``HostConfig.worker_image``).
 WORKER_IMAGE_DEFAULT = DEFAULT_WORKER_IMAGE
@@ -120,6 +120,12 @@ def build_plan(
     the limits apply to the container instance only. They are contract, not
     measured facts: no live Docker run is performed by the default test suite,
     so the host cannot claim what the daemon actually enforced.
+
+    ``--entrypoint`` is the image-local prebaked-package guard
+    (:data:`agent_env.IMAGE_PACKAGE_GUARD`), not the image default: the mounted
+    ``settings.json`` points at ``/opt/pi-packages`` instead of declaring an
+    ``npm:`` install, and pi silently ignores a local package path that does not
+    exist — the guard turns that silent loss into a clear failure (exit 78).
     """
     image = worker_image(config)
     container_name = f"pi-glink-{run_id}"
@@ -132,6 +138,12 @@ def build_plan(
         "--pids-limit", str(config.docker_pids_limit),
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
+        # The container faces load pi packages from the image instead of running
+        # npm inside the run, so the entrypoint is the image's package guard:
+        # it exits 78 when a package the mounted settings point at is missing.
+        # A pre-change image has no such file and fails at container start
+        # instead of silently running without web_search.
+        "--entrypoint", IMAGE_PACKAGE_GUARD,
         "-v", f"{workspace}:{CONTAINER_WORKSPACE}",
         "-w", CONTAINER_WORKSPACE,
         "-v", f"{runtime.directory}:{CONTAINER_CONFIG}",

@@ -25,7 +25,11 @@ directory (generated files plus the reviewed template entries: ``AGENTS.md``,
 ``settings.json``, ``extensions/``, ``skills/``, ``prompts/``), with the same
 relative paths the in-process and Docker faces use. The upload records a manifest
 of ``(relative path, sha256)`` so the delivery is verifiable instead of "the
-current directory happened to be empty".
+current directory happened to be empty". ``settings.json`` renders the prebaked
+pi packages as image-local paths (``/opt/pi-packages/node_modules/…``); the
+sandbox command runs the image's package guard before pi, because pi silently
+ignores a missing local package and a research run without web_search must fail
+loudly instead.
 
 **Live event stream (corrected by GLINK-E2B-LIVE-01).** The SDK's streaming
 interface for a background command is the ``CommandHandle`` returned by
@@ -61,7 +65,7 @@ from typing import Any, Callable, Iterator, Mapping
 
 from ..artifacts import ArtifactError, ArtifactTree
 from ..config import ConfigError, HostConfig
-from .agent_env import AgentRuntime
+from .agent_env import IMAGE_PACKAGE_GUARD, AgentRuntime
 from .framing import strip_trailing_cr
 
 #: Sandbox paths (E2B runs as a non-root user with /home/user as home).
@@ -70,6 +74,13 @@ SANDBOX_CONFIG = f"{SANDBOX_HOME}/config"
 SANDBOX_WORKSPACE = f"{SANDBOX_HOME}/workspace"
 SANDBOX_SESSIONS = f"{SANDBOX_HOME}/sessions"
 REPORT_FILENAME = "report.md"
+#: Image-local guard script (same bytes in both worker images, see
+#: :data:`agent_env.IMAGE_PACKAGE_GUARD`). The sandbox has no ``--entrypoint``
+#: equivalent, so the command chain verifies it before starting pi. pi silently
+#: skips a local package path that does not exist, so without the guard a
+#: template that predates the host (or lost the package) would run the whole
+#: research task without web_search.
+SANDBOX_PACKAGE_GUARD = IMAGE_PACKAGE_GUARD
 #: The sandbox tees its JSON event stream here (see module docstring) and
 #: records the pipeline's exit code in the marker file once it finishes.
 _EVENTS_FILE = f"{SANDBOX_HOME}/events.jsonl"
@@ -591,6 +602,12 @@ class E2BSandboxClient:
         ``tee``, and the shell records the pipeline's status in the exit-code
         marker before exiting with it, so a run whose stream was lost can still
         be classified (``kernel_exit``) from the sandbox alone.
+
+        The command chain also carries the image-local package guard: the first
+        step fails with exit 78 when the template predates the host (no guard
+        script), and the guard itself verifies the packages the rendered
+        ``settings.json`` points at before ``exec``ing pi. Both failures reach
+        the run as ``kernel_exit`` with the message in the stderr tail.
         """
         encoded_prompt = base64.b64encode(prompt.encode("utf-8")).decode("ascii")
         parts = [
@@ -600,8 +617,19 @@ class E2BSandboxClient:
             f"mkdir -p {SANDBOX_CONFIG} {SANDBOX_WORKSPACE} {SANDBOX_SESSIONS}",
             f"cd {SANDBOX_WORKSPACE}",
             f"PROMPT=$(printf '%s' '{encoded_prompt}' | base64 -d)",
+            # A template built before this host has no guard script: fail with a
+            # clear reason here instead of letting pi start without web_search.
+            (
+                f"test -x {SANDBOX_PACKAGE_GUARD} || {{ "
+                f"echo 'pi-glink: 沙箱模板缺少预装包守卫 {SANDBOX_PACKAGE_GUARD}，"
+                "请用 scripts/build-e2b-template.py 重建模板' >&2; exit 78; }"
+            ),
         ]
         pi = [
+            # The guard verifies every package the rendered settings point at,
+            # then ``exec``s pi with these same arguments (exit 78 when one is
+            # missing).
+            SANDBOX_PACKAGE_GUARD,
             "pi",
             "--mode", "json",
             "--provider", self.runtime.provider_id,

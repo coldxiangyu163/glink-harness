@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -103,6 +104,47 @@ def worker_versions(text: str) -> tuple[str, str]:
     return node.group(1), pi.group(1)
 
 
+def worker_package_versions(text: str) -> tuple[str, str]:
+    """The exact versions of the prebaked pi packages (both worker images).
+
+    The repository declares pi-web-access in ``agent/settings.json`` (the runtime
+    source for the in-process face) and both images install the same pin plus
+    ``pi-subagents`` (available in the image, deliberately not auto-loaded).
+    A floating or missing declaration is a failure, not a warning.
+    """
+    parsed = []
+    for name in ("PI_WEB_ACCESS_VERSION", "PI_SUBAGENTS_VERSION"):
+        match = re.search(rf"^ARG\s+{name}=(\d+\.\d+\.\d+(?:-[\w.-]+)?)\s*$", text, re.MULTILINE)
+        if match is None:
+            raise ValueError(f"worker Dockerfile needs an exact {name}")
+        parsed.append(match.group(1))
+    return parsed[0], parsed[1]
+
+
+def guard_packages(text: str) -> list[str]:
+    """The package names the image-local guard script refuses to start without."""
+    match = re.search(r"for pkg in ([^;\n]+); do", text)
+    if match is None:
+        raise ValueError("worker Dockerfile needs the prebaked package guard")
+    return match.group(1).split()
+
+
+def template_package_pins() -> dict[str, str]:
+    """``agent/settings.json`` npm packages as ``name -> declared spec``."""
+    settings = json.loads((ROOT / "agent" / "settings.json").read_text(encoding="utf-8"))
+    pins: dict[str, str] = {}
+    for entry in settings["packages"]:
+        source = entry if isinstance(entry, str) else entry["source"]
+        if not source.startswith("npm:"):
+            continue
+        spec = source[4:]
+        if spec.startswith("@"):
+            raise ValueError("scoped template packages need an explicit parser")
+        name, _at, version = spec.partition("@")
+        pins[name] = version
+    return pins
+
+
 def test_no_runtime_credentials_or_data_are_tracked() -> None:
     assert runtime_files(git_paths(ROOT)) == []
 
@@ -170,6 +212,52 @@ def test_worker_version_comparison_detects_each_runtime_change() -> None:
     original = "FROM node:24.21.0-bookworm-slim\nARG PI_VERSION=0.86.1\n"
     assert worker_versions(original) != worker_versions(original.replace("24.21.0", "24.22.0"))
     assert worker_versions(original) != worker_versions(original.replace("0.86.1", "0.87.0"))
+
+
+def test_prebaked_package_versions_are_exact_and_equal() -> None:
+    docker = worker_package_versions((ROOT / "docker/Dockerfile.worker").read_text())
+    e2b = worker_package_versions((ROOT / "docker/e2b/Dockerfile.e2b").read_text())
+    assert docker == e2b, "Docker/E2B prebaked package versions diverged"
+
+
+def test_template_package_pin_matches_the_image_build_argument() -> None:
+    """镜像与宿主声明来自同一份 pin：模板的 npm 版本必须等于镜像 ARG。"""
+    docker_pin, _subagents_pin = worker_package_versions(
+        (ROOT / "docker/Dockerfile.worker").read_text()
+    )
+    pins = template_package_pins()
+    assert set(pins) == {"pi-web-access"}, "模板只应该声明检索包（subagents 不由产品加载）"
+    assert pins["pi-web-access"] == docker_pin, "模板 pin 与镜像 ARG 漂移"
+
+
+def test_worker_dockerfiles_install_and_guard_the_prebaked_packages() -> None:
+    """两个镜像都要按 ARG 安装、并用同一个守卫脚本验证包存在。"""
+    for relative in ("docker/Dockerfile.worker", "docker/e2b/Dockerfile.e2b"):
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        assert "pi-web-access@${PI_WEB_ACCESS_VERSION}" in text, relative
+        assert "pi-subagents@${PI_SUBAGENTS_VERSION}" in text, relative
+        assert "/opt/pi-packages" in text, relative
+        # 与 pi 自己的 managed install 一致：不自动装 @earendil-works/pi-* peer。
+        assert "npm install --prefix /opt/pi-packages --legacy-peer-deps" in text, relative
+        assert set(guard_packages(text)) == {"pi-web-access"}, relative
+        assert "exec \"$@\"" in text, relative
+
+
+@pytest.mark.parametrize("text", [
+    "ARG PI_SUBAGENTS_VERSION=0.40.0\n",
+    "ARG PI_WEB_ACCESS_VERSION=0.31.0\n",
+    "ARG PI_WEB_ACCESS_VERSION=^0.31.0\nARG PI_SUBAGENTS_VERSION=0.40.0\n",
+    "ARG PI_WEB_ACCESS_VERSION=0.31.0\nARG PI_SUBAGENTS_VERSION=latest\n",
+    "ARG PI_WEB_ACCESS_VERSION=0.31.0\nARG PI_SUBAGENTS_VERSION=v0.40.0\n",
+])
+def test_floating_or_missing_prebaked_package_versions_fail(text: str) -> None:
+    with pytest.raises(ValueError, match="exact"):
+        worker_package_versions(text)
+
+
+def test_guard_package_list_is_not_optional() -> None:
+    with pytest.raises(ValueError, match="guard"):
+        guard_packages("RUN echo no guard here\n")
 
 
 def test_git_discovery_covers_tracked_secrets_and_new_sources(tmp_path: Path) -> None:

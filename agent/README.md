@@ -32,7 +32,7 @@ pi 读取的是这份配置，而不是用户 `~/.pi/agent` 的个人配置，�
 
 | 文件 | 内容 |
 |---|---|
-| `settings.json` | `defaultThinkingLevel` 与 `packages: ["npm:pi-web-access"]` |
+| `settings.json` | `defaultThinkingLevel` 与 `packages: ["npm:pi-web-access@0.31.0"]`（精确 pin）。本机（inproc）面按此在 run 启动时安装到运行期配置目录；Docker/E2B 面由宿主渲染成镜像内本地包 `/opt/pi-packages/node_modules/pi-web-access`（`docs/architecture.md` §5.3），不在 run 里联网安装；`pi-subagents` 只预装、不加载 |
 | `research-prompt.md` | 通用工作约定：任务分级、工具与取证纪律、深入任务纪律（由宿主以 `--append-system-prompt` 追加） |
 | `prompts/deepresearch.md` | 显式 `/deepresearch <题目>` 入口：跳过「直接回答」分级，强制深入流程并收紧覆盖声明与核查 |
 | `extensions/` | 扩展位（当前为空；新需求优先落在这里） |
