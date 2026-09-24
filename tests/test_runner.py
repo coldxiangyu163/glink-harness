@@ -317,9 +317,15 @@ def test_prompt_reaches_the_kernel_verbatim_and_never_through_argv(tmp_path: Pat
 
     assert final.status == FINISHED
     assert captured["messages"] == [prompt], "the prompt must arrive byte for byte"
-    assert prompt not in " ".join(captured["argv"] or []), (
+    argv = captured["argv"] or []
+    assert prompt not in " ".join(argv), (
         "an instruction with shell metacharacters must never be argv"
     )
+    # The research contract travels as an appended system prompt, read from the
+    # repository template (offline smoke for the `--append-system-prompt` path).
+    assert "--append-system-prompt" in argv
+    contract = (REPO_ROOT / "agent" / "research-prompt.md").read_text(encoding="utf-8").strip()
+    assert contract in argv, "the rendered research prompt must reach the kernel verbatim"
 
 
 def test_two_runs_do_not_share_runtime_configuration_or_credentials(tmp_path: Path) -> None:
