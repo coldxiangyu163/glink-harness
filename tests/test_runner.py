@@ -478,7 +478,12 @@ def test_settle_failure_still_releases_the_slot_and_the_stream(
         record = manager.start("收尾写盘失败也要释放槽位")
         assert wait_for(lambda: manager.active_run_id is None, timeout=30)
 
-        assert manager.bus.is_open(record.run_id) is False, "the live stream must be closed"
+        # The slot is released at the commit point, before settle (which fails
+        # here and logs) and before the stream is closed: wait for the close
+        # itself instead of assuming it already happened.
+        assert wait_for(
+            lambda: manager.bus.is_open(record.run_id) is False, timeout=30
+        ), "the live stream must be closed"
         meta = json.loads((store.run_dir(record.run_id) / "meta.json").read_text(encoding="utf-8"))
         assert meta["status"] == "running", "the settled copy was never written"
         seen = store.get(record.run_id)
