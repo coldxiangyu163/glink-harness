@@ -228,6 +228,11 @@ class AcpExecutionAdapter(ExecutionAdapter):
                 self._outcome.cancelled = True
                 self._outcome.stop_reason = "abort"
                 return
+            # The turn boundary the product's streaming model needs: streamed
+            # text/thinking blocks are only closed (and rendered as Markdown)
+            # at ``turn_finished``. ACP has no such update of its own, but the
+            # host knows exactly when the prompt turn starts and ends.
+            self._on_frame({"type": "acp_turn_started"})
             response = client.request(
                 "session/prompt",
                 {
@@ -270,6 +275,16 @@ class AcpExecutionAdapter(ExecutionAdapter):
             else:
                 self._outcome.settled = True
         finally:
+            # The turn ended (answered, rejected or the process died): close the
+            # streamed blocks and release any withheld delta tail. Emitted from
+            # this thread before ``_done``, so the normal path always precedes
+            # the terminal verdict.
+            try:
+                self._on_frame({"type": "acp_turn_finished"})
+            except Exception:  # noqa: BLE001 - the outcome is already recorded
+                logger.exception(
+                    "emitting the ACP turn end failed run=%s", self.spec.run_id
+                )
             self._done.set()
 
     def _fail(self, stop_reason: str, error: str) -> None:

@@ -75,6 +75,11 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
 * 未投影的变体（`user_message_chunk`、`current_mode_update`、`config_option_update`、
   `session_info_update` 等）在 M1 **不伪造产品事件**，按类型一次性写一条 `kernel_status`
   提示（`acp_update_not_projected`），避免静默丢事实。（`合成实测`）
+* **回合边界**：ACP 没有「turn 开始/结束」更新，但产品的流式模型靠 `turn_finished` 关闭
+  文本/思考块（关闭后才按 Markdown 渲染，思考行才从「正在思考」转为「思考过程」）。适配器
+  因此在发出 `session/prompt` 前与回合结束时各发一个合成帧（`acp_turn_started` /
+  `acp_turn_finished`），由投影层译为 `turn_started` / `turn_finished`；前端无需知道 harness
+  差异。（`合成实测`；前端语义由 `tests/web/run-stream.test.mjs` 的既有断言钉住）
 
 ### 1.5 工具调用
 
@@ -86,8 +91,7 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
   completed/failed 即终态。（`schema`）
 * `ToolCallContent` 有三种：`content`（包 `ContentBlock`）、`diff`（`path`/`oldText`/`newText`）、
   `terminal`（`terminalId`，需要 `terminal/*` 能力——宿主不声明，出现只作占位呈现）。（`schema`）
-* 产品工具卡片口径（`合成实测`）：`toolName` 取 `name → kind → title`（程序名优先）；
-  `args` 走与 pi 相同的限幅投影（`projection._project_args`，同一份数组/对象契约）；
+* 产品工具卡片口径（`合成实测`）：`toolName` 取 `name → title → kind`（程序名优先；`title` 是人类可读描述且总存在，dsh 把工具名放在这里而 `kind` 固定为 `other`；类别仅作最后回退），`tool_started` 额外带 `kind`；`args` 走与 pi 相同的限幅投影（`projection._project_args`，同一份数组/对象契约）；
   `result` 取 `content` 文本（diff 渲染为 `diff <path>` + 新文本），为空时回退 `rawOutput`
   的紧凑 JSON，最终整体限幅；`tool_updated.output` 同样是「到目前为止的累计内容」。
 
@@ -131,7 +135,9 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
   待答的权限请求。（`docs`/`schema`）
 * 宿主实现：`cancel()` 幂等，只发一次通知；run 的结论由宿主的取消标志决定（adapter 的
   cancel 只缩短等待）。**超时触发的收尾取消不算用户取消**：结论保持 `failed/timeout`，
-  不会因为 agent 回了 `cancelled` 而被改写成 `cancelled`。（`合成实测`）
+  不会因为 agent 回了 `cancelled` 而被改写成 `cancelled`。产品侧在终态为 `cancelled` 时
+  把未完成的工具卡片标为已取消（前端 `run-stream.mjs` 的既有行为），适配器不为凑规范
+  伪造额外的 `tool_call_update`。（`合成实测`）
 
 ## 2. 产品事件映射（实现口径）
 
@@ -146,6 +152,7 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
 | `plan` | `run_stage`（`stage: "plan"` + `entries`） | 条目限 20 条、每条 300 字符 |
 | `usage_update` | `usage_reported` | 见 §1.6；口径标注 `basis` |
 | `available_commands_update` | `kernel_status`（warning） | 记命令数与名称（限幅）；ACP 门禁一律拒绝 `/` 开头 prompt |
+| 适配器合成的回合边界（`session/prompt` 前后） | `turn_started` / `turn_finished` | ACP 没有 turn 更新；宿主补上这两个产品回合边界，让流式文本/思考块按产品既有语义关闭与渲染（见 §1.4） |
 | `session/prompt` 的 `stopReason` | 终态判定输入 | `end_turn`→正常；`max_tokens`→`finished/length`（交付不完整）；`max_turn_requests`→`finished/max_turn_requests`；`refusal`→`failed/model_error`；`cancelled`→取消路径；未知/缺字段→`failed/execution_error` |
 | `session/request_permission` | `kernel_status`（warning） | 不投影成交互，自动应答见 §1.7 |
 | 其余变体 | 不投影 | 一次性 `kernel_status` 提示，词表不变（前端不感知 harness 差异） |

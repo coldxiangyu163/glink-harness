@@ -130,6 +130,7 @@ def test_acp_run_projects_the_whole_lifecycle_and_the_report(tmp_path: Path) -> 
     # §4.1 mapping: every ACP update family has its product event.
     for expected in (
         "session_ready",
+        "turn_started",
         "thinking_delta",
         "assistant_delta",
         "run_stage",
@@ -140,6 +141,11 @@ def test_acp_run_projects_the_whole_lifecycle_and_the_report(tmp_path: Path) -> 
         "kernel_status",
     ):
         assert expected in types, expected
+    # The turn boundary frames make the product's stream model close and render
+    # the streamed blocks; they must bracket the deltas and precede the verdict.
+    assert types.index("turn_started") < types.index("thinking_delta")
+    assert types.index("assistant_delta") < types.index("turn_finished")
+    assert types.index("turn_finished") < types.index("run_finished")
 
     ready = payloads(events, "session_ready")[0]
     assert ready["harness"] == "acp"
@@ -163,6 +169,7 @@ def test_acp_run_projects_the_whole_lifecycle_and_the_report(tmp_path: Path) -> 
         "toolCallId": "call_1",
         "toolName": "bash",
         "args": {"command": "ls -la"},
+        "kind": "execute",
     }
     updated = payloads(events, "tool_updated")
     assert updated[0]["toolCallId"] == "call_1"

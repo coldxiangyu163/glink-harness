@@ -18,10 +18,14 @@ the same :class:`~pi_glink.redaction.StreamRedactor` the pi projector uses, so a
 credential split across two ACP chunks is withheld exactly like one split
 across two pi deltas.
 
-The projector is stateful for the length of one run. ``session/prompt``'s
-answer is delivered by the adapter as an ``acp_prompt_result`` frame;
-``session/request_permission``'s fail-closed answer as an ``acp_permission``
-frame. Both are translated here so the runner's event path stays harness-blind.
+The projector is stateful for the length of one run. The adapter delivers four
+synthetic frames this module translates: ``acp_turn_started`` /
+``acp_turn_finished`` (the prompt turn's boundaries — ACP has no update for
+them, but the product's stream needs them to close and render the streamed
+blocks), ``acp_prompt_result`` (``session/prompt``'s answer) and
+``acp_permission`` (the fail-closed permission answer). Everything else is a
+real ``session/update`` notification. Keeping the translation here lets the
+runner's event path stay harness-blind.
 """
 
 from __future__ import annotations
@@ -78,6 +82,15 @@ class AcpProjector:
     def project(self, frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         produced: list[tuple[str, dict[str, Any]]] = []
         frame_type = frame.get("type")
+        if frame_type == "acp_turn_started":
+            # The adapter's synthetic turn boundary: ACP has no update for it,
+            # but the product's stream model needs it to close and render the
+            # streamed blocks (front end stays harness-blind).
+            return [(events.TURN_STARTED, {})]
+        if frame_type == "acp_turn_finished":
+            produced.extend(self.flush())
+            produced.append((events.TURN_FINISHED, {}))
+            return produced
         if frame_type == "acp_prompt_result":
             # A turn boundary: release the withheld delta tail before the
             # terminal judgement is recorded.
@@ -198,16 +211,17 @@ def _agent_tool_call(
     name = _tool_name(update)
     if name:
         projector._tool_names[tool_call_id] = name
-    produced = [
-        (
-            events.TOOL_STARTED,
-            {
-                "toolCallId": tool_call_id,
-                "toolName": name,
-                "args": _project_args(update.get("rawInput")),
-            },
-        )
-    ]
+    payload: dict[str, Any] = {
+        "toolCallId": tool_call_id,
+        "toolName": name,
+        "args": _project_args(update.get("rawInput")),
+    }
+    kind = update.get("kind")
+    if isinstance(kind, str) and kind:
+        # The ACP tool category is card content (plan §4.1): keep it in the
+        # record without forwarding the raw frame.
+        payload["kind"] = kind
+    produced = [(events.TOOL_STARTED, payload)]
     if update.get("status") in _TERMINAL_TOOL_STATUS:
         produced.append((events.TOOL_FINISHED, _tool_finished_payload(update, projector)))
     return produced
@@ -336,14 +350,16 @@ def _usage_update(
 
 
 def _tool_name(update: Mapping[str, Any]) -> str:
-    """The best available tool label: programmatic name, kind, then title.
+    """The best available tool label: programmatic name, title, then kind.
 
-    ACP's ``title`` is human-readable and always present; ``name`` is the
-    unstable programmatic field and ``kind`` the category. The product tool
-    card keys on a stable name-like string, so the most programmatic value
-    wins and the title is the fallback (not the other way round).
+    ACP's ``title`` is the human-readable description and is always present;
+    ``name`` is the unstable programmatic field; ``kind`` is only a category
+    (dsh sends ``kind: "other"`` for every tool and puts the actual tool name
+    in ``title``). The product card keys on a name-like string, so the most
+    programmatic value wins, the title is the practical fallback, and the
+    category is the last resort that at least says what sort of tool ran.
     """
-    for key in ("name", "kind", "title"):
+    for key in ("name", "title", "kind"):
         value = update.get(key)
         if isinstance(value, str) and value:
             return value

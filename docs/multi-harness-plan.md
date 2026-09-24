@@ -147,6 +147,9 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 * **未投影的更新**：`user_message_chunk`、`current_mode_update`、`session_info_update` 等
   §4.1 未定义的变体不猜语义，按类型一次性记 `kernel_status` 提示；`max_turn_requests` 以原词
   进入 `stopReason`（前端目前只对 `length` 提示「交付不完整」）。
+* **回合边界（§4.1 补充）**：ACP 没有 turn 更新，适配器在 `session/prompt` 前后补发合成的
+  回合边界，投影为 `turn_started`/`turn_finished`，让流式文本/思考块按产品既有语义关闭与
+  渲染；产品事件词表与前端契约不变。
 
 ## 7. 风险与纪律
 

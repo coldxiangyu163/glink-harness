@@ -26,6 +26,8 @@ from pi_glink.events import (
     TOOL_FINISHED,
     TOOL_STARTED,
     TOOL_UPDATED,
+    TURN_FINISHED,
+    TURN_STARTED,
     USAGE_REPORTED,
 )
 from pi_glink.kernel.acp_execution import CLIENT_CAPABILITIES
@@ -238,6 +240,20 @@ def test_acp_client_close_terminates_a_stubborn_agent(tmp_path: Path) -> None:
 # -- projection: content ------------------------------------------------------
 
 
+# -- projection: turn boundaries and content ---------------------------------
+
+
+def test_turn_frames_close_the_streamed_blocks() -> None:
+    """ACP sends no turn updates; the adapter's synthetic frames supply them."""
+    projector = AcpProjector(SecretRedactor())
+    assert projector.project({"type": "acp_turn_started"}) == [(TURN_STARTED, {})]
+    assert _project(
+        projector,
+        {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "回答"}},
+    ) == [(ASSISTANT_DELTA, {"text": "回答"})]
+    assert projector.project({"type": "acp_turn_finished"}) == [(TURN_FINISHED, {})]
+
+
 def test_message_and_thought_chunks_project_to_deltas() -> None:
     projector = AcpProjector(SecretRedactor())
     assert _project(
@@ -313,7 +329,12 @@ def test_tool_call_lifecycle_projects_to_started_updated_finished() -> None:
     assert started == [
         (
             TOOL_STARTED,
-            {"toolCallId": "call_1", "toolName": "bash", "args": {"command": "ls -la"}},
+            {
+                "toolCallId": "call_1",
+                "toolName": "bash",
+                "args": {"command": "ls -la"},
+                "kind": "execute",
+            },
         )
     ]
     running = _project(
@@ -377,6 +398,24 @@ def test_tool_arguments_keep_the_shared_product_contract() -> None:
         },
     )
     assert produced[0][1]["args"] == _project_args(raw_input)
+
+
+def test_a_tool_call_without_a_programmatic_name_uses_the_title() -> None:
+    """dsh sends ``kind: "other"`` and puts the tool name in ``title``."""
+    projector = AcpProjector(SecretRedactor())
+    produced = _project(
+        projector,
+        {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call_5",
+            "title": "read_file",
+            "kind": "other",
+            "status": "pending",
+            "rawInput": {"path": "notes.md"},
+        },
+    )
+    assert produced[0][1]["toolName"] == "read_file"
+    assert produced[0][1]["kind"] == "other"
 
 
 def test_plan_projects_to_a_run_stage() -> None:
