@@ -18,6 +18,10 @@ from urllib.parse import urlsplit
 from .dotenv import parse_env_file
 
 EXECUTORS = ("inproc", "docker", "e2b")
+#: Kernel adapter families the host can drive. ``pi`` is the existing kernel
+#: (all three execution faces); ``acp`` is the ACP client family, which in M1
+#: runs on ``inproc`` only (see docs/multi-harness-plan.md).
+HARNESSES = ("pi", "acp")
 #: ``local`` keeps the single-user surface; ``multitenant`` requires the
 #: gateway-asserted identity material and a container/sandbox execution face.
 TENANCY_MODES = ("local", "multitenant")
@@ -69,6 +73,15 @@ class HostConfig:
     workspace_root: Path
     openai_base_url: str
     openai_model: str
+    #: Kernel adapter family for every run of this host: ``pi`` (default) or
+    #: ``acp``. A host-level, startup-frozen choice; M1 deliberately has no
+    #: per-run API/query parameter and no front-end surface for it.
+    harness: str = "pi"
+    #: Command line of the ACP agent process (``PI_GLINK_ACP_COMMAND``), e.g.
+    #: ``"dsh acp"``. Split with :func:`shlex.split` and executed without a
+    #: shell; frozen at startup so a run cannot be relabelled later. Only
+    #: consulted when ``harness`` is ``acp``.
+    acp_command: str = ""
     openai_api_key: str = field(repr=False, default="")
     context_window: int = _DEFAULT_CONTEXT_WINDOW
     max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS
@@ -229,6 +242,8 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     host = _text(values, "LOCAL_WEB_HOST", "127.0.0.1")
     port = _port(values, "LOCAL_WEB_PORT", _DEFAULT_PORT)
     executor = _text(values, "LOCAL_WEB_EXECUTOR", "inproc").lower()
+    harness = _text(values, "PI_GLINK_HARNESS", "pi").lower()
+    acp_command = _text(values, "PI_GLINK_ACP_COMMAND", "")
     tenancy_mode = _text(values, "PI_GLINK_TENANCY", "local").lower()
     auth_mode = _text(values, "PI_GLINK_AUTH_MODE", "gateway").lower()
     model_credentials = _text(values, "PI_GLINK_MODEL_CREDENTIALS", "tenant").lower()
@@ -236,6 +251,23 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     if executor not in EXECUTORS:
         raise ConfigError(
             f"LOCAL_WEB_EXECUTOR must be one of {', '.join(EXECUTORS)}; got {executor!r}"
+        )
+    if harness not in HARNESSES:
+        raise ConfigError(
+            f"PI_GLINK_HARNESS must be one of {', '.join(HARNESSES)}; got {harness!r}"
+        )
+    if harness == "acp" and not acp_command:
+        # Fail closed at startup: an ACP host with no agent command could only
+        # fail every run later, or (worse) fall back to pi and mislabel it.
+        raise ConfigError(
+            "PI_GLINK_HARNESS=acp 需要 PI_GLINK_ACP_COMMAND（ACP agent 的命令行）"
+        )
+    if harness == "acp" and executor != "inproc":
+        # M1 implements the ACP family on the in-process face only; the Docker
+        # and E2B transmission work is a separate milestone (M3), and silently
+        # running pi instead would misrepresent the run.
+        raise ConfigError(
+            "PI_GLINK_HARNESS=acp 目前只支持 LOCAL_WEB_EXECUTOR=inproc（docker/e2b 见 M3）"
         )
     if tenancy_mode not in TENANCY_MODES:
         raise ConfigError(
@@ -313,6 +345,8 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         host=host,
         port=port,
         executor=executor,
+        harness=harness,
+        acp_command=acp_command,
         pi_bin=_text(values, "PI_GLINK_PI_BIN", "pi"),
         agent_config_dir=agent_config_dir,
         session_dir=_path(values, "PI_CODING_AGENT_SESSION_DIR", data_root / "sessions"),
@@ -427,6 +461,19 @@ def validate_host_config(config: HostConfig) -> None:
         raise ConfigError(
             f"LOCAL_WEB_EXECUTOR must be one of {', '.join(EXECUTORS)}; got {config.executor!r}"
         )
+    if config.harness not in HARNESSES:
+        raise ConfigError(
+            f"PI_GLINK_HARNESS must be one of {', '.join(HARNESSES)}; got {config.harness!r}"
+        )
+    if config.harness == "acp":
+        if not config.acp_command:
+            raise ConfigError(
+                "PI_GLINK_HARNESS=acp 需要 PI_GLINK_ACP_COMMAND（ACP agent 的命令行）"
+            )
+        if config.executor != "inproc":
+            raise ConfigError(
+                "PI_GLINK_HARNESS=acp 目前只支持 LOCAL_WEB_EXECUTOR=inproc（docker/e2b 见 M3）"
+            )
     if config.tenancy_mode not in TENANCY_MODES:
         raise ConfigError(
             f"PI_GLINK_TENANCY must be one of {', '.join(TENANCY_MODES)}; got {config.tenancy_mode!r}"
