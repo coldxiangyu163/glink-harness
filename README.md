@@ -386,8 +386,8 @@ node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 26 个角�
 | `LOCAL_WEB_E2B_ACP_TEMPLATE` | `glink-acp-worker` | ACP + `e2b` 面换模板时（与 pi 面模板分开，同上） |
 | `PI_GLINK_BLUEPRINTS_DIR` | `<repo>/blueprints` | 蓝图模板放在别处时；目录缺失不是启动错误，只表示可用蓝图集合为空 |
 | `LOCAL_WEB_TASK_TIMEOUT_SECONDS` | `1800` | 单次 run 的整体超时（秒）；题型明显更长/更短时。E2B 沙箱寿命按它 + 300s 取值 |
-| `OPENAI_CONTEXT_WINDOW` | `400000` | 换到上下文窗口更小的 provider 时 |
-| `OPENAI_MAX_TOKENS` | `65536` | 换到输出上限更短的 provider 时 |
+| `OPENAI_CONTEXT_WINDOW` | `400000` | pi 面模型元数据的上下文窗口；provider 窗口更小时 |
+| `OPENAI_MAX_TOKENS` | `65536` | pi 面模型元数据的输出上限；provider 上限更短时 |
 
 ACP 族的送达通道、凭据注入与体积边界见 [ACP 集成笔记](docs/acp-integration-notes.md)；
 蓝图格式、准入与列举接口见 [会话蓝图](docs/blueprint-templates.md)。
