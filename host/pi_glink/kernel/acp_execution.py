@@ -707,8 +707,13 @@ class AcpExecutionAdapter(ExecutionAdapter):
         reaped the child, so its exit status is available now; it is attributed
         to the agent only when the teardown did not have to stop it -- a status
         produced by terminate/kill is the host's doing, not the agent's own.
+
+        The completion serves a decision that *is* the ``kernel_exit`` report:
+        when the driver's stream loss only surfaced during the teardown of an
+        already-decided timeout (or cancellation), the report is late and the
+        decided error text stays untouched.
         """
-        if exit_code is None or client.stopped_process:
+        if exit_code is None:
             return
         with self._outcome_lock:
             if self._kernel_exit_cause is None:
@@ -723,6 +728,8 @@ class AcpExecutionAdapter(ExecutionAdapter):
                     self.spec.run_id,
                     self._outcome.stop_reason,
                 )
+                return
+            if client.stopped_process:
                 return
             self._outcome.error = self._kernel_exit_message(exit_code)
 
