@@ -1031,6 +1031,12 @@ class AcpSandboxExecutionAdapter(AcpExecutionAdapter):
         )
         self._sandbox = sandbox
         self._on_identity = on_identity
+        #: The sandbox state-root recovery verdict (``None`` until the face's
+        #: ``recover_artifacts`` ran). It is published in the post-recovery
+        #: ``session_ready`` frame so a reader can see whether this run's state
+        #: root is available on the host for a follow-up; the admission gate
+        #: reads the recovered directory itself, never this frame alone.
+        self._state_recovered: bool | None = None
 
     def start(self) -> None:
         self._sandbox.start(timeout_seconds=self.spec.timeout_seconds + 300)
@@ -1040,6 +1046,11 @@ class AcpSandboxExecutionAdapter(AcpExecutionAdapter):
         if self._sandbox.sandbox_id and self._on_identity is not None:
             self._on_identity({"sandbox": self._sandbox.sandbox_id})
         self._sandbox.upload_home()
+        if self.spec.resume_session:
+            # The continuation's workspace half: the resumed agent works in the
+            # conversation's workspace (M7), so the deliverable it produced
+            # there travels into the new sandbox before the agent starts.
+            self._sandbox.upload_continuation()
         super().start()
 
     def session_info(self) -> SessionInfo | None:
@@ -1051,13 +1062,29 @@ class AcpSandboxExecutionAdapter(AcpExecutionAdapter):
         # which template it came from.
         payload["sandboxId"] = self._sandbox.sandbox_id
         payload["template"] = self._sandbox.template
+        if self._state_recovered is not None:
+            # Set once the state root has been recovered to the host (or the
+            # recovery failed): the durable
+            # ``acp-agent/recovered`` mirror is what a follow-up inherits.
+            payload["stateRootRecovered"] = self._state_recovered
         return SessionInfo(
             payload=payload, session_id=session.session_id, session_file=None
         )
 
     def recover_artifacts(self, destination: Path) -> ArtifactRecovery:
         files, failures = self._sandbox.recover_artifacts(destination)
-        return ArtifactRecovery(files=tuple(files), failures=tuple(failures))
+        # The sandbox destroys the agent state with it, so the state root is
+        # recovered in the same pre-teardown window as the workspace. A failed
+        # recovery publishes no recovered root, which is exactly the
+        # fail-closed refusal a follow-up then earns.
+        state = self._sandbox.recover_state()
+        self._state_recovered = state.ok
+        return ArtifactRecovery(
+            files=tuple(files),
+            failures=tuple(failures) + state.failures,
+            state_recovered=state.ok,
+            secrets=state.secrets,
+        )
 
     def close(self) -> CleanupReport:
         # Client first (stop the agent), then the sandbox. The base report

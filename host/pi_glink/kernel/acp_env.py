@@ -54,6 +54,19 @@ from .agent_env import PASSTHROUGH_ENV
 
 #: Per-run ACP agent directory inside the run directory.
 ACP_RUNTIME_DIRNAME = "acp-agent"
+#: The run's agent state root (``HOME``) below :data:`ACP_RUNTIME_DIRNAME`.
+ACP_HOME_DIRNAME = "home"
+#: A state root recovered from an E2B sandbox, below
+#: :data:`ACP_RUNTIME_DIRNAME`. Only the E2B face writes it, and only after the
+#: whole bounded recovery succeeded (see
+#: :meth:`~pi_glink.kernel.e2b_env.E2BAcpSandboxClient.recover_state`): the
+#: sandbox destroys the agent's own state with it, so the host needs its own
+#: copy before that happens — and the directory's existence is the durable
+#: "父状态根回收成功" fact the ACP admission gate reads. It is a separate root
+#: from :data:`ACP_HOME_DIRNAME` so the rendered credential copies (and, for a
+#: follow-up, the inherited state that was uploaded) are never confused with
+#: what the sandbox actually wrote.
+ACP_RECOVERED_DIRNAME = "recovered"
 #: Upper bound on one copied credential file. A credential store is small;
 #: a bigger file is refused instead of silently consumed/stored.
 CREDENTIAL_FILE_MAX_BYTES = 1 << 20
@@ -128,9 +141,11 @@ def prepare_acp_runtime(
     overwrite each other's agent state. ``operator_home`` is the host user's home
     a credential source's leading ``~`` expands against (never the run HOME).
 
-    ``inherit_from`` is the authorized parent run's ACP state root
-    (``<data_root>/runs/<parent>/acp-agent/home``) when this run continues that
-    parent's session. It is copied into this run's own HOME — the ACP analogue
+    ``inherit_from`` is the authorized parent run's ACP state root — its own
+    ``runs/<parent>/acp-agent/home`` on the in-process and Docker faces, or the
+    sandbox state root recovered to ``runs/<parent>/acp-agent/recovered`` on the
+    E2B face — when this run continues that parent's session. It is copied into
+    this run's own HOME — the ACP analogue
     of the pi face's sanitized session-file copy — after the fresh credentials
     are in place, and every configured credential destination is skipped: the
     child must render its own credential copy (so the run's redactor knows the
@@ -146,7 +161,7 @@ def prepare_acp_runtime(
             "PI_GLINK_HARNESS=acp 需要 PI_GLINK_ACP_COMMAND（ACP agent 的命令行）"
         )
     directory = Path(runtime_dir)
-    home = directory / "home"
+    home = directory / ACP_HOME_DIRNAME
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(directory, 0o700)

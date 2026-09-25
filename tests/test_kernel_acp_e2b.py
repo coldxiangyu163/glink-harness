@@ -35,7 +35,7 @@ import pytest
 from pi_glink.config import ConfigError, build_config
 from pi_glink.events import EventBus
 from pi_glink.kernel.acp_env import prepare_acp_runtime
-from pi_glink.kernel.acp_execution import AcpSandboxExecutionAdapter
+from pi_glink.kernel.acp_execution import RESUME_METHOD, AcpSandboxExecutionAdapter
 from pi_glink.kernel.e2b_env import (
     SANDBOX_ACP_HOME,
     SANDBOX_WORKSPACE,
@@ -62,6 +62,11 @@ def translate(sandbox_path: str, root: Path) -> Path:
     if not sandbox_path.startswith("/home/user"):
         raise AssertionError(f"unexpected sandbox path: {sandbox_path}")
     return root / relative
+
+
+def untranslate(real: Path, root: Path) -> str:
+    """The inverse of :func:`translate`: one real path as its sandbox path."""
+    return "/" + real.relative_to(root).as_posix()
 
 
 class _Info:
@@ -101,6 +106,7 @@ class FakeFiles:
         existed = real.is_dir()
         real.mkdir(parents=True, exist_ok=True)
         self._sandbox.made_dirs.append(path)
+        self._sandbox.operations.append(f"make_dir {path}")
         return not existed
 
     def write(self, path: str, content: Any, **_kwargs: Any) -> None:
@@ -111,6 +117,7 @@ class FakeFiles:
         data = content if isinstance(content, bytes) else str(content).encode("utf-8")
         real.write_bytes(data)
         self._sandbox.written[path] = data
+        self._sandbox.operations.append(f"write {path}")
 
     def read(self, path: str, format: str | None = None, **_kwargs: Any) -> Any:
         self._sandbox.reads.append(path)
@@ -122,12 +129,25 @@ class FakeFiles:
     def get_info(self, path: str, **_kwargs: Any) -> _Info:
         return _Info(self._real(path).stat().st_size)
 
-    def list(self, path: str, **_kwargs: Any) -> list[_Entry]:
+    def list(self, path: str, depth: int = 1, **_kwargs: Any) -> list[_Entry]:
         self._sandbox.listed.append(path)
+        if self._sandbox.list_failure is not None and path == SANDBOX_ACP_HOME:
+            raise OSError(self._sandbox.list_failure)
         real = self._real(path)
         if not real.is_dir():
             raise FileNotFoundError(path)
-        return [_Entry(f"{path.rstrip('/')}/{child.name}", self._sandbox.root) for child in sorted(real.iterdir())]
+        levels = depth if isinstance(depth, int) and depth >= 1 else 1
+
+        def walk(directory: Path, remaining: int) -> list[_Entry]:
+            found: list[_Entry] = []
+            for child in sorted(directory.iterdir()):
+                sandbox_path = untranslate(child, self._sandbox.root)
+                found.append(_Entry(sandbox_path, self._sandbox.root))
+                if remaining > 1 and child.is_dir() and not child.is_symlink():
+                    found.extend(walk(child, remaining - 1))
+            return found
+
+        return walk(real, levels)
 
 
 class _Result:
@@ -203,6 +223,7 @@ class FakeCommands:
             return self._spawn_agent(cmd, kwargs)
         self._sandbox.harden_command = cmd
         self._sandbox.harden_commands.append(cmd)
+        self._sandbox.operations.append(f"run {cmd}")
         # chmod and friends: the fake has no permissions to change.
         return _Result(0)
 
@@ -243,6 +264,7 @@ class FakeSandbox:
         sandbox_id: str = "fake-sandbox-id",
         report: str | None = "# 沙箱报告\n\n来自 ACP E2B 面。\n",
         write_failure: str | None = None,
+        list_failure: str | None = None,
     ) -> None:
         self.root = tmp_path / "sandbox-root"
         self.root.mkdir(parents=True, exist_ok=True)
@@ -262,7 +284,11 @@ class FakeSandbox:
         self.agent_argv: list[str] = []
         self.agent_process: subprocess.Popen[bytes] | None = None
         self.write_failure = write_failure
+        self.list_failure = list_failure
         self.files = FakeFiles(self)
+        #: Ordered filesystem/command operations, for ordering assertions
+        #: (``make_dir`` -> ``chmod 0700`` -> inherited upload -> 0600 harden).
+        self.operations: list[str] = []
         self.commands = FakeCommands(self)
         if report is not None:
             workspace = translate(SANDBOX_WORKSPACE, self.root)
@@ -646,34 +672,377 @@ def test_an_acp_run_finishes_on_the_sandbox_face(tmp_path: Path) -> None:
     assert sandbox_report.is_file()
 
 
-def test_acp_followups_are_refused_on_the_sandbox_face(tmp_path: Path) -> None:
-    """The sandbox destroys the agent state with it, so a follow-up is refused.
+# -- continuation across sandboxes (GLINK-ACP-13 / M8) ------------------------
+#
+# Original obligation (M7): the E2B face refused every ACP follow-up because the
+# sandbox destroyed the agent state with it. New obligation (M8): the run's
+# state root is recovered to the host before the sandbox is destroyed and the
+# follow-up inherits it into its own sandbox. The tests below pin the recovery
+# contract (bounded, whole-or-nothing, credential-aware), the restore order the
+# follow-up uploads it with, the admission matrix that keeps every other case
+# refused, and the full fake-SDK chain.
 
-    The E2B face recovers the workspace, not the agent's state root: the host
-    has nothing to inherit and a started sandbox could never resume. M7 fails
-    closed here (``session_unavailable``) instead of paying for a sandbox whose
-    resume must fail; recovering the sandbox state root is recorded as future
-    work in the integration notes.
+
+def _sandbox_sequence(
+    tmp_path: Path, sandboxes: list[FakeSandbox], *, report: str | None = None, **kwargs: Any
+):
+    """A ``sandbox_factory`` handing out a fresh fake sandbox per call."""
+
+    def factory(**_ignored: Any) -> FakeSandbox:
+        sandbox = FakeSandbox(
+            tmp_path, report=report, sandbox_id=f"fake-sandbox-{len(sandboxes) + 1}", **kwargs
+        )
+        sandboxes.append(sandbox)
+        return sandbox
+
+    return factory
+
+
+def _state_path(sandbox: FakeSandbox, relative: str) -> Path:
+    return translate(f"{SANDBOX_ACP_HOME}/{relative}", sandbox.root)
+
+
+def _payloads(store: RunStore, run_id: str, event_type: str) -> list[dict[str, Any]]:
+    events = [
+        json.loads(line)
+        for line in store.events_path(run_id).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    return [event["payload"] for event in events if event["type"] == event_type]
+
+
+def _assistant_text(store: RunStore, run_id: str) -> str:
+    return "".join(
+        str(payload.get("text") or "")
+        for payload in _payloads(store, run_id, "assistant_delta")
+    )
+
+
+def test_acp_followup_resumes_the_parent_session_across_sandboxes(tmp_path: Path) -> None:
+    """The full chain: first turn, bounded recovery, new sandbox, same session.
+
+    One sandbox per run (the follow-up really starts a new one), the parent's
+    state root really travelled host-ward before the first sandbox was killed,
+    the follow-up uploaded it into the new sandbox before starting the agent,
+    and the resumed answer carries the first turn's codename — which appears in
+    neither the follow-up's prompt nor a fresh state.
+    """
+    log = tmp_path / "agent.jsonl"
+    settings = {"FAKE_ACP_LOG": str(log), "FAKE_ACP_WRITE_REPORT": True}
+    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings))
+    sandboxes: list[FakeSandbox] = []
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(
+        config, EventBus(), store=store, sandbox_factory=_sandbox_sequence(tmp_path, sandboxes, report=None)
+    )
+
+    parent = manager.start("第一轮：请记住代号 REMEMBER:ZETA-7319，然后写报告")
+    parent_final = manager.wait(parent.run_id, timeout=120)
+    assert parent_final is not None and parent_final.status == FINISHED
+    assert parent_final.session_id == "fake-acp-session"
+
+    # The state root was recovered to the host before the sandbox was killed,
+    # and it is a mirror of what the agent wrote inside the sandbox.
+    parent_recovered = store.run_dir(parent.run_id) / "acp-agent" / "recovered"
+    recovered_state = json.loads((parent_recovered / "fake-acp-state.json").read_text(encoding="utf-8"))
+    assert recovered_state["remembered"] == "ZETA-7319"
+    assert sandboxes[0].killed is True
+
+    child = manager.start(
+        "RECALL 不要读文件，只用一行复述上一个会话里要求记住的代号",
+        parent_run_id=parent.run_id,
+    )
+    child_final = manager.wait(child.run_id, timeout=120)
+    assert child_final is not None and child_final.status == FINISHED, child_final.error
+
+    # A new sandbox carried the follow-up; the session id is the parent's own.
+    assert len(sandboxes) == 2
+    assert sandboxes[1].sandbox_id == "fake-sandbox-2"
+    assert child_final.session_id == parent_final.session_id
+    # Original obligation (ACP first cut): every run got its own workspace. New
+    # obligation (M7): the session records its cwd, so the continuation reuses
+    # the conversation's workspace and the child's artifacts stay its own.
+    assert Path(child.workspace) == Path(parent.workspace)
+
+    # Restore order (M3b): the sandbox state root is made 0700 *before* the
+    # inherited files are written, and the fresh 0600 harden covers them.
+    inherited_target = f"{SANDBOX_ACP_HOME}/fake-acp-state.json"
+    operations = sandboxes[1].operations
+    assert f"make_dir {SANDBOX_ACP_HOME}" in operations
+    assert f"run chmod 0700 {SANDBOX_ACP_HOME}" in operations
+    assert f"write {inherited_target}" in operations
+    assert operations.index(f"run chmod 0700 {SANDBOX_ACP_HOME}") < operations.index(
+        f"write {inherited_target}"
+    )
+    assert sandboxes[1].written[inherited_target] == (
+        sandboxes[0].root / "home/user/acp/home/fake-acp-state.json"
+    ).read_bytes()
+    assert inherited_target in sandboxes[1].harden_commands[-1]
+    assert sandboxes[1].command_kwargs["envs"]["HOME"] == SANDBOX_ACP_HOME
+    # The conversation's workspace half travelled too: the prior deliverable is
+    # in the new sandbox before the agent starts (the pi face does the same).
+    parent_report = (store.run_dir(parent.run_id) / "artifacts" / "report.md").read_bytes()
+    assert sandboxes[1].written[f"{SANDBOX_WORKSPACE}/report.md"] == parent_report
+
+    # The follow-up's own record proves the continuation.
+    ready = _payloads(store, child.run_id, "session_ready")
+    assert ready[0]["sandboxId"] == "fake-sandbox-2"
+    assert ready[0]["resumed"] is True
+    assert ready[0]["resumeMethod"] == RESUME_METHOD
+    assert ready[-1]["stateRootRecovered"] is True
+    noticed = [
+        payload
+        for payload in _payloads(store, child.run_id, "kernel_status")
+        if payload.get("message") == "acp_session_resumed"
+    ]
+    assert len(noticed) == 1
+    # Continuity: the answer carries the first turn's codename, and a fresh
+    # session (or the child's own prompt) could not produce it.
+    assert "REMEMBERED:ZETA-7319" in _assistant_text(store, child.run_id)
+    assert "ZETA-7319" not in child.prompt
+    assert "ZETA-7319" not in str(_payloads(store, child.run_id, "session_ready")[0])
+
+    # The child's own state root is recovered too, so a third turn can continue
+    # the same conversation; the cleanup acted on the two known sandbox ids.
+    child_recovered = store.run_dir(child.run_id) / "acp-agent" / "recovered"
+    child_state = json.loads((child_recovered / "fake-acp-state.json").read_text(encoding="utf-8"))
+    assert child_state["sessionId"] == "fake-acp-session"
+    assert [sandbox.killed for sandbox in sandboxes] == [True, True]
+    grandfather = manager.start("RECALL 复述代号", parent_run_id=child.run_id)
+    grandfather_final = manager.wait(grandfather.run_id, timeout=120)
+    assert grandfather_final is not None and grandfather_final.status == FINISHED
+    assert grandfather_final.session_id == parent_final.session_id
+    assert len(sandboxes) == 3 and sandboxes[2].killed is True
+
+    entries = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [entry["event"] for entry in entries].count("session_new") == 1
+    assert [entry["event"] for entry in entries].count("session_resume") == 2
+
+
+def test_acp_followup_refused_when_the_state_recovery_failed(tmp_path: Path) -> None:
+    """A failed recovery leaves nothing to inherit, so the follow-up stays refused.
+
+    The sandbox destroys the state with it; the host records the failure and
+    publishes no recovered root. The refusal happens before a second sandbox is
+    created — the host does not pay for a resume it knows cannot work.
     """
     settings = {"FAKE_ACP_WRITE_REPORT": True}
     config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings))
     sandboxes: list[FakeSandbox] = []
-
-    def factory(**_kwargs: Any) -> FakeSandbox:
-        sandbox = FakeSandbox(tmp_path, report=None)
-        sandboxes.append(sandbox)
-        return sandbox
-
     store = RunStore(config.data_root / "runs")
-    manager = RunManager(config, EventBus(), store=store, sandbox_factory=factory)
+    manager = RunManager(
+        config,
+        EventBus(),
+        store=store,
+        sandbox_factory=_sandbox_sequence(tmp_path, sandboxes, report=None, list_failure="state listing broke"),
+    )
     record = manager.start("第一轮")
     final = manager.wait(record.run_id, timeout=120)
     assert final is not None and final.status == FINISHED
 
+    # The failure is recorded honestly in the run's terminal frame, the
+    # post-recovery frame carries the negative verdict, and no recovered root
+    # (nor a leftover staging directory) exists.
+    meta = json.loads((store.run_dir(record.run_id) / "meta.json").read_text(encoding="utf-8"))
+    assert meta["status"] == FINISHED
+    ready = _payloads(store, record.run_id, "session_ready")
+    assert ready[-1]["stateRootRecovered"] is False
+    run_acp_dir = store.run_dir(record.run_id) / "acp-agent"
+    assert not (run_acp_dir / "recovered").exists()
+    assert not (run_acp_dir / ".recovered.staging").exists()
+
+    before = len(store.list(limit=None))
     with pytest.raises(FollowupUnavailable) as excinfo:
         manager.start("追问", parent_run_id=record.run_id)
     assert excinfo.value.code == "session_unavailable"
+    assert len(store.list(limit=None)) == before
     assert len(sandboxes) == 1, "refusal happens before a second sandbox is created"
+
+
+def test_state_recovery_bounds_refuse_the_whole_mirror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any bound violation refuses the follow-up instead of truncating the state.
+
+    The bounds are the inheritance bounds (one file / file count / total), so a
+    state root that would be undeliverable to the next sandbox is refused at
+    the source. A violation must leave no recovered root at all.
+    """
+    settings = {"FAKE_ACP_WRITE_REPORT": True}
+    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings))
+    for constant, value, seed in (
+        ("INHERIT_MAX_FILE_BYTES", 1024, {"big.bin": b"x" * 4096}),
+        ("INHERIT_MAX_FILES", 1, {"a.bin": b"a", "b.bin": b"b"}),
+        ("INHERIT_MAX_TOTAL_BYTES", 16, {"a.bin": b"a" * 40}),
+    ):
+        monkeypatch.setattr(f"pi_glink.kernel.e2b_env.{constant}", value)
+        sandboxes: list[FakeSandbox] = []
+
+        class SeedingFactory:
+            """A sandbox whose state root already holds the seeded entries.
+
+            ``upload_home`` only writes the host-rendered files, so entries
+            that exist before the run are exactly extra sandbox state the
+            recovery has to judge — the same shape a long agent session has.
+            """
+
+            def __call__(self, **_kwargs: Any) -> FakeSandbox:
+                sandbox = FakeSandbox(
+                    tmp_path, report=None, sandbox_id=f"fake-sandbox-{len(sandboxes) + 1}"
+                )
+                for name, data in seed.items():
+                    target = translate(f"{SANDBOX_ACP_HOME}/{name}", sandbox.root)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(data)
+                sandboxes.append(sandbox)
+                return sandbox
+
+        store = RunStore(config.data_root / f"runs-{constant}")
+        manager = RunManager(config, EventBus(), store=store, sandbox_factory=SeedingFactory())
+        record = manager.start(f"第一轮-{constant}")
+        final = manager.wait(record.run_id, timeout=120)
+        assert final is not None and final.status == FINISHED
+        run_acp_dir = store.run_dir(record.run_id) / "acp-agent"
+        assert not (run_acp_dir / "recovered").exists(), constant
+        assert not (run_acp_dir / ".recovered.staging").exists(), constant
+        # The failure is recorded, and it is the bound (not some other reason),
+        # that refused the mirror.
+        failures = [
+            event["payload"]["artifactFailures"]
+            for event in (
+                json.loads(line)
+                for line in store.events_path(record.run_id).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            )
+            if event["type"] == "run_finished"
+        ]
+        assert failures and any("上限" in item for item in failures[-1]), (constant, failures)
+        with pytest.raises(FollowupUnavailable) as excinfo:
+            manager.start("追问", parent_run_id=record.run_id)
+        assert excinfo.value.code == "session_unavailable"
+        assert len(sandboxes) == 1
+
+
+def test_inherited_state_secrets_join_the_child_redaction_boundary(tmp_path: Path) -> None:
+    """A credential-shaped value in the sandbox state is masked in the child.
+
+    The value is not one of the operator's configured credentials: the host
+    only learns it from the recovered sandbox state (and the follow-up's
+    inheritance scan). The fake agent echoes it on ``RECALL``; the child's
+    stream must show no readable copy. The recovered state files themselves are
+    not rewritten — that would corrupt the session a resume is meant to
+    continue.
+    """
+    inherited_secret = "sk-live-inherited-credential-0123456789"
+    log = tmp_path / "agent.jsonl"
+    settings = {"FAKE_ACP_LOG": str(log), "FAKE_ACP_WRITE_REPORT": True}
+    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings))
+    sandboxes: list[FakeSandbox] = []
+
+    class SeedingFactory:
+        def __call__(self, **_kwargs: Any) -> FakeSandbox:
+            sandbox = FakeSandbox(
+                tmp_path, report=None, sandbox_id=f"fake-sandbox-{len(sandboxes) + 1}"
+            )
+            target = translate(f"{SANDBOX_ACP_HOME}/fake-acp-state.json", sandbox.root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"remembered": inherited_secret}), encoding="utf-8")
+            sandboxes.append(sandbox)
+            return sandbox
+
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store=store, sandbox_factory=SeedingFactory())
+    parent = manager.start("第一轮：不用记住任何东西，直接写报告")
+    parent_final = manager.wait(parent.run_id, timeout=120)
+    assert parent_final is not None and parent_final.status == FINISHED
+    recovered = store.run_dir(parent.run_id) / "acp-agent" / "recovered" / "fake-acp-state.json"
+    assert inherited_secret in recovered.read_text(encoding="utf-8")
+
+    child = manager.start("RECALL 复述代号", parent_run_id=parent.run_id)
+    child_final = manager.wait(child.run_id, timeout=120)
+    assert child_final is not None and child_final.status == FINISHED
+    raw_events = store.events_path(child.run_id).read_text(encoding="utf-8")
+    assert inherited_secret not in raw_events
+    assert "[REDACTED]" in raw_events
+    assert inherited_secret not in _assistant_text(store, child.run_id)
+
+
+def test_acp_e2b_followup_admission_matrix(tmp_path: Path) -> None:
+    """Every e2b refusal besides the admitted case stays in force.
+
+    * no declared continuation capability: refused before a sandbox exists;
+    * a parent that already has a follow-up turn (not the latest turn);
+    * a missing recovered state root (the parent record is forged to look
+      resumable): refused, never inherited from an absent root.
+    """
+    settings = {"FAKE_ACP_WRITE_REPORT": True}
+    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings))
+    store = RunStore(config.data_root / "runs")
+    sandboxes: list[FakeSandbox] = []
+    manager = RunManager(
+        config, EventBus(), store=store, sandbox_factory=_sandbox_sequence(tmp_path, sandboxes, report=None)
+    )
+    parent = manager.start("第一轮")
+    assert manager.wait(parent.run_id, timeout=120) is not None
+    child = manager.start("追问", parent_run_id=parent.run_id)
+    assert manager.wait(child.run_id, timeout=120) is not None
+
+    # Not the latest turn: the parent already has a follow-up.
+    with pytest.raises(FollowupUnavailable) as excinfo:
+        manager.start("再追问", parent_run_id=parent.run_id)
+    assert excinfo.value.code == "stale_run"
+
+    # Missing recovered root: a parent that never recovered it is refused even
+    # when the capability and session facts look resumable.
+    import shutil
+
+    shutil.rmtree(store.run_dir(child.run_id) / "acp-agent" / "recovered")
+    with pytest.raises(FollowupUnavailable) as excinfo:
+        manager.start("追问", parent_run_id=child.run_id)
+    assert excinfo.value.code == "session_unavailable"
+    assert len(sandboxes) == 2, "refusals happen before a further sandbox exists"
+
+    # No continuation capability in the parent's recorded matrix: refused.
+    no_resume = {
+        "FAKE_ACP_WRITE_REPORT": True,
+        "FAKE_ACP_CAPABILITIES": {"loadSession": False, "sessionCapabilities": {}},
+    }
+    config2 = make_config(
+        tmp_path,
+        PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, no_resume, name="no-resume.json"),
+        LOCAL_WEB_DATA_ROOT=str(tmp_path / "capability-data"),
+    )
+    store2 = RunStore(config2.data_root / "runs")
+    manager2 = RunManager(config2, EventBus(), store=store2, sandbox_factory=_sandbox_sequence(tmp_path, []))
+    parent2 = manager2.start("第一轮")
+    assert manager2.wait(parent2.run_id, timeout=120) is not None
+    before = len(store2.list(limit=None))
+    with pytest.raises(FollowupUnavailable) as excinfo:
+        manager2.start("追问", parent_run_id=parent2.run_id)
+    assert excinfo.value.code == "session_unavailable"
+    assert len(store2.list(limit=None)) == before
+
+
+def test_recovery_never_mirrors_a_path_outside_the_state_root() -> None:
+    """Sandbox entry paths are validated, never trusted.
+
+    A recursive listing is untrusted input: a path that is not exactly below
+    the sandbox state root refuses the whole recovery (``None``) instead of
+    being re-interpreted by the host's path model.
+    """
+    from pi_glink.kernel.e2b_env import _state_relative
+
+    assert _state_relative(f"{SANDBOX_ACP_HOME}/.dsh/sessions/a.json") == ".dsh/sessions/a.json"
+    for hostile in (
+        "/home/user/workspace/report.md",
+        f"{SANDBOX_ACP_HOME}/../escape",
+        f"{SANDBOX_ACP_HOME}/a/../../escape",
+        f"{SANDBOX_ACP_HOME}/a\\b",
+        f"{SANDBOX_ACP_HOME}/",
+        f"{SANDBOX_ACP_HOME}",
+        "",
+    ):
+        assert _state_relative(hostile) is None, hostile
 
 
 def test_the_credential_value_stays_in_the_sandbox_file(tmp_path: Path) -> None:
