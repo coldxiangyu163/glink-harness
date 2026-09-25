@@ -5,7 +5,7 @@
 本文记录「从单一 pi 内核走向多 harness 平台」的方向决定、目标架构、复用策略与里程碑。
 状态（2026-09-25）：方向已经用户确认；**M1（GLINK-ACP-01）已完成合成验证**；
 **M2（GLINK-ACP-02）已完成真实冒烟**：`dsh --profile acp`（dsh 0.1.5-rc.3）与
-`codex-acp`（@zed-industries/codex-acp 0.16.0）各完成真实 initialize/session/new 握手，并经
+`codex-acp`（@zed-industries/codex-acp 0.16.0，M3a 起后继包 @agentclientprotocol/codex-acp）各完成真实 initialize/session/new 握手，并经
 宿主 HTTP API 各跑一次最小真实研究 run（流式事件、终态、`report.md` 回收全部验证）；
 system prompt 送达通道与每 run 凭据注入已实现。逐条实测事实、能力矩阵与权限决策见
 [ACP 集成笔记](acp-integration-notes.md) §4，证据在 `docs/evidence/acp-m2-*.txt`。
@@ -33,7 +33,13 @@ dev 模板重建（docker 与 e2b 各加 claude 双包钉版层 + 无模型握�
 状态目录落点实测、权限形态（真实 run 0 请求，不启用白名单）、镜像与 dev 模板加
 opencode 钉版层并完成容器/沙箱握手；docker 面另用刷新后的凭据副本跑通一次最小真实 run
 （只读挂载使刷新写回不可用，有效期内无需它）。详见 [ACP 集成笔记](acp-integration-notes.md) §8
-与 `docs/evidence/acp-m5-opencode-*.txt`。ACP 续接仍属后续里程碑。
+与 `docs/evidence/acp-m5-opencode-*.txt`。**M6（GLINK-ACP-08）已完成**（2026-09-25）：
+claude 适配器迁到后继包 `@agentclientprotocol/claude-agent-acp@0.81.2`（入口
+`claude-agent-acp`）——inproc 握手与能力矩阵重新实测、settings env 凭据形态在新版成立
+（不再需要 `CLAUDE_CODE_EXECUTABLE` 绕行，该通道仍可用）、两次 inproc 最小真实 run
+（原生通道与旧通道各一次）通过；镜像与 dev 模板换后继钉版层并完成容器/沙箱握手；
+codex 侧旧包引用收尾清零。详见 [ACP 集成笔记](acp-integration-notes.md) §9 与
+`docs/evidence/acp-m6-migration-*.txt`。ACP 续接仍属后续里程碑。
 宿主默认 harness 仍是 `pi`，ACP 族只在显式配置下启用，执行面已覆盖 inproc / docker / e2b；
 本文是该方向的事实源：实现与本文出现偏差时回写本文，而不是让代码与文档各自漂移。
 
@@ -76,7 +82,7 @@ HarnessAdapter（抽象随 M1 落地）
 ├─ pi 族   — 现有 kernel/ 原样：rpc（双向 stdio NDJSON，inproc+docker 共用）、
 │            json（单向流，e2b）；作为其它族的参照系与回归基线
 ├─ ACP 族  — 一次 ACP client（JSON-RPC over stdio）覆盖：
-│            dsh 原生 acp server、claude-code-acp、codex-acp（@zed-industries/codex-acp）、
+│            dsh 原生 acp server、claude-agent-acp、codex-acp（@agentclientprotocol/codex-acp）、
 │            gemini --acp、opencode；适配器进程与 agent 同容器/沙箱，stdio 桥接
 └─ SDK 直连族（可选，暂不建）— 如 claude-agent-sdk Python 进程内集成
 ```
@@ -120,7 +126,9 @@ Write/Edit（它的权限请求不带 tool kind，宿主按同一 `toolCallId` �
 请求继续拒绝；决定、机制与真实 run 证据见
 [ACP 集成笔记](acp-integration-notes.md) §7.4。M5 接入 opencode 时反向确认了"先实测再决定"：
 opencode 的真实 run 在 `webfetch`/`apply_patch` 上 0 条请求，**不为它启用白名单**（默认
-fail-closed 不变），源码里请求自带 `kind` 的形态与触发面记在集成笔记 §8.4。
+fail-closed 不变），源码里请求自带 `kind` 的形态与触发面记在集成笔记 §8.4。M6 迁移后重测：
+claude-agent-acp 0.81.2 的权限请求**自带 `kind`**（两次冒烟 `toolKindSource=request`），
+M4 的“无 kind 请求 + 同 `toolCallId` 回查”兼容分支保留（集成笔记 §9.4）。
 
 ### 4.3 准入与门禁
 
@@ -160,13 +168,16 @@ M4 补上 claude-code-acp 的凭据形态：它的登录态在本机来自 `~/.c
 [ACP 集成笔记](acp-integration-notes.md) §7.3。M5 补上 opencode：凭据就是文件
 `~/.local/share/opencode/auth.json`（OAuth `access`/`refresh`，按精确字段名并入 redactor），
 每 run 落在 `HOME/.local/share/opencode/auth.json`（0600），docker 面再叠一层嵌套只读挂载、
-e2b 面在沙箱内 0600 加固——同一套机制，没有为它新增通道；见集成笔记 §8.3。
+e2b 面在沙箱内 0600 加固——同一套机制，没有为它新增通道；见集成笔记 §8.3。M6 迁移
+claude 适配器到后继包 `@agentclientprotocol/claude-agent-acp@0.81.2` 后重测：settings env
+派生在新版仍成立（原生 cli 2.1.280 认它），`CLAUDE_CODE_EXECUTABLE` 不再是必选项但
+仍受支持；见集成笔记 §9.3。
 
 ## 5. 开源复用策略
 
 | 项目 | 复用方式 | 约束 |
 |---|---|---|
-| ACP 适配器（claude-code-acp、@zed-industries/codex-acp、dsh acp） | 作为**钉版外部依赖**接入（npm 包/二进制），记录版本、来源、license | 版本钉死 + 冒烟 + 每 harness 一份集成笔记（沿用 pi-boundary 纪律）；适配器缺陷不改对方源码，反馈上游或换版本 |
+| ACP 适配器（claude-agent-acp、@agentclientprotocol/codex-acp、dsh acp） | 作为**钉版外部依赖**接入（npm 包/二进制），记录版本、来源、license | 版本钉死 + 冒烟 + 每 harness 一份集成笔记（沿用 pi-boundary 纪律）；适配器缺陷不改对方源码，反馈上游或换版本 |
 | vibe-kanban（BloopAI，已停摆转社区维护） | **只读借鉴**：`crates/executors` 的 per-agent normalize 实现是事件归一化字典 | 不引入运行时依赖 |
 | 官方 SDK（claude-agent-sdk Python、@openai/codex-sdk TS） | SDK 直连族的候选（暂不建）；其事件定义作为投影语义参照 | Python SDK 才可进程内；TS SDK 仅参考 |
 | VibeKit / OpenHands / terminal-bench / gate4agent | 形态与传输矩阵的参照证据 | 不引入 |
@@ -185,6 +196,7 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 | M3b | e2b 执行面：双向 stdio（`stdin=True` + `send_stdin`，SDK 2.x 已具备）帧完整性实测先行；模板钉版；`harness=acp + executor=e2b` 的启动拒绝随之解除 | e2b smoke | **已完成**（2026-09-25）：帧完整性正面、dev 模板 `glink-acp-worker` 构建+自检、两 agent 沙箱内握手、dsh 最小真实 run（report.md 与沙箱按 id 无残留）；实测见 [ACP 集成笔记](acp-integration-notes.md) §6，证据 `docs/evidence/acp-m3-e2b-*.txt` |
 | M4（GLINK-ACP-05） | claude-code-acp 接入（`@zed-industries/claude-code-acp@0.16.2`）；能力矩阵补齐；每 run 凭据与首启形态；权限最小白名单；镜像/dev 模板加 claude 双包钉版层 | inproc 握手 + 一次最小真实 run（流式/终态/report.md/清理）；容器与沙箱无模型握手自检；`bash scripts/check.sh` 全绿 | **已完成**（2026-09-25）：inproc 握手与真实 run 通过；docker 镜像重建后三个 agent 容器内握手（codex-acp 无凭据属预期）；e2b dev 模板重建后沙箱握手；docker/e2b 的真实模型 run 无 API key 属预期阻塞。详见 [ACP 集成笔记](acp-integration-notes.md) §7，证据 `docs/evidence/acp-m4-claude-*.txt` |
 | M5（GLINK-ACP-06） | opencode 接入（`opencode-ai@1.18.32`，入口 `opencode acp`）：inproc 握手与能力矩阵；每 run `auth.json` 凭据与状态目录；权限形态与决策；镜像/dev 模板加 opencode 钉版层 | inproc 握手 + 一次最小真实 run（流式/终态/report.md/清理）；容器与沙箱无模型握手自检；`bash scripts/check.sh` 全绿 | **已完成**（2026-09-25）：inproc 与 docker 面各一次最小真实 run 通过（均 0 权限请求），凭据/状态目录、镜像重建与容器挂载契约、dev 模板沙箱握手均已实测。详见 [ACP 集成笔记](acp-integration-notes.md) §8，证据 `docs/evidence/acp-m5-opencode-*.txt` |
+| M6（GLINK-ACP-08） | claude 适配器迁到后继包 `@agentclientprotocol/claude-agent-acp@0.81.2`（入口 `claude-agent-acp`，旧包 `@zed-industries/claude-code-acp@0.16.2` 被 npm 标记 renamed）；codex 旧包引用收尾清零；镜像/dev 模板换后继钉版层；集成笔记与 plan 回写 | inproc 握手与能力矩阵对照（逐条记差异）；settings env 凭据形态结论；≤2 次 inproc 最小真实 run；镜像与 dev 模板重建 + 容器/沙箱握手；`bash scripts/check.sh` 全绿；钉版边界测试同步（原义务/新义务注释） | **已完成**（2026-09-25）：两次 inproc 真实 run 通过（原生通道与 `CLAUDE_CODE_EXECUTABLE` 通道）、settings env 派生在新版成立、镜像/dev 模板重建后握手通过、`git grep` 旧包引用清零（历史文档条目逐条说明）。详见 [ACP 集成笔记](acp-integration-notes.md) §9，证据 `docs/evidence/acp-m6-migration-*.txt` |
 
 每个里程碑独立验收、独立提交边界；里程碑之间允许因实测结论回写本文。
 
