@@ -182,6 +182,14 @@ class AcpProjector:
         option_id = str(frame.get("optionId") or "")
         option_kind = str(frame.get("optionKind") or "")
         tool_kind = str(frame.get("toolKind") or tool.get("kind") or "")
+        # Where the kind came from: the request itself, or the ``tool_call``
+        # notification the agent sent for the same ``toolCallId``. The
+        # distinction is recorded because it is the fact that makes a
+        # kind-based allowlist usable for agents that omit ``kind`` in the
+        # permission request (claude-code-acp 0.16.2, M4).
+        tool_kind_source = str(
+            frame.get("toolKindSource") or ("request" if tool_kind else "")
+        )
         if decision == "allowed":
             # The run was explicitly given an allowlist; the answer is still
             # recorded (an allowed tool is a fact the operator must be able to
@@ -195,6 +203,8 @@ class AcpProjector:
             detail += f"；tool={title or tool_call_id}"
         if tool_kind:
             detail += f"；kind={tool_kind}"
+            if tool_kind_source == "tool_call":
+                detail += "（来自同一 toolCallId 的 tool_call 通知）"
         if option_id or option_kind:
             detail += f"；option={option_id}({option_kind})"
         payload: dict[str, Any] = {
@@ -209,6 +219,8 @@ class AcpProjector:
             payload["toolTitle"] = title
         if tool_kind:
             payload["toolKind"] = tool_kind
+        if tool_kind_source:
+            payload["toolKindSource"] = tool_kind_source
         if option_id:
             payload["optionId"] = option_id
         if option_kind:

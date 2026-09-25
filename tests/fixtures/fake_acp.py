@@ -37,6 +37,14 @@ Prompt markers select the terminal result:
 ``SECRET``             streams ``secret`` in small chunks
 ``NONUPDATE``          one unmapped update type and one non-text content chunk
 =====================  ======================================================
+
+The permission-request order is selectable because real agents differ:
+``FAKE_ACP_PERMISSION`` asks before the ``tool_call`` notification for
+``call_1`` (the M1 order), while ``FAKE_ACP_PERMISSION_AFTER_TOOL_CALL`` asks
+after it -- the order claude-code-acp 0.16.2 uses (measured in M4), where the
+request omits ``toolCall.kind`` but the notification already published it.
+``FAKE_ACP_TOOL_CALL_KIND`` overrides the kind of that notification (default
+``execute``).
 """
 
 from __future__ import annotations
@@ -186,6 +194,13 @@ def _text_chunk(kind: str, text: str) -> dict:
 
 
 def prompt_updates(text: str) -> list[dict]:
+    """The notification sequence one prompt produces.
+
+    ``FAKE_ACP_TOOL_CALL_KIND`` sets the ACP kind announced for ``call_1``
+    (default ``execute``), so a test can pair the published kind with a
+    permission request that omits its own ``kind``.
+    """
+    tool_call_kind = str(setting("FAKE_ACP_TOOL_CALL_KIND", "execute") or "")
     thought = "先看目录结构"
     answer = "我来看一下工作区。"
     if flag("FAKE_ACP_SEPARATORS"):
@@ -207,7 +222,7 @@ def prompt_updates(text: str) -> list[dict]:
             "toolCallId": "call_1",
             "title": "运行 ls -la",
             "name": "bash",
-            "kind": "execute",
+            **(({"kind": tool_call_kind}) if tool_call_kind else {}),
             "status": "pending",
             "rawInput": {"command": "ls -la"},
         },
@@ -333,6 +348,10 @@ def run_prompt(request: dict, params: dict) -> None:
         None,
     )
     permission_enabled = flag("FAKE_ACP_PERMISSION")
+    permission_after_tool_call = flag("FAKE_ACP_PERMISSION_AFTER_TOOL_CALL")
+    # The published ``tool_call`` must reach the client before a permission
+    # request that relies on it, so that one update is never buffered.
+    ask_after_here = permission_enabled and permission_after_tool_call
     chunked = flag("FAKE_ACP_CHUNKED")
     buffered: list[dict] = []
 
@@ -354,14 +373,19 @@ def run_prompt(request: dict, params: dict) -> None:
     for index, update in enumerate(updates):
         if _cancel.is_set():
             break
-        if index == permission_index and permission_enabled:
+        if index == permission_index and permission_enabled and not permission_after_tool_call:
             flush_buffered()
             ask_permission()
         if chunked and len(buffered) < 3:
-            buffered.append(update)
-            continue
+            if index == permission_index and ask_after_here:
+                flush_buffered()
+            else:
+                buffered.append(update)
+                continue
         flush_buffered()
         notify("session/update", {"sessionId": session_id(), "update": update})
+        if index == permission_index and permission_enabled and permission_after_tool_call:
+            ask_permission()
         time.sleep(0.002)
     flush_buffered()
     if flag("FAKE_ACP_WRITE_REPORT"):

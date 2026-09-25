@@ -231,6 +231,29 @@ def test_acp_run_projects_the_whole_lifecycle_and_the_report(tmp_path: Path) -> 
     assert not (store.run_dir(record.run_id) / "pi-agent").exists()
 
 
+def test_acp_initialize_identifies_the_client_with_a_version(tmp_path: Path) -> None:
+    """The client's ``clientInfo`` carries both required fields.
+
+    Original obligation (M1): the client introduced itself by name; ``version``
+    was informational and omitted. New obligation (M4): ACP's ``Implementation``
+    declares both fields, and claude-code-acp 0.16.2 validates the initialize
+    params strictly -- a ``clientInfo`` without ``version`` is answered with
+    ``-32602 Invalid params`` before any session exists (measured in M4), so
+    the host sends its own version and this regression pins it.
+    """
+    from pi_glink import __version__ as host_version
+
+    log = tmp_path / "agent.jsonl"
+    _config, store, manager = build_manager(tmp_path, {"FAKE_ACP_LOG": str(log)})
+    record = manager.start("检查 initialize 的 clientInfo")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FINISHED
+    initialize = next(
+        entry for entry in read_log(log) if entry["event"] == "initialize"
+    )
+    assert initialize["clientInfo"] == {"name": "pi-glink", "version": host_version}
+
+
 def test_acp_usage_updates_replace_the_total_instead_of_summing(tmp_path: Path) -> None:
     settings = {"FAKE_ACP_WRITE_REPORT": True}
     _config, store, manager = build_manager(tmp_path, settings)
@@ -503,6 +526,91 @@ def test_acp_permission_allowlist_refuses_a_kindless_request_when_kinds_are_set(
         entry for entry in read_log(log) if entry["event"] == "permission_outcome"
     )
     assert outcome["outcome"] == {"outcome": "selected", "optionId": "reject-once"}
+
+
+def test_acp_permission_allowlist_resolves_the_kind_published_by_the_agent(
+    tmp_path: Path,
+) -> None:
+    """The kind from the agent's own ``tool_call`` notice classifies the request.
+
+    Original obligation (M2): a tool-kind allowlist refused a permission request
+    that carried no ``kind`` of its own. New obligation (M4): claude-code-acp
+    0.16.2 omits ``kind`` from the request but publishes it for the same
+    ``toolCallId`` in the preceding ``tool_call`` notification, so the adapter
+    resolves the request against that published classification instead of
+    guessing from the title. A request whose kind is unknown in both places is
+    still refused — the regression above pins that half.
+    """
+    log = tmp_path / "agent.jsonl"
+    settings = {
+        "FAKE_ACP_PERMISSION": True,
+        # claude-code-acp's measured order: tool_call notification first, then
+        # the permission request without a kind of its own.
+        "FAKE_ACP_PERMISSION_AFTER_TOOL_CALL": True,
+        "FAKE_ACP_TOOL_CALL_KIND": "read",
+        "FAKE_ACP_LOG": str(log),
+    }
+    _config, store, manager = build_manager(
+        tmp_path,
+        settings,
+        PI_GLINK_ACP_PERMISSION_ALLOW="allow_once,read,search,fetch,edit",
+    )
+    record = manager.start("通知里已经公布过 kind")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FINISHED
+    outcome = next(
+        entry for entry in read_log(log) if entry["event"] == "permission_outcome"
+    )
+    assert outcome["error"] is None
+    assert outcome["outcome"] == {"outcome": "selected", "optionId": "allow-once"}
+    notices = [
+        payload
+        for payload in payloads(read_events(store, record.run_id), "kernel_status")
+        if payload.get("message", "").startswith("acp_permission_")
+    ]
+    assert notices[0]["message"] == "acp_permission_allowed"
+    assert notices[0]["decision"] == "allowed"
+    assert notices[0]["toolKind"] == "read"
+    assert notices[0]["toolKindSource"] == "tool_call"
+
+
+def test_acp_permission_allowlist_refuses_a_published_execute_kind(
+    tmp_path: Path,
+) -> None:
+    """The resolved classification is authoritative in the refusal direction too.
+
+    Same mechanism as the test above, opposite kind: an ``execute`` tool whose
+    request omits ``kind`` is refused by an allowlist that lists only the
+    research kinds, so resolving the kind cannot become a blanket allow.
+    """
+    log = tmp_path / "agent.jsonl"
+    settings = {
+        "FAKE_ACP_PERMISSION": True,
+        "FAKE_ACP_PERMISSION_AFTER_TOOL_CALL": True,
+        "FAKE_ACP_TOOL_CALL_KIND": "execute",
+        "FAKE_ACP_LOG": str(log),
+    }
+    _config, store, manager = build_manager(
+        tmp_path,
+        settings,
+        PI_GLINK_ACP_PERMISSION_ALLOW="allow_once,read,search,fetch,edit",
+    )
+    record = manager.start("通知里公布的是 execute")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FINISHED
+    outcome = next(
+        entry for entry in read_log(log) if entry["event"] == "permission_outcome"
+    )
+    assert outcome["outcome"] == {"outcome": "selected", "optionId": "reject-once"}
+    notices = [
+        payload
+        for payload in payloads(read_events(store, record.run_id), "kernel_status")
+        if payload.get("message") == "acp_permission_denied"
+    ]
+    assert notices[0]["decision"] == "rejected"
+    assert notices[0]["policy"] == "fail_closed"
+    assert notices[0]["toolKind"] == "execute"
+    assert notices[0]["toolKindSource"] == "tool_call"
 
 
 # -- session configuration -----------------------------------------------------

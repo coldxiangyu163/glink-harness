@@ -27,6 +27,11 @@ from the host:
   or report is masked like every other secret the host knows. The values are
   never logged and never put into the child's command line or environment.
 
+* **Credential injection by env.** ``PI_GLINK_ACP_ENV`` carries explicit
+  ``NAME=value`` entries (an API-key style credential the agent reads from the
+  environment, e.g. ``ANTHROPIC_API_KEY``). Values whose *name* looks like a
+  credential join the same redaction boundary, so both channels behave alike.
+
 The host never runs the command through a shell: ``PI_GLINK_ACP_COMMAND`` is
 split with :func:`shlex.split` and executed as an argv, so a run cannot inherit
 shell expansion from the configuration.
@@ -70,7 +75,8 @@ class AcpRuntime:
     home: Path
     #: The frozen command line, for the run record and diagnostics.
     command: str
-    #: Credential values copied into :attr:`home`, for the run's redactor.
+    #: Credential values this run may render (copied files and
+    #: credential-shaped ``PI_GLINK_ACP_ENV`` values), for the run's redactor.
     secrets: tuple[str, ...] = ()
     #: The credential destinations, relative to :attr:`home`, in the order they
     #: were injected. The container face uses these to mount each injected
@@ -105,12 +111,18 @@ def prepare_acp_runtime(
     os.chmod(directory, 0o700)
     os.chmod(home, 0o700)
     base_home = Path(operator_home) if operator_home is not None else Path.home()
-    secrets = _inject_credential_files(config, home, base_home)
+    secrets = list(_inject_credential_files(config, home, base_home))
+    # ``PI_GLINK_ACP_ENV`` is the explicit env channel (an API-key style
+    # credential that an agent reads from the environment). Its values join the
+    # run's redaction boundary by the same rule the credential files use: only
+    # a credential-looking *name* makes a value a secret, so an ordinary knob
+    # (``ACME_MODE=workspace``) never becomes a redaction target.
+    secrets.extend(_env_credential_values(config))
     return AcpRuntime(
         directory=directory,
         home=home,
         command=config.acp_command.strip(),
-        secrets=secrets,
+        secrets=_dedupe(secrets),
         credential_dests=tuple(dest for _source, dest in config.acp_credential_files),
     )
 
@@ -181,6 +193,26 @@ def credential_secrets_from_text(text: str) -> tuple[str, ...]:
         if text_value not in stable:
             stable.append(text_value)
     return tuple(stable)
+
+
+def _env_credential_values(config: HostConfig) -> tuple[str, ...]:
+    """Credential-shaped values of the explicit ``PI_GLINK_ACP_ENV`` entries.
+
+    The env channel has no file to scan, so the variable *name* is the only
+    hint: names matching the credential rule (``*_API_KEY``, ``*_TOKEN``,
+    ``*_SECRET``, …) have their values added to the redaction boundary. Values
+    below the redactor's minimum length and documentation placeholders are
+    skipped, exactly like values found inside credential files.
+    """
+    values: list[str] = []
+    for name, value in config.acp_env:
+        if not _SECRET_NAME_RE.search(name):
+            continue
+        text_value = value.strip()
+        if len(text_value) < MIN_SECRET_LENGTH or is_placeholder_value(text_value):
+            continue
+        values.append(text_value)
+    return _dedupe(values)
 
 
 def _inject_credential_files(

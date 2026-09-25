@@ -1,0 +1,120 @@
+ACP M4 e2b dev 模板重建与沙箱握手证据（GLINK-ACP-05，不消耗模型调用）
+===================================================================
+日期: 2026-09-25
+模板: glink-acp-worker（**独立 dev 模板**；生产模板 glink-frontier-e2b 与 pi 模板
+  pi-glink-worker 未被读取写入，只出现在 template list 的只读列出里）
+模板 ID: oen0rq47o2sizakry5v3（M3b 同一 ID）
+构建: E2B_API_KEY=… npx -y @e2b/cli template create glink-acp-worker \
+        --dockerfile docker/e2b/Dockerfile.acp-e2b --cpu-count 2 --memory-mb 4096
+exit=0
+新层: @zed-industries/claude-code-acp@0.16.2 + @anthropic-ai/claude-code@2.1.282
+  （与 docker/Dockerfile.acp-worker 同一对钉版；构建期 ARG 精确比对通过）
+
+模板构建日志（关键行）
+----------------------
+1.0s  | 11:53:51 AM INFO  Template created with ID: oen0rq47o2sizakry5v3, Build ID: 4a5fbaea-d46b-44fe-81ef-0255d854c6d7
+2.6s  | 11:53:52 AM INFO  [builder 5/14] ENV CLAUDE_CODE_ACP_VERSION 0.16.2 [f5c5210ac98c9101cd0f7d997879c0fede928f1ba41d5835ea618c918aadadc8]
+7.6s  | 11:53:58 AM INFO  [builder 6/14] ENV CLAUDE_CODE_VERSION 2.1.282 [92902e540a77edd09b6909bedee190a5e3e2a6b75cd15e4c25535cb0aba66840]
+52.9s | 11:54:43 AM INFO  [builder 9/14] [stderr]: npm warn deprecated @zed-industries/claude-code-acp@0.16.2: This package has been renamed to @agentclientprotocol/claude-agent-acp. Please migrate to continue receiving updates.
+72.7s | 11:55:02 AM INFO  [builder 10/14] RUN { echo '#!/bin/sh'; echo 'set -eu'; echo 'dsh --version'; echo 'codex-acp --version'; echo 'claude --version'; echo 'npm ls -g --depth=0'; } > /usr/local/bin/acp-self-check && chmod 0755 /usr/local/bin/acp-self-check && /usr/local/bin/acp-self-check [ee3693e70ba78a78e63a750d6bcd0444dc144b88c64c99928d6bc364a886fcf2]
+73.1s | 11:55:03 AM INFO  [builder 10/14] [stdout]: 0.1.5-rc.3
+73.1s | 11:55:03 AM INFO  [builder 10/14] [stdout]: @agentclientprotocol/codex-acp 1.13.1
+73.1s | 11:55:03 AM INFO  [builder 10/14] [stdout]: 2.1.282 (Claude Code)
+74.0s | 11:55:04 AM INFO  [builder 10/14] [stdout]: /usr/local/lib
+74.0s | 11:55:04 AM INFO  [builder 10/14] [stdout]: +-- @agentclientprotocol/codex-acp@1.13.1
+74.0s | 11:55:04 AM INFO  [builder 10/14] [stdout]: +-- @anthropic-ai/claude-code@2.1.282
+74.0s | 11:55:04 AM INFO  [builder 10/14] [stdout]: +-- @deepseek-ai/dsh@0.1.5-rc.3
+74.0s | 11:55:04 AM INFO  [builder 10/14] [stdout]: +-- @zed-industries/claude-code-acp@0.16.2
+74.0s | 11:55:04 AM INFO  [builder 10/14] [stdout]: +-- corepack@0.36.0
+74.0s | 11:55:04 AM INFO  [builder 10/14] [stdout]: `-- npm@11.19.0
+81.5s | 11:55:11 AM INFO  Running start command: acp-self-check
+81.9s | 11:55:12 AM INFO  [start] [stdout]: 0.1.5-rc.3
+82.4s | 11:55:12 AM INFO  [start] [stdout]: @agentclientprotocol/codex-acp 1.13.1
+82.4s | 11:55:12 AM INFO  [start] [stdout]: 2.1.282 (Claude Code)
+83.2s | 11:55:13 AM INFO  [start] [stdout]: /usr/local/lib
+83.2s | 11:55:13 AM INFO  [start] [stdout]: +-- @agentclientprotocol/codex-acp@1.13.1
+83.2s | 11:55:13 AM INFO  [start] [stdout]: +-- @anthropic-ai/claude-code@2.1.282
+83.2s | 11:55:13 AM INFO  [start] [stdout]: +-- @deepseek-ai/dsh@0.1.5-rc.3
+83.2s | 11:55:13 AM INFO  [start] [stdout]: +-- @zed-industries/claude-code-acp@0.16.2
+83.2s | 11:55:13 AM INFO  [start] [stdout]: +-- corepack@0.36.0
+83.2s | 11:55:13 AM INFO  [start] [stdout]: `-- npm@11.19.0
+101.7s | 11:55:31 AM INFO  Template is ready
+105.1s | 11:55:35 AM INFO  Build finished, took 1m43s
+
+模板自检（scripts/spikes/acp_e2b/template_selfcheck.py，真实沙箱）
+------------------------------------------------------------------
+{
+  "date": "2026-09-25 11:56:19",
+  "template": "glink-acp-worker",
+  "sandbox_id": "ioacw4b9z0u0sbjbc0y4t",
+  "envd_version": "0.9.0",
+  "exit_code": 0,
+  "stdout": "id=user uid=1001 gid=1001\nhome=/home/user pwd=/home/user/workspace\nnode=v24.21.0\ndsh=0.1.5-rc.3\ncodex_acp=@agentclientprotocol/codex-acp 1.13.1\nacp_dir_writable=yes\nworkspace_writable=yes\nself_check=0.1.5-rc.3;@agentclientprotocol/codex-acp 1.13.1;2.1.282 (Claude Code);/usr/local/lib;+-- @agentclientprotocol/codex-acp@1.13.1;+-- @anthropic-ai/claude-code@2.1.282;+-- @deepseek-ai/dsh@0.1.5-rc.3;+-- @zed-industries/claude-code-acp@0.16.2;+-- corepack@0.36.0;`-- npm@11.19.0;;npm notice;npm notice New major version of npm available! 11.19.0 -> 12.1.0;npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.1.0;npm notice To update run: npm install -g npm@12.1.0;npm notice;\nper_run_home_mkdir=ok\nper_run_home_write=ok\nprobe_read=credential-probe\n",
+  "stderr": "",
+  "killed": true
+}
+[PASS] 模板自检
+
+沙箱内握手（scripts/spikes/acp_e2b/sandbox_handshake.py --agent claude-code-acp；
+只做 initialize + session/new，不发 prompt）
+------------------------------------------------------------------
+ACP agent did not exit after stdin closed; terminating
+{
+  "date": "2026-09-25 11:55:51",
+  "agent": "claude-code-acp",
+  "command": "claude-code-acp",
+  "template": "glink-acp-worker",
+  "credential_source": null,
+  "credential_dest": null,
+  "credential_sha256_before": null,
+  "source_mtime": null,
+  "runtime_home": "$TMP/glink-acp-e2b-handshake-<id>/acp-agent/home",
+  "credential_dests": [],
+  "secret_count": 0,
+  "sandbox_id": "ilsid1nj75j7s1sf434vy",
+  "sandbox_command": "cd /home/user/workspace && exec claude-code-acp",
+  "harden_command": "chmod 0700 /home/user/acp/home …",
+  "upload_manifest": [],
+  "initializeOk": true,
+  "protocolVersion": 1,
+  "agentInfo": {
+    "name": "@zed-industries/claude-code-acp",
+    "title": "Claude Code",
+    "version": "0.16.2"
+  },
+  "capabilities": [
+    "loadSession",
+    "mcpCapabilities",
+    "promptCapabilities",
+    "sessionCapabilities"
+  ],
+  "authMethodIds": [
+    "claude-login"
+  ],
+  "sessionId": "0f6561b4-9ff8-43c6-b3e8-eec27f6e6a80",
+  "cwd": "/home/user/workspace",
+  "configOptionIds": [],
+  "cleanup": {
+    "released": true,
+    "failures": [],
+    "external": {
+      "sandbox": "ilsid1nj75j7s1sf434vy"
+    }
+  },
+  "credential_sha256_after": null,
+  "source_unchanged": true
+}
+[PASS] claude-code-acp 真实沙箱 ACP 握手（initialize + session/new）
+
+结论
+----
+* 重建后的 dev 模板内四个组件版本正确：dsh 0.1.5-rc.3、codex-acp 1.13.1、
+  claude 2.1.282、claude-code-acp 0.16.2；构建期与 finalize 的 start command
+  都跑了 acp-self-check 且输出一致。
+* 真实沙箱内 claude-code-acp 完成 initialize（protocolVersion=1）与 session/new：
+  agentInfo 0.16.2、cwd=/home/user/workspace、authMethods=[claude-login]、
+  configOptions 为空；沙箱按 id 终止（cleanup.released=true，external.sandbox=<id>）。
+* 沙箱没有 macOS Keychain，宿主也未提供 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN：
+  e2b 面的真实模型 run 属预期阻塞，如实记录，不索取凭据。
+* 脱敏: 家目录以 ~ 代替，临时目录以 $TMP/glink-acp-e2b-*-<id> 代替；E2B_API_KEY
+  只在进程环境/--env-file 中，不落证据。

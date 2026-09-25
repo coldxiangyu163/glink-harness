@@ -34,7 +34,11 @@ from pi_glink.kernel.e2b_env import E2BAcpSandboxClient  # noqa: E402
 from pi_glink.kernel.execution import ExecutionSpec, build_adapter  # noqa: E402
 from pi_glink.kernel.rpc import PiRpcClient  # noqa: E402
 
-#: The two agents and the credential location each one reads (M2 measurement).
+#: The agents and the credential location each one reads (M2/M4 measurement).
+#: ``claude-code-acp`` runs from the SDK-bundled or image-local claude CLI and
+#: needs no credential for initialize/session/new on a fresh HOME; a real model
+#: run needs ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN supplied by the host (the
+#: sandbox has no macOS Keychain).
 AGENTS = {
     "dsh": {
         "command": "dsh --profile acp",
@@ -43,6 +47,10 @@ AGENTS = {
     "codex-acp": {
         "command": "codex-acp",
         "credential": "~/.codex/auth.json=.codex/auth.json",
+    },
+    "claude-code-acp": {
+        "command": "claude-code-acp",
+        "credential": "",
     },
 }
 
@@ -77,29 +85,36 @@ def main(argv: list[str] | None = None) -> int:
 
     agent = AGENTS[args.agent]
     credential = args.credential or agent["credential"]
-    source_text = credential.split("=", 1)[0]
-    source = Path(source_text.replace("~/", str(Path.home()) + "/", 1))
-    if not source.is_file():
-        print(f"缺少凭据来源: {source}", file=sys.stderr)
-        return 2
-    source_digest = sha256_file(source)
+    source: Path | None = None
+    source_digest = ""
+    source_text = ""
+    if credential:
+        source_text = credential.split("=", 1)[0]
+        source = Path(source_text.replace("~/", str(Path.home()) + "/", 1))
+        if not source.is_file():
+            print(f"缺少凭据来源: {source}", file=sys.stderr)
+            return 2
+        source_digest = sha256_file(source)
 
     result: dict = {
         "date": time.strftime("%Y-%m-%d %H:%M:%S"),
         "agent": args.agent,
         "command": agent["command"],
         "template": args.template,
-        "credential_source": source_text,
-        "credential_dest": credential.split("=", 1)[1],
-        "credential_sha256_before": source_digest,
-        "source_mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(source.stat().st_mtime)),
+        "credential_source": source_text or None,
+        "credential_dest": credential.split("=", 1)[1] if credential else None,
+        "credential_sha256_before": source_digest or None,
+        "source_mtime": (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(source.stat().st_mtime))
+            if source is not None
+            else None
+        ),
     }
 
     workdir = Path(tempfile.mkdtemp(prefix="glink-acp-e2b-handshake-"))
     values = {
         "PI_GLINK_HARNESS": "acp",
         "PI_GLINK_ACP_COMMAND": agent["command"],
-        "PI_GLINK_ACP_CREDENTIAL_FILES": credential,
         "LOCAL_WEB_EXECUTOR": "e2b",
         "LOCAL_WEB_DATA_ROOT": str(workdir / "data"),
         "LOCAL_WEB_E2B_ACP_TEMPLATE": args.template,
@@ -107,6 +122,8 @@ def main(argv: list[str] | None = None) -> int:
         "E2B_API_KEY": api_key,
         "PI_GLINK_WEB_SEARCH_CONFIG": str(workdir / "absent-web-search.json"),
     }
+    if credential:
+        values["PI_GLINK_ACP_CREDENTIAL_FILES"] = credential
     config = build_config(values, REPO_ROOT)
     runtime = prepare_acp_runtime(config, runtime_dir=workdir / "acp-agent")
     result["runtime_home"] = str(runtime.home)
@@ -181,8 +198,12 @@ def main(argv: list[str] | None = None) -> int:
             "failures": list(cleanup.failures),
             "external": dict(cleanup.external),
         }
-        result["credential_sha256_after"] = sha256_file(source)
-        result["source_unchanged"] = result["credential_sha256_after"] == source_digest
+        result["credential_sha256_after"] = (
+            sha256_file(source) if source is not None else None
+        )
+        result["source_unchanged"] = (
+            True if source is None else result["credential_sha256_after"] == source_digest
+        )
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
     ok = (
