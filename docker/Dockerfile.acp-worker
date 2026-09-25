@@ -1,0 +1,62 @@
+# pi-glink ACP worker 镜像：容器内自包含 ACP agent 运行时。
+#
+# 设计边界（对应 GLINK-ACP-03 / M3a 的验收契约）：
+#   * 镜像自带 Node 与 ACP agents（dsh、codex-acp），容器内的执行不依赖宿主安装的运行时；
+#   * 宿主只提供数据通道：工作区 /workspace、每 run 的 HOME /home/acp（agent 状态根；
+#     注入的凭据文件在其内以只读方式二次挂载），凭据不经环境变量、不写进镜像；
+#   * 两个 agent 的版本在此精确定版；版本事实与替换决定见
+#     docs/acp-integration-notes.md 的 M3a 章节，边界测试见
+#     tests/test_kernel_acp_docker.py；
+#   * 镜像内自检：构建时校验两个 agent 的 --version（含与 ARG 的精确比对），
+#     默认 CMD 也能直接复验（docker run --rm pi-glink-acp-worker:latest）。
+#
+# 构建：
+#   docker build -t pi-glink-acp-worker:latest -f docker/Dockerfile.acp-worker .
+#
+# 网络受限环境（例如中国大陆）可覆盖基础源，仓库默认仍用官方源：
+#   docker build -t pi-glink-acp-worker:latest -f docker/Dockerfile.acp-worker \
+#     --build-arg DEBIAN_MIRROR=mirrors.aliyun.com \
+#     --build-arg NPM_REGISTRY=https://registry.npmmirror.com .
+#
+# Node 固定在官方镜像的精确版本 tag（不用浮动 24-bookworm-slim），与
+# docker/Dockerfile.worker 同一 tag：容器内 `node -v` 实测 v24.21.0。
+FROM node:24.21.0-bookworm-slim
+
+# @deepseek-ai/dsh：M2 实测版本（docs/acp-integration-notes.md §4.1）。
+ARG DSH_VERSION=0.1.5-rc.3
+# codex-acp：@zed-industries/codex-acp 已被 npm 标记 deprecated
+# （"replaced by @agentclientprotocol/codex-acp"）。M3a 改用后继包并钉版：
+# 1.13.1 已用仓库 M1 客户端验证 initialize 协商（protocolVersion=1）与
+# sessionCapabilities，容器内握手证据见 docs/evidence/acp-m3-docker-agent-check.txt。
+ARG CODEX_ACP_VERSION=1.13.1
+ARG DEBIAN_MIRROR=deb.debian.org
+ARG NPM_REGISTRY=https://registry.npmjs.org
+
+RUN if [ "${DEBIAN_MIRROR}" != "deb.debian.org" ]; then \
+      sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+       bash ca-certificates curl git ripgrep \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm config set registry "${NPM_REGISTRY}" \
+    && mkdir -p /home/acp \
+    && npm install -g --no-fund --no-audit \
+         "@deepseek-ai/dsh@${DSH_VERSION}" \
+         "@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}" \
+    && dsh --version > /tmp/dsh-version \
+    && codex-acp --version > /tmp/codex-acp-version \
+    && grep -qx "${DSH_VERSION}" /tmp/dsh-version \
+    && grep -qx "@agentclientprotocol/codex-acp ${CODEX_ACP_VERSION}" /tmp/codex-acp-version \
+    && rm -f /tmp/dsh-version /tmp/codex-acp-version \
+    && npm cache clean --force
+
+# 运行期由宿主覆盖为挂载点；这里给出容器内默认值，便于单独调试与自检。
+# HOME 与 docker_env.CONTAINER_HOME 是同一个值（宿主用 -e HOME=… 显式传入）。
+ENV HOME=/home/acp \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
+WORKDIR /workspace
+ENTRYPOINT []
+# 默认命令 = 镜像内自检：两个 agent 的 --version 都能跑。
+CMD ["sh", "-c", "dsh --version && codex-acp --version"]

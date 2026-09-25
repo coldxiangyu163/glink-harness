@@ -1,23 +1,37 @@
-"""Docker execution face: pi runs inside a disposable container.
+"""Docker execution face: a harness runs inside a disposable container.
 
 The host stays outside the boundary. It starts ``docker run --rm -i`` and speaks
-the same RPC protocol over the container's stdio, so the runner, the event
-projection and the browser contract are untouched by the change of face.
+the harness's own stdio protocol over the container's stdio, so the runner, the
+event projection and the browser contract are untouched by the change of face:
+
+* the **pi** face speaks its bidirectional RPC protocol (:func:`build_plan`);
+* the **ACP** face speaks ACP JSON-RPC (:func:`build_acp_plan`).
 
 Only data crosses the boundary:
 
 * the run workspace — read-write bind mount at ``/workspace`` (the agent's cwd);
-* the runtime config directory rendered by the host — at ``/config``;
+* pi's runtime config directory rendered by the host — at ``/config``;
 * the pi session directory — at ``/sessions``;
+* the ACP family's per-run ``HOME`` (agent state root, with the injected
+  credentials inside it) — at :data:`CONTAINER_HOME`, with every credential file
+  additionally mounted ``:ro`` so the container can keep state under ``HOME``
+  but cannot modify or delete the injected credentials.
 
-The container's configuration — including the model credential, which lives in
-``auth.json`` inside the runtime directory — arrives through those mounts, so
+The pi container's configuration — including the model credential, which lives
+in ``auth.json`` inside the runtime directory — arrives through those mounts, so
 nothing credential-shaped travels through argv or the CLI environment at all.
 A shell tool inside the container cannot read the key with ``env``.
 
-The image is self-contained (Node + pi + the tools the agent uses); a container
-installed-runtime dependency would defeat the point of the isolation, so this
-module deliberately refuses to pass through host paths that are not mounts.
+Resource ceilings and the reduced privilege profile (``--cpus`` / ``--memory``
+/ ``--pids-limit``, all capabilities dropped, ``no-new-privileges``) are
+identical for both faces (:func:`_isolation_argv`) — contract, not measured
+fact: the default test suite performs no live Docker run, so the host cannot
+claim what the daemon actually enforced.
+
+The image is self-contained (Node + the harness and the tools it uses); a
+container installed-runtime dependency would defeat the point of the isolation,
+so this module deliberately refuses to pass through host paths that are not
+mounts.
 """
 
 from __future__ import annotations
@@ -30,6 +44,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Sequence
 
 from ..config import DEFAULT_WORKER_IMAGE, HostConfig
+from .acp_env import AcpRuntime, build_acp_argv
 from .agent_env import IMAGE_PACKAGE_GUARD, PASSTHROUGH_ENV, AgentRuntime
 
 #: Default image; frozen at configuration time (see ``HostConfig.worker_image``).
@@ -37,6 +52,12 @@ WORKER_IMAGE_DEFAULT = DEFAULT_WORKER_IMAGE
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_CONFIG = "/config"
 CONTAINER_SESSIONS = "/sessions"
+#: The ACP face's ``HOME`` inside the container: the per-run agent state root
+#: (``<run>/acp-agent/home``) is mounted here and the container's ``HOME`` is
+#: pointed at it, so ``~/.codex`` / ``~/.dsh`` and every cache stay inside the
+#: run instead of the operator's home. Mirrors ``HOME=/home/acp`` in
+#: ``docker/Dockerfile.acp-worker``.
+CONTAINER_HOME = "/home/acp"
 #: Host environment variables forwarded by name (value stays out of argv).
 #: Docker CLI needs these beyond the shared kernel whitelist (Docker Desktop / Colima).
 _DOCKER_CLI_ENV = (
@@ -59,7 +80,7 @@ class ContainerPlan:
 
 
 def worker_image(config: HostConfig) -> str:
-    """The frozen worker image for every run of this host process.
+    """The frozen pi worker image for every run of this host process.
 
     The value is resolved once at configuration time (``LOCAL_WEB_WORKER_IMAGE``
     is part of the frozen environment). Re-reading ``os.environ`` here would let
@@ -67,6 +88,16 @@ def worker_image(config: HostConfig) -> str:
     a different image.
     """
     return config.worker_image
+
+
+def acp_worker_image(config: HostConfig) -> str:
+    """The frozen ACP worker image (``LOCAL_WEB_ACP_WORKER_IMAGE``).
+
+    Frozen at configuration time for the same reason as :func:`worker_image`:
+    the ACP image carries different agents than the pi image, so re-reading the
+    environment at run time could relabel an accepted run.
+    """
+    return config.acp_worker_image
 
 
 def is_available() -> bool:
@@ -133,11 +164,7 @@ def build_plan(
         "docker", "run", "--rm", "-i",
         "--name", container_name,
         "--label", f"pi-glink.run={run_id}",
-        "--cpus", str(config.docker_cpus),
-        "--memory", str(config.docker_memory),
-        "--pids-limit", str(config.docker_pids_limit),
-        "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges",
+        *_isolation_argv(config),
         # The container faces load pi packages from the image instead of running
         # npm inside the run, so the entrypoint is the image's package guard:
         # it exits 78 when a package the mounted settings point at is missing.
@@ -168,6 +195,86 @@ def build_plan(
         container_name=container_name,
         image=image,
     )
+
+
+def build_acp_plan(
+    config: HostConfig,
+    runtime: AcpRuntime,
+    *,
+    run_id: str,
+    workspace: Path,
+) -> ContainerPlan:
+    """Compose ``docker run -i`` for one ACP family run.
+
+    The container's stdio is the ACP transport: ``-i`` keeps stdin open and
+    ``--rm`` removes the container when the agent exits. The agent's argv is the
+    frozen ``PI_GLINK_ACP_COMMAND`` verbatim, so the *image-local* command (for
+    example ``dsh --profile acp``) is what runs — the in-process face's host
+    path would not exist inside the container.
+
+    The ACP family keeps its state in ``HOME``, so the run's own state root is
+    mounted at :data:`CONTAINER_HOME` and the container's ``HOME`` points at it:
+    ``~/.codex`` / ``~/.dsh`` / caches live in the run directory and are
+    destroyed with it, never in the operator's home. The mount itself stays
+    writable (an agent must be able to keep sessions), but every injected
+    credential file is mounted ``:ro`` on top of it: the container can read the
+    credential and cannot modify or delete it.
+
+    ``PI_GLINK_ACP_ENV`` entries are passed by *name* (``-e NAME``), with their
+    values set on the docker CLI's own environment: they never appear in argv
+    (the process list), unlike the file-mounted credentials they are the
+    explicit process-environment channel of this face.
+    """
+    image = acp_worker_image(config)
+    container_name = container_name_for(run_id)
+    argv: list[str] = [
+        "docker", "run", "--rm", "-i",
+        "--name", container_name,
+        "--label", f"pi-glink.run={run_id}",
+        *_isolation_argv(config),
+        "-v", f"{workspace}:{CONTAINER_WORKSPACE}",
+        "-w", CONTAINER_WORKSPACE,
+        "-v", f"{runtime.home}:{CONTAINER_HOME}",
+        "-e", f"HOME={CONTAINER_HOME}",
+    ]
+    for dest in runtime.credential_dests:
+        # A nested read-only mount: the credential file itself cannot be
+        # rewritten by the container while HOME stays writable for agent state.
+        argv.extend(
+            [
+                "-v",
+                f"{runtime.home / dest}:{CONTAINER_HOME}/{dest}:ro",
+            ]
+        )
+    for name, _value in config.acp_env:
+        # By name only: the value stays out of argv (see the docstring).
+        argv.extend(["-e", name])
+    argv.append(image)
+    argv.extend(build_acp_argv(config))
+    env = build_env(config)
+    env.update({name: value for name, value in config.acp_env})
+    return ContainerPlan(
+        argv=argv,
+        env=env,
+        container_name=container_name,
+        image=image,
+    )
+
+
+def _isolation_argv(config: HostConfig) -> list[str]:
+    """Per-container resource ceilings and reduced privileges (both faces).
+
+    Shared so the ACP face cannot drift from the pi face on the isolation
+    contract. The image is never changed here; these are ``docker run``
+    instance arguments.
+    """
+    return [
+        "--cpus", str(config.docker_cpus),
+        "--memory", str(config.docker_memory),
+        "--pids-limit", str(config.docker_pids_limit),
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+    ]
 
 
 def build_env(

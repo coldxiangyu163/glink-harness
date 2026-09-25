@@ -12,6 +12,8 @@
 | `合成实测` | 本仓库 M1/M2 回归（`tests/test_kernel_acp*.py` + `tests/fixtures/fake_acp.py`）。**只证明宿主侧客户端/投影/生命周期行为，不证明任何真实 agent 的实现** |
 | `dsh 实测` | dsh 0.1.5-rc.3 的真实 initialize/session/new 与真实运行（证据 `docs/evidence/acp-m2-handshake.txt`、`acp-m2-smoke-dsh.txt`） |
 | `codex-acp 实测` | codex-acp 0.16.0 的真实 initialize/session/new 与真实运行（证据 `docs/evidence/acp-m2-handshake.txt`、`acp-m2-smoke-codex-acp.txt`） |
+| `docker 实测` | M3a 的真实容器证据（`docs/evidence/acp-m3-docker-*.txt`）：镜像构建与容器内自检、容器内 ACP 握手、经宿主 HTTP API 的一次最小真实 run |
+| `镜像自检` | `pi-glink-acp-worker` 镜像内两个 agent 的 `--version` 输出（构建期日志与本机 `docker run --rm` 复验，证据同 `docker 实测`） |
 | `npm` | npm registry 元数据（`npm view`） |
 | `宿主代码` | 本仓库实现（`host/pi_glink/kernel/`、`config.py`） |
 | `待实测` | 需要真实 agent/授权或其它执行面才能确认 |
@@ -19,8 +21,9 @@
 状态（2026-09-25）：M1 合成验证完成（GLINK-ACP-01）；**M2 真实冒烟完成**（GLINK-ACP-02）：
 `@deepseek-ai/dsh@0.1.5-rc.3` 与 `@zed-industries/codex-acp@0.16.0` 均完成真实
 initialize + session/new（不消耗模型）并经宿主 HTTP API 各跑一次最小真实研究 run。
-实测结论、能力矩阵、凭据注入点与权限决策见 §4；`claude-code-acp` 与 docker/e2b 面仍属后续
-里程碑。
+**M3a 完成（GLINK-ACP-03）**：ACP 族的 Docker 执行面可用（容器 stdio 桥接同一 M1 客户端、
+每 run HOME 与只读凭据挂载、资源限制与 pi 面对齐），镜像与实测见 §5；E2B 面、
+`claude-code-acp` 与 ACP 续接仍属后续里程碑。
 
 ## 1. 协议事实（v1）
 
@@ -181,8 +184,9 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
 1. **harness 选择只在配置层**：`PI_GLINK_HARNESS=pi|acp`（默认 `pi`）+
    `PI_GLINK_ACP_COMMAND`（ACP agent 命令行，`shlex.split` 后直接 exec，不经 shell）。
    没有 API/前端参数，`public_view()` 不含 harness，现有部署零变化。（与方案 §5/§6 一致）
-2. **执行面**：M1 只接 `inproc`；`PI_GLINK_HARNESS=acp` 与 docker/e2b 组合在启动即拒绝
-   （M3 做容器/沙箱 stdio 与状态目录回收）。
+2. **执行面**：M1 只接 `inproc`；M3a 起 `PI_GLINK_HARNESS=acp` 同时支持
+   `LOCAL_WEB_EXECUTOR=inproc|docker`（Docker 面见 §5），与 `e2b` 的组合继续在启动即拒绝
+   （M3b 做沙箱 stdio 与状态目录回收）。
 3. **续接未实现**：M1 不实现 `session/resume`（能力位 `sessionCapabilities.resume`）。
    ACP run 不落会话文件，追问在**准入层**以 `session_unavailable` 拒绝；适配器另外对
    任何 `resume_session` 输入直接报错，绝不以新会话冒充追问。（方案 §4.4 的「能力缺失
@@ -333,7 +337,62 @@ support），不依赖可选能力位、不依赖任何 agent 私有扩展；围
 * 宿主清理：宿主 PID 由 `$!` 记录，运行结束后只对已知 PID 发 `kill -TERM`（未用 `pkill -f` 等
   宽匹配）。（证据 summary.txt）
 
-## 5. M1 合成验证覆盖
+## 5. M3a 实测（2026-09-25，Docker 执行面）
+
+M3a 把 ACP 族从 inproc 扩展到 Docker 执行面。协议侧零新增：容器只是另一个 stdio 承载，
+ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现。
+
+### 5.1 镜像与钉版
+
+* 新增 `docker/Dockerfile.acp-worker`，`FROM node:24.21.0-bookworm-slim`——与 pi worker
+  同一 Node 精确 tag（`宿主代码`/`镜像自检`）。镜像自包含：构建期装好 Node 与两个 agent，
+  容器内不安装任何运行时依赖。
+* 镜像钉版（可机检：`tests/test_kernel_acp_docker.py` 强制 Dockerfile ARG 等于本节记录的
+  实测版本）：`@deepseek-ai/dsh@0.1.5-rc.3`、
+  `@agentclientprotocol/codex-acp@1.13.1`。
+* dsh 保持 M2 实测版本（`dsh 实测`/`npm`）。codex-acp 改钉**后继包**
+  `@agentclientprotocol/codex-acp`：旧包 `@zed-industries/codex-acp`（0.16.0，M2 实测）
+  已被 npm 标记 deprecated（“replaced by @agentclientprotocol/codex-acp”，`npm`），
+  后继包 1.13.1 用仓库 M1 客户端实测 `initialize` 协商回 `protocolVersion=1`
+  并声明 `sessionCapabilities`（`docker 实测`）；本次只验证握手，真实模型 run 仍列在 §7。
+* 镜像默认命令即自检：`dsh --version && codex-acp --version`；构建期还用 ARG 精确比对
+  两个 `--version` 输出（不一致即构建失败），因此“镜像里装的是声明版本”是可复核事实
+  （`镜像自检`/`宿主代码`）。
+* 命名与冻结：`LOCAL_WEB_ACP_WORKER_IMAGE`（默认 `pi-glink-acp-worker:latest`）与 pi 面的
+  `LOCAL_WEB_WORKER_IMAGE`分开；值在配置期冻结，运行期不再读环境（`宿主代码`/`合成实测`）。
+  升级路径：改 ARG → 重建 → 边界测试（ARG 必须重新等于 §5.1 记录值）→ 重建后的容器内
+  握手/最小 run。
+
+### 5.2 传输、挂载与容器身份
+
+* `docker run --rm -i`：容器 stdio 就是 ACP 传输（`-i` 保持 stdin，无 TTY——TTY 会破坏
+  LF 分帧）。宿主把 `docker run` 的 argv 交给 M1 的 `AcpRpcClient`，不新增第二套协议代码
+  （`宿主代码`/`合成实测`/`docker 实测`）。
+* 工作区：宿主 run 工作区以读写挂载到 `/workspace` 并作为容器工作目录；`session/new` 的
+  `cwd` 是容器路径 `/workspace`（宿主路径在容器内不存在），run 记录的 `session_ready.cwd`
+  也是该容器路径（`宿主代码`/`合成实测`）。产物因此直接落在宿主工作区，不需要回收通道。
+* 每 run HOME：`<run>/acp-agent/home` 挂载到 `/home/acp` 并 `-e HOME=/home/acp`；
+  `~/.codex`、`~/.dsh`、cache 都落在本 run 目录内，随 run 销毁，不碰操作员目录
+  （`宿主代码`/`合成实测`/`docker 实测`）。
+* 凭据形态：沿用 M2 的“只读复制进 run HOME”，再在容器内对每个凭据文件做**嵌套只读挂载**
+  （`-v <run-home>/<dest>:/home/acp/<dest>:ro`）。HOME 本身保持可写（agent 必须能写会话与
+  缓存），但凭据文件在容器内不可改写/删除（`宿主代码`/`合成实测`/`docker 实测`）。
+* `PI_GLINK_ACP_ENV`：按**名字**传（`-e NAME`），值放在 docker CLI 自己的环境里，不进 argv
+  （进程列表）；这是与文件注入并列的显式进程环境通道（`宿主代码`/`合成实测`）。
+* 容器身份与对账：容器名、停止、对账完全复用 pi 面的 `container_name_for` / `stop_argv` /
+  `confirm_absent` 约定；名字在 `docker run` 执行前持久化到 run 记录，在线 ledger 只按
+  这个持久化身份探测（`宿主代码`/`合成实测`）。
+
+### 5.3 资源限制与降权
+
+* 与 pi 面共用同一份 `--cpus` / `--memory` / `--pids-limit` / `--cap-drop ALL` /
+  `--security-opt no-new-privileges`（`_isolation_argv`），合成测试逐项比对两面 argv 相等
+  （`宿主代码`/`合成实测`）。这些都是 `docker run` 实例参数，镜像本身不被改写。
+* 容器内进程仍是 root（与 pi 面一致）：降权靠 cap-drop + no-new-privileges；没有
+  `--user`。限制是**契约**而非实测 enforcement——默认测试集不连 Docker daemon，宿主不会
+  声称 daemon 实际执行了哪个值。
+
+## 6. M1 合成验证覆盖
 
 `tests/test_kernel_acp.py`（客户端/投影）与 `tests/test_kernel_acp_runner.py`（run 生命周期），
 fixture 为 `tests/fixtures/fake_acp.py`（真实子进程、真实 stdio）：
@@ -350,13 +409,19 @@ fixture 为 `tests/fixtures/fake_acp.py`（真实子进程、真实 stdio）：
 * 流式与工具结果中的凭据脱敏、每 run 状态根隔离、宿主无模型 key 也能跑 ACP；
 * `build_adapter` 的 harness 分派与 `ExecutionAdapter` 契约（pi 路径默认行为不变）。
 
-## 6. 剩余待实测项（§4 已覆盖的不再列）
+M3a 新增 `tests/test_kernel_acp_docker.py`（无 daemon）：ACP docker plan 组合（`docker run -i`、
+`/workspace` 与 `HOME=/home/acp` 挂载、凭据嵌套只读挂载、资源限制与 pi 面逐项相等、
+`PI_GLINK_ACP_ENV` 按名字传且值不进 argv）、ACP worker 镜像的钉版边界
+（Dockerfile ARG == 本笔记记录的实测版本，浮动/缺失声明直接失败）、e2b 仍被拒、
+容器身份在启动前持久化与按名对账。真实容器行为不在这个文件里，见 §5 与证据文件。
+
+## 7. 剩余待实测项（§4/§5 已覆盖的不再列）
 
 | 待测事实 | 为什么重要 | 验证方式 |
 |---|---|---|
 | `session/resume` / `session/load` 真实续接（含 dsh 的持久会话语义） | M1 起追问仍显式拒绝；M2 只确认能力位存在 | 授权后的真实续接 run + 终态/状态目录核对 |
-| `session/cancel` 真实响应时延与终态（含工具收敛） | 取消体验；M2 两次 run 未触发取消 | 真实 run + 计时 |
+| `session/cancel` 真实响应时延与终态（含工具收敛） | 取消体验；M2 两次 run 未触发取消；M3a docker 面同样未触发 | 真实 run + 计时 |
 | claude-code-acp 能力矩阵与凭据（`ANTHROPIC_API_KEY` env） | M4 接入 | 同 M2 握手 + 冒烟 |
-| docker/e2b 面的 stdio 桥接与帧完整性（M3 前置） | 传输面扩展 | 逐面 smoke |
+| e2b 面的 ACP stdio 桥接与帧完整性（M3b） | 传输面扩展；M3 的 e2b 部分 | 逐面 smoke（`stdin=True` + `send_stdin`） |
+| `@agentclientprotocol/codex-acp@1.13.1` 的真实模型 run | M3a 只验证了容器内握手与 dsh 的真实 run | 同 M2 冒烟（需新授权） |
 | 各适配器版本升级冒烟步骤与 license 记录 | 方案 §5/§7 纪律 | 集成笔记逐项补齐 |
-| codex-acp 后继包（`@agentclientprotocol/codex-acp`）迁移评估 | 0.16.0 已被标记 deprecated | 版本对比握手 + 冒烟 |

@@ -72,6 +72,10 @@ class AcpRuntime:
     command: str
     #: Credential values copied into :attr:`home`, for the run's redactor.
     secrets: tuple[str, ...] = ()
+    #: The credential destinations, relative to :attr:`home`, in the order they
+    #: were injected. The container face uses these to mount each injected
+    #: credential file read-only on top of the writable state root.
+    credential_dests: tuple[str, ...] = ()
 
 
 def prepare_acp_runtime(
@@ -107,6 +111,7 @@ def prepare_acp_runtime(
         home=home,
         command=config.acp_command.strip(),
         secrets=secrets,
+        credential_dests=tuple(dest for _source, dest in config.acp_credential_files),
     )
 
 
