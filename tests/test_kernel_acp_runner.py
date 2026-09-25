@@ -322,6 +322,25 @@ def test_acp_agent_crash_before_the_prompt_answer_is_kernel_exit(tmp_path: Path)
     assert "exit code 3" in (final.error or "")
 
 
+def test_acp_crash_after_the_stream_ends_still_reports_the_exit_code(tmp_path: Path) -> None:
+    """The crash's event order must not lose the agent's exit status.
+
+    A real crash closes stdout (the client reads EOF) microseconds before the
+    process is reapable, so a report composed from a status sampled at the
+    stream's end can miss the code -- the flake this regression pins down.
+    ``FAKE_ACP_CRASH_EXIT_DELAY`` widens exactly that window (stdout closed,
+    then the delay, then exit 3) so the ordering is exercised every run instead
+    of once per suite under load.
+    """
+    settings = {"FAKE_ACP_CRASH_EXIT_DELAY": "0.3"}
+    _config, _store, manager = build_manager(tmp_path, settings)
+    record = manager.start("CRASH 掉这个 agent")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None
+    assert final.status == FAILED and final.stop_reason == "kernel_exit"
+    assert "exit code 3" in (final.error or "")
+
+
 def test_acp_initialize_failure_fails_the_run(tmp_path: Path) -> None:
     settings = {"FAKE_ACP_INIT_ERROR": True, "FAKE_ACP_LOG": str(tmp_path / "agent.jsonl")}
     _config, store, manager = build_manager(tmp_path, settings)

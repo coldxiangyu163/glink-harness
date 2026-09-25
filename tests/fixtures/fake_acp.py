@@ -30,7 +30,9 @@ Prompt markers select the terminal result:
 ``MAXTURN``            ``stopReason=max_turn_requests``
 ``CANCEL``             ``stopReason=cancelled`` without a client cancel
 ``NOSETTLE``           never answers until ``session/cancel`` arrives
-``CRASH``              exits (code 3) after accepting the prompt, no answer
+``CRASH``              exits (code 3) after accepting the prompt, no answer;
+                       ``FAKE_ACP_CRASH_EXIT_DELAY`` closes stdout first and
+                       then waits that long, widening the exit window
 ``FAILPROMPT``         answers with a JSON-RPC error instead of a stop reason
 ``UNKNOWNSTOP``        answers with a stop reason outside the v1 set
 ``USAGE_TWICE``        two ``usage_update`` notifications (replace semantics)
@@ -336,6 +338,18 @@ def run_prompt(request: dict, params: dict) -> None:
     log("prompt", text=text, sessionId=params.get("sessionId"))
     if "CRASH" in text:
         sys.stdout.flush()
+        delay = float(setting("FAKE_ACP_CRASH_EXIT_DELAY", 0) or 0)
+        if delay > 0:
+            # The crash's event order, widened: the protocol stream ends (the
+            # client reads EOF) before this process exits and is reapable --
+            # exactly what ``os._exit`` does, where the two are microseconds
+            # apart. The holder thread is deliberately *not* a daemon: when the
+            # host closes stdin, the main loop would otherwise exit 0 and end
+            # the process before the delayed ``os._exit(3)``, which would test
+            # the wrong death.
+            threading.Thread(target=time.sleep, args=(delay * 4,), daemon=False).start()
+            os.close(1)
+            time.sleep(delay)
         os._exit(3)
     updates = prompt_updates(text)
     permission_index = next(
