@@ -279,6 +279,9 @@ support），不依赖可选能力位、不依赖任何 agent 私有扩展；围
 * 注入用 `PI_GLINK_ACP_CREDENTIAL_FILES`（`;` 分隔的 `source=dest`）：源文件只读，目标必须是
   run HOME 内相对路径；目标文件 0600、父目录 0700，已存在或为符号链接则失败（不覆盖、不
   跟随）。（`宿主代码`/`合成实测`）
+* 本机 dsh 的真实状态目录是 `~/.dsh`（`$DSH_HOME` 未设置时的默认值），**`~/.config/dsh`
+  不存在**（`ls` 实测）；任务描述里的 `~/.config/dsh` 在本机不是 dsh 的读写路径，两种路径
+  都未被本实现或冒烟修改。（`dsh 实测`）
 * `PI_GLINK_ACP_ENV` 提供命令级 env（`NAME=value`），不允许覆盖 `HOME`（隔离边界）。（`宿主代码`）
 * 注入值抽取（JSON 凭据键、YAML 标量行、provider shape）并入**该 run** 的 redactor：
   两个真实 run 的 events/report/API 下载对真实凭据值 0 命中；源文件 sha256 前后一致。
