@@ -3,10 +3,15 @@
 [架构](architecture.md) · [工程约束](engineering.md) · [pi 边界](pi-boundary.md)
 
 本文记录「从单一 pi 内核走向多 harness 平台」的方向决定、目标架构、复用策略与里程碑。
-状态（2026-09-24）：方向已经用户确认；**M1（GLINK-ACP-01）已完成合成验证**
-（协议事实、映射口径与实测边界见 [ACP 集成笔记](acp-integration-notes.md)）。宿主默认
-harness 仍是 `pi`，ACP 族只在显式配置下启用且限 inproc；真实 agent 与真实模型调用（M2）
-未执行。本文是该方向的事实源：实现与本文出现偏差时回写本文，而不是让代码与文档各自漂移。
+状态（2026-09-25）：方向已经用户确认；**M1（GLINK-ACP-01）已完成合成验证**；
+**M2（GLINK-ACP-02）已完成真实冒烟**：`dsh --profile acp`（dsh 0.1.5-rc.3）与
+`codex-acp`（@zed-industries/codex-acp 0.16.0）各完成真实 initialize/session/new 握手，并经
+宿主 HTTP API 各跑一次最小真实研究 run（流式事件、终态、`report.md` 回收全部验证）；
+system prompt 送达通道与每 run 凭据注入已实现。逐条实测事实、能力矩阵与权限决策见
+[ACP 集成笔记](acp-integration-notes.md) §4，证据在 `docs/evidence/acp-m2-*.txt`。
+宿主默认 harness 仍是 `pi`，ACP 族只在显式配置下启用且限 inproc；claude-code-acp 与
+docker/e2b 面仍属后续里程碑。本文是该方向的事实源：实现与本文出现偏差时回写本文，而不是
+让代码与文档各自漂移。
 
 ## 1. 决定与定位
 
@@ -81,16 +86,20 @@ run 生命周期、终帧即终态、提交先于发布等全部沿用架构 §3
 
 ### 4.2 权限自动应答（无人值守前提）
 
-沙箱/无人场景没有人应答权限询问。M1 默认 **fail-closed 全拒**（合成验证用）；真实冒烟
-（M2）前按 harness 逐个定义白名单策略并记录。拒绝本身必须进入事件流（`kernel_status`），
-不允许静默。
+沙箱/无人场景没有人应答权限询问。默认 **fail-closed 全拒**；拒绝本身必须进入事件流
+（`kernel_status`），不允许静默。M2 实测：dsh 0.1.5-rc.3 与 codex-acp 0.16.0 在
+workspace-write 会话模式下跑完两个最小真实研究 run，均未发出权限请求，因此**保持默认、
+不启用白名单**；配置级门控 `PI_GLINK_ACP_PERMISSION_ALLOW`（option kind，可选 tool kind）
+已实现并默认空集，留给未来确实需要逐次放行的 harness（决策与证据见
+[ACP 集成笔记](acp-integration-notes.md) §4.6）。
 
 ### 4.3 准入与门禁
 
 ACP prompt 是结构化 ContentBlock，不存在 pi 那样的「`/` 前缀先派发扩展命令」面；但
 `available_commands_update` 表明 agent 可能自带 slash 命令——准入层对 ACP 族拒绝
 以 `/` 开头的 prompt（同形复用现有门禁入口，允许清单为空集，从 harness 能力推导而非
-硬编码模板目录）。
+硬编码模板目录）。M2 实测 codex-acp 确实在 `session/new` 后广播 6 条命令，准入拒绝不受
+其影响。
 
 ### 4.4 续接（resume）
 
@@ -103,9 +112,14 @@ ACP prompt 是结构化 ContentBlock，不存在 pi 那样的「`/` 前缀先派
 ### 4.5 凭据与配置渲染
 
 沿用 `agent_env.py` 模式：每 run 渲染独立配置目录，凭据写文件或注入命令级 env，
-不进宿主进程环境，全部出站过 `redaction.py`。各 harness 凭据注入点逐个实测记录
-（M2）：claude-code-acp（`ANTHROPIC_API_KEY` env）、codex-acp（`OPENAI_API_KEY` /
-`auth.json`）、dsh（credentials 包形态待实测）。
+不进宿主进程环境，全部出站过 `redaction.py`。ACP 族的 M2 实现：
+`PI_GLINK_ACP_CREDENTIAL_FILES` 把 `source=dest` 源文件**只读复制**进每 run HOME
+（父目录 0700、文件 0600），`PI_GLINK_ACP_ENV` 注入显式 env（不允许覆盖 `HOME`），
+注入值抽入该 run 的 redactor。已实测：codex-acp 读 `$HOME/.codex/auth.json`、dsh 读
+`$HOME/.dsh/.credentials.yaml`（dsh harness home 默认 `$DSH_HOME` 或 `~/.dsh`）；两者都
+尊重每 run `HOME`，真实用户目录未被修改。逐 agent 落点与证据见
+[ACP 集成笔记](acp-integration-notes.md) §4.4。system prompt 的通道也已在 M2 定下：
+作为 `session/prompt` 的首个围栏文本块送达（ACP v1 无 system role；见集成笔记 §4.3）。
 
 ## 5. 开源复用策略
 
@@ -125,7 +139,7 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 | 里程碑 | 内容 | 验收 | 状态 |
 |---|---|---|---|
 | M1（GLINK-ACP-01） | ACP 族 inproc 骨架：ACP stdio JSON-RPC 客户端（复用 LF 分帧）、projector、harness 注册与配置级选择（默认仍为 pi，不动 API/前端）、run 全生命周期接入（受理/流式/取消/终态/产物回收）、fail-closed 权限应答、合成 fake ACP server 测试 | `bash scripts/check.sh` 全绿；合成测试覆盖 §4.1 映射、取消、stopReason 判定、权限拒绝、门禁；现有 pi 三面测试零回归 | 已完成（合成验证；实现口径与待实测项见 [ACP 集成笔记](acp-integration-notes.md)） |
-| M2 | 真实冒烟：`dsh acp` 与 `codex-acp` 各跑一次真实研究 run（inproc）；产出 `docs/acp-integration-notes.md` 实测记录（能力矩阵、凭据注入点、usage 口径、版本事实） | 真实 run 报告产物 + 集成笔记 | 未开始，**需真实凭据与模型调用授权** |
+| M2（GLINK-ACP-02） | 真实冒烟：`dsh --profile acp` 与 `codex-acp` 各跑一次真实研究 run（inproc）；system prompt 送达通道；per-agent 凭据注入（每 run HOME/env、0600、并入 redactor）；能力矩阵、usage 口径与权限决策回写 | 真实 run 报告产物 + 集成笔记；`bash scripts/check.sh` 全绿 | **已完成**（2026-09-25）：两侧握手与最小真实 run 均成功，fail-closed 默认无需白名单；实测细节见 [ACP 集成笔记](acp-integration-notes.md) §4，证据 `docs/evidence/acp-m2-*.txt` |
 | M3 | docker / e2b 执行面扩展；e2b 双向 stdio（`stdin=True` + `send_stdin`，SDK 2.x 已具备）帧完整性实测先行；模板钉版 | 三面 smoke | 未开始 |
 | M4 | claude-code-acp 接入；能力矩阵补齐；如需，前端 harness 标识与按 run 选择 harness 的 API | 按当时验收 | 未开始 |
 
