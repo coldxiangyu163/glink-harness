@@ -2,7 +2,10 @@ GLINK-ACP-10 blueprint run 真实冒烟证据（pi 面 / inproc）
 ========================================================
 日期: 2026-09-25
 任务: GLINK-ACP-10（blueprint 会话模板第一增量）
-代码范围: 4 commits 84915c3 → 8ddfd0a（基线 main 862605c）；本次冒烟运行于 8ddfd0a
+代码范围: 基线 main 862605c；本次冒烟运行于 8ddfd0a（compose 序列 84915c3/9f6dfe1/cd3ec5f/8ddfd0a）
+生效范围: 冒烟之后的 afaeafc 只在解析入口加了一个 slug 防御（生产路径的名字来自
+  blueprint_names，已按同一 slug 模式过滤，该守卫对冒烟所走路径恒不触发），其余提交只改
+  测试与文档；最终 HEAD 的默认检查（bash scripts/check.sh，760 passed / 2 skipped）见交付报告。
 执行面: LOCAL_WEB_EXECUTOR=inproc；PI_GLINK_HARNESS=pi；pi 0.87.1
 模型: openai/gpt-6-sol（provider/model 取自操作员 .env；凭据值不读取打印、不写证据）
 探针: /tmp/blueprint_smoke.py（进程内起真实宿主，临时数据根 + 随机 loopback 端口；
