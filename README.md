@@ -143,6 +143,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 |---|---|---|
 | GET | `/api/health` | 宿主与 pi 可用性、当前活跃 run |
 | GET | `/api/config` | 公开配置（无密钥、无宿主路径） |
+| GET | `/api/blueprints` | 可用会话蓝图目录（`name`/`description`/阶段元数据；与准入同源推导，只读） |
 | POST | `/api/runs` | 创建并启动一次 run，body `{"prompt": "…"}` |
 | GET | `/api/runs` | run 列表（含状态与报告标记） |
 | GET | `/api/runs/{id}` | run 详情 |
@@ -158,7 +159,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 本机（`local`）执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。以 `/` 开头的 prompt 只有命令名等于 `agent/prompts/` 下模板文件名的才被接受（当前仅 `/deepresearch`），其余返回 `400 unsupported_command`（错误体只给允许的命令列表，不回显被拒输入）——pi 对这类消息会先执行扩展命令，而 pi-subagents 注册了 `/run --bg`、`/subagents-detach` 等后台入口；拒绝在任何 run 目录/执行面创建之前，追问同样适用。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
 
-多租户模式（`PI_GLINK_TENANCY=multitenant`）下所有 `/api/*`（健康的存活性探测除外）都要求可信身份——网关断言或站内会话：未认证 `401`，权限不足 `403`，未知/异租户/legacy 记录统一 `404`，超过并发上限 `429 quota_exceeded`。下一节说明完整语义。
+多租户模式（`PI_GLINK_TENANCY=multitenant`）下所有 `/api/*`（健康的存活性探测除外）都要求可信身份——网关断言或站内会话：未认证 `401`，权限不足 `403`，未知/异租户/legacy 记录统一 `404`，超过并发上限 `429 quota_exceeded`。下一节说明完整语义。`/api/blueprints` 是宿主级资源的只读目录：认证后各租户看到同一份列表（与 `/api/config` 同形）；空目录/缺失目录都返回 `200 {"blueprints": []}`，格式不合契约的文件不进列表（原因只进日志）。
 
 ## 多租户（单宿主，`PI_GLINK_TENANCY=multitenant`）
 

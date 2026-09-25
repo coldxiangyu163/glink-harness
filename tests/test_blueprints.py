@@ -686,6 +686,97 @@ def test_run_api_refuses_unknown_malformed_and_typed_blueprints(tmp_path: Path) 
         thread.join(timeout=5)
 
 
+# -- the read-only blueprint catalogue ----------------------------------------
+
+
+def test_blueprints_api_lists_usable_templates_and_matches_admission(
+    server: PiGlinkServer,
+) -> None:
+    """The catalogue carries what admission resolved, from the same directory."""
+    status, raw = request(server, "/api/blueprints")
+    assert status == 200
+    payload = json.loads(raw)
+    names = [item["name"] for item in payload["blueprints"]]
+    assert "deep-research" in names
+    assert names == sorted(names) and len(names) == len(set(names))
+
+    listed = next(item for item in payload["blueprints"] if item["name"] == "deep-research")
+    parsed = load_blueprint(BLUEPRINTS, "deep-research")
+    assert listed["description"] == parsed.description
+    assert listed["stages"] == [stage.as_record() for stage in parsed.stages]
+    assert set(listed["stages"][0]) == {"id", "title", "goal", "deliverable", "checkpoint"}
+    # 列表只说契约：渲染后的 system prompt 正文不下发。
+    assert "<blueprint" not in raw.decode("utf-8")
+
+    # 与准入同源：同一目录推导的 run 记录逐字段（含顺序）相同。
+    status, raw = request(
+        server, "/api/runs", method="POST", body={"prompt": "对照题目", "blueprint": "deep-research"}
+    )
+    assert status == 201
+    run = json.loads(raw)["run"]
+    assert run["blueprintStages"] == listed["stages"]
+    wait_for_terminal(server, run["runId"])
+
+
+def test_blueprints_api_derives_from_the_directory_and_omits_unusable_candidates(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "blueprints"
+    write_blueprint(directory, "alpha")
+    write_blueprint(directory, "beta")
+    sentinel = "SENTINEL-BLUEPRINT-BODY"
+    (directory / "broken.md").write_text(
+        synthetic_document("broken")
+        .replace('format = "pi-glink-blueprint/v1"', 'format = "wrong/v1"')
+        .replace("正文模板", f"正文模板 {sentinel}"),
+        encoding="utf-8",
+    )
+    instance = create_server(
+        make_config(tmp_path, PI_GLINK_BLUEPRINTS_DIR=str(directory)),
+        client_factory=pi_capture_factory({}),
+    )
+    thread = threading.Thread(target=instance.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, raw = request(instance, "/api/blueprints")
+        assert status == 200
+        assert [item["name"] for item in json.loads(raw)["blueprints"]] == ["alpha", "beta"]
+        assert sentinel not in raw.decode("utf-8"), "不可用候选不出现，也不回显文件内容"
+
+        # 名字来自目录本身：文件增删立即生效，没有硬编码名单。
+        write_blueprint(directory, "gamma")
+        (directory / "alpha.md").unlink()
+        _status, raw = request(instance, "/api/blueprints")
+        assert [item["name"] for item in json.loads(raw)["blueprints"]] == ["beta", "gamma"]
+    finally:
+        instance.shutdown()
+        instance.server_close()
+        thread.join(timeout=5)
+
+
+def test_blueprints_api_answers_an_empty_list_without_a_directory(tmp_path: Path) -> None:
+    """没有目录是合法部署状态：200 空列表，不回显宿主路径。"""
+    instance = create_server(make_config(tmp_path), client_factory=pi_capture_factory({}))
+    thread = threading.Thread(target=instance.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, raw = request(instance, "/api/blueprints")
+        assert status == 200
+        assert json.loads(raw) == {"blueprints": []}
+        assert str(instance.config.blueprints_dir) not in raw.decode("utf-8")
+    finally:
+        instance.shutdown()
+        instance.server_close()
+        thread.join(timeout=5)
+
+
+def test_blueprints_api_has_no_write_surface(server: PiGlinkServer) -> None:
+    """只读：上传/编辑没有实现，POST 落到统一的 unknown_endpoint。"""
+    status, raw = request(server, "/api/blueprints", method="POST", body={"name": "x"})
+    assert status == 404
+    assert json.loads(raw)["error"] == "unknown_endpoint"
+
+
 # -- tenant ownership ---------------------------------------------------------
 
 
