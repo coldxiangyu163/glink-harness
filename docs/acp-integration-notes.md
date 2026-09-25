@@ -10,13 +10,13 @@
 | `docs` | `agentclientprotocol.com/protocol/v1/*` 官方文档 |
 | `dsh 源码` | 只读参考 `/Users/coldxiangyu/AI/git/deepseek-harness/packages/acp/acp`（M1 不接真实 dsh；不作为运行时事实） |
 | `合成实测` | 本仓库 M1/M2 回归（`tests/test_kernel_acp*.py` + `tests/fixtures/fake_acp.py`）。**只证明宿主侧客户端/投影/生命周期行为，不证明任何真实 agent 的实现** |
-| `dsh 实测` | dsh 0.1.5-rc.3 的真实 initialize/session/new 与真实运行（证据 `docs/evidence/acp-m2-handshake.txt`、`acp-m2-smoke-dsh.txt`） |
-| `codex-acp 实测` | codex-acp 0.16.0 的真实 initialize/session/new 与真实运行（证据 `docs/evidence/acp-m2-handshake.txt`、`acp-m2-smoke-codex-acp.txt`） |
+| `dsh 实测` | dsh 0.1.5-rc.3 的真实 initialize/session/new 与真实运行（证据 `docs/evidence/acp-m2-handshake.txt`、`acp-m2-smoke-dsh.txt`）；M8 的真实 `session/resume` 见 `docs/evidence/acp-m8-resume-dsh.txt` |
+| `codex-acp 实测` | codex-acp 的真实 initialize/session/new 与真实运行（M2 证据 `docs/evidence/acp-m2-handshake.txt`、`acp-m2-smoke-codex-acp.txt`）；M8 用后继钉版 `@agentclientprotocol/codex-acp@1.13.1` 实测真实 `session/resume`，见 `docs/evidence/acp-m8-resume-codex-acp.txt` |
 | `docker 实测` | M3a 的真实容器证据（`docs/evidence/acp-m3-docker-*.txt`）：镜像构建与容器内自检、容器内 ACP 握手、经宿主 HTTP API 的一次最小真实 run；M4 重建镜像后的三个 agent 容器内握手见 `docs/evidence/acp-m4-claude-docker-handshake.txt`；M6 重建镜像后的 claude 后继包容器内握手与回归见 `docs/evidence/acp-m6-migration-docker-handshake.txt` |
 | `e2b 帧实测` | M3b 帧完整性探针的真实沙箱输出（`docs/evidence/acp-m3-e2b-framing.txt`，base 模板，e2b SDK 2.51.0）：保序、字节一致、LF 分帧、大帧与 `close_stdin` |
 | `e2b 模板实测` | M3b 的 dev 模板 CLI 构建与真实沙箱自检（`docs/evidence/acp-m3-e2b-template.txt`）：`glink-acp-worker`、构建日志、两次失败与修复；M6 的后继钉版重建见 `docs/evidence/acp-m6-migration-e2b-handshake.txt` |
 | `e2b 握手实测` | M3b 用生产装配路径在两个 agent 上的真实沙箱 `initialize`/`session/new`（`docs/evidence/acp-m3-e2b-agent-check.txt`）；M4 的同路径 claude-code-acp 沙箱握手见 `docs/evidence/acp-m4-claude-e2b-handshake.txt`；M6 的同路径 claude-agent-acp 握手见 `docs/evidence/acp-m6-migration-e2b-handshake.txt` |
-| `e2b 实测` | M3b 经宿主 HTTP API 的一次最小真实 run（`docs/evidence/acp-m3-e2b-smoke.txt`）：SSE 流式、终态、report 回收、沙箱按 id 终止 |
+| `e2b 实测` | M3b 经宿主 HTTP API 的一次最小真实 run（`docs/evidence/acp-m3-e2b-smoke.txt`）：SSE 流式、终态、report 回收、沙箱按 id 终止；M8 的跨沙箱「首轮+追问」续接与状态根回收见 `docs/evidence/acp-m8-resume-e2b-dsh.txt`、`acp-m8-resume-e2b-handshake.txt` |
 | `claude 实测` | M4 的真实 claude-code-acp 事实（`docs/evidence/acp-m4-claude-handshake.txt`、`acp-m4-claude-smoke.txt`）：钉版入口、能力矩阵、每 run HOME/凭据落点、源码级权限 kind 观测、一次真实模型的 inproc 最小 run（M4 钉版 0.16.2；后继包对照见下一行） |
 | `claude-agent 实测` | M6 的真实 `@agentclientprotocol/claude-agent-acp@0.81.2` 事实（`docs/evidence/acp-m6-migration-handshake.txt`、`acp-m6-migration-smoke.txt`、`acp-m6-migration-docker-handshake.txt`、`acp-m6-migration-e2b-handshake.txt`）：入口/版本、能力矩阵差异、settings env 凭据形态（原生 cli 与 `CLAUDE_CODE_EXECUTABLE` 两条通道）、两次 inproc 最小真实 run、镜像/dev 模板重建与容器/沙箱握手 |
 | `M6 源码` | 只读参考 `@agentclientprotocol/claude-agent-acp@0.81.2` 的安装产物（`dist/acp-agent.js` 的 `claudeCliPath()`、`dist/managed-policy.js` 等）；不作为运行时事实，用于解释真实观测 |
@@ -56,6 +56,12 @@ codex 侧的旧包引用收尾清零，见 §9。
 claude-agent-acp 与 opencode 各完成一次 inproc「首轮+追问」真实续接，连续性由首轮约定的
 代号在追问助手正文与子 run report.md 中复现来判定。见 §10 与
 `docs/evidence/acp-m7-resume-*.txt`。
+**M8 完成（GLINK-ACP-13，2026-09-25）**：e2b 面续接可用——ACP e2b run 在销毁沙箱前把 agent
+状态根有界镜像到宿主 `runs/<id>/acp-agent/recovered`（整份成功才发布，越界/读失败拒绝），追问
+把继承状态与既有 `report.md` 灌回新沙箱（先 0700 后上传、0600 加固）后走 `session/resume`；
+e2b 追问准入在原 M7 四条件上增加「父状态根回收成功」，其余维持拒绝。dsh 与 codex-acp 各完成
+一次 inproc「首轮+追问」，dsh 另完成一次 e2b 跨沙箱「首轮+追问」（新沙箱、同 sessionId、
+代号回环、按 id 清理）。见 §11 与 `docs/evidence/acp-m8-resume-*.txt`。
 
 ## 1. 协议事实（v1）
 
@@ -1199,10 +1205,11 @@ HTTP API 创建 run，SSE 与终态从 HTTP 面核对（证据 `acp-m6-migration
   其余（父 run 非 ACP、无 sessionId、无能力位、异租户、非终态、已有后续轮次）维持拒绝。
   能力矩阵取父 run 的 `session_ready`（该帧在 run 一开始就提交，扫描有界），子 run 的
   适配器 initialize 后再按自己协商到的矩阵复核一次（`宿主代码`/`合成实测`）。
-* e2b 面**维持拒绝**（`宿主代码`）：ACP 沙箱的 agent 状态随沙箱销毁，宿主没有可继承的状态根
-  （e2b 只回收工作区），起沙箱也必然无法 resume；在补齐“销毁前回收状态根”之前按
+* e2b 面**维持拒绝**（M7 原义务；`宿主代码`）：ACP 沙箱的 agent 状态随沙箱销毁，宿主没有可
+  继承的状态根（e2b 只回收工作区），起沙箱也必然无法 resume；在补齐“销毁前回收状态根”之前按
   `session_unavailable` 拒绝，不预支一次必然失败的云端 run。合成回归
   `test_acp_followups_are_refused_on_the_sandbox_face` 钉住（`合成实测`）。
+  **M8 已替代该决定**：沙箱销毁前回收状态根，追问灌回新沙箱后续接；见 §14.1–§14.3。
 * 行为变更同步到测试注释：`tests/test_kernel_acp_runner.py` 的原 M1 全拒用例改为“能力缺失
   拒绝”，注释写明原义务/新义务（`合成实测`）。
 
@@ -1268,8 +1275,8 @@ HTTP API 创建 run，SSE 与终态从 HTTP 面核对（证据 `acp-m6-migration
 
 ### 10.7 与既有面的差异与风险
 
-* **e2b 面追问仍不可用**：状态根随沙箱销毁，需要“销毁前回收状态根、追问时灌回新沙箱”；
-  当前按 §10.3 显式拒绝（`待实测`）。
+* **e2b 面追问**（M7 时点）：状态根随沙箱销毁，需要“销毁前回收状态根、追问时灌回新沙箱”；
+  M7 按 §10.3 显式拒绝。**M8 已实现并实测**（dsh 跨沙箱续接），见 §14。
 * **docker 面续接未 live 验证**：实现复用同一适配器，工作区与状态根都在宿主可见
   （§5.2），但本任务未授权 docker live；“隔离替身不能替代镜像/模板验证”的口径仍适用
   （`待实测`）。
@@ -1315,6 +1322,11 @@ initialize/session/new/prompt、投影帧、产物回收与沙箱销毁）、run
 `sandbox_id` 持久化、上传失败仍保留身份、云端失败不上报身份）、模板 ARG 钉版与 dev 模板
 独立性。真实沙箱行为不在这个文件里，见 §6 与证据文件。
 
+M8 新增/更新（`合成实测`）：`tests/test_kernel_acp_e2b.py` 增 e2b 跨沙箱续接全链路（新沙箱、
+同 sessionId、代号回环、两侧 recovered 根与继承文件）、状态根回收上限三轴（单文件/文件数/总量）
+与回收失败拒绝、灌回顺序（`chmod 0700` 先于上传、0600 加固覆盖继承文件）、准入矩阵（能力缺失/
+非最新轮次/回收缺失）、继承值脱敏与沙箱路径安全；现有 pi 面与 inproc/docker ACP 断言不变。
+
 M5 新增/更新（`合成实测`）：`tests/test_kernel_acp_env.py` 增三项 opencode 凭据回归
 （JSON 的 `access`/`refresh` 命中且 `accountId`/`accessMode` 不命中、YAML 标量行同规则）；
 `tests/test_kernel_acp_docker.py` 与 `tests/test_kernel_acp_e2b.py` 的钉版边界各扩展
@@ -1325,9 +1337,9 @@ M5 新增/更新（`合成实测`）：`tests/test_kernel_acp_env.py` 增三项 
 
 | 待测事实 | 为什么重要 | 验证方式 |
 |---|---|---|
-| dsh / codex-acp 的真实 `session/resume`（含 dsh 的持久会话语义） | M7 只对 claude-agent-acp 与 opencode 跑了真实续接；dsh/codex-acp 同样声明 `resume`，宿主分支由合成回归钉住（§10.1/§10.3） | 授权后的真实续接 run + 终态/状态目录核对 |
 | docker 面的 ACP 真实续接 run | M7 的 live 只到 inproc；docker 面实现复用同一适配器（工作区与状态根都在宿主可见），但按纪律不能由合成测试替代镜像/模板验证（§10.7） | 授权后按 `resume_smoke.py` 同形冒烟（docker 执行面） |
-| e2b 面的 ACP 续接（销毁前回收状态根） | M7 在 e2b 面按 `session_unavailable` 显式拒绝：状态根随沙箱销毁，宿主没有可继承的状态（§10.3） | 实现状态根回收 + 沙箱内灌回后再冒烟（需新授权） |
+| dsh 以外 agent（codex-acp / claude-agent-acp / opencode）在 e2b 面的真实续接 | M8 只对 dsh 跑了 e2b 跨沙箱续接（能力与凭据都可注入）；其余 agent 的沙箱内持久会话落点未逐个实测（§14.6） | 授权后按 `resume_smoke.py` 同形各跑一次 |
+| e2b 面状态根回收对长会话/大状态的边界 | 上限（4096 文件 / 8 MiB 单文件 / 64 MiB 总量）触顶即 fail-closed；真实长会话未测（与 §10.7 同源） | 多轮长会话续接 + 回收体积核对 |
 | `session/load` 的 replay 抑制（真实 agent） | 本机三个声明 `loadSession` 的 agent 都同时声明 `resume`，宿主优先 `resume`，load 分支只有合成回归（§10.1/§10.7） | 找一个只声明 `loadSession` 的 agent，或强制配置后真实 run |
 | 长会话的状态继承上限 | 64 MiB 总量 / 8 MiB 单文件对长会话可能触顶；触顶即 fail-closed 拒绝追问（§10.7） | 真实长会话（多轮）续接 + 状态根体积核对 |
 | `session/cancel` 真实响应时延与终态（含工具收敛） | 取消体验；M2 两次 run 未触发取消；M3a docker 面、M3b e2b 面、M4 inproc 面同样未触发 | 真实 run + 计时 |
@@ -1340,8 +1352,8 @@ M5 新增/更新（`合成实测`）：`tests/test_kernel_acp_env.py` 增三项 
 | Linux 宿主上容器 root 写 bind mount 的 uid/属主行为 | macOS/Colima 下属主不变；Linux 原生 Docker 未测 | Linux 宿主上的 docker smoke + 文件属主核对 |
 | 不同 Docker 后端（Docker Desktop 虚拟化 / Linux 原生）的共享路径与空挂载行为 | Colima 只共享 home 树；非共享路径会静默空挂载 | 逐环境 smoke + 挂载内容核对 |
 | 各适配器版本升级冒烟步骤与 license 记录 | 方案 §5/§7 纪律 | 集成笔记逐项补齐 |
-| E2B stdin 单条记录 >1 MiB 的上限 | 已测下界 1 MiB；蓝图+题面的最坏 ACP 帧 ≈196 KiB（§13.3），再往上未探测 | 真实沙箱内逐步加大单条 `send_stdin`（不需要模型） |
-| pi 面 E2B 命令串近上限（>131 KiB）能否启动 | 命令串把题面与 system prompt base64 内插；E2B 文档未声明上限，未实测（§13.3） | 真实沙箱用近上限命令串跑无模型命令（如自检脚本） |
+| E2B stdin 单条记录 >1 MiB 的上限 | 已测下界 1 MiB；蓝图+题面的最坏 ACP 帧 ≈196 KiB（§12.3），再往上未探测 | 真实沙箱内逐步加大单条 `send_stdin`（不需要模型） |
+| pi 面 E2B 命令串近上限（>131 KiB）能否启动 | 命令串把题面与 system prompt base64 内插；E2B 文档未声明上限，未实测（§12.3） | 真实沙箱用近上限命令串跑无模型命令（如自检脚本） |
 
 ## 13. 蓝图 system prompt 在 E2B 通道上的体积评估（调查）
 
@@ -1418,3 +1430,137 @@ ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上
 `session/prompt` 的 `params`，用 `json.dumps(..., ensure_ascii=False, separators=(",", ":"))`
 量帧；题面上下界用 `web_http.MAX_REQUEST_BYTES`。脚本是临时文件、未入仓（纯合成，
 不建沙箱、不调模型）。
+## 14. M8 实测（2026-09-25，e2b 面续接 + dsh/codex-acp 真实 resume）
+
+本节每条都标来源。证据文件：`docs/evidence/acp-m8-resume-dsh.txt`（inproc dsh 首轮+追问）、
+`docs/evidence/acp-m8-resume-codex-acp.txt`（inproc codex-acp 首轮+追问）、
+`docs/evidence/acp-m8-resume-e2b-dsh.txt`（e2b dsh 跨沙箱首轮+追问）、
+`docs/evidence/acp-m8-resume-e2b-handshake.txt`（真实沙箱状态根回收自检，不发 prompt）。
+
+### 14.1 e2b 状态根回收（沙箱销毁前的有界镜像）
+
+* 原状态（M7，§10.3/§10.7）：e2b 面无法续接——agent 状态只在沙箱内、随 `kill()` 销毁，
+  宿主只回收工作区。新实现（M8，`宿主代码`）：ACP e2b run 的 finalize 在销毁沙箱**前**调用
+  `E2BAcpSandboxClient.recover_state()`，把沙箱状态根 `/home/user/acp/home` 整份镜像到宿主
+  `runs/<id>/acp-agent/recovered/`。
+* 边界（`宿主代码`/`合成实测`）：沿用 M7 继承上限——文件数 4096 / 单文件 8 MiB（= e2b 上传
+  上限 `UPLOAD_MAX_BYTES`）/ 总量 64 MiB；递归 listing 有深度上限（12 层）；只收普通文件
+  （符号链接不跟随、不导入）；相对路径逐条校验（越界即拒绝整份）；读取经 SDK 元数据或流式
+  有界读。任一违规或读失败 = **整份拒绝**：不发布 recovered 根、不留 staging，宿主在终态帧的
+  `artifactFailures` 里记录原因。
+* 发布顺序（`宿主代码`/`合成实测`）：先写 `.<recovered>.staging`（目录 0700、文件 0600、
+  父目录 0700），全部写完后一次 `rename` 发布；因此 `acp-agent/recovered` 的**存在**就是
+  “父状态根回收成功”这个持久事实，准入层不读回调、不猜。
+* 脱敏（`宿主代码`/`合成实测`）：回收文本扫描出的凭据形状值并入**本 run** 的 redactor（与注入
+  凭据同待遇）；回收文件本身不重写——这是 agent 自己的会话存储，重写会破坏要续接的会话
+  （与 §10.2 的继承口径一致）。追问继承时 `inherit_acp_state` 再扫描一次，值并入子 run 的
+  redactor（合成回归：子 run 复述宿主只在回收文本里见过的 `sk-live-…` 形状值时被 mask）。
+* 真实 SDK 形状（`e2b 握手实测`，`acp-m8-resume-e2b-handshake.txt`）：dsh 无 prompt 握手后
+  `recover_state()` ok=true，9 文件 / 4417 字节，路径含
+  `.dsh/sessions/--home-user-workspace--/<sessionId>/session.v3.jsonl.zstd` 与
+  `.dsh/storages/session_projcache/sessions/<sessionId>.json`；凭据源 sha256 前后一致，沙箱按 id 终止。
+* 终态帧可见性：收尾时发布第二条 `session_ready`（`stateRootRecovered: true|false`），与 pi 面
+  e2b 回收会话文件后重发 `session_ready` 同形（`宿主代码`）。
+
+### 14.2 灌回新沙箱与 ACP-09 续接路径
+
+* 追问 run 的 `_prepare_runtime` 从父 run 的 `acp-agent/recovered` 有界继承（M7 的
+  `inherit_acp_state`：拒绝链接、凭据目标排除后重渲染、继承值并入 redactor），所以新 run 的
+  每 run HOME 在起沙箱前就含父会话状态（`宿主代码`）。
+* `upload_home()` 按 M3b 顺序把该 HOME 灌进新沙箱：先 `make_dir` + `chmod 0700`
+  `/home/user/acp/home`，再写文件，最后对本次上传的全部目录 0700、文件 0600（`宿主代码`/
+  `合成实测`；合成回归断言 `chmod 0700` 先于继承文件写入、0600 加固覆盖继承文件）。灌入失败
+  → run 失败闭环（沙箱在 finalize 销毁），不启动 agent 对半份状态续接。
+* 续接走同一份 ACP-09 路径：`session/resume`（优先）或 `session/load`，`expected_session_id`
+  核对 + 适配器 initialize 后按自己协商的矩阵复核（`宿主代码`）。
+* 会话工作区：e2b 追问复用父 run 的宿主工作区（M7 决定），并把该工作区的 `report.md` 随追问
+  灌进新沙箱（与 pi 面 `upload_continuation` 同形）；沙箱内新产物仍在 finalize 回收到宿主工作区，
+  子 run 产物发布到自己的 `runs/<child>/artifacts/`（`宿主代码`/`合成实测`/`e2b 实测`）。
+* e2b ACP 追问在启动后、发 turn 前核对 `sessionId == 父 sessionId`（`宿主代码`）；不匹配即
+  `session_unavailable` 失败，不以新会话冒充追问。
+
+### 14.3 准入放开（原义务 M7 → 新义务 M8）
+
+* 原义务（M7，§10.3）：e2b 面 ACP 追问一律 `session_unavailable`。
+* 新义务（M8）：e2b 追问在「同 harness + 已结束 + 最新轮次 + 有 sessionId + 收集到 resume 能力位
+  + 父状态根回收成功（`acp-agent/recovered` 存在且是目录）」时受理；其余（能力缺失、异租户、
+  非终态、已有后续轮次、回收失败/未回收）维持拒绝。回收到的是整份镜像，失败时连目录都不存在，
+  所以“拒绝”先于起沙箱，不预支一次必然失败的云端 run（`宿主代码`/`合成实测`）。
+* 行为变更注释：`runner._acp_resumable_parent` 写明原义务（M7）与新义务（M8）；测试
+  `tests/test_kernel_acp_e2b.py` 的旧“沙箱面一律拒绝”用例改写为跨沙箱续接全链路 + 回收失败/
+  边界/准入矩阵用例（`合成实测`）。
+
+### 14.4 dsh 的真实 resume（inproc）
+
+* 能力矩阵（`dsh 实测`，`acp-m8-resume-dsh.txt` 同次握手）：`sessionCapabilities: {close, list, resume}`，
+  `agentInfo: deepseek-harness-acp 0.0.1`，默认模型 `deepseek-v4-flash`、`reasoning_effort=high`；
+  无 `loadSession` 位 → 宿主走 `session/resume`（§10.1 的选择规则）。
+* 真实「首轮+追问」：父 run `finished`/report 200（655 bytes）；追问 `finished`/report 200
+  （676 bytes，末段 `代号 = VELUE-7145`）、`sessionId` 与父相同、`resumeMethod=session/resume`、
+  `replayedUpdates=0`；追问 HOME 与父 HOME 有 6 个内容一致的状态文件（含
+  `.dsh/sessions/--tmp-…--/<sessionId>/session.v3.jsonl.zstd` 与 storages 投影）；两次 run 的
+  流式/终态/report/清理只按持有 PID（`dsh 实测`）。
+* 结论：dsh 的持久会话语义在「同一会话目录 slug + 同 sessionId」下成立（会话目录由工作区路径
+  派生，inproc 面两轮工作区相同）。
+
+### 14.5 codex-acp 的真实 resume（inproc）
+
+* 能力矩阵（`codex-acp 实测`，本次钉版 `@agentclientprotocol/codex-acp@1.13.1`）：
+  `loadSession: true` + `sessionCapabilities: {resume, list, close, delete, fork,
+  additionalDirectories, subagents}`；会话模式取值变为 `read-only / agent / agent-full-access`
+  （默认 `agent`），M2 的 `mode=auto` 是该包旧版取值，本任务不用
+  `PI_GLINK_ACP_SESSION_CONFIG` 纠偏（`codex-acp 实测`）。
+* 真实「首轮+追问」：父 run `finished`/report 200（406 bytes）；追问 `finished`/report 200
+  （427 bytes，末行 `代号 = KNGQK-2694`）、`sessionId` 与父相同、`resumeMethod=session/resume`；
+  追问 HOME 81→82 文件，68 个与父内容一致（含
+  `.codex/sessions/2026/09/25/rollout-…-<sessionId>.jsonl`）；清理只按持有 PID
+  （`codex-acp 实测`）。
+* 结论：codex-acp 1.13.1 的 `session/resume` 在本机真实可用；持久会话存放在
+  `~/.codex/sessions/**/rollout-….jsonl`（每 run HOME 内，随继承进入子 run）。
+
+### 14.6 e2b dsh 的跨沙箱续接（真实沙箱）
+
+* 事实（`e2b 实测`，`acp-m8-resume-e2b-dsh.txt`，模板 `glink-acp-worker` 未重建）：父 run
+  sandbox `ix3p5icj942x0gjnhxu12`、追问 run sandbox `i6io646oex2y36x2h2ly8`（**新沙箱**）；两轮
+  `sessionId=cc97a2d8-bcc1-4311-9e56-5ddf08d653e9` 相同、`resumeMethod=session/resume`；追问
+  复述首轮代号 `JVNIJ-3418` 并写入 report.md（763 bytes）；宿主两侧 `acp-agent/recovered` 各 8 个
+  文件、6 个内容一致（含 `.dsh/sessions/--home-user-workspace--/<sessionId>/session.v3.jsonl.zstd`、
+  `.dsh/storages/session_projcache/sessions/<sessionId>.json`）；两次 run `cleanup.released=true`，
+  两个沙箱按持久化 id 经 `confirm_sandbox_absent` 确认不存在（无 `pkill`、无名字通配）；
+  `artifactFailures` 为空（`e2b 实测`）。
+* 计数与探针缺陷：e2b 侧共 4 轮真实调用。尝试 1 的实质判据全部通过（异沙箱/同 sessionId/代号
+  回环/两侧回收/按 id 清理），但探针 `child_ok` 读取了回收前的首帧 `session_ready`
+  （`stateRootRecovered: null`）而误报 FAIL；探针改读末帧后重跑 2 轮得到 PASS。两次尝试的原始
+  事实见证据文件（`e2b 实测`）。
+* 回收形状的真实 SDK 自检（`e2b 握手实测`）：见 §14.1 末条。
+
+### 14.7 宿主侧实现变更（M8）
+
+* `kernel/e2b_env.py`：`recover_state()` + `_publish_recovered_state()`（有界整份镜像、staging
+  发布、凭据形状值回传）；`upload_continuation()`（追问把 `report.md` 灌回新沙箱工作区）。
+* `kernel/acp_env.py`：`ACP_HOME_DIRNAME`/`ACP_RECOVERED_DIRNAME` 常量；`prepare_acp_runtime`
+  改用 HOME 常量（行为不变）。
+* `kernel/acp_execution.py`：e2b ACP 收尾调用状态回收并回传 verdict/secrets；`session_ready`
+  增 `stateRootRecovered`；追问启动时灌回工作区。
+* `kernel/execution.py`：`ArtifactRecovery` 增 `state_recovered`/`secrets`（默认 `None`/`()`，
+  其余执行面行为不变）。
+* `kernel/runner.py`：`_acp_state_home(run)` 按执行面返回宿主 HOME 或 recovered 根；
+  `_acp_resumable_parent` 去掉 e2b 无条件拒绝（原义务/新义务注释）；e2b ACP 追问启动后核对
+  sessionId；finalize 记录回收 verdict（第二条 `session_ready`）并把回收文本里的凭据形状值并入
+  run redactor。
+* 合成回归：`tests/test_kernel_acp_e2b.py`（跨沙箱全链路、回收上限三轴、回收失败拒绝、灌回
+  顺序、准入矩阵、继承值脱敏、路径安全）；`bash scripts/check.sh` 全绿（Python 773 / Node 116）。
+* live 探针：`scripts/spikes/acp_e2b/resume_smoke.py`（首轮+追问；判据含异沙箱/同 sessionId/
+  代号回环/两侧回收/按 id 清理）；`sandbox_handshake.py --recover-state`（不发 prompt 的真实
+  沙箱回收自检）。
+
+### 14.8 与既有面的差异与风险
+
+* **执行面差异不是 harness 差异**：inproc/docker 继续用宿主可见的 `acp-agent/home`；e2b 用
+  `acp-agent/recovered`。两者由 `_acp_state_home` 按 `LOCAL_WEB_EXECUTOR` 选择（`宿主代码`）。
+* **回收上限对长会话**：与 §10.7 同一个 64 MiB / 8 MiB 上限；e2b 面另有 listing 深度 12 与
+  单次 listing 体积（SDK 一次性返回）未由宿主直接限制，超出时以错误/超时拒绝（fail-closed）。
+* **状态文件权限**：沙箱内状态文件权限由 agent 自己决定（上传期是 0600/0700）；宿主侧落盘
+  固定 0600/0700（`宿主代码`）。
+* **回收期间 run 仍在流**：回收发生在 finalize、终态帧之前；回收文本发现的值只并入 redactor，
+  不把内容投影进事件流（`宿主代码`）。

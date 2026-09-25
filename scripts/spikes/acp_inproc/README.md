@@ -8,7 +8,7 @@
 |---|---|---|
 | `handshake.py` | 生产装配路径（`build_config` → `prepare_acp_runtime` → `AcpExecutionAdapter`）只做 `initialize` + `session/new`（不发 prompt、不消耗模型）：能力矩阵、`session/new` 选项、每 run HOME 落点、凭据源 sha256 前后一致、agent 子进程命令行 | `docs/evidence/acp-m4-claude-handshake.txt`、`docs/evidence/acp-m6-migration-handshake.txt` |
 | `smoke_host.py` | 一次最小真实 run：起真实宿主进程（随机端口、临时数据根、有界超时）→ `POST /api/runs` → 同时订阅 SSE → 终态 → `/report` → 采样宿主后代 PID 并只按 PID 收尾 | `docs/evidence/acp-m4-claude-smoke.txt`、`docs/evidence/acp-m6-migration-smoke.txt` |
-| `resume_smoke.py`（M7） | 续接冒烟：同一 agent 数据根先跑「首轮」（约定随机代号、不写入 report.md），再以 `parentRunId` 跑「追问」（复述代号并写入新 report.md）；判据含同 sessionId、`session_ready.resumed`、连续性代号、状态继承、报告回收与只按 PID 清理。`--parent-run-id` + `--codename` 可只跑追问 | `docs/evidence/acp-m7-resume-claude-agent-acp.txt`、`docs/evidence/acp-m7-resume-opencode.txt` |
+| `resume_smoke.py`（M7；M8 实测 dsh/codex-acp） | 续接冒烟：同一 agent 数据根先跑「首轮」（约定随机代号、不写入 report.md），再以 `parentRunId` 跑「追问」（复述代号并写入新 report.md）；判据含同 sessionId、`session_ready.resumed`、连续性代号、状态继承、报告回收与只按 PID 清理。`--parent-run-id` + `--codename` 可只跑追问 | `docs/evidence/acp-m7-resume-claude-agent-acp.txt`、`docs/evidence/acp-m7-resume-opencode.txt`、`docs/evidence/acp-m8-resume-dsh.txt`、`docs/evidence/acp-m8-resume-codex-acp.txt` |
 
 复现命令（仓库根目录；`npx` 钉版调用不全局安装，`--npm-cache` 让每 run 的新
 HOME 共享一份 npx 缓存，避免冷下载超过 initialize 的 60s 上限）：
@@ -55,7 +55,24 @@ HOME 共享一份 npx 缓存，避免冷下载超过 initialize 的 60s 上限�
   --permission-allow allow_once,read,search,fetch,edit \
   --timeout 300
 
-# 3a) 续接冒烟——opencode（M7 实测：OAuth 复制件过期且 refresh 被 401 拒绝，
+# 3a) 续接冒烟——dsh（M8 实测：真实 `session/resume`，同 sessionId + 代号回环）
+.venv/bin/python scripts/spikes/acp_inproc/resume_smoke.py \
+  --label dsh \
+  --agent "npx -y @deepseek-ai/dsh@0.1.5-rc.3 --profile acp" \
+  --credential ~/.dsh/.credentials.yaml=.dsh/.credentials.yaml \
+  --npm-cache "$HOME/.npm" \
+  --timeout 300
+
+# 3b) 续接冒烟——codex-acp（M8 实测：真实 `session/resume`；本钉版 mode 取值为
+#     read-only/agent/agent-full-access，默认 agent，不用旧版的 mode=auto）
+.venv/bin/python scripts/spikes/acp_inproc/resume_smoke.py \
+  --label codex-acp \
+  --agent "npx -y @agentclientprotocol/codex-acp@1.13.1" \
+  --credential ~/.codex/auth.json=.codex/auth.json \
+  --npm-cache "$HOME/.npm" \
+  --timeout 300
+
+# 3c) 续接冒烟——opencode（M7 实测：OAuth 复制件过期且 refresh 被 401 拒绝，
 #     改用无凭据的 OpenCode Zen 免费模型，即默认 opencode/big-pickle，不传 credential）
 .venv/bin/python scripts/spikes/acp_inproc/resume_smoke.py \
   --agent "npx -y opencode-ai@1.18.32 acp" \

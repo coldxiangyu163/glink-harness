@@ -1,0 +1,159 @@
+ACP M8 真实续接冒烟证据（dsh；inproc）
+========================================
+日期: 2026-09-25
+任务: GLINK-ACP-13（e2b 面续接 + dsh/codex-acp 真实 resume）
+钉版入口: npx -y @deepseek-ai/dsh@0.1.5-rc.3 --profile acp（能力矩阵含 sessionCapabilities.resume，
+  见 scripts/spikes/acp_inproc/handshake.py 本次实测）
+探针: scripts/spikes/acp_inproc/resume_smoke.py（真实宿主进程 + HTTP API + SSE；首轮 + 追问）
+代码范围: cbfb805（e2b 续接内核提交；inproc 路径与基线 367eee3 一致）
+凭据: ~/.dsh/.credentials.yaml 只读复制进每 run HOME（0600；源文件 sha256 前后只读未变）
+脱敏: 家目录以 ~ 代替，临时目录以 $TMP/... 代替；凭据值不出现。
+模型调用: 2 轮（首轮 + 追问）；本任务授权 ≤8 轮（inproc dsh 2 + inproc codex-acp 2 + e2b 4）。
+附加核对: 数据根经 scripts/check-no-secrets.py 扫描（结果附后）；本证据文件经同一形状检测器扫描 0 命中。
+
+原始输出
+--------
+ACP M7 真实续接冒烟（inproc / dsh）
+====================================================
+日期: 2026-09-25 18:42:32
+宿主命令: python -m pi_glink.app --port 49257（harness=acp, executor=inproc）
+agent 命令: npx -y @deepseek-ai/dsh@0.1.5-rc.3 --profile acp
+命令级 env 名: npm_config_cache
+权限白名单: （空 = fail-closed）
+会话配置: （无）
+数据根: $TMP/glink-acp13-dsh
+任务超时: 300s
+连续性判据: 首轮约定随机代号（不写入首轮 report.md），追问要求复述并写入新 report.md
+
+宿主 PID: 94520（只按这个 PID 收尾）
+宿主健康检查: HTTP 200
+[首轮] POST /api/runs -> HTTP 201
+[首轮] runId: 8d35748626b2
+[首轮] 终态: finished duration=16.041s events=21 sessionId=9439528f-1e6c-486e-8372-1f7968ab656d error=None
+[首轮] GET /api/runs/8d35748626b2/report -> HTTP 200（655 bytes）
+[追问] POST /api/runs -> HTTP 201
+[追问] runId: 63a940213b24
+[追问] 终态: finished duration=9.419s events=20 sessionId=9439528f-1e6c-486e-8372-1f7968ab656d error=None
+[追问] GET /api/runs/63a940213b24/report -> HTTP 200（676 bytes）
+宿主按 PID 94520 终止: exit=-15
+
+run 期间采样的宿主后代进程: 4 个（只按 PID 记录）
+  94522 [exited] npm exec @deepseek-ai/dsh@0.1.5-rc.3 --profile acp     
+  94834 [exited] node ~/.npm/_npx/99cabb0ceac85b86/node_modules/.bin/dsh --profile acp
+  96803 [exited] npm exec @deepseek-ai/dsh@0.1.5-rc.3 --profile acp     
+  97104 [exited] node ~/.npm/_npx/99cabb0ceac85b86/node_modules/.bin/dsh --profile acp
+
+SSE 流式（到达时间相对各自 run 创建）
+  [parent] SSE 帧数: 21
+       0.00s run_started
+       2.45s session_ready
+       2.46s turn_started
+       4.44s thinking_delta
+       4.44s usage_reported
+       4.44s tool_started
+      10.43s tool_finished
+      11.48s thinking_delta
+      11.48s usage_reported
+      11.48s tool_started
+      11.48s tool_started
+      12.70s tool_finished
+      12.94s tool_finished
+      14.82s thinking_delta
+      14.82s usage_reported
+      14.82s tool_started
+      14.85s tool_finished
+      15.88s assistant_delta
+      15.88s usage_reported
+      15.88s turn_finished
+      15.95s run_finished
+  [child] SSE 帧数: 20
+       0.00s run_started
+       2.49s kernel_status
+       2.50s session_ready
+       2.50s turn_started
+       5.35s thinking_delta
+       5.35s assistant_delta
+       5.35s usage_reported
+       5.37s tool_started
+       5.37s tool_finished
+       6.41s thinking_delta
+       6.41s usage_reported
+       6.41s tool_started
+       6.42s tool_finished
+       7.93s usage_reported
+       7.93s tool_started
+       7.95s tool_finished
+       9.18s assistant_delta
+       9.18s usage_reported
+       9.18s turn_finished
+       9.31s run_finished
+
+续接事实（events.jsonl）
+  child session_ready: {"sessionId": "9439528f-1e6c-486e-8372-1f7968ab656d", "resumed": true, "resumeMethod": "session/resume", "cwd": "$TMP/glink-acp13-dsh/workspaces/8d35748626b2"}
+  parent sessionId: 9439528f-1e6c-486e-8372-1f7968ab656d
+  工作区: parent=$TMP/glink-acp13-dsh/workspaces/8d35748626b2 · child=$TMP/glink-acp13-dsh/workspaces/8d35748626b2（ACP 会话 cwd 跨轮稳定，应相同）
+  session_ready.cwd == parent workspace: True
+  child acp_session_resumed: [{"level": "info", "message": "acp_session_resumed", "detail": "ACP 追问续接到已有会话（method=session/resume）", "resumeMethod": "session/resume", "sessionId": "9439528f-1e6c-486e-8372-1f7968ab656d", "replayedUpdates": 0}]
+
+连续性判据
+  代号出现在 child 助手正文: True
+  代号出现在 child report: True
+  代号出现在 parent report（应为 False）: False
+  代号出现在 child 题面（应为 False）: False
+  child.sessionId == parent.sessionId: True
+  child 助手正文尾部: '代号是 **VELUE-7145**。\n\n现在把它追加到 report.md 末尾。代号是 **VELUE-7145**，已按格式作为单独一行追加到 `report.md` 末尾，未重写报告、未检索或读取其他文件。'
+
+状态继承（父/子 run 各自 HOME 的同一文件内容一致，凭据目标已排除）
+  parent HOME 文件数: 8；child HOME 文件数: 8
+  内容一致的继承文件: 6 个
+    .dsh/.anonymous-user-id
+    .dsh/profiles/acp/cordis.patch.yml
+    .dsh/profiles/acp/cordis.yml
+    .dsh/profiles/acp/package.json
+    .dsh/profiles/acp/pnpm-workspace.yaml
+    .dsh/sessions/--tmp-glink-acp13-dsh-workspaces-8d35748626b2--/9439528f-1e6c-486e-8372-1f7968ab656d/session.lock
+  child HOME 文件（前 20）: ['.dsh/.anonymous-user-id', '.dsh/profiles/acp/cordis.patch.yml', '.dsh/profiles/acp/cordis.yml', '.dsh/profiles/acp/package.json', '.dsh/profiles/acp/pnpm-workspace.yaml', '.dsh/sessions/--tmp-glink-acp13-dsh-workspaces-8d35748626b2--/9439528f-1e6c-486e-8372-1f7968ab656d/session.lock', '.dsh/sessions/--tmp-glink-acp13-dsh-workspaces-8d35748626b2--/9439528f-1e6c-486e-8372-1f7968ab656d/session.v3.jsonl.zstd', '.dsh/storages/session_projcache/sessions/9439528f-1e6c-486e-8372-1f7968ab656d.json']
+
+终态与清理事实（meta.json）
+  [parent] status=finished modelStopReason=end_turn reportStatus=ok session_id=9439528f-1e6c-486e-8372-1f7968ab656d
+    cleanup={"released": true, "failures": [], "external": {}}
+  [child] status=finished modelStopReason=end_turn reportStatus=ok session_id=9439528f-1e6c-486e-8372-1f7968ab656d
+    cleanup={"released": true, "failures": [], "external": {}}
+  parent report_status / child report_status: 200 / 200
+
+child report.md（HTTP 200，676 bytes）
+------------------------------------------------------------
+# ACP 对宿主接入多种 agent 的价值
+
+- 统一接口，一次接入即可对接多个 agent：宿主（编辑器/IDE）只需实现一套 ACP 客户端，无需为每个 agent 单独适配，agent 也可专注自身逻辑、由客户端负责交互体验。
+- 基于 JSON-RPC 并复用 MCP 类型，支持流式通知与双向请求（如工具调用授权），配合按需启动子进程与多并发会话，降低集成与运维成本。
+
+来源：[Agent Client Protocol — Architecture](https://agentclientprotocol.com/get-started/architecture.md)；[Zed — How the Community is Driving ACP Forward](https://zed.dev/blog/acp-progress-report)
+
+代号 = VELUE-7145
+
+------------------------------------------------------------
+
+宿主日志尾部
+  内核 pi: ~/.nvm/versions/node/v24.16.0/bin/pi
+  模型 model: 未配置 / unset (缺少密钥 / no key)
+  2026-09-25 18:42:32,949 INFO pi_glink.kernel.acp_rpc: starting ACP agent: npx -y @deepseek-ai/dsh@0.1.5-rc.3 --profile acp
+  2026-09-25 18:42:33,039 INFO pi_glink.host: event stream attached run=8d35748626b2 after=0 live=True
+  2026-09-25 18:42:48,989 INFO pi_glink.kernel.runner: run finalized run=8d35748626b2 status=finished stop=None committed=True report=$TMP/glink-acp13-dsh/runs/8d35748626b2/artifacts/report.md released=True
+  2026-09-25 18:42:48,989 INFO pi_glink.host: event stream detached run=8d35748626b2
+  2026-09-25 18:42:50,124 INFO pi_glink.kernel.acp_rpc: starting ACP agent: npx -y @deepseek-ai/dsh@0.1.5-rc.3 --profile acp
+  2026-09-25 18:42:50,219 INFO pi_glink.host: event stream attached run=63a940213b24 after=0 live=True
+  2026-09-25 18:42:59,534 INFO pi_glink.kernel.runner: run finalized run=63a940213b24 status=finished stop=None committed=True report=$TMP/glink-acp13-dsh/runs/63a940213b24/artifacts/report.md released=True
+  2026-09-25 18:42:59,534 INFO pi_glink.host: event stream detached run=63a940213b24
+
+  parent 通过: True；child 通过: True
+[PASS] ACP 真实续接冒烟（首轮+追问，流式/终态/report/清理只按已知 PID）
+
+脱敏扫描
+--------
+$ ./.venv/bin/python scripts/check-no-secrets.py --data-root $TMP/glink-acp13-dsh \
+      --repo-root ~/AI/git/pi-glink
+凭据来源 2 条 · 扫描文件 7 个 · 真实命中 0 处 · 占位符命中 0 处
+未发现真实凭据残留。
+
+证据文件形状自检（同一 redaction 检测器）：0 命中。

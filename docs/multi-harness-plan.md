@@ -47,6 +47,11 @@ run 继承 agent 状态根（有界、拒绝链接、凭据目标排除后重渲
 （e2b 面因状态随沙箱销毁维持拒绝），续接沿用会话工作区；claude-agent-acp 与 opencode 各
 完成一次 inproc「首轮+追问」真实续接。详见 [ACP 集成笔记](acp-integration-notes.md) §10 与
 `docs/evidence/acp-m7-resume-*.txt`。
+**M8（GLINK-ACP-13）已完成**（2026-09-25）：e2b 面续接——沙箱销毁前有界回收 ACP 状态根、
+追问灌回新沙箱后续接（新沙箱/同 sessionId/代号回环由 dsh 真实冒烟判定），e2b 追问准入在原
+四条件上增加「父状态根回收成功」，其余维持拒绝；dsh 与 codex-acp 各完成一次 inproc
+「首轮+追问」真实续接。详见 [ACP 集成笔记](acp-integration-notes.md) §14 与
+`docs/evidence/acp-m8-resume-*.txt`。
 宿主默认 harness 仍是 `pi`，ACP 族只在显式配置下启用，执行面已覆盖 inproc / docker / e2b；
 本文是该方向的事实源：实现与本文出现偏差时回写本文，而不是让代码与文档各自漂移。
 
@@ -160,8 +165,12 @@ ACP prompt 是结构化 ContentBlock，不存在 pi 那样的「`/` 前缀先派
   run 的工作区）；子 run 的产物仍发布到自己的 `runs/<id>/artifacts/`，父 run 的记录与已发布
   产物不变。opencode 的真实追问实测了这个必要性（模型沿用记忆中的绝对路径）。
 * 准入：同 harness + 已结束 + 最新轮次 + 有 sessionId + 声明续接能力才受理；能力缺失、
-  agent 拒绝或状态继承失败都 fail-closed，绝不以新会话冒充追问。e2b 面的状态根随沙箱销毁，
-  在补齐「销毁前回收状态根、追问时灌回新沙箱」之前追问显式拒绝（列入待实测）。
+  agent 拒绝或状态继承失败都 fail-closed，绝不以新会话冒充追问。
+* e2b 执行面（M8 已实现，实测见集成笔记 §14）：沙箱销毁前把 agent 状态根**有界回收**到宿主
+  `runs/<id>/acp-agent/recovered`（沿用继承上限，整份成功才发布，越界/读失败整份拒绝并在
+  `artifactFailures` 记录）；追问把继承状态灌回新沙箱的每 run HOME（先 0700 后上传、0600
+  加固）后走同一份 `session/resume` 路径，并把会话工作区的 `report.md` 一并灌回；准入在
+  M7 四条件上增加「父状态根回收成功」，回收失败/未回收维持拒绝。
 
 ### 4.5 凭据与配置渲染
 
@@ -218,6 +227,7 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 | M5（GLINK-ACP-06） | opencode 接入（`opencode-ai@1.18.32`，入口 `opencode acp`）：inproc 握手与能力矩阵；每 run `auth.json` 凭据与状态目录；权限形态与决策；镜像/dev 模板加 opencode 钉版层 | inproc 握手 + 一次最小真实 run（流式/终态/report.md/清理）；容器与沙箱无模型握手自检；`bash scripts/check.sh` 全绿 | **已完成**（2026-09-25）：inproc 与 docker 面各一次最小真实 run 通过（均 0 权限请求），凭据/状态目录、镜像重建与容器挂载契约、dev 模板沙箱握手均已实测。详见 [ACP 集成笔记](acp-integration-notes.md) §8，证据 `docs/evidence/acp-m5-opencode-*.txt` |
 | M6（GLINK-ACP-08） | claude 适配器迁到后继包 `@agentclientprotocol/claude-agent-acp@0.81.2`（入口 `claude-agent-acp`，旧包 `@zed-industries/claude-code-acp@0.16.2` 被 npm 标记 renamed）；codex 旧包引用收尾清零；镜像/dev 模板换后继钉版层；集成笔记与 plan 回写 | inproc 握手与能力矩阵对照（逐条记差异）；settings env 凭据形态结论；≤2 次 inproc 最小真实 run；镜像与 dev 模板重建 + 容器/沙箱握手；`bash scripts/check.sh` 全绿；钉版边界测试同步（原义务/新义务注释） | **已完成**（2026-09-25）：两次 inproc 真实 run 通过（原生通道与 `CLAUDE_CODE_EXECUTABLE` 通道）、settings env 派生在新版成立、镜像/dev 模板重建后握手通过、`git grep` 旧包引用清零（历史文档条目逐条说明）。详见 [ACP 集成笔记](acp-integration-notes.md) §9，证据 `docs/evidence/acp-m6-migration-*.txt` |
 | M7（GLINK-ACP-09） | ACP `session/resume` 真实续接：能力矩阵决定 `session/resume`/`session/load`；追问 run 继承父 run 的 agent 状态根；准入按「同 harness + 已结束 + 最新轮次 + 有 sessionId + 声明续接能力」放开，其余拒绝（e2b 维持拒绝）；续接沿用会话工作区 | claude-agent-acp 与 opencode 各一次 inproc「首轮+追问」真实续接（题面可判定连续性）；合成回归含能力缺失/load 回放抑制/继承失败/状态缺失/异 harness/异租户拒绝与继承值脱敏；`bash scripts/check.sh` 全绿 | **已完成**（2026-09-25）：两次 inproc 真实续接通过（追问持有首轮上下文、report.md 回收、状态继承与清理按已知 PID），e2b 面追问显式拒绝等待状态根回收。详见 [ACP 集成笔记](acp-integration-notes.md) §10，证据 `docs/evidence/acp-m7-resume-*.txt` |
+| M8（GLINK-ACP-13） | e2b 面续接：沙箱销毁前有界回收 ACP 状态根到宿主、追问灌回新沙箱每 run HOME（先 0700 后上传）后走 ACP-09 resume 路径，回收/灌回失败 fail-closed；e2b 追问准入在 M7 四条件上增加「父状态根回收成功」；dsh/codex-acp 真实 resume、e2b 选能力具备且凭据可注入者跨沙箱续接 | dsh 与 codex-acp 各一次 inproc「首轮+追问」；e2b 一次跨沙箱「首轮+追问」（新沙箱/同 sessionId/代号回环，按已知 PID 与 sandbox id 清理）；合成回归含回收边界/灌回顺序/准入矩阵/fake SDK 全链路；`bash scripts/check.sh` 全绿；pi 面与既有 ACP 零回归 | **已完成**（2026-09-25）：两次 inproc 真实续接（dsh/codex-acp 均 `session/resume` 且同 sessionId）与一次 e2b 跨沙箱续接（新沙箱、两侧状态根回收、代号回环、沙箱按 id 对账无残留）通过。详见 [ACP 集成笔记](acp-integration-notes.md) §14，证据 `docs/evidence/acp-m8-resume-*.txt` |
 
 每个里程碑独立验收、独立提交边界；里程碑之间允许因实测结论回写本文。
 

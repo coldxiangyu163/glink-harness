@@ -84,6 +84,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--credential", default="", help="覆盖 source=dest（默认按 agent 选择）")
     parser.add_argument("--template", default="glink-acp-worker")
     parser.add_argument("--env-file", default="")
+    parser.add_argument(
+        "--recover-state",
+        action="store_true",
+        help="握手后直接实测状态根回收（不发 prompt；只记录文件数/字节数/路径样本）",
+    )
     parser.add_argument("--timeout", type=int, default=300)
     args = parser.parse_args(argv)
 
@@ -196,6 +201,20 @@ def main(argv: list[str] | None = None) -> int:
             result["configOptionIds"] = [
                 option.get("id") for option in (payload.get("configOptions") or [])
             ]
+        if args.recover_state:
+            # GLINK-ACP-13 / M8: the same bounded recovery the run's finalizer
+            # performs, measured against the real sandbox SDK (recursive
+            # listing shape, entry paths/sizes, streamed reads) without a
+            # model call. Only counts/paths are recorded, never file content.
+            state = sandbox_client.recover_state()
+            result["stateRecovery"] = {
+                "ok": state.ok,
+                "fileCount": len(state.files),
+                "bytes": state.bytes,
+                "paths": list(state.files[:8]),
+                "failures": list(state.failures),
+                "secretCount": len(state.secrets),
+            }
     except Exception as exc:  # noqa: BLE001 - 失败本身是证据
         result["initializeOk"] = False
         result["error"] = f"{type(exc).__name__}: {exc}"
@@ -220,6 +239,13 @@ def main(argv: list[str] | None = None) -> int:
         and result["cleanup"]["released"] is True
         and result["source_unchanged"] is True
         and bool(result.get("sandbox_id"))
+        and (
+            not args.recover_state
+            or (
+                result.get("stateRecovery", {}).get("ok") is True
+                and result.get("stateRecovery", {}).get("fileCount", 0) > 0
+            )
+        )
     )
     print(f"[{'PASS' if ok else 'FAIL'}] {args.agent} 真实沙箱 ACP 握手（initialize + session/new）")
     return 0 if ok else 1
