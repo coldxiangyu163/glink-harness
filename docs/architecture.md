@@ -35,14 +35,18 @@
                        ├─ DataRootOwnership（data_root/host.lock 独占；先证明所有权再对账）
                        ├─ EventBus（每 run 单调 seq；先落盘再发布；有界实时队列）
                        ├─ RunStore（meta.json / events.jsonl / artifacts；终帧即终态提交）
-                       └─ KernelRunner ──┬─► inproc 适配器: pi 子进程（stdio RPC）
-                                         ├─► docker 适配器: docker run -i（容器内 pi，stdio RPC）
-                                         └─► e2b 适配器:    云沙箱内 pi --mode json（单向流）
+                       └─ KernelRunner ── harness 选择（配置级 PI_GLINK_HARNESS，默认 pi）
+                              ├─ pi 族：  inproc（stdio RPC）/ docker（docker run -i，stdio RPC）/ e2b（--mode json 单向流）
+                              └─ ACP 族： inproc / docker / e2b 均为 stdio JSON-RPC 双向桥接
+                                         （e2b 面经后台命令 stdin=True + send_stdin）
 ```
 
-三种执行面共享同一套输入契约与同一套产品事件，因此浏览器、存储与报告下载路径完全一致；
-差异集中在 `kernel/` 内的适配器后面（`execution.py` + `rpc.py` / `docker_env.py` / `e2b_env.py`），
-Run 管理不承担任何单面的收尾逻辑（§5.1）。
+两个 harness 族 × 三种执行面共享同一套输入契约与同一套产品事件，因此浏览器、存储与报告下载
+路径完全一致；差异集中在 `kernel/` 内的适配器后面（pi 族：`rpc.py` / `projection.py` /
+`agent_env.py`；ACP 族：`acp_rpc.py` / `acp_projection.py` / `acp_env.py`；执行面传输：
+`execution.py` + `docker_env.py` / `e2b_env.py`），Run 管理不承担任何单面的收尾逻辑（§5.1）。
+ACP 族的协议事实、能力矩阵与冒烟证据见 [ACP 集成笔记](acp-integration-notes.md) 与
+[多 harness 方案](multi-harness-plan.md)。
 
 ## 3. 事件契约
 
