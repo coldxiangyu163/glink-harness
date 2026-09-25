@@ -3,9 +3,10 @@
 
 Implements just enough of the Agent Client Protocol v1 to exercise the client,
 the projector and the run lifecycle end to end: ``initialize`` with capability
-negotiation, ``session/new``, ``session/update`` notifications (streamed content,
-tool calls, a plan, usage, available commands), ``session/request_permission``
-(agent -> client), ``session/cancel`` and ``session/prompt``'s ``stopReason``.
+negotiation, ``session/new``, ``session/resume`` / ``session/load`` (state-root
+backed), ``session/update`` notifications (streamed content, tool calls, a plan,
+usage, available commands), ``session/request_permission`` (agent -> client),
+``session/cancel`` and ``session/prompt``'s ``stopReason``.
 
 Transport is the documented stdio shape: UTF-8, one JSON-RPC 2.0 message per
 line, LF-delimited. ``chunked`` writes the first three notifications in a single
@@ -16,11 +17,22 @@ Settings come from an optional ``--config <file.json>`` argument (the host
 passes a filtered environment, so the harness has no other channel for them) and
 are overridden by ``FAKE_ACP_*`` environment variables when present. Facts worth
 asserting are appended to the ``log`` path as JSON lines: ``initialize`` (what
-the client asked for), ``session_new`` (the ``cwd``), ``home``, ``env_probe``
+the client asked for), ``session_new`` (the ``cwd``), ``resume`` / ``load`` (the
+resume target and the state found for it), ``home``, ``env_probe``
 (``FAKE_ACP_ENV_PROBE`` names one variable to report), ``config_option``
 (``session/set_config_option`` calls), ``prompt`` (the user text),
 ``permission_outcome`` (the client's answer), ``cancel_received`` and
 ``prompt_done`` (the stop reason).
+
+Session state lives in ``$HOME/fake-acp-state.json`` — the stand-in for a real
+agent's session store. A ``session/resume`` only succeeds when that file exists
+and records the session id being resumed, so state inheritance is observable:
+the same file must have been copied into the child run's HOME. The first prompt
+remembers a marker (``REMEMBER:<word>`` or the live probe's ``代号：<word>``) in
+the state file, and a later prompt containing ``RECALL`` appends the remembered
+word to the answer and to ``report.md`` (``UNKNOWN`` when nothing was
+remembered/read) — the synthetic continuity check. ``write_report`` strips the
+marker from the deliverable, exactly as the probe instructs the real agent.
 
 Prompt markers select the terminal result:
 
@@ -53,6 +65,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -112,6 +125,63 @@ def structured(name: str, default: Any) -> Any:
 
 def session_id() -> str:
     return str(setting("FAKE_ACP_SESSION_ID", "fake-acp-session"))
+
+
+def state_path() -> Path | None:
+    home = os.environ.get("HOME", "")
+    if not home:
+        return None
+    return Path(home, "fake-acp-state.json")
+
+
+def read_state() -> dict:
+    path = state_path()
+    if path is None or not path.is_file():
+        return {}
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def write_state(state: dict) -> None:
+    path = state_path()
+    if path is None:
+        return
+    try:
+        path.write_text(json.dumps(state), encoding="utf-8")
+    except OSError as exc:
+        log("home_write_failed", error=str(exc))
+
+
+def remember(text: str) -> None:
+    """Record the prompt's codename marker in the state file.
+
+    Two spellings mean the same session fact: the synthetic fixtures use
+    ``REMEMBER:<word>`` and the live probe asks in Chinese (``代号：<word>``).
+    """
+    marker = "REMEMBER:"
+    index = text.find(marker)
+    if index >= 0:
+        tail = text[index + len(marker) :]
+        word = re.split(r"[\s,，。.;；、：:）)(（\"']", tail, maxsplit=1)[0].strip()
+    else:
+        match = re.search(r"代号[：:]\s*([A-Za-z0-9][A-Za-z0-9-]*)", text)
+        word = match.group(1) if match else ""
+    if not word:
+        return
+    state = read_state()
+    state["sessionId"] = session_id()
+    state["remembered"] = word
+    write_state(state)
+    log("remembered", word=word)
+
+
+def recalled_word() -> str:
+    state = read_state()
+    value = state.get("remembered")
+    return value if isinstance(value, str) and value else "UNKNOWN"
 
 
 def log(event: str, **fields: Any) -> None:
@@ -186,8 +256,27 @@ def prompt_text(params: dict) -> str:
     return "\n".join(parts)
 
 
+def asks_to_recall(text: str) -> bool:
+    """Does this prompt ask the agent to state the remembered codename?
+
+    The synthetic fixtures say ``RECALL``; the live probe asks in Chinese
+    (``…代号是什么？``). Both are the same request to the stand-in agent.
+    """
+    return "RECALL" in text or "复述" in text or "代号是什么" in text
+
+
 def write_report(text: str) -> None:
-    body = f"# 研究报告（fake acp）\n\n原始问题：{text}\n\n结论：这是 ACP 测试替身产出的报告。\n"
+    """Write the run's deliverable, obeying the codename instructions.
+
+    A ``REMEMBER:<word>`` / ``代号：<word>`` marker is a session fact the probe
+    asks the agent **not** to persist, so it is stripped from the report body;
+    a ``RECALL`` prompt appends the remembered word, which is what the real
+    continuity check asks the agent to do.
+    """
+    body_text = re.sub(r"(?:REMEMBER:|代号[：:])\s*\S+", "（代号已按指令隐去）", text)
+    body = f"# 研究报告（fake acp）\n\n原始问题：{body_text}\n\n结论：这是 ACP 测试替身产出的报告。\n"
+    if asks_to_recall(text):
+        body += f"\n代号 = {recalled_word()}\n"
     Path("report.md").write_text(body, encoding="utf-8")
 
 
@@ -295,6 +384,10 @@ def prompt_updates(text: str) -> list[dict]:
                 "content": {"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"},
             }
         )
+    if asks_to_recall(text):
+        updates.append(
+            _text_chunk("agent_message_chunk", f"REMEMBERED:{recalled_word()}")
+        )
     updates.append(_text_chunk("agent_message_chunk", "工作区里有一份报告草稿。"))
     return updates
 
@@ -336,6 +429,7 @@ def ask_permission() -> None:
 def run_prompt(request: dict, params: dict) -> None:
     text = prompt_text(params)
     log("prompt", text=text, sessionId=params.get("sessionId"))
+    remember(text)
     if "CRASH" in text:
         sys.stdout.flush()
         delay = float(setting("FAKE_ACP_CRASH_EXIT_DELAY", 0) or 0)
@@ -450,12 +544,9 @@ def handle_new_session(request: dict) -> None:
     home = os.environ.get("HOME", "")
     log("home", home=home)
     if home:
-        try:
-            Path(home, "fake-acp-state.json").write_text(
-                json.dumps({"sessionId": session_id()}), encoding="utf-8"
-            )
-        except OSError as exc:
-            log("home_write_failed", error=str(exc))
+        state = read_state()
+        state["sessionId"] = session_id()
+        write_state(state)
     result: dict = {"sessionId": session_id()}
     probe = os.environ.get("FAKE_ACP_ENV_PROBE")
     if probe:
@@ -489,6 +580,55 @@ def handle_new_session(request: dict) -> None:
                 "update": {"sessionUpdate": "current_mode_update", "currentModeId": "code"},
             },
         )
+
+
+def handle_resume(request: dict, method: str) -> None:
+    """``session/resume`` (no replay) and ``session/load`` (replays) stand-in.
+
+    Both require the session to exist in this process's HOME state file: a run
+    whose parent state was not inherited therefore fails to resume, exactly like
+    a real agent that cannot find the session. ``FAKE_ACP_RESUME_ERROR`` forces
+    the failure for the fail-closed regression; ``FAKE_ACP_RESUME_ALLOW_MISSING``
+    lets a test exercise the protocol path without a state root.
+    """
+    params = request.get("params") if isinstance(request.get("params"), dict) else {}
+    target = params.get("sessionId")
+    state = read_state()
+    log(
+        method.replace("/", "_"),
+        sessionId=target,
+        cwd=params.get("cwd"),
+        mcpServers=params.get("mcpServers"),
+        stateSessionId=state.get("sessionId"),
+        remembered=state.get("remembered"),
+    )
+    if flag("FAKE_ACP_RESUME_ERROR"):
+        respond(request, error={"code": -32000, "message": "resume refused by fake agent"})
+        return
+    if not flag("FAKE_ACP_RESUME_ALLOW_MISSING") and (
+        not state or state.get("sessionId") != target
+    ):
+        respond(
+            request,
+            error={"code": -32602, "message": f"session not found: {target}"},
+        )
+        return
+    if method == "session/load":
+        # The replaying method sends the parent's conversation as ordinary
+        # updates before answering; the host must not project them twice.
+        count = int(setting("FAKE_ACP_LOAD_REPLAY_UPDATES", 2) or 0)
+        for index in range(count):
+            notify(
+                "session/update",
+                {
+                    "sessionId": target,
+                    "update": _text_chunk(
+                        "agent_message_chunk", f"REPLAYED-HISTORY-{index}"
+                    ),
+                },
+            )
+        log("load_replayed", count=count)
+    respond(request, result={})
 
 
 def handle_set_config_option(request: dict) -> None:
@@ -558,8 +698,8 @@ def main() -> int:
         elif method == "session/cancel":
             _cancel.set()
             log("cancel_received", sessionId=(frame.get("params") or {}).get("sessionId"))
-        elif method == "session/resume":
-            respond(frame, error={"code": -32601, "message": "Method not found: session/resume"})
+        elif method in ("session/resume", "session/load"):
+            handle_resume(frame, method)
         else:
             respond(frame, error={"code": -32601, "message": f"Method not found: {method}"})
     return 0

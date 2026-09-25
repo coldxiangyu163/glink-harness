@@ -1,0 +1,185 @@
+ACP M7 真实续接冒烟证据（claude-agent-acp；inproc）
+========================================================
+日期: 2026-09-25
+任务: GLINK-ACP-09（ACP session/resume 真实续接）
+钉版入口: npx -y @agentclientprotocol/claude-agent-acp@0.81.2
+探针: scripts/spikes/acp_inproc/resume_smoke.py（真实宿主进程 + HTTP API + SSE；首轮 + 追问）
+代码范围: 983d7b8（续接内核提交）。最终 HEAD 63e5a23 与本对局在续接路径上的唯一差异是
+  “续接沿用会话工作区”（首轮路径未变）；该差异已由 opencode 的 live 追问与合成回归覆盖。
+凭据: 运行期 settings 由 ~/.claude/settings.json 的 env 块派生（0600，临时数据根内）；
+  源文件全程只读（sha256 前后一致，见输出末尾）。
+脱敏: 家目录以 ~ 代替，临时目录以 $TMP/... 代替；凭据值不出现。
+模型调用: 2 轮（首轮 + 追问），属授权 ≤4 轮内。
+附加核对: 数据根经 scripts/check-no-secrets.py 扫描（结果附后）。
+
+原始输出
+--------
+ACP M7 真实续接冒烟（inproc / claude-agent-acp）
+====================================================
+日期: 2026-09-25 15:28:11
+宿主命令: python -m pi_glink.app --port 65011（harness=acp, executor=inproc）
+agent 命令: npx -y @agentclientprotocol/claude-agent-acp@0.81.2
+命令级 env 名: npm_config_registry, npm_config_cache
+权限白名单: allow_once,read,search,fetch,edit
+会话配置: （无）
+数据根: $TMP/glink-acp09-claude
+任务超时: 300s
+运行期 settings 派生自: ~/.claude/settings.json（源仅读；sha256=1c63541b737184c0…）
+连续性判据: 首轮约定随机代号（不写入首轮 report.md），追问要求复述并写入新 report.md
+
+宿主 PID: 82536（只按这个 PID 收尾）
+宿主健康检查: HTTP 200
+[首轮] POST /api/runs -> HTTP 201
+[首轮] runId: de42ba3338fd
+[首轮] 终态: finished duration=55.843s events=248 sessionId=5bef2119-f624-44e6-bab8-d5199edbfc80 error=None
+[首轮] GET /api/runs/de42ba3338fd/report -> HTTP 200（654 bytes）
+[追问] POST /api/runs -> HTTP 201
+[追问] runId: 83d7d1d02d00
+[追问] 终态: finished duration=31.015s events=320 sessionId=5bef2119-f624-44e6-bab8-d5199edbfc80 error=None
+[追问] GET /api/runs/83d7d1d02d00/report -> HTTP 200（675 bytes）
+宿主按 PID 82536 终止: exit=-15
+
+run 期间采样的宿主后代进程: 9 个（只按 PID 记录）
+  82542 [exited] npm exec @agentclientprotocol/claude-agent-acp@0.81.2   
+  82869 [exited] node $TMP/glink-acp-npx-m6/_npx/698eb38f5d7f5a61/node_modules/.bin/claude-agent-acp
+  82976 [exited] $TMP/glink-acp-npx-m6/_npx/698eb38f5d7f5a61/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude auth status --json
+  82993 [exited] $TMP/glink-acp-npx-m6/_npx/698eb38f5d7f5a61/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude --output-format stream-json --verbose --inpu
+  83366 [exited] (claude)
+  91779 [exited] npm exec @agentclientprotocol/claude-agent-acp@0.81.2   
+  91805 [exited] node $TMP/glink-acp-npx-m6/_npx/698eb38f5d7f5a61/node_modules/.bin/claude-agent-acp
+  91820 [exited] $TMP/glink-acp-npx-m6/_npx/698eb38f5d7f5a61/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude --output-format stream-json --verbose --inpu
+  91829 [exited] <defunct>
+
+SSE 流式（到达时间相对各自 run 创建）
+  [parent] SSE 帧数: 248
+       0.00s run_started
+       4.27s session_ready
+       4.27s kernel_status
+       4.27s turn_started
+       4.32s kernel_status
+      23.61s usage_reported
+      23.61s thinking_delta
+      23.61s thinking_delta
+      23.66s thinking_delta
+      23.66s thinking_delta
+      23.72s thinking_delta
+      23.82s thinking_delta
+      23.98s thinking_delta
+      24.01s thinking_delta
+      24.08s thinking_delta
+      24.09s thinking_delta
+      24.09s thinking_delta
+      24.09s thinking_delta
+      24.09s thinking_delta
+      24.09s thinking_delta
+      24.21s thinking_delta
+      24.27s thinking_delta
+      24.34s thinking_delta
+      24.49s thinking_delta
+      26.32s thinking_delta
+      26.32s thinking_delta
+      26.32s thinking_delta
+      26.34s thinking_delta
+      26.34s thinking_delta
+      26.34s thinking_delta
+    … 其余 218 帧；类型序列尾部: ['assistant_delta', 'assistant_delta', 'usage_reported', 'usage_reported', 'turn_finished', 'run_finished']
+  [child] SSE 帧数: 320
+       0.00s run_started
+       1.24s kernel_status
+       1.24s session_ready
+       1.24s kernel_status
+       1.24s turn_started
+       1.27s kernel_status
+       8.82s usage_reported
+       8.82s thinking_delta
+       8.82s thinking_delta
+       8.85s thinking_delta
+       8.85s thinking_delta
+       8.98s thinking_delta
+       9.14s thinking_delta
+       9.14s thinking_delta
+       9.21s thinking_delta
+       9.27s thinking_delta
+       9.37s thinking_delta
+       9.37s thinking_delta
+       9.37s thinking_delta
+       9.37s thinking_delta
+       9.37s thinking_delta
+       9.37s thinking_delta
+       9.37s thinking_delta
+       9.37s thinking_delta
+       9.37s thinking_delta
+       9.37s thinking_delta
+      11.79s thinking_delta
+      11.79s thinking_delta
+      11.79s thinking_delta
+      11.79s thinking_delta
+    … 其余 290 帧；类型序列尾部: ['assistant_delta', 'assistant_delta', 'usage_reported', 'usage_reported', 'turn_finished', 'run_finished']
+
+续接事实（events.jsonl）
+  child session_ready: {"sessionId": "5bef2119-f624-44e6-bab8-d5199edbfc80", "resumed": true, "resumeMethod": "session/resume", "cwd": "$TMP/glink-acp09-claude/workspaces/83d7d1d02d00"}
+  parent sessionId: 5bef2119-f624-44e6-bab8-d5199edbfc80
+  child acp_session_resumed: [{"level": "info", "message": "acp_session_resumed", "detail": "ACP 追问续接到已有会话（method=session/resume）", "resumeMethod": "session/resume", "sessionId": "5bef2119-f624-44e6-bab8-d5199edbfc80", "replayedUpdates": 0}]
+
+连续性判据
+  代号出现在 child 助手正文: True
+  代号出现在 child report: True
+  代号出现在 parent report（应为 False）: False
+  代号出现在 child 题面（应为 False）: False
+  child.sessionId == parent.sessionId: True
+  child 助手正文尾部: '代号是 FVJWA-4637，已按要求追加到 report.md 末尾（`代号 = FVJWA-4637`），报告其余内容未改动。'
+
+状态继承（父/子 run 各自 HOME 的同一文件内容一致，凭据目标已排除）
+  parent HOME 文件数: 4；child HOME 文件数: 4
+  内容一致的继承文件: 2 个
+    .claude/.last-cleanup
+    .claude/backups/.claude.json.backup.1790321294515
+  child HOME 文件（前 20）: ['.claude.json', '.claude/.last-cleanup', '.claude/backups/.claude.json.backup.1790321294515', '.claude/projects/-private-tmp-glink-acp09-claude-workspaces-de42ba3338fd/5bef2119-f624-44e6-bab8-d5199edbfc80.jsonl']
+
+终态与清理事实（meta.json）
+  [parent] status=finished modelStopReason=end_turn reportStatus=ok session_id=5bef2119-f624-44e6-bab8-d5199edbfc80
+    cleanup={"released": true, "failures": [], "external": {}}
+  [child] status=finished modelStopReason=end_turn reportStatus=ok session_id=5bef2119-f624-44e6-bab8-d5199edbfc80
+    cleanup={"released": true, "failures": [], "external": {}}
+  parent report_status / child report_status: 200 / 200
+
+settings 源只读核对: unchanged
+
+child report.md（HTTP 200，675 bytes）
+------------------------------------------------------------
+# ACP 类客户端-代理协议的价值（简述）
+
+- **免去逐对集成**：宿主只要实现一次协议，即可接入整个兼容生态的 agent，避免每种「编辑器 × agent」组合都做定制开发——实现 ACP 的 agent 可与任何兼容编辑器协作，反之亦然。
+- **降低锁定、促进独立演进**：协议把宿主与 agent 解耦，双方各自迭代，用户可自由更换工具；其定位类似 LSP 对语言服务器集成的标准化。
+
+来源：[Agent Client Protocol 官方文档](https://agentclientprotocol.com/overview/introduction/)
+
+## 来源
+1. https://agentclientprotocol.com/overview/introduction/
+
+代号 = FVJWA-4637
+
+------------------------------------------------------------
+
+宿主日志尾部
+  内核 pi: ~/.nvm/versions/node/v24.16.0/bin/pi
+  模型 model: 未配置 / unset (缺少密钥 / no key)
+  2026-09-25 15:28:11,963 INFO pi_glink.kernel.acp_rpc: starting ACP agent: npx -y @agentclientprotocol/claude-agent-acp@0.81.2
+  2026-09-25 15:28:12,045 INFO pi_glink.host: event stream attached run=de42ba3338fd after=0 live=True
+  2026-09-25 15:29:07,805 INFO pi_glink.kernel.runner: run finalized run=de42ba3338fd status=finished stop=None committed=True report=$TMP/glink-acp09-claude/runs/de42ba3338fd/artifacts/report.md released=True
+  2026-09-25 15:29:07,805 INFO pi_glink.host: event stream detached run=de42ba3338fd
+  2026-09-25 15:29:08,238 INFO pi_glink.kernel.acp_rpc: starting ACP agent: npx -y @agentclientprotocol/claude-agent-acp@0.81.2
+  2026-09-25 15:29:08,302 INFO pi_glink.host: event stream attached run=83d7d1d02d00 after=0 live=True
+  2026-09-25 15:29:39,206 INFO pi_glink.kernel.runner: run finalized run=83d7d1d02d00 status=finished stop=None committed=True report=$TMP/glink-acp09-claude/runs/83d7d1d02d00/artifacts/report.md released=True
+  2026-09-25 15:29:39,206 INFO pi_glink.host: event stream detached run=83d7d1d02d00
+
+  parent 通过: True；child 通过: True
+[PASS] ACP 真实续接冒烟（首轮+追问，流式/终态/report/清理只按已知 PID）
+
+
+脱敏扫描
+--------
+$ .venv/bin/python scripts/check-no-secrets.py --data-root $TMP/glink-acp09-claude
+凭据来源 0 条 · 扫描文件 8 个 · 真实命中 0 处 · 占位符命中 0 处
+未发现真实凭据残留。
+exit=0

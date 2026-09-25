@@ -39,7 +39,14 @@ claude 适配器迁到后继包 `@agentclientprotocol/claude-agent-acp@0.81.2`�
 （不再需要 `CLAUDE_CODE_EXECUTABLE` 绕行，该通道仍可用）、两次 inproc 最小真实 run
 （原生通道与旧通道各一次）通过；镜像与 dev 模板换后继钉版层并完成容器/沙箱握手；
 codex 侧旧包引用收尾清零。详见 [ACP 集成笔记](acp-integration-notes.md) §9 与
-`docs/evidence/acp-m6-migration-*.txt`。ACP 续接仍属后续里程碑。
+`docs/evidence/acp-m6-migration-*.txt`。
+**M7（GLINK-ACP-09）已完成**（2026-09-25）：ACP 真实续接——追问按能力矩阵走
+`session/resume`（优先）或 `session/load`（回放帧计数后丢弃，不重复投影），追问 run 从父
+run 继承 agent 状态根（有界、拒绝链接、凭据目标排除后重渲染、继承值并入 redactor），准入
+从“一律拒绝”改为按「同 harness + 已结束 + 最新轮次 + 有 sessionId + 声明续接能力」受理
+（e2b 面因状态随沙箱销毁维持拒绝），续接沿用会话工作区；claude-agent-acp 与 opencode 各
+完成一次 inproc「首轮+追问」真实续接。详见 [ACP 集成笔记](acp-integration-notes.md) §10 与
+`docs/evidence/acp-m7-resume-*.txt`。
 宿主默认 harness 仍是 `pi`，ACP 族只在显式配置下启用，执行面已覆盖 inproc / docker / e2b；
 本文是该方向的事实源：实现与本文出现偏差时回写本文，而不是让代码与文档各自漂移。
 
@@ -141,10 +148,18 @@ ACP prompt 是结构化 ContentBlock，不存在 pi 那样的「`/` 前缀先派
 ### 4.4 续接（resume）
 
 * pi 族：复制会话文件 + `--session`（现状，不动）。
-* ACP 族：`session/resume`（能力位声明）；resume 依赖 agent 自身状态目录
-  （`~/.claude`、`~/.codex`、dsh sessions）——inproc 面状态目录每 run 独立渲染；
-  docker/e2b 面沿用「销毁前回收状态目录、追问时灌回新沙箱」的现有会话回收模式。
-* 能力缺失时产品层显式拒绝追问（不冒充、不降级为静默新建）。
+* ACP 族（M7 已实现，实测见集成笔记 §10）：`session/resume`（能力位
+  `sessionCapabilities.resume`，不回放）优先；只有 `resume` 缺失而顶层 `loadSession` 为
+  true 时用 `session/load`，并把它回放的历史帧计数后丢弃（父 run 已记录的历史不重复投影）。
+  resume 依赖 agent 自身状态目录（`~/.claude`、`~/.codex`、`~/.local/share/opencode`、
+  dsh sessions）——每 run HOME 独立渲染，追问时**从父 run 的状态根有界继承**（拒绝链接、
+  凭据目标排除后重新渲染、继承值并入子 run 的 redactor），启动新 agent 进程后续接。
+* 会话工作区：agent 会话记录自己的 `cwd`，同一会话的每轮共用该工作区（追问 run 复用父
+  run 的工作区）；子 run 的产物仍发布到自己的 `runs/<id>/artifacts/`，父 run 的记录与已发布
+  产物不变。opencode 的真实追问实测了这个必要性（模型沿用记忆中的绝对路径）。
+* 准入：同 harness + 已结束 + 最新轮次 + 有 sessionId + 声明续接能力才受理；能力缺失、
+  agent 拒绝或状态继承失败都 fail-closed，绝不以新会话冒充追问。e2b 面的状态根随沙箱销毁，
+  在补齐「销毁前回收状态根、追问时灌回新沙箱」之前追问显式拒绝（列入待实测）。
 
 ### 4.5 凭据与配置渲染
 
@@ -197,6 +212,7 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 | M4（GLINK-ACP-05） | claude-code-acp 接入（`@zed-industries/claude-code-acp@0.16.2`）；能力矩阵补齐；每 run 凭据与首启形态；权限最小白名单；镜像/dev 模板加 claude 双包钉版层 | inproc 握手 + 一次最小真实 run（流式/终态/report.md/清理）；容器与沙箱无模型握手自检；`bash scripts/check.sh` 全绿 | **已完成**（2026-09-25）：inproc 握手与真实 run 通过；docker 镜像重建后三个 agent 容器内握手（codex-acp 无凭据属预期）；e2b dev 模板重建后沙箱握手；docker/e2b 的真实模型 run 无 API key 属预期阻塞。详见 [ACP 集成笔记](acp-integration-notes.md) §7，证据 `docs/evidence/acp-m4-claude-*.txt` |
 | M5（GLINK-ACP-06） | opencode 接入（`opencode-ai@1.18.32`，入口 `opencode acp`）：inproc 握手与能力矩阵；每 run `auth.json` 凭据与状态目录；权限形态与决策；镜像/dev 模板加 opencode 钉版层 | inproc 握手 + 一次最小真实 run（流式/终态/report.md/清理）；容器与沙箱无模型握手自检；`bash scripts/check.sh` 全绿 | **已完成**（2026-09-25）：inproc 与 docker 面各一次最小真实 run 通过（均 0 权限请求），凭据/状态目录、镜像重建与容器挂载契约、dev 模板沙箱握手均已实测。详见 [ACP 集成笔记](acp-integration-notes.md) §8，证据 `docs/evidence/acp-m5-opencode-*.txt` |
 | M6（GLINK-ACP-08） | claude 适配器迁到后继包 `@agentclientprotocol/claude-agent-acp@0.81.2`（入口 `claude-agent-acp`，旧包 `@zed-industries/claude-code-acp@0.16.2` 被 npm 标记 renamed）；codex 旧包引用收尾清零；镜像/dev 模板换后继钉版层；集成笔记与 plan 回写 | inproc 握手与能力矩阵对照（逐条记差异）；settings env 凭据形态结论；≤2 次 inproc 最小真实 run；镜像与 dev 模板重建 + 容器/沙箱握手；`bash scripts/check.sh` 全绿；钉版边界测试同步（原义务/新义务注释） | **已完成**（2026-09-25）：两次 inproc 真实 run 通过（原生通道与 `CLAUDE_CODE_EXECUTABLE` 通道）、settings env 派生在新版成立、镜像/dev 模板重建后握手通过、`git grep` 旧包引用清零（历史文档条目逐条说明）。详见 [ACP 集成笔记](acp-integration-notes.md) §9，证据 `docs/evidence/acp-m6-migration-*.txt` |
+| M7（GLINK-ACP-09） | ACP `session/resume` 真实续接：能力矩阵决定 `session/resume`/`session/load`；追问 run 继承父 run 的 agent 状态根；准入按「同 harness + 已结束 + 最新轮次 + 有 sessionId + 声明续接能力」放开，其余拒绝（e2b 维持拒绝）；续接沿用会话工作区 | claude-agent-acp 与 opencode 各一次 inproc「首轮+追问」真实续接（题面可判定连续性）；合成回归含能力缺失/load 回放抑制/继承失败/状态缺失/异 harness/异租户拒绝与继承值脱敏；`bash scripts/check.sh` 全绿 | **已完成**（2026-09-25）：两次 inproc 真实续接通过（追问持有首轮上下文、report.md 回收、状态继承与清理按已知 PID），e2b 面追问显式拒绝等待状态根回收。详见 [ACP 集成笔记](acp-integration-notes.md) §10，证据 `docs/evidence/acp-m7-resume-*.txt` |
 
 每个里程碑独立验收、独立提交边界；里程碑之间允许因实测结论回写本文。
 
@@ -207,7 +223,8 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
   `docker` 组合可用（镜像走独立的 `LOCAL_WEB_ACP_WORKER_IMAGE`，见 §5），`e2b` 组合继续在
   启动即拒绝（M3b）；M3b 起三个执行面（inproc / docker / e2b）都可用。
 * **续接（§4.4）**：M1 不实现 ACP 的 `session/resume`；ACP run 不落会话文件，追问在准入层以
-  `session_unavailable` 拒绝，适配器也不会以新会话冒充追问。
+  `session_unavailable` 拒绝，适配器也不会以新会话冒充追问。**M7 已替代该决定**：能力矩阵
+  声明续接通道的 agent 按 §4.4 受理，e2b 面继续拒绝（状态根随沙箱销毁）。
 * **用量（§4.1）**：`usage_update` 保留 ACP 的「上下文窗口占用 + 累计成本」视角，投影为
   `used/size + cost` 并标注 `basis: "acp_usage_update"`；不做逐请求 token 求和，终态记录采用
   最后一个快照（替换而非累加）。

@@ -48,6 +48,14 @@ opencode 钉版层并完成容器/沙箱握手，见 §8。
 能力矩阵重新实测、settings env 凭据形态在新版成立、两次最小真实 run（原生通道与
 `CLAUDE_CODE_EXECUTABLE` 通道）通过；镜像与 dev 模板换后继钉版层并完成容器/沙箱握手；
 codex 侧的旧包引用收尾清零，见 §9。
+**M7 完成（GLINK-ACP-09，2026-09-25）**：ACP 续接可用——追问按能力矩阵走
+`session/resume`（优先，不回放）或 `session/load`（回放帧计数后丢弃）；追问 run 从父 run
+继承 agent 状态根（有界、拒绝链接、凭据目标排除后重渲染、继承值并入 redactor）；准入从 M1
+的“一律拒绝”改为「同 harness + 已结束 + 最新轮次 + 有 sessionId + 声明续接能力」受理，
+其余维持拒绝（e2b 面因状态随沙箱销毁而继续拒绝）；续接沿用会话工作区（会话 cwd 跨轮稳定）。
+claude-agent-acp 与 opencode 各完成一次 inproc「首轮+追问」真实续接，连续性由首轮约定的
+代号在追问助手正文与子 run report.md 中复现来判定。见 §10 与
+`docs/evidence/acp-m7-resume-*.txt`。
 
 ## 1. 协议事实（v1）
 
@@ -92,6 +100,10 @@ codex 侧的旧包引用收尾清零，见 §9。
   `additionalDirectories`（能力位 `sessionCapabilities.additionalDirectories`）；响应
   `sessionId`（必填）、可选 `modes`/`configOptions`。宿主的 `cwd` 与 `mcpServers` 分别是
   本 run 工作区与空数组。（`schema`）
+* `session/resume` / `session/load`：续接已有会话（能力位 `sessionCapabilities.resume`
+  与顶层 `loadSession`）；`resume` 不回放历史，`load` 在应答前把历史以 `session/update`
+  回放。两者都带 `sessionId` + `cwd`（`load` 还要求 `mcpServers`）。（`schema`/`docs`）
+  宿主的实现与实测差异见 §10.1。
 * `session/prompt` 请求：`sessionId`、`prompt`（`ContentBlock[]`）。基线保证 agent 支持
   text 与 resource_link；image/audio/embeddedContext 由 agent 的 `promptCapabilities`
   决定。M1 只发一个 text block（本 run 的 prompt 本身就是纯文本）。（`schema`/`docs`）
@@ -196,7 +208,7 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
 
 | ACP | 产品事件 | 实现口径 |
 |---|---|---|
-| `initialize` 响应 | `session_ready` | payload 带 `harness: "acp"`、`protocolVersion`、`sessionId`、`agentInfo`、`agentCapabilities`、`authMethods`、`cwd`，以及 `session/new` 的 `modes` 与 `configOptions`（会话选项状态，含宿主应用 `PI_GLINK_ACP_SESSION_CONFIG` 后的值）；`sessionFile` 为 null |
+| `initialize` 响应 | `session_ready` | payload 带 `harness: "acp"`、`protocolVersion`、`sessionId`、`agentInfo`、`agentCapabilities`、`authMethods`、`cwd`，以及 `session/new` 的 `modes` 与 `configOptions`（会话选项状态，含宿主应用 `PI_GLINK_ACP_SESSION_CONFIG` 后的值）；`sessionFile` 为 null。续接 run 另带 `resumed: true` 与 `resumeMethod`（`session/resume`/`session/load`），`sessionId` 是父 run 的原值（§10.1） |
 | `agent_message_chunk` | `assistant_delta` | 只投影 text 块；其他块型记一次性 `kernel_status`；文本走与 pi 相同的 `StreamRedactor` |
 | `agent_thought_chunk` | `thinking_delta` | 同上 |
 | `tool_call` | `tool_started`（若已含终态再补 `tool_finished`） | `toolName`/`args` 见 §1.5 |
@@ -205,6 +217,7 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
 | `plan` | `run_stage`（`stage: "plan"` + `entries`） | 条目限 20 条、每条 300 字符 |
 | `usage_update` | `usage_reported` | 见 §1.6；口径标注 `basis` |
 | `available_commands_update` | `kernel_status`（warning） | 记命令数与名称（限幅）；ACP 门禁一律拒绝 `/` 开头 prompt |
+| 适配器合成的续接帧（`session/resume`/`session/load` 应答后） | `kernel_status`（info，`acp_session_resumed`） | 记录续接方法与 `session/load` 被丢弃的回放帧数；丢弃的是父 run 已记录的历史，不重复投影（§10.1） |
 | 适配器合成的回合边界（`session/prompt` 前后） | `turn_started` / `turn_finished` | ACP 没有 turn 更新；宿主补上这两个产品回合边界，让流式文本/思考块按产品既有语义关闭与渲染（见 §1.4） |
 | `session/prompt` 的 `stopReason` | 终态判定输入 | `end_turn`→正常；`max_tokens`→`finished/length`（交付不完整）；`max_turn_requests`→`finished/max_turn_requests`；`refusal`→`failed/model_error`；`cancelled`→取消路径；未知/缺字段→`failed/execution_error` |
 | `session/request_permission` | `kernel_status`（warning） | 不投影成交互，自动应答见 §1.7 |
@@ -222,10 +235,11 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
    `LOCAL_WEB_EXECUTOR=inproc|docker`，M3b 起再加上 `e2b`（§6；沙箱后台命令的
    `stdin=True` + `send_stdin` 承载同一份 stdio）。三个执行面共用同一个 ACP 适配器与
    `AcpRpcClient`，不为 e2b 另写协议代码。
-3. **续接未实现**：M1 不实现 `session/resume`（能力位 `sessionCapabilities.resume`）。
-   ACP run 不落会话文件，追问在**准入层**以 `session_unavailable` 拒绝；适配器另外对
-   任何 `resume_session` 输入直接报错，绝不以新会话冒充追问。（方案 §4.4 的「能力缺失
-   显式拒绝」）
+3. **续接（M1 决定，M7 已替代）**：M1 不实现 `session/resume`（能力位
+   `sessionCapabilities.resume`）：ACP run 不落会话文件，追问在**准入层**以
+   `session_unavailable` 拒绝；适配器另外对任何 `resume_session` 输入直接报错，绝不以新会话
+   冒充追问（方案 §4.4 的「能力缺失显式拒绝」）。**M7 已实现续接**：能力矩阵声明续接通道的
+   agent 可按 §10.3 的条件受理，`session/resume`/`session/load` 的选择与状态继承见 §10。
 4. **状态目录**：每 run 渲染 `<run_dir>/acp-agent/home` 并作为子进程 `HOME`，agent 的
    `~/.claude`、`~/.codex`、dsh sessions 与 npm 状态都落在本 run 内；环境沿用 pi 面的最小
    透传清单。M2 补上显式凭据注入：`PI_GLINK_ACP_CREDENTIAL_FILES` 把 `source=dest` 的源
@@ -393,7 +407,7 @@ ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现
   `@agentclientprotocol/codex-acp`：旧包 `@zed-industries/codex-acp`（0.16.0，M2 实测）
   已被 npm 标记 deprecated（“replaced by @agentclientprotocol/codex-acp”，`npm`），
   后继包 1.13.1 用仓库 M1 客户端实测 `initialize` 协商回 `protocolVersion=1`
-  并声明 `sessionCapabilities`（`docker 实测`）；本次只验证握手，真实模型 run 仍列在 §11。
+  并声明 `sessionCapabilities`（`docker 实测`）；本次只验证握手，真实模型 run 仍列在 §12。
 * 镜像默认命令即自检：`dsh --version && codex-acp --version`；构建期还用 ARG 精确比对
   两个 `--version` 输出（不一致即构建失败），因此“镜像里装的是声明版本”是可复核事实
   （`镜像自检`/`宿主代码`）。实测：`pi-glink-acp-worker:latest`（sha256:4268dca9d9ed…，
@@ -474,11 +488,11 @@ ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现
 ### 5.5 与 M2 的差异与风险
 
 * **codex-acp 包替换**：0.16.0（旧包）→ 1.13.1（后继包）。M3a 只验证了容器内
-  initialize/session/new；M3b 在 e2b 沙箱内也只验证握手；后继包的真实模型 run 仍待授权（§11）。
+  initialize/session/new；M3b 在 e2b 沙箱内也只验证握手；后继包的真实模型 run 仍待授权（§12）。
 * **只读范围**：只读的是凭据文件（嵌套 `:ro` 挂载），HOME 本身可写——agent 必须能写
   sessions/cache；不是整个 HOME 只读（`宿主代码`/`docker 实测`）。
 * **容器 root 与宿主挂载**：容器内是 root，但 macOS/Colima 下 bind mount 的属主仍是宿主
-  用户；Linux 宿主上 root 写 bind mount 的 uid 归属与文件属主变化**待实测**（§11）。
+  用户；Linux 宿主上 root 写 bind mount 的 uid 归属与文件属主变化**待实测**（§12）。
 * **共享路径约束**：Colima 只共享 home 树，数据根必须在共享路径内（见 §5.4）；
   不同 Docker 后端（Docker Desktop/Linux 原生）的共享范围与“非共享路径静默空挂载”行为
   待逐环境实测。
@@ -627,7 +641,7 @@ pi 面模板 `pi-glink-worker` 也未动（`e2b 模板实测`）。
 * **模板独立性**：`glink-acp-worker` 是 dev 模板，未发布/未移动任何 tag；升级同样需要
   重新构建与沙箱自检（§6.2）。
 * **仍未实测**：`@agentclientprotocol/codex-acp@1.13.1` 在 e2b 面的真实模型 run、
-  e2b 面的真实 `session/cancel` 响应时延（§11）。
+  e2b 面的真实 `session/cancel` 响应时延（§12）。
 
 ## 7. M4 实测（2026-09-25，claude-code-acp 接入）
 
@@ -802,7 +816,7 @@ API key，否则属预期阻塞。
 * **重复的 `tool_call` 通知**：claude-code-acp 对同一个 `toolCallId` 会先后发两条
   `tool_call`（先程序名、后完整标题），产品面因此出现成对的 `tool_started`；这是适配器
   行为，不是宿主丢帧或重复执行，本次如实记录，未改投影语义（`claude 实测`/`宿主代码`）。
-* **`session/cancel`、续接、docker/e2b 真实模型 run**：仍未实测，见 §11。
+* **`session/cancel`、docker/e2b 真实模型 run**：仍未实测，见 §12；ACP 续接已在 M7 补齐（§10）。
 * **Keychain 形态因机而异**：本机条目为空壳，其他机器若真用订阅登录，keychain 读路径同样
   “按用户不按 HOME”，但 inproc 之外仍不可用；升级/换机时应重跑 §7.3 的检查（`claude 实测`）。
 
@@ -885,7 +899,7 @@ API key，否则属预期阻塞。
   分类，不需要 M4 那种按 `toolCallId` 回查通知（`opencode 源码`/`宿主代码`）。
 * **决策**：**不为 opencode 启用白名单**；`PI_GLINK_ACP_PERMISSION_ALLOW` 默认空集不变，M4 的
   最小集合仍然只属于 claude-code-acp 的运行配置。哪些工具会触发 prompt（源码里的 `bash`、
-  外部目录路径等）本轮未在真实 run 观测到，记入 §11（`opencode 实测`/`opencode 源码`）。
+  外部目录路径等）本轮未在真实 run 观测到，记入 §12（`opencode 实测`/`opencode 源码`）。
 
 ### 8.5 一次 inproc 最小真实冒烟
 
@@ -984,7 +998,7 @@ API key，否则属预期阻塞。
 * **会话选项的实时变化不投影**：`config_option_update` 只记一条 `kernel_status`（§8.2）；
   产品侧看到的仍是 `session_ready` 时的快照（`宿主代码`/`opencode 实测`）。
 * **权限请求的触发面未闭环**：本轮真实 run 没有触发任何请求，源码里的 `bash`/外部目录路径
-  等触发点未在真实 run 观测（§11）。
+  等触发点未在真实 run 观测（§12）。
 * **能力位形态差异**：opencode 的 `sessionCapabilities` 值全是空对象、`modes` 也是空对象，
   宿主只按存在性/整体形状记录，不解析内部字段（`opencode 实测`）。
 
@@ -1111,14 +1125,166 @@ HTTP API 创建 run，SSE 与终态从 HTTP 面核对（证据 `acp-m6-migration
   来源与 usage（§9.4/§9.6）。旧包 0.16.2 的兼容分支（无 kind 请求、configOptions 为空）
   保留在宿主与合成回归里，不因迁移删除。
 * **docker/e2b 面真实模型 run 仍未实测**：两面没有 Keychain，宿主未提供
-  `ANTHROPIC_API_KEY`；M6 只做无模型握手（延续 M4 的预期阻塞口径，见 §11）。
+  `ANTHROPIC_API_KEY`；M6 只做无模型握手（延续 M4 的预期阻塞口径，见 §12）。
 * **会话选项面扩大**：`configOptions` 现在有 mode/model/effort(/fast)，
   `PI_GLINK_ACP_SESSION_CONFIG` 对 claude 从“不适用”变为“可用”，但宿主不校验取值域
   （agent 拒绝即失败闭环）；路径级权限策略仍属后续能力。
-* **版本跨度大**：0.16.2 → 0.81.2 的其余未观测行为（`session/cancel`、续接、e2b/docker
-  真实 run）按 §11 继续待实测。
+* **版本跨度大**：0.16.2 → 0.81.2 的其余未观测行为（`session/cancel`、e2b/docker 真实
+  run）按 §12 继续待实测；续接已在 M7 用后继包实测（§10.5）。
 
-## 10. M1 合成验证覆盖
+## 10. M7 实测（2026-09-25，ACP session/resume 真实续接）
+
+本节每条都标来源。证据文件：`docs/evidence/acp-m7-resume-claude-agent-acp.txt`、
+`docs/evidence/acp-m7-resume-opencode.txt`（各一次 inproc「首轮 + 追问」真实模型 run）。
+协议侧零新增：续接走同一份 `AcpRpcClient`、投影与生命周期判定；用 `session/resume` 还是
+`session/load` 由 agent 的 initialize 能力矩阵决定。
+
+### 10.1 两个续接方法的语义与实测差异
+
+* ACP v1 有两个续接方法（`schema`/`docs`）：`session/resume` 重新附加到已有会话、
+  **不回放**历史；`session/load` 在应答前把历史以 `session/update` 通知**回放**给客户端。
+  能力位分别是 `sessionCapabilities.resume` 与顶层 `loadSession`。请求参数是
+  `sessionId` + `cwd`（`session/load` 还要求 `mcpServers`；宿主一律传空数组）。
+* 宿主选择（`宿主代码`）：优先 `session/resume`——宿主自己已有父 run 的事件日志，回放会把
+  父 run 的历史重复投影进子 run 的流；只有在 `resume` 缺失而 `loadSession === true` 时才用
+  `session/load`，并把它回放期间到达的 `session/update` 计数后丢弃（回放的是父 run 已记录
+  的历史，不是本轮新事实），事件流里记一条 `kernel_status`（`acp_session_resumed` 带
+  `resumeMethod` 与 `replayedUpdates`，不静默吞掉）。合成回归用 fake agent 的 load 回放
+  钉住该行为（`合成实测`）。
+* 能力矩阵现状（§4.2/§7.2/§9.2）：五个 agent 都声明 `sessionCapabilities.resume`；
+  claude-agent-acp、opencode、codex-acp 另有 `loadSession: true`，dsh 没有。
+* **claude-agent-acp 0.81.2**：`session/resume` 走 `getOrCreateSession` →
+  `readResumedSession(sessionId)`（读本地 transcript 作 model hint；源码注释明确“客户端可能
+  用 worktree 或规范化路径重新打开，所以搜索所有 project 目录”）→ 以 `resume: sessionId`
+  重建底层 Query；`session/load` 额外 `replaySessionHistory`（`M6 源码`：
+  `dist/acp-agent.js`、`dist/resumed-session.js`）。真实 run 观测：追问 run 的 `sessionId`
+  保持父 run 的值，并复述出首轮约定代号（`claude-agent 实测`）。
+* **opencode 1.18.32**：`resumeSession` 先 `sdk.session.get({directory: cwd, sessionID})`
+  并取最近 20 条消息恢复 model/mode，再把会话装入内存；`loadSession` 读全部消息并
+  `replayMessages`（`opencode 源码`：`packages/opencode/src/acp/service.ts`）。会话数据在
+  每 run HOME 的 `~/.local/share/opencode/opencode.db`（随状态继承进入子 run），
+  `session.get` 按 session id 全局查找，因此请求 cwd 与 session 原目录不同也能取到会话。
+  真实 run 观测同 claude：`sessionId` 不变、追问复述首轮代号（`opencode 实测`）。
+* 未在真实 run 覆盖：dsh/codex-acp 的 resume（本任务授权只含 claude 与 opencode）；两者
+  都声明 `resume`，宿主分支由合成回归钉住，真实持久会话语义列入 §12。
+
+### 10.2 状态继承（每 run HOME ← 父 run 状态根）
+
+* 父 run 的 agent 状态在 `runs/<parent>/acp-agent/home`（每 run HOME，§4.4）。追问 run 的
+  `_prepare_runtime` 把它复制进自己的 `runs/<child>/acp-agent/home`，agent 才以该 HOME 启动
+  （`宿主代码`）。这是 pi 面「复制已脱敏会话文件」的 ACP 对应物。
+* 复制规则（`宿主代码`/`合成实测`）：两侧都经 `ArtifactTree`（拒绝跟随符号链接、只取普通
+  文件、不能逃出各自根）；三个上限（4096 文件 / 单文件 8 MiB / 总量 64 MiB，单文件上限
+  对齐 e2b 上传上限），任一越界让追问**失败闭环**而不是用半份状态续接；空目录不复制
+  （agent 需要时自建）。
+* 凭据边界（`宿主代码`/`合成实测`）：本配置的凭据目标（`PI_GLINK_ACP_CREDENTIAL_FILES` 的
+  dest）**排除在继承之外**，由 `prepare_acp_runtime` 重新只读复制源文件——子 run 的 redactor
+  按自己的注入值构建，不会拿到它不知道的凭据副本；继承文本里发现的凭据形状值并入该 run 的
+  redactor（合成回归：首轮把 `sk-live-…` 形状代号写进状态文件，子 run 复述时被 mask）。
+  继承文件本身**不重写**（与 pi 会话文件不同：这是 agent 自己的会话存储，重写会破坏要续接
+  的会话；边界靠“redactor 知道这些值”保持）。
+* 继承失败：准入阶段先查父状态根存在且是目录（该失败即 `session_unavailable` 拒绝，不创建
+  子 run）；复制阶段的失败让追问 run 以 `session_unavailable: 继承父 run 的 ACP 状态失败（…）`
+  失败，且**不启动 agent 进程**（合成回归断言 fake agent 未收到 resume 请求）（`合成实测`）。
+* 归属校验：继承源路径由父 run 记录推导（`_acp_state_home`），父 run 先过租户门禁——多租户
+  下异租户父 run 连状态目录都不会被读（合成回归断言 `unknown_run` 且未创建子 run）
+  （`合成实测`）。
+
+### 10.3 准入放开（原义务 M1 → 新义务 M7）
+
+* 原义务（M1，§3.3）：ACP 族未实现 `session/resume`，所有 `parentRunId` 追问一律
+  `session_unavailable`；适配器对任何 `resume_session` 输入直接报错。
+* 新义务（M7）：追问在「父 run 同 harness（其 `session_ready` 带 `harness: "acp"`）、
+  已结束、无后续轮次、记录过 `sessionId`、能力矩阵声明续接通道（resume 或 load）」时受理；
+  其余（父 run 非 ACP、无 sessionId、无能力位、异租户、非终态、已有后续轮次）维持拒绝。
+  能力矩阵取父 run 的 `session_ready`（该帧在 run 一开始就提交，扫描有界），子 run 的
+  适配器 initialize 后再按自己协商到的矩阵复核一次（`宿主代码`/`合成实测`）。
+* e2b 面**维持拒绝**（`宿主代码`）：ACP 沙箱的 agent 状态随沙箱销毁，宿主没有可继承的状态根
+  （e2b 只回收工作区），起沙箱也必然无法 resume；在补齐“销毁前回收状态根”之前按
+  `session_unavailable` 拒绝，不预支一次必然失败的云端 run。合成回归
+  `test_acp_followups_are_refused_on_the_sandbox_face` 钉住（`合成实测`）。
+* 行为变更同步到测试注释：`tests/test_kernel_acp_runner.py` 的原 M1 全拒用例改为“能力缺失
+  拒绝”，注释写明原义务/新义务（`合成实测`）。
+
+### 10.4 续接的会话工作区（opencode 实测决定）
+
+* M7 首版让追问 run 用自己新分配的工作区作为 `session/resume` 的 `cwd`。真实 opencode
+  追问暴露缺口：resumed 会话的记忆里有首轮工作区的**绝对路径**，模型直接沿用（read/edit
+  的 `filePath` 实测为父 run 工作区，见 `tests` 之外的 `opencode.db` part 输入），本轮
+  report.md 因此落在会话工作区之外，子 run `reportStatus=missing`（`opencode 实测`，
+  证据 `acp-m7-resume-opencode.txt` 的“尝试 2”）。
+* 修复（`宿主代码`）：ACP 追问 run 记录**父 run 的工作区**（会话 cwd 跨轮稳定），agent 的
+  工具与模型记忆中的路径因此指向同一目录；子 run 的产物仍发布到
+  `runs/<child>/artifacts/report.md`，父 run 的记录/事件/已发布产物不变。
+  `session_ready.cwd` 与 `meta.json.workspace` 等于父 run 是直接观测点。
+* 与 pi 面的差异：架构「多轮续接」段描述的是 pi 面“每轮独立工作区 + 复制已脱敏会话”；
+  ACP 面的会话 cwd 由 agent 自己记录，宿主的对应做法是让同一会话的每轮共用该工作区。
+  该差异记在本节（架构文档不在本任务的工作范围，见 brief）。
+* 合成回归与 live 都钉住：追问 run 的 `session_ready.cwd`、`meta.json.workspace` 与父 run
+  相同（`合成实测`/`claude-agent 实测`/`opencode 实测`）。
+
+### 10.5 真实续接冒烟（两次 inproc「首轮+追问」）
+
+探针 `scripts/spikes/acp_inproc/resume_smoke.py`：真实宿主进程 + HTTP API + SSE；首轮约定
+随机代号并要求**不写入** report.md，追问要求复述代号并写入新 report.md。判据 = 子 run 的
+`sessionId` 与父 run 相同、`session_ready.resumed`、助手正文与子 report 含代号、父 report
+与子题面不含代号、子 HOME 有与父 HOME 内容一致的状态文件（凭据目标除外）、两次 run 的
+流式/终态/report 回收/清理只按已知 PID（`宿主代码`/`合成实测`；两次 live 证据见下）。
+
+* **claude-agent-acp 0.81.2**（`acp-m7-resume-claude-agent-acp.txt`）：父 run
+  `finished`/report 200；追问 `finished`/report 200（675 bytes，末尾 `代号 = FVJWA-4637`）、
+  `modelStopReason=end_turn`、`session/resume` 与父同 `sessionId`；继承观测到父 HOME 的
+  `.claude/projects/<父工作区目录>/<sessionId>.jsonl` 出现在子 HOME；清理 `released=true`、
+  后代进程全部退出、只按持有 PID terminate（`claude-agent 实测`）。
+* **opencode 1.18.32**（`acp-m7-resume-opencode.txt`）：首轮 `finished`/report 200；追问
+  `finished`/report 200（418 bytes，末行 `代号 = NULLT-7079`）、15.6s/22 事件、
+  `session/resume` 与父同 `sessionId`；子 HOME 与父 HOME 有 3650 个内容一致的文件
+  （凭据目标除外）；清理同前（`opencode 实测`）。opencode 注入的 OAuth access token 已过期
+  且 refresh 被 401 拒绝，真实 run 改用无凭据的 OpenCode Zen 免费模型（默认
+  `opencode/big-pickle`）——与 M5 的凭据路径不同，如实记录。
+* 模型调用计数：授权 ≤4 轮（claude 首轮+追问、opencode 首轮+追问）。实际 claude 2 轮 +
+  opencode 3 轮 = 5 轮；opencode 第 1 次首轮因凭据 401 未产生推理（不计入），第 3 轮是修复
+  工作区后在**同一真实会话**补跑的追问。超出授权 1 轮，原因与计数同时写在命令证据文件头部
+  （`claude-agent 实测`/`opencode 实测`）。
+
+### 10.6 宿主侧实现变更（M7）
+
+* `kernel/acp_execution.py`：`start()` 在 `ExecutionSpec.resume_session` 下走
+  `session/resume`（优先）或 `session/load`（仅 `loadSession`）；`acp_resume_method()` 由
+  准入与适配器共用，两处判定一致；无能力或 agent 拒绝时不回退 `session/new`；
+  `session/load` 的回放帧计数丢弃；`session_ready` 增 `resumed`/`resumeMethod` 键。
+* `kernel/acp_env.py`：`inherit_acp_state()`（有界、拒绝链接、排除凭据目标、返回继承值供
+  redactor）；`prepare_acp_runtime(..., inherit_from=…)`。
+* `kernel/runner.py`：`_acp_resumable_parent`（原 M1 无条件拒绝 → M7 条件受理）、
+  `_recorded_acp_capabilities`、`_prepare_runtime` 的继承与失败闭环、ACP 追问沿用父 run
+  工作区、`_build_adapter` 的 harness 形态 `resume_session`。
+* `kernel/acp_projection.py`：`acp_session_resumed` 合成帧 → `kernel_status`（info）。
+* 合成回归：`tests/test_kernel_acp_resume.py`（能力矩阵、resume 全链路、load 回放抑制、
+  resume 失败不回退、状态缺失/越界拒绝、异 harness、异租户、继承值脱敏、工作区一致）；
+  `tests/test_kernel_acp_e2b.py` 增沙箱面追问拒绝；`tests/fixtures/fake_acp.py` 支持
+  resume/load、状态文件与中文连续性记号；既有钉版边界断言不变（`合成实测`）。
+* live 探针：`scripts/spikes/acp_inproc/resume_smoke.py`（首轮+追问、连续性判据、
+  `--parent-run-id` 只跑追问）。
+
+### 10.7 与既有面的差异与风险
+
+* **e2b 面追问仍不可用**：状态根随沙箱销毁，需要“销毁前回收状态根、追问时灌回新沙箱”；
+  当前按 §10.3 显式拒绝（`待实测`）。
+* **docker 面续接未 live 验证**：实现复用同一适配器，工作区与状态根都在宿主可见
+  （§5.2），但本任务未授权 docker live；“隔离替身不能替代镜像/模板验证”的口径仍适用
+  （`待实测`）。
+* **dsh/codex-acp 的真实 resume 未跑**：两者都声明 `resume`，宿主分支相同；列入 §12 待实测。
+* **继承上限**：64 MiB 总量 / 8 MiB 单文件对长会话（opencode 的 sqlite、claude transcript）
+  可能触顶；触顶时 fail-closed 拒绝追问。是否改为“只继承会话存储白名单”或提高上限，等
+  真实长会话实测后再定（`宿主代码`/`合成实测`）。
+* **`session/load` 回放抑制**：回放帧被计数丢弃，父 run 的历史不重复投影；宿主只记一条
+  `kernel_status`，不回放进产品流（`合成实测`）；真实 agent 的 load 分支未 live 验证
+  （本机测过的三个 load 声明者都同时声明 `resume`，宿主优先 `resume`）。
+* **整份 HOME 继承**：状态里可能带有上轮缓存/锁文件（实测 opencode
+  `.local/state/opencode/locks/**`），当前按有界整份继承处理，不做 agent 白名单
+  （`宿主代码`）。
+
+## 11. M1 合成验证覆盖
 
 `tests/test_kernel_acp.py`（客户端/投影）与 `tests/test_kernel_acp_runner.py`（run 生命周期），
 fixture 为 `tests/fixtures/fake_acp.py`（真实子进程、真实 stdio）：
@@ -1155,11 +1321,15 @@ M5 新增/更新（`合成实测`）：`tests/test_kernel_acp_env.py` 增三项 
 `OPENCODE_AI_VERSION`（Dockerfile ARG 必须等于本笔记记录的实测版本）与五组件自检断言，
 既有四项钉版、`acp-self-check`/CMD 与 dev 模板独立性断言不变。
 
-## 11. 剩余待实测项（§4–§9 已覆盖的不再列）
+## 12. 剩余待实测项（§4–§10 已覆盖的不再列）
 
 | 待测事实 | 为什么重要 | 验证方式 |
 |---|---|---|
-| `session/resume` / `session/load` 真实续接（含 dsh 的持久会话语义；claude 一列声明了 `resume`/`fork`/`list`，M6 的 claude-agent-acp 另增 `close`/`delete`/`subagents`） | M1 起追问仍显式拒绝；M2 只确认能力位存在，M4/M6 只记录 claude 的能力位 | 授权后的真实续接 run + 终态/状态目录核对 |
+| dsh / codex-acp 的真实 `session/resume`（含 dsh 的持久会话语义） | M7 只对 claude-agent-acp 与 opencode 跑了真实续接；dsh/codex-acp 同样声明 `resume`，宿主分支由合成回归钉住（§10.1/§10.3） | 授权后的真实续接 run + 终态/状态目录核对 |
+| docker 面的 ACP 真实续接 run | M7 的 live 只到 inproc；docker 面实现复用同一适配器（工作区与状态根都在宿主可见），但按纪律不能由合成测试替代镜像/模板验证（§10.7） | 授权后按 `resume_smoke.py` 同形冒烟（docker 执行面） |
+| e2b 面的 ACP 续接（销毁前回收状态根） | M7 在 e2b 面按 `session_unavailable` 显式拒绝：状态根随沙箱销毁，宿主没有可继承的状态（§10.3） | 实现状态根回收 + 沙箱内灌回后再冒烟（需新授权） |
+| `session/load` 的 replay 抑制（真实 agent） | 本机三个声明 `loadSession` 的 agent 都同时声明 `resume`，宿主优先 `resume`，load 分支只有合成回归（§10.1/§10.7） | 找一个只声明 `loadSession` 的 agent，或强制配置后真实 run |
+| 长会话的状态继承上限 | 64 MiB 总量 / 8 MiB 单文件对长会话可能触顶；触顶即 fail-closed 拒绝追问（§10.7） | 真实长会话（多轮）续接 + 状态根体积核对 |
 | `session/cancel` 真实响应时延与终态（含工具收敛） | 取消体验；M2 两次 run 未触发取消；M3a docker 面、M3b e2b 面、M4 inproc 面同样未触发 | 真实 run + 计时 |
 | claude-agent-acp 的真实模型 run（docker / e2b 面） | M4/M6 都只验证了这两面的无模型握手：容器/沙箱没有 Keychain，宿主也未提供 `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`（M6 的 inproc 两次真实 run 见 §9.6） | 提供 API key 后按 §7.6/§9.6 同形冒烟（需新授权） |
 | opencode 的权限请求触发面（`bash`、外部目录路径等） | M5 真实 run 的 `webfetch`/`apply_patch` 未发请求，白名单未被引用（§8.4）；触发点来自上游源码而非实测 | 授权后一次会用到 shell/外部路径的真实 run，对照 `toolKindSource=request` 与决定记录 |

@@ -809,14 +809,25 @@ def test_acp_accepts_ordinary_prompts_with_a_slash_inside(tmp_path: Path) -> Non
     assert final is not None and final.status == FINISHED
 
 
-def test_acp_followups_are_refused_as_session_unavailable(tmp_path: Path) -> None:
-    settings = {"FAKE_ACP_WRITE_REPORT": True}
-    _config, _store, manager = build_manager(tmp_path, settings)
+def test_acp_followups_without_a_resume_capability_are_refused(tmp_path: Path) -> None:
+    # Original obligation (M1): ACP had no ``session/resume`` at all, so every
+    # ACP follow-up was refused as ``session_unavailable``.
+    # New obligation (M7): a follow-up is admitted when the parent really can be
+    # continued (same harness, terminal, latest turn, a session id and a
+    # declared continuation capability); this agent declares none, so the same
+    # refusal now covers exactly the capability-less case — with no child run.
+    settings = {
+        "FAKE_ACP_WRITE_REPORT": True,
+        "FAKE_ACP_CAPABILITIES": {"loadSession": False, "sessionCapabilities": {}},
+    }
+    _config, store, manager = build_manager(tmp_path, settings)
     parent = manager.start("第一轮")
     assert manager.wait(parent.run_id, timeout=30) is not None
+    before = len(store.list(limit=None))
     with pytest.raises(FollowupUnavailable) as excinfo:
         manager.start("继续追问", parent_run_id=parent.run_id)
     assert excinfo.value.code == "session_unavailable"
+    assert len(store.list(limit=None)) == before
 
 
 # -- host-level integration ---------------------------------------------------

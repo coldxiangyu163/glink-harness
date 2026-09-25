@@ -10,9 +10,16 @@ therefore this module — is the same.
 
 ``start()``
     Spawn the agent, ``initialize`` (protocol version + capability negotiation)
-    and ``session/new``. A continuation request is refused outright: the ACP
-    family has no ``session/resume`` implementation, and starting a fresh
-    session instead would fake a continuation.
+    and either ``session/new`` (a first turn) or the continuation of the parent
+    session: ``session/resume`` when the agent declares
+    ``sessionCapabilities.resume``, otherwise ``session/load`` when the older
+    top-level ``loadSession`` capability is declared. A continuation request
+    never falls back to ``session/new``: with no declared continuation channel,
+    or when the agent refuses the resume, the run fails instead of presenting a
+    fresh session as the parent's next turn. ``session/load`` replays the
+    conversation as ``session/update`` notifications before it answers; those
+    frames are the parent's already-recorded history, so they are counted and
+    dropped rather than projected twice into this run's stream.
 ``session_info()``
     The ACP session id plus the negotiated capability matrix, for the run
     record's ``session_ready`` frame.
@@ -89,6 +96,13 @@ logger = logging.getLogger("pi_glink.kernel.acp_execution")
 #: The protocol MAJOR version this client implements (ACP v1 schema).
 ACP_PROTOCOL_VERSION = 1
 
+#: The continuation method that reattaches to an existing session without
+#: replaying it (capability ``sessionCapabilities.resume``).
+RESUME_METHOD = "session/resume"
+#: The older top-level ``loadSession`` continuation: it replays the conversation
+#: through ``session/update`` notifications before answering.
+LOAD_METHOD = "session/load"
+
 #: Capabilities this client advertises. Deliberately empty: the agent operates
 #: on its own filesystem, so the host offers no ``fs/*`` and no ``terminal/*``
 #: methods, and it cannot reproduce the agent invocation in an interactive
@@ -150,6 +164,32 @@ def compose_prompt(system_prompt: str, prompt: str) -> str:
         f"<system-prompt>\n{instructions}\n</system-prompt>\n\n"
         f"--- 用户请求 ---\n\n{request_text}"
     )
+
+
+def acp_resume_method(capabilities: Mapping[str, Any]) -> str | None:
+    """The continuation channel an agent's capability matrix declares.
+
+    ACP carries two. ``sessionCapabilities.resume`` is the no-replay method and
+    is preferred: the host already owns the parent run's event log, so replaying
+    the conversation into a new run would duplicate it. The older top-level
+    ``loadSession`` boolean is the replaying method and is used only when
+    ``resume`` is absent. A missing bit (or a false one) means the agent has no
+    continuation at all — the caller then fails closed instead of starting a
+    fresh session as the parent's next turn.
+
+    One function serves both callers: the adapter checks the matrix it just
+    negotiated, and the runner's admission gate checks the matrix recorded in
+    the parent run's ``session_ready`` frame (the only capability source that
+    exists before the child's agent process is started).
+    """
+    session_capabilities = capabilities.get("sessionCapabilities")
+    if isinstance(session_capabilities, Mapping):
+        resume = session_capabilities.get("resume")
+        if resume is not None and resume is not False:
+            return RESUME_METHOD
+    if capabilities.get("loadSession") is True:
+        return LOAD_METHOD
+    return None
 
 
 class AcpExecutionAdapter(ExecutionAdapter):
@@ -214,6 +254,17 @@ class AcpExecutionAdapter(ExecutionAdapter):
         #: been reaped. :meth:`close` completes the report from that status.
         self._kernel_exit_cause: str | None = None
         self._session_id: str | None = None
+        #: Which continuation method this run used (``session/resume`` or
+        #: ``session/load``); ``None`` for a first turn.
+        self._resume_method_used: str | None = None
+        #: ``session/load`` replays the parent's conversation as ordinary
+        #: ``session/update`` notifications before it answers. Those frames are
+        #: history this host already recorded for the parent run, so they must
+        #: not be projected a second time into this run's stream; they are
+        #: counted while the load is in flight and reported once it returns.
+        self._replay_lock = threading.Lock()
+        self._suppressing_replay = False
+        self._replayed_updates = 0
         self._protocol_version: int | None = None
         self._agent_info: dict[str, Any] = {}
         self._capabilities: dict[str, Any] = {}
@@ -224,14 +275,6 @@ class AcpExecutionAdapter(ExecutionAdapter):
     # -- lifecycle ------------------------------------------------------------
 
     def start(self) -> None:
-        if self.spec.resume_session:
-            # A follow-up carries a parent session. ACP can only continue it via
-            # ``session/resume`` (capability-gated, M2 work after real-agent
-            # measurement); starting a fresh session here would misrepresent
-            # the run as a continuation.
-            raise AcpError(
-                "ACP 适配器尚不支持续接（session/resume 未实现）；拒绝以新会话冒充追问"
-            )
         client_kwargs: dict[str, Any] = {
             "cwd": self._cwd,
             "env": self._env,
@@ -260,11 +303,10 @@ class AcpExecutionAdapter(ExecutionAdapter):
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
             self._accept_initialize(negotiated)
-            created = client.request(
-                "session/new",
-                {"cwd": self._session_cwd, "mcpServers": []},
-                timeout=REQUEST_TIMEOUT_SECONDS,
-            )
+            if self.spec.resume_session:
+                self._resume_session(client, self.spec.resume_session)
+            else:
+                self._new_session(client)
         except Exception:
             # Nothing may outlive a failed start: the caller still runs
             # ``close()``, but leaving the child up when start() itself failed
@@ -275,6 +317,14 @@ class AcpExecutionAdapter(ExecutionAdapter):
             except Exception:  # noqa: BLE001 - the start failure is the report
                 logger.exception("closing ACP agent after a failed start failed")
             raise
+
+    def _new_session(self, client: AcpRpcClient) -> None:
+        """A first turn: create the session this run's prompt works in."""
+        created = client.request(
+            "session/new",
+            {"cwd": self._session_cwd, "mcpServers": []},
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
         session_id = created.get("sessionId")
         if not isinstance(session_id, str) or not session_id:
             raise AcpProtocolError("session/new 没有返回 sessionId")
@@ -284,6 +334,80 @@ class AcpExecutionAdapter(ExecutionAdapter):
         )
         self._config_options = _project_config_options(created.get("configOptions"))
         self._apply_session_config(client, session_id)
+
+    def _resume_session(self, client: AcpRpcClient, session_id: str) -> None:
+        """Continue the parent's session the way this agent's matrix allows.
+
+        The method is chosen from the negotiated capability matrix, never guessed:
+        ``session/resume`` when declared, ``session/load`` when only the older
+        top-level ``loadSession`` bit is. Anything else fails closed — this run
+        is not allowed to answer a follow-up with a brand-new session.
+        """
+        method = self._resume_method()
+        if method is None:
+            raise AcpError(
+                "ACP agent 未声明续接能力（sessionCapabilities.resume 或 loadSession）；"
+                "拒绝以新会话冒充追问"
+            )
+        if self.spec.expected_session_id and self.spec.expected_session_id != session_id:
+            # The admission layer verified the parent; a value that changed
+            # between admission and start is never used as a resume target.
+            raise AcpProtocolError(
+                "续接目标与准入时校验的父 sessionId 不一致；拒绝续接"
+            )
+        self._resume_method_used = method
+        params: dict[str, Any] = {
+            "sessionId": session_id,
+            "cwd": self._session_cwd,
+            # The host declares no MCP server for any run; both methods take the
+            # same empty list (``session/load`` requires the field).
+            "mcpServers": [],
+        }
+        if method == LOAD_METHOD:
+            # ``session/load`` replays the parent's conversation before it
+            # answers: those frames belong to the parent run's record, not to
+            # this turn's stream.
+            self._begin_replay_suppression()
+        try:
+            answer = client.request(method, params, timeout=REQUEST_TIMEOUT_SECONDS)
+        finally:
+            replayed = self._end_replay_suppression()
+        self._session_id = session_id
+        self._modes = (
+            dict(answer["modes"]) if isinstance(answer.get("modes"), Mapping) else {}
+        )
+        self._config_options = _project_config_options(answer.get("configOptions"))
+        self._on_frame(
+            {
+                "type": "acp_session_resumed",
+                "method": method,
+                "sessionId": session_id,
+                # How many replayed frames were dropped (0 for resume). The
+                # projection records this; nothing is silently swallowed.
+                "replayedUpdates": replayed,
+            }
+        )
+        self._apply_session_config(client, session_id)
+
+    def _resume_method(self) -> str | None:
+        """The continuation channel this agent's capability matrix declares.
+
+        ACP carries two (see :func:`acp_resume_method`), and the admission gate
+        reads the parent run's recorded matrix through the same function, so a
+        run is only admitted when the agent this host is about to start would
+        also accept the resume.
+        """
+        return acp_resume_method(self._capabilities)
+
+    def _begin_replay_suppression(self) -> None:
+        with self._replay_lock:
+            self._suppressing_replay = True
+            self._replayed_updates = 0
+
+    def _end_replay_suppression(self) -> int:
+        with self._replay_lock:
+            self._suppressing_replay = False
+            return self._replayed_updates
 
     def _apply_session_config(self, client: AcpRpcClient, session_id: str) -> None:
         """Apply ``PI_GLINK_ACP_SESSION_CONFIG`` right after ``session/new``.
@@ -379,6 +503,12 @@ class AcpExecutionAdapter(ExecutionAdapter):
             # face. This is the ACP fact, not a host path.
             "cwd": self._session_cwd,
         }
+        if self._resume_method_used is not None:
+            # A continuation's session id is the parent's own id, so the run
+            # record can prove the agent reattached to exactly that session
+            # rather than opening a new one.
+            payload["resumed"] = True
+            payload["resumeMethod"] = self._resume_method_used
         return SessionInfo(payload=payload, session_id=self._session_id, session_file=None)
 
     def deliver_input(self) -> None:
@@ -598,6 +728,14 @@ class AcpExecutionAdapter(ExecutionAdapter):
 
     def _on_notification(self, frame: Mapping[str, Any]) -> None:
         """Hand one wire notification to the run's projection."""
+        if self._suppressing_replay:
+            # ``session/load`` is replaying the parent's conversation: these
+            # frames are already in the parent run's record. Counting them (the
+            # adapter reports the count when the load answers) keeps the drop
+            # visible without duplicating an entire transcript into this run.
+            with self._replay_lock:
+                self._replayed_updates += 1
+            return
         self._remember_tool_kind(frame)
         self._on_frame(frame)
 

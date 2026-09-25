@@ -44,7 +44,7 @@ from pi_glink.kernel.e2b_env import (
 )
 from pi_glink.kernel.execution import ExecutionSpec, build_adapter
 from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.kernel.runner import RunManager
+from pi_glink.kernel.runner import FollowupUnavailable, RunManager
 from pi_glink.store import FAILED, FINISHED, RunStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -644,6 +644,36 @@ def test_an_acp_run_finishes_on_the_sandbox_face(tmp_path: Path) -> None:
     # what put it on the host (the file is not a host-side fixture).
     sandbox_report = translate(SANDBOX_WORKSPACE, sandbox.root) / "report.md"
     assert sandbox_report.is_file()
+
+
+def test_acp_followups_are_refused_on_the_sandbox_face(tmp_path: Path) -> None:
+    """The sandbox destroys the agent state with it, so a follow-up is refused.
+
+    The E2B face recovers the workspace, not the agent's state root: the host
+    has nothing to inherit and a started sandbox could never resume. M7 fails
+    closed here (``session_unavailable``) instead of paying for a sandbox whose
+    resume must fail; recovering the sandbox state root is recorded as future
+    work in the integration notes.
+    """
+    settings = {"FAKE_ACP_WRITE_REPORT": True}
+    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings))
+    sandboxes: list[FakeSandbox] = []
+
+    def factory(**_kwargs: Any) -> FakeSandbox:
+        sandbox = FakeSandbox(tmp_path, report=None)
+        sandboxes.append(sandbox)
+        return sandbox
+
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store=store, sandbox_factory=factory)
+    record = manager.start("第一轮")
+    final = manager.wait(record.run_id, timeout=120)
+    assert final is not None and final.status == FINISHED
+
+    with pytest.raises(FollowupUnavailable) as excinfo:
+        manager.start("追问", parent_run_id=record.run_id)
+    assert excinfo.value.code == "session_unavailable"
+    assert len(sandboxes) == 1, "refusal happens before a second sandbox is created"
 
 
 def test_the_credential_value_stays_in_the_sandbox_file(tmp_path: Path) -> None:

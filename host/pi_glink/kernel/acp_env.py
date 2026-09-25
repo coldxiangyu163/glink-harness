@@ -49,6 +49,7 @@ from typing import Mapping
 
 from ..config import ConfigError, HostConfig
 from ..redaction import MIN_SECRET_LENGTH, find_credential_shapes, is_placeholder_value
+from ..artifacts import ArtifactError, ArtifactTree
 from .agent_env import PASSTHROUGH_ENV
 
 #: Per-run ACP agent directory inside the run directory.
@@ -56,6 +57,30 @@ ACP_RUNTIME_DIRNAME = "acp-agent"
 #: Upper bound on one copied credential file. A credential store is small;
 #: a bigger file is refused instead of silently consumed/stored.
 CREDENTIAL_FILE_MAX_BYTES = 1 << 20
+
+#: Continuation state inherited from a parent run is bounded on all three axes
+#: (file count, one file, total bytes). A research agent's own state is small;
+#: the bounds keep one run's cache — or a hostile session file — from making the
+#: next run copy without limit. Exceeding any bound refuses the follow-up
+#: instead of silently resuming from a partial state. The per-file bound is the
+#: E2B face's upload ceiling (``e2b_env.UPLOAD_MAX_BYTES``), so a state root that
+#: inherits on one face is not undeliverable on another.
+INHERIT_MAX_FILES = 4096
+INHERIT_MAX_FILE_BYTES = 8 * 1024 * 1024
+INHERIT_MAX_TOTAL_BYTES = 64 * 1024 * 1024
+#: How much inherited text is scanned for credential-shaped values that join the
+#: run's redaction boundary (this bounds the scan, not the copy).
+INHERIT_SCAN_MAX_BYTES = 8 * 1024 * 1024
+
+
+class AcpStateInheritError(RuntimeError):
+    """A follow-up's parent state could not be inherited safely.
+
+    Raised for a missing/unreadable parent state root, a bound violation or an
+    unsafe entry. The caller refuses the follow-up: the alternative — resuming
+    from a partial copy or from nothing — would present a continuation the
+    agent does not actually have.
+    """
 
 #: Key-name hints for values that must join the redaction boundary even when a
 #: scanner cannot recognise their shape (an opaque token, a short shared secret).
@@ -94,6 +119,7 @@ def prepare_acp_runtime(
     *,
     runtime_dir: Path,
     operator_home: Path | None = None,
+    inherit_from: Path | None = None,
 ) -> AcpRuntime:
     """Create one run's ACP state root, inject credentials, return its handle.
 
@@ -101,6 +127,16 @@ def prepare_acp_runtime(
     subdirectory): rendering into a shared directory would let two runs
     overwrite each other's agent state. ``operator_home`` is the host user's home
     a credential source's leading ``~`` expands against (never the run HOME).
+
+    ``inherit_from`` is the authorized parent run's ACP state root
+    (``<data_root>/runs/<parent>/acp-agent/home``) when this run continues that
+    parent's session. It is copied into this run's own HOME — the ACP analogue
+    of the pi face's sanitized session-file copy — after the fresh credentials
+    are in place, and every configured credential destination is skipped: the
+    child must render its own credential copy (so the run's redactor knows the
+    values it may echo) rather than inherit the parent's. Values discovered in
+    the inherited text are returned through :attr:`AcpRuntime.secrets` so they
+    join this run's redaction boundary too.
 
     Credential sources are read only: the operator's own files are never
     written, moved or chmodded by this function.
@@ -123,13 +159,112 @@ def prepare_acp_runtime(
     # a credential-looking *name* makes a value a secret, so an ordinary knob
     # (``ACME_MODE=workspace``) never becomes a redaction target.
     secrets.extend(_env_credential_values(config))
+    credential_dests = tuple(dest for _source, dest in config.acp_credential_files)
+    if inherit_from is not None:
+        # After the injection above, so the fresh credential files win; the
+        # destinations are excluded from the copy for the same reason.
+        secrets.extend(
+            inherit_acp_state(
+                Path(inherit_from), home, skip=credential_dests
+            )
+        )
     return AcpRuntime(
         directory=directory,
         home=home,
         command=config.acp_command.strip(),
         secrets=_dedupe(secrets),
-        credential_dests=tuple(dest for _source, dest in config.acp_credential_files),
+        credential_dests=credential_dests,
     )
+
+
+def inherit_acp_state(
+    parent_home: Path,
+    home: Path,
+    *,
+    skip: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Copy an authorized parent's ACP state into this run's HOME (bounded).
+
+    The copy is the ACP counterpart of the pi face's session-file breadcrumb: a
+    ``session/resume`` only means something when the agent can find the session
+    it is told to resume, and that session lives in the agent's own state root.
+
+    Safety rules, in the order they are enforced:
+
+    * both roots are walked through :class:`~pi_glink.artifacts.ArtifactTree`,
+      so a symbolic link below either root is never followed and the copy can
+      never land outside this run's own HOME;
+    * only regular files are copied; device nodes, FIFOs and sockets are not
+      inherited;
+    * the copy is bounded (file count, per-file bytes, total bytes) and any
+      bound violation raises :class:`AcpStateInheritError` instead of leaving a
+      silently truncated state behind;
+    * ``skip`` names this configuration's credential destinations (relative to
+      HOME), which the caller has just re-rendered for this run: inheriting the
+      parent's copies would shadow the fresh ones and put values into the run
+      that its redactor was not built from.
+
+    Credential-shaped values found in the copied text are returned so the caller
+    can add them to this run's redaction boundary. The copied files themselves
+    are **not** rewritten: unlike the pi session log, this tree is the agent's
+    own session store — rewriting it would corrupt the very session the resume
+    is meant to continue. The boundary is preserved by knowing the values
+    instead.
+    """
+    source_dir = Path(parent_home)
+    destination_dir = Path(home)
+    if not destination_dir.is_dir():
+        raise AcpStateInheritError(f"本次 run 的 ACP HOME 不存在: {destination_dir}")
+    skipped = {_normalise_relative(item) for item in skip}
+    try:
+        source = ArtifactTree(source_dir)
+    except ArtifactError as exc:
+        raise AcpStateInheritError(f"父 run 的 ACP 状态目录不可用: {exc}") from exc
+    with source, ArtifactTree(destination_dir) as destination:
+        relatives = source.files(max_files=INHERIT_MAX_FILES + 1)
+        if len(relatives) > INHERIT_MAX_FILES:
+            raise AcpStateInheritError(
+                f"父 run 的 ACP 状态文件数超过上限 {INHERIT_MAX_FILES}"
+            )
+        total = 0
+        scanned = 0
+        secrets: list[str] = []
+        for relative in relatives:
+            if relative in skipped:
+                continue
+            try:
+                data = source.read(relative, max_bytes=INHERIT_MAX_FILE_BYTES)
+            except ArtifactError as exc:
+                raise AcpStateInheritError(
+                    f"读取父 run 状态文件失败 {relative}: {exc}"
+                ) from exc
+            total += len(data)
+            if total > INHERIT_MAX_TOTAL_BYTES:
+                raise AcpStateInheritError(
+                    f"父 run 的 ACP 状态超过总量上限 {INHERIT_MAX_TOTAL_BYTES} 字节"
+                )
+            try:
+                destination.replace(
+                    relative,
+                    data,
+                    max_bytes=INHERIT_MAX_FILE_BYTES,
+                    create_parents=True,
+                )
+            except ArtifactError as exc:
+                raise AcpStateInheritError(
+                    f"写入继承的父 run 状态失败 {relative}: {exc}"
+                ) from exc
+            if scanned < INHERIT_SCAN_MAX_BYTES and b"\x00" not in data[:1024]:
+                scanned += len(data)
+                secrets.extend(
+                    credential_secrets_from_text(data.decode("utf-8", errors="replace"))
+                )
+    return _dedupe(secrets)
+
+
+def _normalise_relative(value: str) -> str:
+    """One config credential destination as a forward-slash relative path."""
+    return str(value).strip().lstrip("/")
 
 
 def build_acp_argv(config: HostConfig) -> list[str]:
