@@ -112,6 +112,7 @@ class AcpRpcClient:
         on_notification: NotificationHandler | None = None,
         on_request: RequestHandler | None = None,
         on_stderr: Callable[[str], None] | None = None,
+        spawn: Callable[[], Any] | None = None,
     ) -> None:
         self._argv = list(argv)
         self._cwd = cwd
@@ -119,7 +120,14 @@ class AcpRpcClient:
         self._on_notification = on_notification
         self._on_request = on_request
         self._on_stderr = on_stderr
-        self._process: subprocess.Popen[bytes] | None = None
+        #: How the agent process is started. ``None`` spawns ``argv`` on this
+        #: host (the in-process and Docker faces). The E2B face hands in a
+        #: factory for a sandbox background command, so the client speaks to the
+        #: same wire shape without a second protocol implementation — the object
+        #: it must return has the ``subprocess.Popen`` surface this class uses
+        #: (stdin/stdout/stderr, poll/wait/terminate/kill).
+        self._spawn = spawn
+        self._process: Any | None = None
         self._write_lock = threading.Lock()
         self._pending_lock = threading.Lock()
         #: Outbound request id -> waiter. Keys are strings because a JSON-RPC id
@@ -139,16 +147,22 @@ class AcpRpcClient:
     def start(self) -> None:
         if self._process is not None:
             raise AcpError("client already started")
-        logger.info("starting ACP agent: %s", " ".join(self._argv))
-        self._process = subprocess.Popen(
-            self._argv,
-            cwd=str(self._cwd) if self._cwd is not None else None,
-            env=self._env,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=0,
-        )
+        if self._spawn is not None:
+            # The execution face owns the launch (a sandbox command); the argv is
+            # kept for diagnostics in the run record.
+            logger.info("starting ACP agent in its execution face: %s", " ".join(self._argv))
+            self._process = self._spawn()
+        else:
+            logger.info("starting ACP agent: %s", " ".join(self._argv))
+            self._process = subprocess.Popen(
+                self._argv,
+                cwd=str(self._cwd) if self._cwd is not None else None,
+                env=self._env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
         self._reader = threading.Thread(
             target=self._read_stdout, name="acp-stdout", daemon=True
         )

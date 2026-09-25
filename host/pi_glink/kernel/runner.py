@@ -79,7 +79,10 @@ from .docker_env import (
     is_available as docker_available,
     stop_argv as docker_stop_argv,
 )
-from .e2b_env import confirm_sandbox_absent as e2b_confirm_sandbox_absent
+from .e2b_env import (
+    E2BAcpSandboxClient,
+    confirm_sandbox_absent as e2b_confirm_sandbox_absent,
+)
 from .execution import (
     CleanupReport,
     ExecutionAdapter,
@@ -1531,6 +1534,7 @@ class RunManager:
             docker_stop=docker_stop_argv,
             acp_plan=self._acp_plan,
             acp_docker_plan=self._acp_docker_plan,
+            acp_e2b_plan=self._acp_e2b_plan,
         )
 
     def _acp_plan(
@@ -1575,6 +1579,26 @@ class RunManager:
             workspace=spec.workspace,
         )
         return plan.argv, plan.env, plan.container_name
+
+    def _acp_e2b_plan(self, spec: ExecutionSpec) -> E2BAcpSandboxClient:
+        """The sandbox carrier for one ACP run (M3b).
+
+        The ACP family's E2B face reuses the pi face's sandbox lifecycle
+        (:class:`~pi_glink.kernel.e2b_env.E2BAcpSandboxClient`: same frozen
+        credential, bounded lifetime, artifact recovery and identity), and the
+        separate ``LOCAL_WEB_E2B_ACP_TEMPLATE`` because the pi template has no
+        ACP agent installed. The sandbox id is persisted by the adapter as soon
+        as it exists.
+        """
+        if not isinstance(spec.runtime, AcpRuntime):
+            raise ConfigError("ACP harness 的运行期配置没有按 AcpRuntime 渲染")
+        return E2BAcpSandboxClient(
+            spec.config,
+            spec.runtime,
+            run_id=spec.run_id,
+            workspace=spec.workspace,
+            sandbox_factory=self._sandbox_factory,
+        )
 
     def _rpc_plan(
         self, spec: ExecutionSpec
