@@ -41,7 +41,9 @@ Prompt markers select the terminal result:
 ``REFUSAL``            ``stopReason=refusal``
 ``MAXTURN``            ``stopReason=max_turn_requests``
 ``CANCEL``             ``stopReason=cancelled`` without a client cancel
-``NOSETTLE``           never answers until ``session/cancel`` arrives
+``NOSETTLE``           never answers until ``session/cancel`` arrives;
+                       ``FAKE_ACP_CANCEL_HANG`` makes it ignore the cancel and
+                       keep running, so only the host's teardown ends it
 ``CRASH``              exits (code 3) after accepting the prompt, no answer;
                        ``FAKE_ACP_CRASH_EXIT_DELAY`` closes stdout first and
                        then waits that long, widening the exit window
@@ -500,6 +502,13 @@ def run_prompt(request: dict, params: dict) -> None:
         write_report(text)
     if "NOSETTLE" in text:
         _cancel.wait(timeout=30.0)
+        if flag("FAKE_ACP_CANCEL_HANG"):
+            # A hung agent: the cancel arrived and the agent never answers, so
+            # the driver's ``session/prompt`` request only unblocks when the
+            # host tears the pipe down -- after the host has already decided
+            # the deadline verdict. That is the ordering the late-write
+            # regression needs, held open instead of raced.
+            return
     if "FAILPROMPT" in text:
         respond(request, error={"code": -32000, "message": "prompt rejected by fake agent"})
         log("prompt_done", error="rejected")

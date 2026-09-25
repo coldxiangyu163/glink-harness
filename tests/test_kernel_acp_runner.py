@@ -386,6 +386,47 @@ def test_acp_run_timeout_cancels_the_agent(tmp_path: Path) -> None:
     assert wait_for(lambda: any(entry["event"] == "cancel_received" for entry in read_log(log)))
 
 
+def test_acp_timeout_error_text_survives_a_late_kernel_exit_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deadline's error text is final; the driver's late write cannot rewrite it.
+
+    A hung agent ignores ``session/cancel`` (``FAKE_ACP_CANCEL_HANG``), so the
+    driver's ``session/prompt`` request only unblocks when the host's teardown
+    closes the stream -- after ``wait()`` has already decided ``timeout``. The
+    window is held open deterministically: the run-level ``_decide`` joins the
+    driver thread before reading the outcome, so the late ``kernel_exit`` write
+    lands exactly where it lands under load. Without a freeze the record keeps
+    ``stop_reason=timeout`` but its error text becomes the kernel-exit report.
+    """
+    log = tmp_path / "agent.jsonl"
+    settings = {"FAKE_ACP_LOG": str(log), "FAKE_ACP_CANCEL_HANG": True}
+    _config, _store, manager = build_manager(
+        tmp_path, settings, LOCAL_WEB_TASK_TIMEOUT_SECONDS="1"
+    )
+    original_decide = RunManager._decide
+    driver_states: list[bool] = []
+
+    def decide_after_the_driver_stops(self, execution):
+        driver = getattr(execution.adapter, "_driver", None)
+        if driver is not None:
+            driver.join(timeout=10)
+            driver_states.append(driver.is_alive())
+        return original_decide(self, execution)
+
+    monkeypatch.setattr(RunManager, "_decide", decide_after_the_driver_stops)
+    record = manager.start("NOSETTLE 收到取消也不回答")
+    assert wait_for(lambda: any(entry["event"] == "prompt" for entry in read_log(log)))
+    final = manager.wait(record.run_id, timeout=30)
+
+    # The race window was actually entered: the driver finished (its late write
+    # landed) before the verdict read the outcome.
+    assert driver_states == [False]
+    assert final is not None
+    assert (final.status, final.stop_reason) == (FAILED, "timeout")
+    assert "run did not settle within" in (final.error or "")
+
+
 # -- cancellation -------------------------------------------------------------
 
 
