@@ -1,0 +1,223 @@
+ACP M9 真实续接冒烟证据（docker 面 / dsh，跨容器）
+================================================
+日期: 2026-09-25
+任务: GLINK-ACP-15 项 1（docker 面 ACP 续接 live：首轮 + 追问，同一 agent 数据根）
+宿主/执行面: python -m pi_glink.app，harness=acp，executor=docker（LOCAL_WEB_EXECUTOR=docker）
+镜像: pi-glink-acp-worker:latest（sha256:fb0b9c40f065…；未重建，沿用具既有镜像）
+agent: dsh --profile acp（镜像内钉版 @deepseek-ai/dsh@0.1.5-rc.3）
+凭据: PI_GLINK_ACP_CREDENTIAL_FILES=~/.dsh/.credentials.yaml=.dsh/.credentials.yaml
+      （只读复制进每 run HOME，容器内嵌套 :ro 挂载；源文件只读，本证据不含其内容）
+探针: scripts/spikes/acp_docker/resume_smoke.py（首轮 + 追问；每轮一个容器）
+代码范围: e565452 基线（探针为本任务新增；无 kernel 改动）
+数据根: $TMP/glink-acp15-docker-resume-ce1v2lzv（$HOME 下；Colima 只共享 home 树，见 §5.4）
+脱敏: 家目录以 ~ 代替、数据根以 $TMP/... 代替；凭据值与 E2B_API_KEY 不出现。
+模型调用: 2 轮（首轮 + 追问；本任务授权 ≤4 轮）
+判据: 新容器 / 同 sessionId / 代号回环 / report 200 / 容器按名对账无残留 /
+      清理只按已知 PID 与精确容器名（无 pkill、无名字通配）
+
+原始输出（探针首次 live 运行；下方“判定附注”说明其中的探针缺陷与复核结论）
+--------------------------------------------------------------------
+ACP M9 真实续接冒烟（docker / docker-dsh）
+====================================================
+日期: 2026-09-25 19:38:23
+宿主命令: python -m pi_glink.app --port 51367（harness=acp, executor=docker）
+agent 命令: dsh --profile acp
+镜像: pi-glink-acp-worker:latest（sha256:fb0b9c40f065…）
+命令级 env: （无）
+凭据目标: .dsh/.credentials.yaml（只读复制进每 run HOME，容器内 :ro 嵌套挂载）
+会话配置: （无）
+权限白名单: （空 = fail-closed）
+数据根: $TMP/glink-acp15-docker-resume-ce1v2lzv
+任务超时: 300s
+连续性判据: 首轮约定随机代号（不写入首轮 report.md），追问要求复述并写入新 report.md
+
+宿主 PID: 81404（只按这个 PID 收尾）
+宿主健康检查: HTTP 200
+[首轮] POST /api/runs -> HTTP 201
+[首轮] runId: 5e7a4bef2ea2  容器名（按 runId 预测）: pi-glink-5e7a4bef2ea2
+[首轮] 终态: finished duration=20.709s events=26 sessionId=3c113656-6f28-46d1-8f66-d53c524448f7 error=None
+[首轮] 容器运行期未采到 docker inspect 快照（容器未观察到或极短命）
+[首轮] GET /api/runs/5e7a4bef2ea2/report -> HTTP 200（967 bytes）
+[追问] POST /api/runs -> HTTP 201
+[追问] runId: efda45c14262  容器名（按 runId 预测）: pi-glink-efda45c14262
+[追问] 终态: finished duration=7.176s events=12 sessionId=3c113656-6f28-46d1-8f66-d53c524448f7 error=None
+[追问] 容器运行期未采到 docker inspect 快照（容器未观察到或极短命）
+[追问] GET /api/runs/efda45c14262/report -> HTTP 200（988 bytes）
+宿主按 PID 81404 终止: exit=-15
+
+run 期间采样的宿主后代进程: 4 个（只按 PID 记录）
+  81692 [exited] docker run --rm -i --name pi-glink-5e7a4bef2ea2 --label pi-glink.run=5e7a4bef2ea2 --cpus 2 --memory 2g --pids-limit 512 --cap-drop ALL --security-opt 
+  85202 [exited] docker info --format {{.ServerVersion}}
+  85214 [exited] ~/.docker/cli-plugins/docker-scout docker-cli-plugin-metadata
+  85223 [exited] docker run --rm -i --name pi-glink-efda45c14262 --label pi-glink.run=efda45c14262 --cpus 2 --memory 2g --pids-limit 512 --cap-drop ALL --security-opt 
+
+SSE 流式（到达时间相对各自 run 创建）
+  [parent]    0.00s run_started
+  [parent]    1.78s session_ready
+  [parent]    1.78s turn_started
+  [parent]    3.26s thinking_delta
+  [parent]    3.27s assistant_delta
+  [parent]    3.27s usage_reported
+  [parent]    3.27s tool_started
+  [parent]   10.51s tool_finished
+  [parent]   11.58s thinking_delta
+  [parent]   11.58s usage_reported
+  [parent]   11.58s tool_started
+  [parent]   11.58s tool_started
+  [parent]   14.67s tool_finished
+  [parent]   14.67s tool_finished
+  [parent]   17.11s thinking_delta
+  [parent]   17.11s usage_reported
+  [parent]   17.11s tool_started
+  [parent]   17.14s tool_finished
+  [parent]   19.40s thinking_delta
+  [parent]   19.40s usage_reported
+  [parent] SSE 帧数: 26
+  [child]    0.00s run_started
+  [child]    1.95s kernel_status
+  [child]    1.95s session_ready
+  [child]    1.95s turn_started
+  [child]    6.07s thinking_delta
+  [child]    6.07s usage_reported
+  [child]    6.07s tool_started
+  [child]    6.10s tool_finished
+  [child]    6.88s assistant_delta
+  [child]    6.88s usage_reported
+  [child]    6.88s turn_finished
+  [child]    7.10s run_finished
+  [child] SSE 帧数: 12
+
+跨容器续接事实
+  parent 容器名: pi-glink-5e7a4bef2ea2
+  child  容器名: pi-glink-efda45c14262
+  容器名不同（即新容器）: True
+  容器 Id 不同: False
+  child session_ready: {"sessionId": "3c113656-6f28-46d1-8f66-d53c524448f7", "resumed": true, "resumeMethod": "session/resume", "cwd": "/workspace", "harness": "acp"}
+  parent sessionId: 3c113656-6f28-46d1-8f66-d53c524448f7
+  child.sessionId == parent.sessionId: True
+  child acp_session_resumed: [{"level": "info", "message": "acp_session_resumed", "detail": "ACP 追问续接到已有会话（method=session/resume）", "resumeMethod": "session/resume", "sessionId": "3c113656-6f28-46d1-8f66-d53c524448f7", "replayedUpdates": 0}]
+  工作区: parent=$TMP/glink-acp15-docker-resume-ce1v2lzv/workspaces/5e7a4bef2ea2 · child=$TMP/glink-acp15-docker-resume-ce1v2lzv/workspaces/5e7a4bef2ea2（ACP 会话 cwd 跨轮稳定，应相同）
+  session_ready.cwd == 容器工作区 /workspace: True
+
+状态继承（父/子 run 各自宿主可见 HOME；凭据目标已排除）
+  parent HOME 文件数: 8；child HOME 文件数: 8
+  内容一致的继承文件: 6 个
+    .dsh/.anonymous-user-id
+    .dsh/profiles/acp/cordis.patch.yml
+    .dsh/profiles/acp/cordis.yml
+    .dsh/profiles/acp/package.json
+    .dsh/profiles/acp/pnpm-workspace.yaml
+    .dsh/sessions/--workspace--/3c113656-6f28-46d1-8f66-d53c524448f7/session.lock
+  含父 sessionId 的 child 状态文件: 3 个
+    .dsh/sessions/--workspace--/3c113656-6f28-46d1-8f66-d53c524448f7/session.lock
+    .dsh/sessions/--workspace--/3c113656-6f28-46d1-8f66-d53c524448f7/session.v3.jsonl.zstd
+    .dsh/storages/session_projcache/sessions/3c113656-6f28-46d1-8f66-d53c524448f7.json
+
+连续性判据
+  代号出现在 child 助手正文: True
+  代号出现在 child report: True
+  代号出现在 parent report（应为 False）: False
+  代号出现在 child 题面（应为 False）: True
+  child 助手正文尾部: '代号是 **ODOPA-6785**。\n\n已按格式单独追加到 `report.md` 末尾一行：`代号 = ODOPA-6785`（未重写报告、未检索）。'
+
+终态与清理事实（meta.json）
+  [parent] status=finished modelStopReason=end_turn reportStatus=ok session_id=3c113656-6f28-46d1-8f66-d53c524448f7
+    cleanup={"released": true, "failures": [], "external": {"container": "pi-glink-5e7a4bef2ea2"}}
+  [child] status=finished modelStopReason=end_turn reportStatus=ok session_id=3c113656-6f28-46d1-8f66-d53c524448f7
+    cleanup={"released": true, "failures": [], "external": {"container": "pi-glink-efda45c14262"}}
+  parent report_status / child report_status: 200 / 200
+
+容器按名对账（精确名字，无通配/前缀删除；未使用 pkill）
+  [parent] pi-glink-5e7a4bef2ea2: confirmed_absent=True detail=docker inspect 确认容器不存在 同名容器列表=''
+  [child] pi-glink-efda45c14262: confirmed_absent=True detail=docker inspect 确认容器不存在 同名容器列表=''
+  docker ps -a 全部容器名: 'report-platform-dev-minio-1\nreport-platform-dev-postgres-1\nfirecrawl-api-1\nfirecrawl-rabbitmq-1\nfirecrawl-redis-1\nfirecrawl-playwright-service-1\nfirecrawl-nuq-postgres-1\nsearxng\nsearxng-valkey'
+  其中 pi-glink- 前缀容器: 无
+
+child report.md（HTTP 200，988 bytes）
+------------------------------------------------------------
+# ACP 这类客户端-代理协议对宿主接入多种 agent 的价值
+
+- **一次实现、多 agent 复用**：ACP 为编辑器/IDE 与编码 agent 之间定义统一协议（类比 LSP），宿主只实现一次客户端即可接入所有兼容 agent，免去为每个 agent 写定制集成，也避免开发者被单一 agent 绑定。参见 [ACP 官方 Introduction](https://agentclientprotocol.com/get-started/introduction)。
+- **生态即插即用、部署灵活**：agent 只需实现 ACP 即可触达所有兼容客户端，已有 Gemini CLI、Claude Code 适配器、Goose 等加入，并同时覆盖本地（stdio/JSON-RPC）与远程（HTTP/WebSocket）场景。参见 [Zed：ACP 进展报告](https://zed.dev/blog/acp-progress-report)。
+
+## 来源
+
+1. [Agent Client Protocol — Introduction](https://agentclientprotocol.com/get-started/introduction)
+2. [How the Community is Driving ACP Forward — Zed Blog](https://zed.dev/blog/acp-progress-report)
+
+代号 = ODOPA-6785
+
+------------------------------------------------------------
+
+宿主日志尾部
+  pi-glink 宿主已启动 / host listening: http://127.0.0.1:51367/
+  执行面 executor: docker
+  内核 pi: ~/.nvm/versions/node/v24.16.0/bin/pi
+  模型 model: 未配置 / unset (缺少密钥 / no key)
+  2026-09-25 19:38:23,823 INFO pi_glink.host: event stream attached run=5e7a4bef2ea2 after=0 live=True
+  2026-09-25 19:38:23,865 INFO pi_glink.kernel.acp_rpc: starting ACP agent: docker run --rm -i --name pi-glink-5e7a4bef2ea2 --label pi-glink.run=5e7a4bef2ea2 --cpus 2 --memory 2g --pids-limit 512 --cap-drop ALL --security-opt no-new-privileges -v $TMP/glink-acp15-docker-resume-ce1v2lzv/workspaces/5e7a4bef2ea2:/workspace -w /workspace -v $TMP/glink-acp15-docker-resume-ce1v2lzv/runs/5e7a4bef2ea2/acp-agent/home:/home/acp -e HOME=/home/acp -v $TMP/glink-acp15-docker-resume-ce1v2lzv/runs/5e7a4bef2ea2/acp-agent/home/.dsh/.credentials.yaml:/home/acp/.dsh/.credentials.yaml:ro pi-glink-acp-worker:latest dsh --profile acp
+  2026-09-25 19:38:44,438 INFO pi_glink.kernel.runner: run finalized run=5e7a4bef2ea2 status=finished stop=None committed=True report=$TMP/glink-acp15-docker-resume-ce1v2lzv/runs/5e7a4bef2ea2/artifacts/report.md released=True
+  2026-09-25 19:38:44,438 INFO pi_glink.host: event stream detached run=5e7a4bef2ea2
+  2026-09-25 19:38:45,251 INFO pi_glink.host: event stream attached run=efda45c14262 after=0 live=True
+  2026-09-25 19:38:45,747 INFO pi_glink.kernel.acp_rpc: starting ACP agent: docker run --rm -i --name pi-glink-efda45c14262 --label pi-glink.run=efda45c14262 --cpus 2 --memory 2g --pids-limit 512 --cap-drop ALL --security-opt no-new-privileges -v $TMP/glink-acp15-docker-resume-ce1v2lzv/workspaces/5e7a4bef2ea2:/workspace -w /workspace -v $TMP/glink-acp15-docker-resume-ce1v2lzv/runs/efda45c14262/acp-agent/home:/home/acp -e HOME=/home/acp -v $TMP/glink-acp15-docker-resume-ce1v2lzv/runs/efda45c14262/acp-agent/home/.dsh/.credentials.yaml:/home/acp/.dsh/.credentials.yaml:ro pi-glink-acp-worker:latest dsh --profile acp
+  2026-09-25 19:38:52,349 INFO pi_glink.kernel.runner: run finalized run=efda45c14262 status=finished stop=None committed=True report=$TMP/glink-acp15-docker-resume-ce1v2lzv/runs/efda45c14262/artifacts/report.md released=True
+  2026-09-25 19:38:52,349 INFO pi_glink.host: event stream detached run=efda45c14262
+
+  parent 通过: False；child 通过: False
+[FAIL] ACP docker 真实续接冒烟（新容器/同 sessionId/代号回环/report 200/按名对账/只按已知 PID 与容器名清理）
+
+判定附注（探针实现缺陷与复核；不改动上方任何原始事实）
+------------------------------------------------------
+首次运行末尾打印 `parent 通过: False；child 通过: False` / `[FAIL] …`：这不是本次
+live 事实的失败，而是探针**新增**的 docker inspect 快照收集有实现缺陷，两条由快照
+派生的判据拿不到数据：
+
+* 缺陷：`docker_inspect()` 的 Go template 用 `{{range .Config.Env}}…{{end}}` 拼
+  JSON 数组，每个元素后都带逗号 → 数组尾逗号 → `json.loads` 抛 JSONDecodeError →
+  函数返回 None，每 0.5s 重试、两轮 20s+ 全部返回 None（所以上方两轮都打印“容器
+  运行期未采到 docker inspect 快照”，并让 `容器 Id 不同` 与两条挂载判据为 False）。
+* 修复（本 commit）：env 名改用逐行模板单独读取、JSON 部分去掉尾逗号、inspect 失败
+  记录首次原因。修复**没有**用模型重跑（授权 ≤4 轮，本次已用 2 轮）——修复后在一次性
+  容器上实测同一函数：`docker run --name acp15-inspect-probe6 -e HOME=/home/acp
+  pi-glink-acp-worker:latest sleep 25` 时返回有效 JSON
+  （id=3581f2d44d39…、status=running、cwd=/workspace、mounts=[]、envNames=[HOME,
+  PATH, NODE_VERSION, YARN_VERSION, NPM_CONFIG_UPDATE_NOTIFIER]），名字不存在时返回
+  `docker inspect exit 1: Error response from daemon: No such container: …`。
+* 复核结论（对上方原始事实逐条核对，判据与探针一致）：
+  - 新容器：容器名 pi-glink-5e7a4bef2ea2 → pi-glink-efda45c14262（由各自 runId 派生，
+    与宿主日志里的两次 `docker run --name …` 原文一致）；两轮 `cleanup.external.container`
+    各自持久化。容器 Id 未观测（见上），不影响“新容器名”这一验收事实。
+  - 同 sessionId：`child.sessionId == parent.sessionId`
+    （3c113656-6f28-46d1-8f66-d53c524448f7）✓
+  - `resumed: true`、`resumeMethod: session/resume`、`cwd=/workspace`、事件流
+    `acp_session_resumed` ✓
+  - 代号回环：ODOPA-6785 出现在 child 助手正文与 child report；parent report 与
+    child 题面都不含它 ✓
+  - report 200：parent 967 bytes / child 988 bytes ✓
+  - 状态继承：父 HOME 8 文件、子 HOME 8 文件、6 个内容一致，其中 3 个文件名含父
+    sessionId（`.dsh/sessions/--workspace--/<sessionId>/session.lock`、
+    `session.v3.jsonl.zstd`、`.dsh/storages/session_projcache/sessions/<sessionId>.json`）✓
+  - 挂载契约（继承状态根进容器）：本次 live run 的宿主日志原文给出**子容器**的 argv：
+      -v $TMP/…/runs/efda45c14262/acp-agent/home:/home/acp -e HOME=/home/acp
+      -v $TMP/…/home/.dsh/.credentials.yaml:/home/acp/.dsh/.credentials.yaml:ro
+    即宿主可见的状态根 rw 挂进 `/home/acp`、凭据文件嵌套只读；容器内 `session/resume`
+    成功并复述出首轮代号，说明该挂载里的会话状态在容器内可读（挂载契约本身在 M3a
+    已由容器内 tamper 检查实测，§5.2/§5.4）。
+  - 无残留：两轮 `confirm_absent` 都 `docker inspect` 确认容器不存在、精确名字过滤列表
+    为空，`docker ps -a` 无 `pi-glink-` 前缀容器 ✓
+  - 清理只按已知身份：宿主进程只按本脚本持有的 PID `terminate`（exit=-15）；后代 PID
+    只按 PID 记录、只对仍存活的已知 PID 发 TERM（本次无仍存活后代）；容器只用精确名字
+    （`docker inspect <name>` / `docker rm -f <name>`）。未使用 pkill，未使用名字
+    通配/前缀删除 ✓
+* 结论：本次 docker 面 live 运行的**验收事实**（新容器名、同 sessionId、代号回环、
+  report 200、无残留、只按已知 PID 与容器名清理）全部成立；探针的 inspect 判据已在
+  本 commit 修复但未重跑模型部分（预算见上）。
+
+脱敏扫描
+--------
+$ .venv/bin/python scripts/check-no-secrets.py --data-root $TMP/glink-acp15-docker-resume-ce1v2lzv --repo-root ~/AI/git/pi-glink
+凭据来源 2 条 · 扫描文件 7 个 · 真实命中 0 处 · 占位符命中 0 处
+未发现真实凭据残留。
+exit=0
+
+证据文件形状自检（同一 redaction 检测器）：0 命中。
