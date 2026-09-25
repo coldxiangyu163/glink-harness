@@ -1,0 +1,124 @@
+ACP M5 opencode dev 模板重建与真实沙箱握手证据（不消耗模型调用）
+============================================================
+日期: 2026-09-25
+宿主: macOS (arm64) / Python 3.12.10 / host pi-glink 0.1.0
+模板: glink-acp-worker（独立 dev 模板，Template ID oen0rq47o2sizakry5v3）
+构建: E2B CLI（npx -y @e2b/cli template create glink-acp-worker \
+  --dockerfile docker/e2b/Dockerfile.acp-e2b --cpu-count 2 --memory-mb 4096）
+  新 Build ID: ef0637fd-9b6d-47f4-bef0-de94bdb3ff23，构建 2m15s
+探针: scripts/spikes/acp_e2b/sandbox_handshake.py --agent opencode（生产装配路径
+  build_config → prepare_acp_runtime → E2BAcpSandboxClient → build_adapter；
+  只做 initialize + session/new，不发 prompt）
+脱敏: 家目录以 ~ 代替，临时目录以 $TMP/... 代替；E2B_API_KEY 与凭据值不出现
+  （只记录凭据源 sha256 与并入 redactor 的条数）。生产模板 glink-frontier-e2b 与
+  pi 面模板 pi-glink-worker 未被触碰。
+
+一、模板构建（关键片段）
+--------
+
+Found ./docker/e2b/Dockerfile.acp-e2b that will be used to build the sandbox template.
+
+Building sandbox template...
+
+0.0s  | 12:41:31 PM INFO  Requesting build for template: glink-acp-worker
+1.0s  | 12:41:32 PM INFO  Template created with ID: oen0rq47o2sizakry5v3, Build ID: ef0637fd-9b6d-47f4-bef0-de94bdb3ff23
+1.0s  | 12:41:32 PM INFO  All file uploads completed
+
+（构建期自检：五组件版本；opencode 用的是 ``opencode --version``）
+94.8s | 12:43:05 PM INFO  [builder 11/15] RUN { echo '#!/bin/sh'; echo 'set -eu'; echo 'dsh --version'; echo 'codex-acp --version'; echo 'claude --version'; echo 'opencode --version'; echo 'npm ls -g --depth=0'; } > /usr/local/bin/acp-self-check && chmod 0755 /usr/local/bin/acp-self-check && /usr/local/bin/acp-self-check [fe781404efafb0f8bc771856e1aa37c230746db721eb63ca7d72997207690a0e]
+96.5s | 12:43:07 PM INFO  [builder 11/15] [stdout]: 0.1.5-rc.3
+96.9s | 12:43:08 PM INFO  [builder 11/15] [stdout]: @agentclientprotocol/codex-acp 1.13.1
+97.7s | 12:43:08 PM INFO  [builder 11/15] [stdout]: 2.1.282 (Claude Code)
+98.6s | 12:43:09 PM INFO  [builder 11/15] [stdout]: 1.18.32
+99.4s | 12:43:10 PM INFO  [builder 11/15] [stdout]: /usr/local/lib
+99.4s | 12:43:10 PM INFO  [builder 11/15] [stdout]: +-- @agentclientprotocol/codex-acp@1.13.1
+99.4s | 12:43:10 PM INFO  [builder 11/15] [stdout]: +-- @anthropic-ai/claude-code@2.1.282
+99.4s | 12:43:10 PM INFO  [builder 11/15] [stdout]: +-- @deepseek-ai/dsh@0.1.5-rc.3
+99.4s | 12:43:10 PM INFO  [builder 11/15] [stdout]: +-- @zed-industries/claude-code-acp@0.16.2
+99.4s | 12:43:10 PM INFO  [builder 11/15] [stdout]: +-- corepack@0.36.0
+99.4s | 12:43:10 PM INFO  [builder 11/15] [stdout]: +-- npm@11.19.0
+99.4s | 12:43:10 PM INFO  [builder 11/15] [stdout]: `-- opencode-ai@1.18.32
+99.8s | 12:43:11 PM INFO  [builder 12/15] ENV HOME /home/user NPM_CONFIG_UPDATE_NOTIFIER false [b5062d700bc4ede5f88b34d00cc244a7317b6f13c0932767fad35d36ffec8c65]
+
+（finalize 与 start command）
+99.4s | 12:43:10 PM INFO  [builder 11/15] [stdout]: +-- @deepseek-ai/dsh@0.1.5-rc.3
+99.4s | 12:43:10 PM INFO  [builder 11/15] [stdout]: +-- @zed-industries/claude-code-acp@0.16.2
+99.4s | 12:43:10 PM INFO  [builder 11/15] [stdout]: +-- corepack@0.36.0
+99.4s | 12:43:10 PM INFO  [builder 11/15] [stdout]: +-- npm@11.19.0
+99.4s | 12:43:10 PM INFO  [builder 11/15] [stdout]: `-- opencode-ai@1.18.32
+99.8s | 12:43:11 PM INFO  [builder 12/15] ENV HOME /home/user NPM_CONFIG_UPDATE_NOTIFIER false [b5062d700bc4ede5f88b34d00cc244a7317b6f13c0932767fad35d36ffec8c65]
+109.0s | 12:43:20 PM INFO  [builder 13/15] RUN mkdir -p /home/user/acp /home/user/workspace [3f40621fe9ca7643ffd5735385c8632801bc26916cdc19ff1c71807627e41c13]
+109.4s | 12:43:20 PM INFO  [builder 14/15] WORKDIR /home/user/workspace [54bb268268aafa813360d9a74ae29383b48df56dd92add5ed5356d3225243fe6]
+109.4s | 12:43:20 PM INFO  [builder 14/15] [stdout]: 
+109.4s | 12:43:20 PM INFO  [builder 14/15] [stderr]: TERM environment variable not set.
+109.8s | 12:43:21 PM INFO  [builder 15/15] USER user [0a4a68e9fbe2d363089727d79f3378d50b97fac70af6d9fbf7cfaf03199dca21]
+110.2s | 12:43:21 PM INFO  [resize-disk] Resizing disk [cc4b19e657be4496f80fd7708b9b7b30edf39e9cf4891e66dff01caf66187d8d]
+111.1s | 12:43:22 PM INFO  resize-disk: free 8577 -> 10251 MiB
+111.1s | 12:43:22 PM INFO  [finalize] Finalizing template build [aa8adafd39aa4ee695a7144e3716cecc09e3b6276f4855735cd0ad814d97af4e]
+113.2s | 12:43:24 PM INFO  Running start command: acp-self-check
+113.2s | 12:43:24 PM INFO  Waiting for template to be ready: sleep 20
+113.6s | 12:43:24 PM INFO  [start] [stdout]: 0.1.5-rc.3
+113.6s | 12:43:24 PM INFO  [start] [stdout]: @agentclientprotocol/codex-acp 1.13.1
+114.0s | 12:43:25 PM INFO  [start] [stdout]: 2.1.282 (Claude Code)
+116.9s | 12:43:27 PM INFO  [start] [stdout]: 1.18.32
+117.8s | 12:43:28 PM INFO  [start] [stdout]: /usr/local/lib
+117.8s | 12:43:28 PM INFO  [start] [stdout]: +-- @agentclientprotocol/codex-acp@1.13.1
+117.8s | 12:43:28 PM INFO  [start] [stdout]: +-- @anthropic-ai/claude-code@2.1.282
+
+二、真实沙箱握手（沙箱内 initialize + session/new）
+--------
+{
+  "date": "2026-09-25 12:44:43",
+  "agent": "opencode",
+  "command": "opencode acp",
+  "template": "glink-acp-worker",
+  "credential_source": "~/.local/share/opencode/auth.json",
+  "credential_dest": ".local/share/opencode/auth.json",
+  "credential_sha256_before": "0898364a705bd2bb6aae0023c9434fca1c53965dbbc064790593abb88c174e4a",
+  "source_mtime": "2026-09-08 17:37:11",
+  "runtime_home": "$TMP/glink-acp-e2b-handshake-<id>/acp-agent/home",
+  "credential_dests": [
+    ".local/share/opencode/auth.json"
+  ],
+  "secret_count": 4,
+  "sandbox_id": "ih4y06fy4b9zokfqe9fb5",
+  "sandbox_command": "cd /home/user/workspace && exec opencode acp",
+  "harden_command": "chmod 0700 /home/user/acp/home …",
+  "upload_manifest": [
+    {
+      "path": ".local/share/opencode/auth.json",
+      "sha256": "0898364a705bd2bb6aae0023c9434fca1c53965dbbc064790593abb88c174e4a"
+    }
+  ],
+  "initializeOk": true,
+  "protocolVersion": 1,
+  "agentInfo": {
+    "name": "OpenCode",
+    "version": "1.18.32"
+  },
+  "capabilities": [
+    "loadSession",
+    "mcpCapabilities",
+    "promptCapabilities",
+    "sessionCapabilities"
+  ],
+  "authMethodIds": [
+    "opencode-login"
+  ],
+  "sessionId": "ses_f291e7e8fffeK50bJQ9lXZ4yUi",
+  "cwd": "/home/user/workspace",
+  "configOptionIds": [
+    "model",
+    "mode"
+  ],
+  "cleanup": {
+    "released": true,
+    "failures": [],
+    "external": {
+      "sandbox": "ih4y06fy4b9zokfqe9fb5"
+    }
+  },
+  "credential_sha256_after": "0898364a705bd2bb6aae0023c9434fca1c53965dbbc064790593abb88c174e4a",
+  "source_unchanged": true
+}
+[PASS] opencode 真实沙箱 ACP 握手（initialize + session/new）

@@ -1,14 +1,14 @@
 # pi-glink ACP worker 镜像：容器内自包含 ACP agent 运行时。
 #
 # 设计边界（对应 GLINK-ACP-03 / M3a 定下、GLINK-ACP-05 / M4 扩展的验收契约）：
-#   * 镜像自带 Node 与 ACP agents（dsh、codex-acp、claude-code-acp + claude CLI），
-#     容器内的执行不依赖宿主安装的运行时；
+#   * 镜像自带 Node 与 ACP agents（dsh、codex-acp、claude-code-acp + claude CLI、
+#     opencode），容器内的执行不依赖宿主安装的运行时；
 #   * 宿主只提供数据通道：工作区 /workspace、每 run 的 HOME /home/acp（agent 状态根；
 #     注入的凭据文件在其内以只读方式二次挂载），凭据不经环境变量、不写进镜像；
 #   * 每个 agent 的版本在此精确定版；版本事实与替换决定见
 #     docs/acp-integration-notes.md 的 M3a/M4 章节，边界测试见
 #     tests/test_kernel_acp_docker.py；
-#   * 镜像内自检：构建时校验四个组件的版本（含与 ARG 的精确比对），
+#   * 镜像内自检：构建时校验五个组件的版本（含与 ARG 的精确比对），
 #     默认 CMD 指向同一份自检脚本（docker run --rm pi-glink-acp-worker:latest）。
 #
 # 构建：
@@ -40,6 +40,11 @@ ARG CLAUDE_CODE_ACP_VERSION=0.16.2
 # 镜像同时装官方 CLI，让容器内可显式指向它；钉版为构建时 npm latest（实测记录见
 # docs/evidence/acp-m4-claude-docker-handshake.txt）。
 ARG CLAUDE_CODE_VERSION=2.1.282
+# opencode（M5 / GLINK-ACP-06）：sst/opencode 的官方 npm 包，入口 `opencode acp`。
+# 钉版是 npm latest 与本机 inproc 握手实测的共同版本；包是 wrapper + 平台可选包，
+# postinstall 把平台二进制复制到 bin/。容器内握手证据见
+# docs/evidence/acp-m5-opencode-docker-handshake.txt。
+ARG OPENCODE_AI_VERSION=1.18.32
 ARG DEBIAN_MIRROR=deb.debian.org
 ARG NPM_REGISTRY=https://registry.npmjs.org
 
@@ -57,31 +62,39 @@ RUN if [ "${DEBIAN_MIRROR}" != "deb.debian.org" ]; then \
          "@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}" \
          "@zed-industries/claude-code-acp@${CLAUDE_CODE_ACP_VERSION}" \
          "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+         "opencode-ai@${OPENCODE_AI_VERSION}" \
     # claude code 的原生二进制由该包自己的 postinstall 从平台可选依赖复制到
     # bin/claude.exe；npm 在部分环境下不执行生命周期脚本，就显式跑一次
     # （幂等：重复执行只是把同一个二进制再复制一遍）。
     && node "$(npm root -g)/@anthropic-ai/claude-code/install.cjs" \
+    # opencode 同样靠 postinstall 把平台包二进制复制到 bin/opencode.exe；
+    # 显式再跑一次，并断言它报告的版本与 ARG 一致（"opencode --version"）。
+    && node "$(npm root -g)/opencode-ai/postinstall.mjs" \
     && dsh --version > /tmp/dsh-version \
     && codex-acp --version > /tmp/codex-acp-version \
     && claude --version > /tmp/claude-version \
+    && opencode --version > /tmp/opencode-version \
     && node -e 'console.log(require(process.argv[1]).version)' \
          "$(npm root -g)/@zed-industries/claude-code-acp/package.json" \
          > /tmp/claude-code-acp-version \
     && grep -qx "${DSH_VERSION}" /tmp/dsh-version \
     && grep -qx "@agentclientprotocol/codex-acp ${CODEX_ACP_VERSION}" /tmp/codex-acp-version \
     && grep -qx "${CLAUDE_CODE_VERSION} (Claude Code)" /tmp/claude-version \
+    && grep -qx "${OPENCODE_AI_VERSION}" /tmp/opencode-version \
     && grep -qx "${CLAUDE_CODE_ACP_VERSION}" /tmp/claude-code-acp-version \
-    && rm -f /tmp/dsh-version /tmp/codex-acp-version /tmp/claude-version /tmp/claude-code-acp-version \
+    && rm -f /tmp/dsh-version /tmp/codex-acp-version /tmp/claude-version \
+         /tmp/claude-code-acp-version /tmp/opencode-version \
     && npm cache clean --force
 
 # 镜像内自检脚本：构建期最后一步、运行时默认 CMD、以及 docker run --rm 复验都用它。
-# 四个组件都要能跑出声明版本；claude-code-acp 没有 --version，用安装包的 package.json。
+# 五个组件都要能跑出声明版本；claude-code-acp 没有 --version，用安装包的 package.json。
 RUN { \
       echo '#!/bin/sh'; \
       echo 'set -eu'; \
       echo 'dsh --version'; \
       echo 'codex-acp --version'; \
       echo 'claude --version'; \
+      echo 'opencode --version'; \
       echo 'node -e '\''console.log(require(process.argv[1]).version)'\'' "$(npm root -g)/@zed-industries/claude-code-acp/package.json"'; \
     } > /usr/local/bin/acp-self-check \
     && chmod 0755 /usr/local/bin/acp-self-check \
@@ -94,5 +107,5 @@ ENV HOME=/home/acp \
 
 WORKDIR /workspace
 ENTRYPOINT []
-# 默认命令 = 镜像内自检（四个组件）。
+# 默认命令 = 镜像内自检（五个组件）。
 CMD ["acp-self-check"]

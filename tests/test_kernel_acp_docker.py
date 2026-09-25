@@ -289,30 +289,41 @@ def test_the_acp_worker_dockerfile_pins_exactly_what_the_notes_measured() -> Non
     assert acp_worker_version(text, "CLAUDE_CODE_VERSION") == notes_package_pin(
         notes, "@anthropic-ai/claude-code"
     )
+    # M5 adds opencode; its notes entry is the single measured version the
+    # in-process handshake, the image and the e2b template all agree on.
+    assert acp_worker_version(text, "OPENCODE_AI_VERSION") == notes_package_pin(
+        notes, "opencode-ai"
+    )
     # The install line consumes the pins instead of repeating a literal.
     assert '"@deepseek-ai/dsh@${DSH_VERSION}"' in text
     assert '"@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}"' in text
     assert '"@zed-industries/claude-code-acp@${CLAUDE_CODE_ACP_VERSION}"' in text
     assert '"@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"' in text
+    assert '"opencode-ai@${OPENCODE_AI_VERSION}"' in text
 
 
 def test_the_acp_worker_dockerfile_self_checks_every_agent() -> None:
-    """构建期自检：四个组件的版本都能跑，且与 ARG 精确一致。
+    """构建期自检：五个组件的版本都能跑，且与 ARG 精确一致。
 
     原义务（M3a）：默认 CMD 直接跑 `dsh --version && codex-acp --version`。
     新义务（M4）：默认 CMD 指向镜像内自检脚本 `acp-self-check`（与 e2b 模板同形），
     覆盖 dsh、codex-acp、claude 与 claude-code-acp；claude-code-acp 没有 --version，
     用 `npm ls -g` 的本行输出复验。
+    新义务（M5）：自检再覆盖 opencode（`opencode --version`，钉版与 ARG 比对），
+    它同样靠 postinstall 从平台可选包放置二进制。
     """
     text = ACP_DOCKERFILE.read_text(encoding="utf-8")
     assert "dsh --version" in text
     assert "codex-acp --version" in text
     assert "claude --version" in text
+    assert "opencode --version" in text
     assert 'grep -qx "${DSH_VERSION}"' in text
     assert 'grep -qx "@agentclientprotocol/codex-acp ${CODEX_ACP_VERSION}"' in text
     assert 'grep -qx "${CLAUDE_CODE_VERSION} (Claude Code)"' in text
     assert 'grep -qx "${CLAUDE_CODE_ACP_VERSION}"' in text
+    assert 'grep -qx "${OPENCODE_AI_VERSION}"' in text
     assert "@zed-industries/claude-code-acp/package.json" in text
+    assert "$(npm root -g)/opencode-ai/postinstall.mjs" in text
     # The default command is the same self-check, so an existing image can be
     # verified without knowing the pins.
     assert "/usr/local/bin/acp-self-check" in text
@@ -343,6 +354,8 @@ def test_the_acp_worker_shares_the_pi_node_tag_and_stays_self_contained() -> Non
         "ARG CODEX_ACP_VERSION=${SOMETHING_ELSE}\n",
         "ARG CLAUDE_CODE_VERSION=2.1\n",
         "ARG CLAUDE_CODE_ACP_VERSION=latest\n",
+        "ARG OPENCODE_AI_VERSION=latest\n",
+        "ARG OPENCODE_AI_VERSION=1.18\n",
         "",
     ],
 )

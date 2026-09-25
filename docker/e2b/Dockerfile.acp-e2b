@@ -8,7 +8,7 @@
 #     （docs/evidence/acp-m3-e2b-framing.txt）。
 #   * 这是**独立 dev 模板**（默认名 glink-acp-worker）：不移动任何已有模板的
 #     tag，尤其不触碰生产模板 glink-frontier-e2b 与 pi 面模板 pi-glink-worker。
-#   * 镜像内自检：构建期校验四个组件的版本（含与 ARG 的精确比对），
+#   * 镜像内自检：构建期校验五个组件的版本（含与 ARG 的精确比对），
 #     默认 CMD 也能直接复验。
 #
 # 构建必须用 E2B CLI（历史事故：Python SDK 的 Template().from_dockerfile() 会
@@ -33,6 +33,9 @@ ARG CODEX_ACP_VERSION=1.13.1
 # 沙箱内握手证据见 docs/evidence/acp-m4-claude-e2b-handshake.txt。
 ARG CLAUDE_CODE_ACP_VERSION=0.16.2
 ARG CLAUDE_CODE_VERSION=2.1.282
+# opencode（M5 / GLINK-ACP-06）：与 docker/Dockerfile.acp-worker 同一钉版；
+# 沙箱内握手证据见 docs/evidence/acp-m5-opencode-e2b-handshake.txt。
+ARG OPENCODE_AI_VERSION=1.18.32
 ARG DEBIAN_MIRROR=deb.debian.org
 ARG NPM_REGISTRY=https://registry.npmjs.org
 
@@ -49,21 +52,28 @@ RUN if [ "${DEBIAN_MIRROR}" != "deb.debian.org" ]; then \
          "@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}" \
          "@zed-industries/claude-code-acp@${CLAUDE_CODE_ACP_VERSION}" \
          "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+         "opencode-ai@${OPENCODE_AI_VERSION}" \
     # claude code 的原生二进制由该包自己的 postinstall 从平台可选依赖复制到
     # bin/claude.exe；npm 在部分环境下不执行生命周期脚本，就显式跑一次
     # （幂等：重复执行只是把同一个二进制再复制一遍）。
     && node "$(npm root -g)/@anthropic-ai/claude-code/install.cjs" \
+    # opencode 同样靠 postinstall 把平台包二进制复制到 bin/opencode.exe；
+    # 显式再跑一次，并断言它报告的版本与 ARG 一致（opencode --version）。
+    && node "$(npm root -g)/opencode-ai/postinstall.mjs" \
     && dsh --version > /tmp/dsh-version \
     && codex-acp --version > /tmp/codex-acp-version \
     && claude --version > /tmp/claude-version \
+    && opencode --version > /tmp/opencode-version \
     && node -e 'console.log(require(process.argv[1]).version)' \
          "$(npm root -g)/@zed-industries/claude-code-acp/package.json" \
          > /tmp/claude-code-acp-version \
     && grep -qx "${DSH_VERSION}" /tmp/dsh-version \
     && grep -qx "@agentclientprotocol/codex-acp ${CODEX_ACP_VERSION}" /tmp/codex-acp-version \
     && grep -qx "${CLAUDE_CODE_VERSION} (Claude Code)" /tmp/claude-version \
+    && grep -qx "${OPENCODE_AI_VERSION}" /tmp/opencode-version \
     && grep -qx "${CLAUDE_CODE_ACP_VERSION}" /tmp/claude-code-acp-version \
-    && rm -f /tmp/dsh-version /tmp/codex-acp-version /tmp/claude-version /tmp/claude-code-acp-version \
+    && rm -f /tmp/dsh-version /tmp/codex-acp-version /tmp/claude-version \
+         /tmp/claude-code-acp-version /tmp/opencode-version \
     && npm cache clean --force
 
 # 模板自检脚本：构建期（E2B finalize 的 start command）与运行期都用它复验组件可执行。
@@ -83,6 +93,7 @@ RUN { \
       echo 'dsh --version'; \
       echo 'codex-acp --version'; \
       echo 'claude --version'; \
+      echo 'opencode --version'; \
       echo 'npm ls -g --depth=0'; \
     } > /usr/local/bin/acp-self-check \
     && chmod 0755 /usr/local/bin/acp-self-check \

@@ -1,0 +1,285 @@
+ACP M5 opencode 握手与凭据/状态目录证据（inproc，不消耗模型调用）
+============================================================
+日期: 2026-09-25
+宿主: macOS (arm64) / Python 3.12.10 / Node v24.16.0 / host pi-glink 0.1.0
+钉版入口: npx -y opencode-ai@1.18.32 acp（不全局安装；本机 npm 全局另有 1.18.18 同族版本，
+  两者能力矩阵一致，仅 configOptions.model 候选随版本/凭据变化）
+探针: scripts/spikes/acp_inproc/handshake.py（生产装配路径 build_config →
+  prepare_acp_runtime → AcpExecutionAdapter；只做 initialize + session/new，不发 prompt）
+脱敏: 家目录以 ~ 代替，临时目录以 $TMP/... 代替；凭据值不出现（只记录并入 redactor 的
+  条数与凭据源 sha256 前 16 位）。本文件不含任何 API key / OAuth 令牌 / 账号标识。
+
+原始输出（4 次运行）
+--------
+
+
+===== 运行 1：1.18.32，无凭据（session/new 不需要登录；模型候选只有 OpenCode Zen） =====
+
+ACP inproc 握手实测（不消耗模型调用）
+============================================
+日期: 2026-09-25 12:29:50
+宿主: darwin / Python 3.12.10 / host pi-glink 0.1.0
+agent 命令: npx -y opencode-ai@1.18.32 acp
+命令级 env 名: npm_config_cache
+运行期 HOME: $TMP/glink-acp-inproc-handshake-<id>/data/acp-agent/home
+redactor 并入值: 0 条（不打印值）
+
+握手成功（6.6s）
+能力矩阵（initialize / session/new 响应原文）
+--------------------------------------------
+protocolVersion: 1
+agentInfo: {"name": "OpenCode", "version": "1.18.32"}
+agentCapabilities: {"loadSession": true, "mcpCapabilities": {"http": true, "sse": true}, "promptCapabilities": {"embeddedContext": true, "image": true}, "sessionCapabilities": {"close": {}, "fork": {}, "list": {}, "resume": {}}}
+authMethods: [{"description": "Run `opencode auth login` in the terminal", "name": "Login with opencode", "id": "opencode-login"}]
+sessionId: ses_f292c3f8bffeDAZbz5l6BYRssC
+cwd: $TMP/glink-acp-inproc-handshake-<id>/workspace
+modes: {}
+configOptions: [{"id": "model", "name": "Model", "type": "select", "category": "model", "currentValue": "opencode/big-pickle", "options": [{"value": "opencode/big-pickle", "name": "OpenCode Zen/Big Pickle"}, {"value": "opencode/ling-3.0-flash-fin-free", "name": "OpenCode Zen/Ling 3.0 Flash Fin Free"}, {"value": "opencode/mimo-v2.5-free", "name": "OpenCode Zen/MiMo V2.5 Free"}, {"value": "opencode/mimo-v2.6-flash-free", "name": "OpenCode Zen/MiMo-V2.6-Flash Free"}, {"value": "opencode/muse-spark-1.2-contributor-free", "name": "OpenCode Zen/Muse Spark 1.2 Free"}, {"value": "opencode/muse-spark-1.3-contributor-free", "name": "OpenCode Zen/Muse Spark 1.3 Free"}, {"value": "opencode/nemotron-3-ultra-free", "name": "OpenCode Zen/Nemotron 3 Ultra Free"}, {"value": "opencode/nemotron-3.5-lightning-free", "name": "OpenCode Zen/Nemotron 3.5 Lightning Free"}]}, {"id": "mode", "name": "Session Mode", "type": "select", "category": "mode", "currentValue": "build", "options": [{"value": "build", "name": "build", "description": "The default agent. Executes tools based on configured permissions."}, {"value": "plan", "name": "plan", "description": "Plan mode. Disallows all edit tools."}]}]
+
+client.close(): released=True failures=[]
+
+agent 子进程命令行（采样，证明钉版入口）
+--------------------------------------------
+
+每 run HOME 落点（路径 + 权限位 + 大小；不含内容）
+--------------------------------------------
+  .cache 0o755
+  .cache/opencode 0o755
+  .cache/opencode/bin 0o755
+  .config 0o755
+  .config/opencode 0o755
+  .config/opencode/.gitignore 0o644 63
+  .config/opencode/opencode.jsonc 0o644 50
+  .local 0o755
+  .local/share 0o755
+  .local/share/opencode 0o755
+  .local/share/opencode/log 0o755
+  .local/share/opencode/log/opencode.log 0o644 0
+  .local/share/opencode/opencode.db 0o644 249856
+  .local/share/opencode/opencode.db-shm 0o644 32768
+  .local/share/opencode/opencode.db-wal 0o644 49472
+  .local/share/opencode/repos 0o755
+  .local/state 0o755
+  .local/state/opencode 0o755
+  .local/state/opencode/locks 0o755
+  .local/state/opencode/locks/202a67f9daaa4e3038b758f5a31b4801c4430572.lock 0o700
+  .local/state/opencode/locks/202a67f9daaa4e3038b758f5a31b4801c4430572.lock/heartbeat 0o644 0
+  .local/state/opencode/locks/202a67f9daaa4e3038b758f5a31b4801c4430572.lock/meta.json 0o644 162
+  .local/state/opencode/locks/e572c4a636782f75c5b29d149ec5163d4c45f9f7.lock 0o700
+  .local/state/opencode/locks/e572c4a636782f75c5b29d149ec5163d4c45f9f7.lock/heartbeat 0o644 0
+  .local/state/opencode/locks/e572c4a636782f75c5b29d149ec5163d4c45f9f7.lock/meta.json 0o644 145
+
+凭据源只读核对
+--------------------------------------------
+
+临时目录: $TMP/glink-acp-inproc-handshake-<id>（按本脚本创建的路径清理；未做模式匹配删除）
+
+
+===== 运行 2：1.18.32 + auth.json 注入 + PI_GLINK_ACP_SESSION_CONFIG=model=openai/gpt-5.6-sol-fast =====
+
+ACP inproc 握手实测（不消耗模型调用）
+============================================
+日期: 2026-09-25 12:32:53
+宿主: darwin / Python 3.12.10 / host pi-glink 0.1.0
+agent 命令: npx -y opencode-ai@1.18.32 acp
+命令级 env 名: npm_config_cache
+会话配置: model=openai/gpt-5.6-sol-fast
+运行期 HOME: $TMP/glink-acp-inproc-handshake-<id>/data/acp-agent/home
+redactor 并入值: 4 条（不打印值）
+凭据: ~/.local/share/opencode/auth.json -> HOME/.local/share/opencode/auth.json（源 sha256=0898364a705bd2bb…，mtime=2026-09-08 17:37:11）
+
+握手成功（3.2s）
+能力矩阵（initialize / session/new 响应原文）
+--------------------------------------------
+protocolVersion: 1
+agentInfo: {"name": "OpenCode", "version": "1.18.32"}
+agentCapabilities: {"loadSession": true, "mcpCapabilities": {"http": true, "sse": true}, "promptCapabilities": {"embeddedContext": true, "image": true}, "sessionCapabilities": {"close": {}, "fork": {}, "list": {}, "resume": {}}}
+authMethods: [{"description": "Run `opencode auth login` in the terminal", "name": "Login with opencode", "id": "opencode-login"}]
+sessionId: ses_f29297fb9ffeEylsDiYz3b2C9e
+cwd: $TMP/glink-acp-inproc-handshake-<id>/workspace
+modes: {}
+configOptions: [{"id": "model", "name": "Model", "type": "select", "category": "model", "currentValue": "openai/gpt-5.6-sol-fast", "options": [{"value": "openai/gpt-5.3-codex-spark", "name": "OpenAI/GPT-5.3 Codex Spark"}, {"value": "openai/gpt-5.4", "name": "OpenAI/GPT-5.4"}, {"value": "openai/gpt-5.4-fast", "name": "OpenAI/GPT-5.4 Fast"}, {"value": "openai/gpt-5.4-mini", "name": "OpenAI/GPT-5.4 mini"}, {"value": "openai/gpt-5.4-mini-fast", "name": "OpenAI/GPT-5.4 mini Fast"}, {"value": "openai/gpt-5.5", "name": "OpenAI/GPT-5.5"}, {"value": "openai/gpt-5.5-fast", "name": "OpenAI/GPT-5.5 Fast"}, {"value": "openai/gpt-5.6-luna", "name": "OpenAI/GPT-5.6 Luna"}, {"value": "openai/gpt-5.6-luna-fast", "name": "OpenAI/GPT-5.6 Luna Fast"}, {"value": "openai/gpt-5.6-sol", "name": "OpenAI/GPT-5.6 Sol"}, {"value": "openai/gpt-5.6-sol-fast", "name": "OpenAI/GPT-5.6 Sol Fast"}, {"value": "openai/gpt-5.6-terra", "name": "OpenAI/GPT-5.6 Terra"}, {"value": "openai/gpt-5.6-terra-fast", "name": "OpenAI/GPT-5.6 Terra Fast"}, {"value": "openai/gpt-6-astra", "name": "OpenAI/GPT-6 Astra"}, {"value": "openai/gpt-6-astra-fast", "name": "OpenAI/GPT-6 Astra Fast"}, {"value": "opencode/big-pickle", "name": "OpenCode Zen/Big Pickle"}, {"value": "opencode/ling-3.0-flash-fin-free", "name": "OpenCode Zen/Ling 3.0 Flash Fin Free"}, {"value": "opencode/mimo-v2.5-free", "name": "OpenCode Zen/MiMo V2.5 Free"}, {"value": "opencode/mimo-v2.6-flash-free", "name": "OpenCode Zen/MiMo-V2.6-Flash Free"}, {"value": "opencode/muse-spark-1.2-contributor-free", "name": "OpenCode Zen/Muse Spark 1.2 Free"}, {"value": "opencode/muse-spark-1.3-contributor-free", "name": "OpenCode Zen/Muse Spark 1.3 Free"}, {"value": "opencode/nemotron-3-ultra-free", "name": "OpenCode Zen/Nemotron 3 Ultra Free"}, {"value": "opencode/nemotron-3.5-lightning-free", "name": "OpenCode Zen/Nemotron 3.5 Lightning Free"}]}, {"id": "effort", "name": "Effort", "type": "select", "category": "thought_level", "currentValue": "none", "description": "Available effort levels for this model", "options": [{"value": "none", "name": "None"}, {"value": "low", "name": "Low"}, {"value": "medium", "name": "Medium"}, {"value": "high", "name": "High"}, {"value": "xhigh", "name": "Xhigh"}, {"value": "max", "name": "Max"}, {"value": "default", "name": "Default"}]}, {"id": "mode", "name": "Session Mode", "type": "select", "category": "mode", "currentValue": "build", "options": [{"value": "build", "name": "build", "description": "The default agent. Executes tools based on configured permissions."}, {"value": "plan", "name": "plan", "description": "Plan mode. Disallows all edit tools."}]}]
+
+client.close(): released=True failures=[]
+
+agent 子进程命令行（采样，证明钉版入口）
+--------------------------------------------
+  采样关键字: opencode
+  99330 99329 .venv/bin/python scripts/spikes/acp_inproc/handshake.py --command npx -y opencode-ai@1.18.32 acp --npm-cache $TMP/glink-acp06/npx-cache --credential ~/.local/share/opencode/auth.json=.local/share/opencode/auth.json --session-config model=openai/gpt-5.6-sol-fast --watch opencode --timeout
+  99331 99330 npm exec opencode-ai@1.18.32 acp
+  99331 99330 npm exec opencode-ai@1.18.32 acp
+  99331 99330 npm exec opencode-ai@1.18.32 acp
+  99331 99330 npm exec opencode-ai@1.18.32 acp
+  99696 99331 opencode acp
+
+每 run HOME 落点（路径 + 权限位 + 大小；不含内容）
+--------------------------------------------
+  .cache 0o755
+  .cache/opencode 0o755
+  .cache/opencode/bin 0o755
+  .config 0o755
+  .config/opencode 0o755
+  .config/opencode/.gitignore 0o644 63
+  .config/opencode/opencode.jsonc 0o644 50
+  .local 0o700
+  .local/share 0o700
+  .local/share/opencode 0o700
+  .local/share/opencode/auth.json 0o600 4285
+  .local/share/opencode/log 0o755
+  .local/share/opencode/log/opencode.log 0o644 0
+  .local/share/opencode/opencode.db 0o644 249856
+  .local/share/opencode/opencode.db-shm 0o644 32768
+  .local/share/opencode/opencode.db-wal 0o644 49472
+  .local/share/opencode/repos 0o755
+  .local/state 0o755
+  .local/state/opencode 0o755
+  .local/state/opencode/locks 0o755
+  .local/state/opencode/locks/9ba355c6fea4b0f76af4df9b706c5cc1a68a1067.lock 0o700
+  .local/state/opencode/locks/9ba355c6fea4b0f76af4df9b706c5cc1a68a1067.lock/heartbeat 0o644 0
+  .local/state/opencode/locks/9ba355c6fea4b0f76af4df9b706c5cc1a68a1067.lock/meta.json 0o644 162
+  .local/state/opencode/locks/c6373f34aa5dfbb6153817303a256fcc12902606.lock 0o700
+  .local/state/opencode/locks/c6373f34aa5dfbb6153817303a256fcc12902606.lock/heartbeat 0o644 0
+  .local/state/opencode/locks/c6373f34aa5dfbb6153817303a256fcc12902606.lock/meta.json 0o644 145
+
+凭据源只读核对
+--------------------------------------------
+  ~/.local/share/opencode/auth.json: sha256 unchanged
+
+临时目录: $TMP/glink-acp-inproc-handshake-<id>（按本脚本创建的路径清理；未做模式匹配删除）
+
+
+===== 运行 3：本机 1.18.18 对照（能力矩阵与 1.18.32 一致） =====
+
+ACP inproc 握手实测（不消耗模型调用）
+============================================
+日期: 2026-09-25 12:28:39
+宿主: darwin / Python 3.12.10 / host pi-glink 0.1.0
+agent 命令: opencode acp
+命令级 env 名: （无）
+运行期 HOME: $TMP/glink-acp-inproc-handshake-<id>/data/acp-agent/home
+redactor 并入值: 0 条（不打印值）
+
+握手成功（1.7s）
+能力矩阵（initialize / session/new 响应原文）
+--------------------------------------------
+protocolVersion: 1
+agentInfo: {"name": "OpenCode", "version": "1.18.18"}
+agentCapabilities: {"loadSession": true, "mcpCapabilities": {"http": true, "sse": true}, "promptCapabilities": {"embeddedContext": true, "image": true}, "sessionCapabilities": {"close": {}, "fork": {}, "list": {}, "resume": {}}}
+authMethods: [{"description": "Run `opencode auth login` in the terminal", "name": "Login with opencode", "id": "opencode-login"}]
+sessionId: ses_f292d6661ffeVfPc90cZ3GIkDf
+cwd: $TMP/glink-acp-inproc-handshake-<id>/workspace
+modes: {}
+configOptions: [{"id": "model", "name": "Model", "type": "select", "category": "model", "currentValue": "opencode/big-pickle", "options": [{"value": "opencode/big-pickle", "name": "OpenCode Zen/Big Pickle"}, {"value": "opencode/deepseek-v4-flash-free", "name": "OpenCode Zen/DeepSeek V4 Flash Free"}, {"value": "opencode/hy3-free", "name": "OpenCode Zen/Hy3 Free"}, {"value": "opencode/laguna-s-2.1-free", "name": "OpenCode Zen/Laguna S 2.1 Free"}, {"value": "opencode/ling-3.0-tiny-free", "name": "OpenCode Zen/Ling-3.0-tiny Free"}, {"value": "opencode/mimo-v2.5-free", "name": "OpenCode Zen/MiMo V2.5 Free"}, {"value": "opencode/nemotron-3-ultra-free", "name": "OpenCode Zen/Nemotron 3 Ultra Free"}, {"value": "opencode/nemotron-3.5-lightning-free", "name": "OpenCode Zen/Nemotron 3.5 Lightning Free"}]}, {"id": "mode", "name": "Session Mode", "type": "select", "category": "mode", "currentValue": "build", "options": [{"value": "build", "name": "build", "description": "The default agent. Executes tools based on configured permissions."}, {"value": "plan", "name": "plan", "description": "Plan mode. Disallows all edit tools."}]}]
+
+client.close(): released=True failures=[]
+
+agent 子进程命令行（采样，证明钉版入口）
+--------------------------------------------
+
+每 run HOME 落点（路径 + 权限位 + 大小；不含内容）
+--------------------------------------------
+  .cache 0o755
+  .cache/opencode 0o755
+  .cache/opencode/bin 0o755
+  .config 0o755
+  .config/opencode 0o755
+  .config/opencode/.gitignore 0o644 63
+  .config/opencode/opencode.jsonc 0o644 50
+  .local 0o755
+  .local/share 0o755
+  .local/share/opencode 0o755
+  .local/share/opencode/log 0o755
+  .local/share/opencode/log/opencode.log 0o644 0
+  .local/share/opencode/opencode.db 0o644 249856
+  .local/share/opencode/opencode.db-shm 0o644 32768
+  .local/share/opencode/opencode.db-wal 0o644 49472
+  .local/share/opencode/repos 0o755
+  .local/state 0o755
+  .local/state/opencode 0o755
+  .local/state/opencode/locks 0o755
+  .local/state/opencode/locks/6289796d4e9100b2e5946cd499b509a7b8aa3b8a.lock 0o700
+  .local/state/opencode/locks/6289796d4e9100b2e5946cd499b509a7b8aa3b8a.lock/heartbeat 0o644 0
+  .local/state/opencode/locks/6289796d4e9100b2e5946cd499b509a7b8aa3b8a.lock/meta.json 0o644 145
+  .local/state/opencode/locks/86d5c03720a8c6699509a92b64230c3a0891e468.lock 0o700
+  .local/state/opencode/locks/86d5c03720a8c6699509a92b64230c3a0891e468.lock/heartbeat 0o644 0
+  .local/state/opencode/locks/86d5c03720a8c6699509a92b64230c3a0891e468.lock/meta.json 0o644 162
+
+凭据源只读核对
+--------------------------------------------
+
+临时目录: $TMP/glink-acp-inproc-handshake-<id>（按本脚本创建的路径清理；未做模式匹配删除）
+
+
+===== 运行 4：run HOME 配置通道（另注入一份只定义 zzz-marker-6 的 opencode.json） =====
+
+ACP inproc 握手实测（不消耗模型调用）
+============================================
+日期: 2026-09-25 12:33:28
+宿主: darwin / Python 3.12.10 / host pi-glink 0.1.0
+agent 命令: npx -y opencode-ai@1.18.32 acp
+命令级 env 名: npm_config_cache
+会话配置: model=openai/gpt-5.6-sol-fast
+运行期 HOME: $TMP/glink-acp-inproc-handshake-<id>_9zhi_5/data/acp-agent/home
+redactor 并入值: 4 条（不打印值）
+凭据: ~/.local/share/opencode/auth.json -> HOME/.local/share/opencode/auth.json（源 sha256=0898364a705bd2bb…，mtime=2026-09-08 17:37:11）
+凭据: $TMP/glink-acp06/marker-opencode.json -> HOME/.config/opencode/opencode.json（源 sha256=d0a1d1c867e826c4…，mtime=2026-09-25 12:33:28）
+
+握手成功（3.0s）
+能力矩阵（initialize / session/new 响应原文）
+--------------------------------------------
+protocolVersion: 1
+agentInfo: {"name": "OpenCode", "version": "1.18.32"}
+agentCapabilities: {"loadSession": true, "mcpCapabilities": {"http": true, "sse": true}, "promptCapabilities": {"embeddedContext": true, "image": true}, "sessionCapabilities": {"close": {}, "fork": {}, "list": {}, "resume": {}}}
+authMethods: [{"description": "Run `opencode auth login` in the terminal", "name": "Login with opencode", "id": "opencode-login"}]
+sessionId: ses_f2928f722ffee69E6YcIv6w9WS
+cwd: $TMP/glink-acp-inproc-handshake-<id>_9zhi_5/workspace
+modes: {}
+configOptions: [{"id": "model", "name": "Model", "type": "select", "category": "model", "currentValue": "openai/gpt-5.6-sol-fast", "options": [{"value": "openai/gpt-5.3-codex-spark", "name": "OpenAI/GPT-5.3 Codex Spark"}, {"value": "openai/gpt-5.4", "name": "OpenAI/GPT-5.4"}, {"value": "openai/gpt-5.4-fast", "name": "OpenAI/GPT-5.4 Fast"}, {"value": "openai/gpt-5.4-mini", "name": "OpenAI/GPT-5.4 mini"}, {"value": "openai/gpt-5.4-mini-fast", "name": "OpenAI/GPT-5.4 mini Fast"}, {"value": "openai/gpt-5.5", "name": "OpenAI/GPT-5.5"}, {"value": "openai/gpt-5.5-fast", "name": "OpenAI/GPT-5.5 Fast"}, {"value": "openai/gpt-5.6-luna", "name": "OpenAI/GPT-5.6 Luna"}, {"value": "openai/gpt-5.6-luna-fast", "name": "OpenAI/GPT-5.6 Luna Fast"}, {"value": "openai/gpt-5.6-sol", "name": "OpenAI/GPT-5.6 Sol"}, {"value": "openai/gpt-5.6-sol-fast", "name": "OpenAI/GPT-5.6 Sol Fast"}, {"value": "openai/gpt-5.6-terra", "name": "OpenAI/GPT-5.6 Terra"}, {"value": "openai/gpt-5.6-terra-fast", "name": "OpenAI/GPT-5.6 Terra Fast"}, {"value": "openai/gpt-6-astra", "name": "OpenAI/GPT-6 Astra"}, {"value": "openai/gpt-6-astra-fast", "name": "OpenAI/GPT-6 Astra Fast"}, {"value": "openai/zzz-marker-6", "name": "OpenAI/Marker Six"}, {"value": "opencode/big-pickle", "name": "OpenCode Zen/Big Pickle"}, {"value": "opencode/ling-3.0-flash-fin-free", "name": "OpenCode Zen/Ling 3.0 Flash Fin Free"}, {"value": "opencode/mimo-v2.5-free", "name": "OpenCode Zen/MiMo V2.5 Free"}, {"value": "opencode/mimo-v2.6-flash-free", "name": "OpenCode Zen/MiMo-V2.6-Flash Free"}, {"value": "opencode/muse-spark-1.2-contributor-free", "name": "OpenCode Zen/Muse Spark 1.2 Free"}, {"value": "opencode/muse-spark-1.3-contributor-free", "name": "OpenCode Zen/Muse Spark 1.3 Free"}, {"value": "opencode/nemotron-3-ultra-free", "name": "OpenCode Zen/Nemotron 3 Ultra Free"}, {"value": "opencode/nemotron-3.5-lightning-free", "name": "OpenCode Zen/Nemotron 3.5 Lightning Free"}]}, {"id": "effort", "name": "Effort", "type": "select", "category": "thought_level", "currentValue": "none", "description": "Available effort levels for this model", "options": [{"value": "none", "name": "None"}, {"value": "low", "name": "Low"}, {"value": "medium", "name": "Medium"}, {"value": "high", "name": "High"}, {"value": "xhigh", "name": "Xhigh"}, {"value": "max", "name": "Max"}, {"value": "default", "name": "Default"}]}, {"id": "mode", "name": "Session Mode", "type": "select", "category": "mode", "currentValue": "build", "options": [{"value": "build", "name": "build", "description": "The default agent. Executes tools based on configured permissions."}, {"value": "plan", "name": "plan", "description": "Plan mode. Disallows all edit tools."}]}]
+
+client.close(): released=True failures=[]
+
+agent 子进程命令行（采样，证明钉版入口）
+--------------------------------------------
+  采样关键字: opencode
+  5897  5895 .venv/bin/python scripts/spikes/acp_inproc/handshake.py --command npx -y opencode-ai@1.18.32 acp --npm-cache $TMP/glink-acp06/npx-cache --credential ~/.local/share/opencode/auth.json=.local/share/opencode/auth.json --credential $TMP/glink-acp06/marker-opencode.json=.config/opencode/openco
+  5897  5895 .venv/bin/python scripts/spikes/acp_inproc/handshake.py --command npx -y opencode-ai@1.18.32 acp --npm-cache $TMP/glink-acp06/npx-cache --credential ~/.local/share/opencode/auth.json=.local/share/opencode/auth.json --credential $TMP/glink-acp06/marker-opencode.json=.config/opencode/openco
+  5898  5897 npm exec opencode-ai@1.18.32 acp
+  5897  5895 .venv/bin/python scripts/spikes/acp_inproc/handshake.py --command npx -y opencode-ai@1.18.32 acp --npm-cache $TMP/glink-acp06/npx-cache --credential ~/.local/share/opencode/auth.json=.local/share/opencode/auth.json --credential $TMP/glink-acp06/marker-opencode.json=.config/opencode/openco
+  5898  5897 npm exec opencode-ai@1.18.32 acp
+  5897  5895 .venv/bin/python scripts/spikes/acp_inproc/handshake.py --command npx -y opencode-ai@1.18.32 acp --npm-cache $TMP/glink-acp06/npx-cache --credential ~/.local/share/opencode/auth.json=.local/share/opencode/auth.json --credential $TMP/glink-acp06/marker-opencode.json=.config/opencode/openco
+
+每 run HOME 落点（路径 + 权限位 + 大小；不含内容）
+--------------------------------------------
+  .cache 0o755
+  .cache/opencode 0o755
+  .cache/opencode/bin 0o755
+  .config 0o700
+  .config/opencode 0o700
+  .config/opencode/.gitignore 0o644 63
+  .config/opencode/opencode.json 0o600 189
+  .local 0o700
+  .local/share 0o700
+  .local/share/opencode 0o700
+  .local/share/opencode/auth.json 0o600 4285
+  .local/share/opencode/log 0o755
+  .local/share/opencode/log/opencode.log 0o644 0
+  .local/share/opencode/opencode.db 0o644 249856
+  .local/share/opencode/opencode.db-shm 0o644 32768
+  .local/share/opencode/opencode.db-wal 0o644 49472
+  .local/share/opencode/repos 0o755
+  .local/state 0o755
+  .local/state/opencode 0o755
+  .local/state/opencode/locks 0o755
+  .local/state/opencode/locks/1aba499639520590aa6adbd8ad5df31606b6e1bd.lock 0o700
+  .local/state/opencode/locks/1aba499639520590aa6adbd8ad5df31606b6e1bd.lock/heartbeat 0o644 0
+  .local/state/opencode/locks/1aba499639520590aa6adbd8ad5df31606b6e1bd.lock/meta.json 0o644 161
+  .local/state/opencode/locks/c293e324cdda6e432044efc6340b377063de4351.lock 0o700
+  .local/state/opencode/locks/c293e324cdda6e432044efc6340b377063de4351.lock/heartbeat 0o644 0
+  .local/state/opencode/locks/c293e324cdda6e432044efc6340b377063de4351.lock/meta.json 0o644 144
+
+凭据源只读核对
+--------------------------------------------
+  ~/.local/share/opencode/auth.json: sha256 unchanged
+  $TMP/glink-acp06/marker-opencode.json: sha256 unchanged
+
+临时目录: $TMP/glink-acp-inproc-handshake-<id>_9zhi_5（按本脚本创建的路径清理；未做模式匹配删除）

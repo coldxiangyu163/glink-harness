@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ACP E2B dev 模板的真实沙箱握手（GLINK-ACP-04 / M3b，不消耗模型）。
+"""ACP E2B dev 模板的真实沙箱握手（GLINK-ACP-04 / M3b 起，M5 扩展，不消耗模型）。
 
 用**生产装配路径**（``build_config`` → ``prepare_acp_runtime`` →
 ``E2BAcpSandboxClient`` → ``build_adapter`` → ``AcpSandboxExecutionAdapter``）在真实
@@ -8,7 +8,9 @@
 * 证明 E2B 模板里的 agent 确实经 ``send_stdin`` / ``CommandHandle`` 完成 ACP 握手；
 * 证明每 run HOME 与凭据文件在真实沙箱里可用（无凭据时 codex-acp 的
   ``session/new`` 会以 Authentication required 拒绝，是注入生效的观测点）；
-* 记录 sandbox_id / 协议版本 / agentInfo / configOptions，供集成笔记与证据。
+* 记录 sandbox_id / 协议版本 / agentInfo / configOptions，供集成笔记与证据；
+* ``opencode``（M5）在全新 HOME 下也不需要凭据就能 initialize/session/new，但带上它的
+  ``auth.json`` 能顺带实测§6.3 的上传与沙箱内 0600 加固路径。
 
 只创建并操作自己的沙箱，结束时按 sandbox id 终止；不打印任何凭据值。
 """
@@ -51,6 +53,12 @@ AGENTS = {
     "claude-code-acp": {
         "command": "claude-code-acp",
         "credential": "",
+    },
+    # opencode（M5）：凭据是单个 auth.json；initialize/session/new 不依赖它，
+    # 带上是为了同时实测每 run HOME 在沙箱内的上传与 0600 加固。
+    "opencode": {
+        "command": "opencode acp",
+        "credential": "~/.local/share/opencode/auth.json=.local/share/opencode/auth.json",
     },
 }
 

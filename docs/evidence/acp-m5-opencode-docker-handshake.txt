@@ -1,0 +1,78 @@
+ACP M5 opencode docker 面证据（镜像重建、容器握手、凭据只读挂载；不消耗模型调用）
+================================================================
+日期: 2026-09-25
+宿主: macOS (arm64) / Python 3.12.10 / Docker 29.2.1（Colima 实例）
+镜像: pi-glink-acp-worker:latest（本次重建 ID sha256:fbf2707319e664ab91e8ecf5c23a2bfa9f42890da4acbba7dc53ef736fcb40e3，
+  linux/arm64，docker inspect 大小 527357716 字节，默认 CMD ["acp-self-check"]）
+构建: docker build -t pi-glink-acp-worker:latest -f docker/Dockerfile.acp-worker \
+  --build-arg DEBIAN_MIRROR=mirrors.aliyun.com --build-arg NPM_REGISTRY=https://registry.npmmirror.com .
+  （本机网络到官方源很慢：apt 阶段 8 分钟、npm 约 60 KB/s；Dockerfile 已声明支持基础源覆盖，
+  同一次构建的组件版本与官方源一致。第一次官方源构建在 npm 阶段中止，未产出镜像。）
+探针: scripts/spikes/acp_docker/handshake.py（生产装配路径 build_config → prepare_acp_runtime →
+  docker_env.build_acp_plan → AcpExecutionAdapter；只做 initialize + session/new，不发 prompt）
+脱敏: 家目录以 ~ 代替；凭据值不出现（只记录源文件 sha256 前 16 位与容器内权限/大小）。
+
+一、镜像重建（关键片段）
+--------
+#0 building with "colima" instance using docker driver
+#1 transferring dockerfile: 6.50kB done
+#2 DONE 0.0s
+#5 [2/4] RUN if [ "mirrors.aliyun.com" != "deb.debian.org" ]; then       sed -i "s|deb.debian.org|mirrors.aliyun.com|g" /etc/apt/sources.list.d/debian.sources;     fi     && apt-get update     && apt-get install -y --no-install-recommends        bash ca-certificates curl git ripgrep     && rm -rf /var/lib/apt/lists/*     && npm config set registry "https://registry.npmmirror.com"     && mkdir -p /
+#5 47.60 npm warn install-scripts 7 packages have install scripts not yet covered by allowScripts:
+#5 47.60 npm warn install-scripts   @anthropic-ai/claude-code@2.1.282 (postinstall: node install.cjs)
+#5 47.60 npm warn install-scripts   opencode-ai@1.18.32 (postinstall: node ./postinstall.mjs)
+#5 47.60 npm warn install-scripts   @deepseek-ai/dsh-subprocess-local@0.1.5-rc.3 (postinstall: node scripts/ensure-spawn-helper.mjs)
+#5 47.60 npm warn install-scripts   koffi@3.3.1 (install: node ./cnoke.cjs -P . -D src/koffi --prebuild --release)
+#5 47.60 npm warn install-scripts   node-pty@1.2.0-beta.15 (install: node scripts/prebuild.js || node-gyp rebuild; postinstall: node scripts/post-install.js)
+#5 47.60 npm warn install-scripts   @google/genai@1.52.0 (preinstall: echo 'preinstall: no-op')
+#5 47.60 npm warn install-scripts   protobufjs@7.6.6 (postinstall: node scripts/postinstall)
+#5 47.60 npm warn install-scripts
+#5 47.60 npm warn install-scripts Run `npm install -g --allow-scripts=@anthropic-ai/claude-code,opencode-ai,@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs` to allow these scripts once, or `npm config set allow-scripts=@anthropic-ai/claude-code,opencode-ai,@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user` to allow them for all glob
+#5 DONE 49.7s
+#6 [3/4] RUN {       echo '#!/bin/sh';       echo 'set -eu';       echo 'dsh --version';       echo 'codex-acp --version';       echo 'claude --version';       echo 'opencode --version';       echo 'node -e '''console.log(require(process.argv[1]).version)''' "$(npm root -g)/@zed-industries/claude-code-acp/package.json"';     } > /usr/local/bin/acp-self-check     && chmod 0755 /usr/local/bin/acp-se
+#6 0.992 1.18.32
+#8 naming to docker.io/library/pi-glink-acp-worker:latest done
+#8 DONE 48.2s
+
+二、容器内握手（opencode acp，含凭据嵌套只读挂载与会话配置）
+--------
+ACP docker 容器内握手实测（不消耗模型调用）
+============================================
+日期: 2026-09-25 12:54:57
+镜像: pi-glink-acp-worker:latest
+容器名: pi-glink-m4-handshake-opencode
+容器内命令: opencode acp
+命令级 env 名: （无）
+凭据落点: HOME/.local/share/opencode/auth.json（源只读；容器内为嵌套只读挂载）
+会话配置: model=openai/gpt-5.6-sol-fast
+数据根: ~/.cache/glink-acp06/glink-acp-docker-handshake-lko8szfu
+docker 二进制: Docker version 29.2.1, build a5c7197
+
+握手成功（2.2s）
+protocolVersion: 1
+agentInfo: {"name": "OpenCode", "version": "1.18.32"}
+agentCapabilities: {"loadSession": true, "mcpCapabilities": {"http": true, "sse": true}, "promptCapabilities": {"embeddedContext": true, "image": true}, "sessionCapabilities": {"close": {}, "fork": {}, "list": {}, "resume": {}}}
+authMethods: [{"description": "Run `opencode auth login` in the terminal", "name": "Login with opencode", "id": "opencode-login"}]
+sessionId: ses_f29154ffdffe9lh14YoJJ10mDF
+cwd: /workspace
+modes: {}
+configOptions: [{"id": "model", "name": "Model", "type": "select", "category": "model", "currentValue": "openai/gpt-5.6-sol-fast", "options": [{"value": "openai/gpt-5.3-codex-spark", "name": "OpenAI/GPT-5.3 Codex Spark"}, {"value": "openai/gpt-5.4", "name": "OpenAI/GPT-5.4"}, {"value": "openai/gpt-5.4-fast", "name": "OpenAI/GPT-5.4 Fast"}, {"value": "openai/gpt-5.4-mini", "name": "OpenAI/GPT-5.4 mini"}, {"value": "openai/gpt-5.4-mini-fast", "name": "OpenAI/GPT-5.4 mini Fast"}, {"value": "openai/gpt-5.5", "name": "OpenAI/GPT-5.5"}, {"value": "openai/gpt-5.5-fast", "name": "OpenAI/GPT-5.5 Fast"}, {"value": "openai/gpt-5.6-luna", "name": "OpenAI/GPT-5.6 Luna"}, {"value": "openai/gpt-5.6-luna-fast", "name": "OpenAI/GPT-5.6 Luna Fast"}, {"value": "openai/gpt-5.6-sol", "name": "OpenAI/GPT-5.6 Sol"}, {"value": "openai/gpt-5.6-sol-fast", "name": "OpenAI/GPT-5.6 Sol Fast"}, {"value": "openai/gpt-5.6-terra", "name": "OpenAI/GPT-5.6 Terra"}, {"value": "openai/gpt-5.6-terra-fast", "name": "OpenAI/GPT-5.6 Terra Fast"}, {"value": "openai/gpt-6-astra", "name": "OpenAI/GPT-6 Astra"}, {"value": "openai/gpt-6-astra-fast", "name": "OpenAI/GPT-6 Astra Fast"}, {"value": "opencode/big-pickle", "name": "OpenCode Zen/Big Pickle"}, {"value": "opencode/ling-3.0-flash-fin-free", "name": "OpenCode Zen/Ling 3.0 Flash Fin Free"}, {"value": "opencode/mimo-v2.5-free", "name": "OpenCode Zen/MiMo V2.5 Free"}, {"value": "opencode/mimo-v2.6-flash-free", "name": "OpenCode Zen/MiMo-V2.6-Flash Free"}, {"value": "opencode/muse-spark-1.2-contributor-free", "name": "OpenCode Zen/Muse Spark 1.2 Free"}, {"value": "opencode/muse-spark-1.3-contributor-free", "name": "OpenCode Zen/Muse Spark 1.3 Free"}, {"value": "opencode/nemotron-3-ultra-free", "name": "OpenCode Zen/Nemotron 3 Ultra Free"}, {"value": "opencode/nemotron-3.5-lightning-free", "name": "OpenCode Zen/Nemotron 3.5 Lightning Free"}]}, {"id": "effort", "name": "Effort", "type": "select", "category": "thought_level", "currentValue": "none", "description": "Available effort levels for this model", "options": [{"value": "none", "name": "None"}, {"value": "low", "name": "Low"}, {"value": "medium", "name": "Medium"}, {"value": "high", "name": "High"}, {"value": "xhigh", "name": "Xhigh"}, {"value": "max", "name": "Max"}, {"value": "default", "name": "Default"}]}, {"id": "mode", "name": "Session Mode", "type": "select", "category": "mode", "currentValue": "build", "options": [{"value": "build", "name": "build", "description": "The default agent. Executes tools based on configured permissions."}, {"value": "plan", "name": "plan", "description": "Plan mode. Disallows all edit tools."}]}]
+
+client.close(): released=True failures=[]
+容器按名对账: confirmed_absent=True detail=docker inspect 确认容器不存在 同名容器列表=''
+临时目录: ~/.cache/glink-acp06/glink-acp-docker-handshake-lko8szfu（按本脚本创建的路径清理；未做模式匹配删除）
+
+三、凭据只读挂载契约（同一 plan 的挂载参数，容器内实测）
+--------
+宿主副本: sha256=0898364a705bd2bb… size=4285 mode=100600
+容器内:   container_mode=600 container_size=4285 container_sha=0898364a705bd2bb
+写入尝试: sh: 1: cannot create /home/acp/.local/share/opencode/auth.json: Read-only file system
+          tamper_exit=2
+删除尝试: rm: cannot remove '/home/acp/.local/share/opencode/auth.json': Device or resource busy
+          unlink_exit=1
+HOME 其它位置可写: home_write_exit=0（/home/acp/probe.txt 存在）
+
+四、附带事实
+--------
+* 容器按持久化名字对账 confirmed_absent=True（docker ps -a 无同名容器）。
+* docker 面的真实模型 run 见 docs/evidence/acp-m5-opencode-docker-smoke.txt。

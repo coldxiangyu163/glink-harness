@@ -26,7 +26,14 @@ dsh 的一次最小真实 run（SSE 流式、终态、`report.md` 回收、`sand
 0600）、权限最小白名单（`allow_once,read,search,fetch,edit`；execute 保持拒绝）、镜像与
 dev 模板重建（docker 与 e2b 各加 claude 双包钉版层 + 无模型握手自检）；docker/e2b 面的
 真实模型 run 因无 API key 属预期阻塞，详见 [ACP 集成笔记](acp-integration-notes.md) §7
-与 `docs/evidence/acp-m4-claude-*.txt`。ACP 续接仍属后续里程碑。
+与 `docs/evidence/acp-m4-claude-*.txt`。
+**M5（GLINK-ACP-06）已完成**（2026-09-25）：opencode（`opencode-ai@1.18.32`，入口
+`opencode acp`）接入——inproc 握手与一次最小真实 run（53 事件/19.8s，report.md 336 bytes）、
+每 run `auth.json` 只读复制（OAuth `access`/`refresh` 值并入 redactor，4 条）、
+状态目录落点实测、权限形态（真实 run 0 请求，不启用白名单）、镜像与 dev 模板加
+opencode 钉版层并完成容器/沙箱握手；docker 面另用刷新后的凭据副本跑通一次最小真实 run
+（只读挂载使刷新写回不可用，有效期内无需它）。详见 [ACP 集成笔记](acp-integration-notes.md) §8
+与 `docs/evidence/acp-m5-opencode-*.txt`。ACP 续接仍属后续里程碑。
 宿主默认 harness 仍是 `pi`，ACP 族只在显式配置下启用，执行面已覆盖 inproc / docker / e2b；
 本文是该方向的事实源：实现与本文出现偏差时回写本文，而不是让代码与文档各自漂移。
 
@@ -111,7 +118,9 @@ workspace-write 会话模式下跑完两个最小真实研究 run，均未发出
 Write/Edit（它的权限请求不带 tool kind，宿主按同一 `toolCallId` 的 `tool_call` 通知解析），
 最小集合为 `allow_once,read,search,fetch,edit`，execute/think/switch_mode/other 与未分类
 请求继续拒绝；决定、机制与真实 run 证据见
-[ACP 集成笔记](acp-integration-notes.md) §7.4。
+[ACP 集成笔记](acp-integration-notes.md) §7.4。M5 接入 opencode 时反向确认了"先实测再决定"：
+opencode 的真实 run 在 `webfetch`/`apply_patch` 上 0 条请求，**不为它启用白名单**（默认
+fail-closed 不变），源码里请求自带 `kind` 的形态与触发面记在集成笔记 §8.4。
 
 ### 4.3 准入与门禁
 
@@ -148,7 +157,10 @@ system prompt 的通道也已在 M2 定下：
 M4 补上 claude-code-acp 的凭据形态：它的登录态在本机来自 `~/.claude/settings.json` 的
 `env` 块（不是 Keychain 里的 OAuth），需把该 env 块抽成运行期 settings 经 CREDENTIAL_FILES
 复制进每 run HOME；真实 settings.json 含 hooks/plugins，不得整文件复制。细节与证据见
-[ACP 集成笔记](acp-integration-notes.md) §7.3。
+[ACP 集成笔记](acp-integration-notes.md) §7.3。M5 补上 opencode：凭据就是文件
+`~/.local/share/opencode/auth.json`（OAuth `access`/`refresh`，按精确字段名并入 redactor），
+每 run 落在 `HOME/.local/share/opencode/auth.json`（0600），docker 面再叠一层嵌套只读挂载、
+e2b 面在沙箱内 0600 加固——同一套机制，没有为它新增通道；见集成笔记 §8.3。
 
 ## 5. 开源复用策略
 
@@ -172,6 +184,7 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 | M3a（GLINK-ACP-03） | Docker 执行面：`docker/Dockerfile.acp-worker`（自包含、ARG 钉版、镜像内自检）；`docker run -i` 双向 stdio 桥接复用 M1 客户端；每 run HOME 与只读凭据挂载；容器名/停止/对账复用 `docker_env` 约定；资源限制与降权与 pi 面对齐；解除 `harness=acp + executor=docker` 的启动拒绝 | `bash scripts/check.sh` 全绿；合成 plan/钉版边界回归；镜像自检 + 一次容器内最小真实 run（流式/终态/report.md/无容器残留） | **已完成**（2026-09-25）：docker 面可用，pi docker 面零回归；实测与钉版见 [ACP 集成笔记](acp-integration-notes.md) §5，证据 `docs/evidence/acp-m3-docker-*.txt` |
 | M3b | e2b 执行面：双向 stdio（`stdin=True` + `send_stdin`，SDK 2.x 已具备）帧完整性实测先行；模板钉版；`harness=acp + executor=e2b` 的启动拒绝随之解除 | e2b smoke | **已完成**（2026-09-25）：帧完整性正面、dev 模板 `glink-acp-worker` 构建+自检、两 agent 沙箱内握手、dsh 最小真实 run（report.md 与沙箱按 id 无残留）；实测见 [ACP 集成笔记](acp-integration-notes.md) §6，证据 `docs/evidence/acp-m3-e2b-*.txt` |
 | M4（GLINK-ACP-05） | claude-code-acp 接入（`@zed-industries/claude-code-acp@0.16.2`）；能力矩阵补齐；每 run 凭据与首启形态；权限最小白名单；镜像/dev 模板加 claude 双包钉版层 | inproc 握手 + 一次最小真实 run（流式/终态/report.md/清理）；容器与沙箱无模型握手自检；`bash scripts/check.sh` 全绿 | **已完成**（2026-09-25）：inproc 握手与真实 run 通过；docker 镜像重建后三个 agent 容器内握手（codex-acp 无凭据属预期）；e2b dev 模板重建后沙箱握手；docker/e2b 的真实模型 run 无 API key 属预期阻塞。详见 [ACP 集成笔记](acp-integration-notes.md) §7，证据 `docs/evidence/acp-m4-claude-*.txt` |
+| M5（GLINK-ACP-06） | opencode 接入（`opencode-ai@1.18.32`，入口 `opencode acp`）：inproc 握手与能力矩阵；每 run `auth.json` 凭据与状态目录；权限形态与决策；镜像/dev 模板加 opencode 钉版层 | inproc 握手 + 一次最小真实 run（流式/终态/report.md/清理）；容器与沙箱无模型握手自检；`bash scripts/check.sh` 全绿 | **已完成**（2026-09-25）：inproc 与 docker 面各一次最小真实 run 通过（均 0 权限请求），凭据/状态目录、镜像重建与容器挂载契约、dev 模板沙箱握手均已实测。详见 [ACP 集成笔记](acp-integration-notes.md) §8，证据 `docs/evidence/acp-m5-opencode-*.txt` |
 
 每个里程碑独立验收、独立提交边界；里程碑之间允许因实测结论回写本文。
 
