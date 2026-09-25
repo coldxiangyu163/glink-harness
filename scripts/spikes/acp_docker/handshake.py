@@ -40,7 +40,7 @@ from pi_glink.kernel.docker_env import (  # noqa: E402
 )
 from pi_glink.kernel.execution import ExecutionSpec  # noqa: E402
 
-DEFAULT_COMMAND = "claude-code-acp"
+DEFAULT_COMMAND = "claude-agent-acp"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -77,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         values["PI_GLINK_ACP_SESSION_CONFIG"] = args.session_config
     config = build_config(values, REPO_ROOT)
 
-    run_id = "m4-handshake-" + args.command.split()[0].replace("/", "_")
+    run_id = "acp-handshake-" + args.command.split()[0].replace("/", "_")
     runtime = prepare_acp_runtime(
         config, runtime_dir=workdir / "data" / "acp-agent"
     )

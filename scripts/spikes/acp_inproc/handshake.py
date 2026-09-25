@@ -6,7 +6,7 @@
 ``session/prompt``：
 
 * 记录被测 agent 的 ``initialize`` 能力矩阵与 ``session/new`` 响应原文
-  （dsh / codex-acp / claude-code-acp / opencode 都用同一个探针）；
+  （dsh / codex-acp / claude-agent-acp / opencode 都用同一个探针）；
 * 记录能力位来源（agentInfo / protocolVersion / loadSession /
   sessionCapabilities / promptCapabilities / authMethods / modes /
   configOptions）供集成笔记并排对照；
@@ -16,7 +16,7 @@
   用 ``model=…`` 观测 option 变化与 ``effort`` 选项的联动）；
 * 不打印任何凭据值；凭据源始终只读。
 
-CLI 入口只做钉版调用（默认 ``npx -y @zed-industries/claude-code-acp@0.16.2``；
+CLI 入口只做钉版调用（默认 ``npx -y @agentclientprotocol/claude-agent-acp@0.81.2``；
 opencode 用 ``npx -y opencode-ai@1.18.32 acp``，本地已装 1.18.18 与它同族），
 不做全局安装。``--env`` 可注入 ``npm_config_cache``（npx 缓存）或
 ``CLAUDE_CODE_EXECUTABLE``（宿主 claude CLI 路径）等命令级环境；``--watch``
@@ -49,7 +49,7 @@ from pi_glink.kernel.acp_env import (  # noqa: E402
 from pi_glink.kernel.acp_execution import AcpExecutionAdapter  # noqa: E402
 from pi_glink.kernel.execution import ExecutionSpec  # noqa: E402
 
-DEFAULT_COMMAND = "npx -y @zed-industries/claude-code-acp@0.16.2"
+DEFAULT_COMMAND = "npx -y @agentclientprotocol/claude-agent-acp@0.81.2"
 
 #: Capability fields worth printing on their own line, in a stable order.
 CAPABILITY_FIELDS = (

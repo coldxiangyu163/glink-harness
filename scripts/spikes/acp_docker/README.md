@@ -1,4 +1,4 @@
-# ACP docker 面的 live 探针（GLINK-ACP-05 / M4 起，M5 扩展）
+# ACP docker 面的 live 探针（GLINK-ACP-05 / M4 起，M5/M6 扩展）
 
 `handshake.py` 用生产装配路径（`build_config` → `prepare_acp_runtime` →
 `docker_env.build_acp_plan` → `AcpExecutionAdapter`）在本地 `pi-glink-acp-worker`
@@ -6,8 +6,8 @@
 持久化容器名 force-remove、确认无同名容器残留。不是默认检查的一部分。
 
 ```bash
-# 握手（claude-code-acp 是 M4 新增；opencode 是 M5 新增；其余可复跑作回归）
-.venv/bin/python scripts/spikes/acp_docker/handshake.py --command claude-code-acp
+# 握手（claude-agent-acp 是 M6 起的后继包名；opencode 是 M5 新增；其余可复跑作回归）
+.venv/bin/python scripts/spikes/acp_docker/handshake.py --command claude-agent-acp
 .venv/bin/python scripts/spikes/acp_docker/handshake.py --command 'opencode acp'
 .venv/bin/python scripts/spikes/acp_docker/handshake.py --command 'dsh --profile acp'
 .venv/bin/python scripts/spikes/acp_docker/handshake.py --command codex-acp

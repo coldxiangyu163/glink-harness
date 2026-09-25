@@ -151,7 +151,7 @@ def sse_collector(base: str, run_id: str, frames: list[dict], stop: threading.Ev
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="ACP inproc 最小真实冒烟")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
-    parser.add_argument("--agent", default="npx -y @zed-industries/claude-code-acp@0.16.2")
+    parser.add_argument("--agent", default="npx -y @agentclientprotocol/claude-agent-acp@0.81.2")
     parser.add_argument("--credential", action="append", default=[], help="source=dest，可重复")
     parser.add_argument("--env", action="append", default=[], help="NAME=value，可重复")
     parser.add_argument(
