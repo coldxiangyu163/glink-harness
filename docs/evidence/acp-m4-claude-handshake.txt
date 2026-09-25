@@ -1,0 +1,121 @@
+ACP M4 握手与凭据/首启形态证据（inproc，不消耗模型调用）
+============================================================
+日期: 2026-09-25
+宿主: macOS (arm64) / Python 3.12.10 / Node v24.16.0 / host pi-glink 0.1.0
+钉版入口: npx -y @zed-industries/claude-code-acp@0.16.2（不全局安装；
+  npm warn deprecated: 已被 @agentclientprotocol/claude-agent-acp 取代，迁移评估留后续）
+探针: scripts/spikes/acp_inproc/handshake.py（生产装配路径 build_config →
+  prepare_acp_runtime → AcpExecutionAdapter；只做 initialize + session/new，不发 prompt）
+脱敏: 家目录以 ~ 代替，临时目录以 $TMP/glink-acp-inproc-* 代替；凭据值不出现。
+
+原始输出
+--------
+ACP agent did not exit after stdin closed; terminating
+ACP inproc 握手实测（不消耗模型调用）
+============================================
+日期: 2026-09-25 11:36:45
+宿主: darwin / Python 3.12.10 / host pi-glink 0.1.0
+agent 命令: npx -y @zed-industries/claude-code-acp@0.16.2
+命令级 env 名: CLAUDE_CODE_EXECUTABLE, npm_config_cache
+运行期 HOME: $TMP/glink-acp-inproc-handshake-<id>/data/acp-agent/home
+redactor 并入值: 1 条（不打印值）
+运行期 settings 派生自: ~/.claude/settings.json（源仅读；sha256=1c63541b737184c0…；只取 env 块）
+凭据: $TMP/glink-acp-inproc-handshake-<id>/run-settings/settings.json -> HOME/.claude/settings.json（源 sha256=243ae4e7ee68c07c…，mtime=2026-09-25 11:36:45）
+
+握手成功（2.7s）
+能力矩阵（initialize / session/new 响应原文）
+--------------------------------------------
+protocolVersion: 1
+agentInfo: {"name": "@zed-industries/claude-code-acp", "title": "Claude Code", "version": "0.16.2"}
+agentCapabilities: {"promptCapabilities": {"image": true, "embeddedContext": true}, "mcpCapabilities": {"http": true, "sse": true}, "loadSession": true, "sessionCapabilities": {"fork": {}, "list": {}, "resume": {}}}
+authMethods: [{"description": "Run `claude /login` in the terminal", "name": "Log in with Claude Code", "id": "claude-login"}]
+sessionId: bb101123-05ae-4863-a070-fbee5a5c5867
+cwd: $TMP/glink-acp-inproc-handshake-<id>/workspace
+modes: {"currentModeId": "default", "availableModes": [{"id": "default", "name": "Default", "description": "Standard behavior, prompts for dangerous operations"}, {"id": "acceptEdits", "name": "Accept Edits", "description": "Auto-accept file edit operations"}, {"id": "plan", "name": "Plan Mode", "description": "Planning mode, no actual tool execution"}, {"id": "dontAsk", "name": "Don't Ask", "description": "Don't prompt for permissions, deny if not pre-approved"}, {"id": "bypassPermissions", "name": "Bypass Permissions", "description": "Bypass all permission checks"}]}
+configOptions: []
+
+client.close(): released=True failures=[]
+
+agent 子进程命令行（采样，证明钉版入口）
+--------------------------------------------
+  797 47947 /bin/bash -c cd ~/.herdr/worktrees/pi-glink/acp-claude-m4-20260925 && .venv/bin/python scripts/spikes/acp_inproc/handshake.py --npm-cache /tmp/glink-m4-scratch/npmcache --derive-settings-from ~/.claude/settings.json --env "CLAUDE_CODE_EXECUTABLE=$(command -v claude)" --tim
+  798   797 .venv/bin/python scripts/spikes/acp_inproc/handshake.py --npm-cache /tmp/glink-m4-scratch/npmcache --derive-settings-from ~/.claude/settings.json --env CLAUDE_CODE_EXECUTABLE=~/.nvm/versions/node/v24.16.0/bin/claude --timeout 180
+  797 47947 /bin/bash -c cd ~/.herdr/worktrees/pi-glink/acp-claude-m4-20260925 && .venv/bin/python scripts/spikes/acp_inproc/handshake.py --npm-cache /tmp/glink-m4-scratch/npmcache --derive-settings-from ~/.claude/settings.json --env "CLAUDE_CODE_EXECUTABLE=$(command -v claude)" --tim
+  798   797 .venv/bin/python scripts/spikes/acp_inproc/handshake.py --npm-cache /tmp/glink-m4-scratch/npmcache --derive-settings-from ~/.claude/settings.json --env CLAUDE_CODE_EXECUTABLE=~/.nvm/versions/node/v24.16.0/bin/claude --timeout 180
+  808   798 npm exec @zed-industries/claude-code-acp@0.16.2
+  797 47947 /bin/bash -c cd ~/.herdr/worktrees/pi-glink/acp-claude-m4-20260925 && .venv/bin/python scripts/spikes/acp_inproc/handshake.py --npm-cache /tmp/glink-m4-scratch/npmcache --derive-settings-from ~/.claude/settings.json --env "CLAUDE_CODE_EXECUTABLE=$(command -v claude)" --tim
+
+每 run HOME 落点（路径 + 权限位 + 大小；不含内容）
+--------------------------------------------
+  .claude 0o700
+  .claude/backups 0o755
+  .claude/backups/.claude.json.backup.1790307407640 0o600 84
+  .claude/debug 0o755
+  .claude/debug/fb70ce4f-43e5-45f8-b997-fa7f792870a9.txt 0o644 86
+  .claude/debug/latest 0o644 86
+  .claude/sessions 0o700
+  .claude/settings.json 0o600 583
+  .claude.json 0o600 692
+  Library 0o755
+  Library/Caches 0o755
+  Library/Caches/claude-cli-nodejs 0o755
+  Library/Caches/claude-cli-nodejs/-private-var-folders-78-dy70php52d9gpp38b-dx--w40000gn-T-glink-acp-inproc-handshake-a2rxyogw-workspace 0o755
+  Library/Caches/claude-cli-nodejs/-private-var-folders-78-dy70php52d9gpp38b-dx--w40000gn-T-glink-acp-inproc-handshake-a2rxyogw-workspace/mcp-logs-acp 0o755
+  Library/Caches/claude-cli-nodejs/-private-var-folders-78-dy70php52d9gpp38b-dx--w40000gn-T-glink-acp-inproc-handshake-a2rxyogw-workspace/mcp-logs-acp/2026-09-25T03-36-47-885Z.jsonl 0o644 253
+
+凭据源只读核对
+--------------------------------------------
+  $TMP/glink-acp-inproc-handshake-<id>/run-settings/settings.json: sha256 unchanged
+  ~/.claude/settings.json（派生源）: sha256 unchanged
+
+临时目录: $TMP/glink-acp-inproc-handshake-<id>（按本脚本创建的路径清理；未做模式匹配删除）
+
+凭据与首启形态的先行实测（同一任务，真实 ~/.claude* 只读）
+--------------------------------------------------------
+1) Keychain 可达但内容不可用（macOS Keychain 按用户不按 HOME）
+   - `security find-generic-password -a "$USER" -w -s "Claude Code-credentials"` 退出码 0，
+     无交互提示：CLI 用的同一条读取命令可达。
+   - 值结构（只列键名与长度，不打印值）: claudeAiOauth.accessToken 长度 0、
+     refreshToken 长度 0 —— 该条目是空壳，不提供可用登录态。
+   - 同一条目下本机 claude 2.1.281 `auth status` 在全新 HOME + 复制真实 settings.json
+     时报 loggedIn=true / authMethod=oauth_token；把复制件里的 ANTHROPIC_AUTH_TOKEN、
+     ANTHROPIC_BASE_URL 去掉后立刻变成 loggedIn=false。结论：登录态来自 settings 的
+     env 块，不来自 Keychain OAuth。
+2) 工作凭据形态 = settings.json 的 env 块（本机为第三方 Anthropic 兼容端点）
+   - 真实 ~/.claude/settings.json 的 env 含 ANTHROPIC_AUTH_TOKEN、ANTHROPIC_BASE_URL 与
+     模型/上下文相关旋钮（键名见集成笔记 §7；值不落证据）。
+   - 该文件同时含约 30 条 hooks（Muxy/Otty/Orca/Herdr/harness notify）、enabledPlugins 与
+     statusLine。实测把真实文件整体复制进 run HOME 时，SessionStart hook 立即在宿主上
+     拉起了 ~/.harness/cli/notify.mjs，并把操作员真实的 ~/.claude/projects 等目录参数传进去
+     —— 即“整体复制真实 settings.json”会把操作员的 hook 副作用带进每个 run。
+3) 每 run HOME 需要的最小配置
+   - 需要: 只含 env 块的一份运行期 settings → 复制到 HOME/.claude/settings.json（0600）。
+     本证据用 --derive-settings-from 把它生成在临时数据根内（0600），真实文件只读
+     （脚本核对 sha256 unchanged）。
+   - 不需要: ~/.claude.json（CLI 在全新 HOME 首次启动时自行创建，含 firstStartTime/userID/
+     GrowthBook 缓存与 .claude.json.backup.*；不依赖预先存在）。
+   - 不需要: ~/.claude 下的 skills/plugins/history/daemon 等状态。
+4) 驱动哪个 claude CLI
+   - 适配器 0.16.2 默认驱动 @anthropic-ai/claude-agent-sdk@0.2.44 自带的
+     vendor cli.js（版本 2.1.44）。
+   - 同一份运行期 settings 下：2.1.44 `auth status` 报 loggedIn=false，本机
+     claude 2.1.281 报 loggedIn=true。为避免把冒烟赌在 2.1.44 是否应用 settings env 上，
+     冒烟按适配器官方通道设 CLAUDE_CODE_EXECUTABLE=本机 claude（2.1.281，SDK 原生二进制
+     直启，实测子进程命令行确认）。
+5) 首启形态
+   - 全新 HOME 下 initialize + session/new 不需要任何凭据：CLI 自建 .claude.json 与
+     .claude 下的 backups/debug/sessions，session/new 成功返回 sessionId 与 modes。
+   - session/new 返回 modes（default/acceptEdits/plan/dontAsk/bypassPermissions）；
+     configOptions 为空数组（因此 PI_GLINK_ACP_SESSION_CONFIG 对 claude-code-acp 不可用，
+     缺省不配置即不触发）。
+   - session/new 后立即广播 available_commands_update（本次 47 条），宿主 ACP 门禁继续
+     拒绝 / 开头 prompt。
+
+结论
+----
+* inproc 可用凭据形态：运行期 .claude/settings.json（env 块，CREDENTIAL_FILES 0600 复制，
+  注入值并入 redactor） + CLAUDE_CODE_EXECUTABLE 指向宿主 claude CLI；
+  PI_GLINK_ACP_ENV 的 ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN 是等价的环境变量通道。
+* Keychain 本条目的 OAuth token 为空，不能作为凭据；即使非空，macOS Keychain 也只在
+  inproc 面存在（docker/e2b 无 Keychain）。
+* 真实 ~/.claude* 全程只读未改（settings.json sha256 前后一致）。

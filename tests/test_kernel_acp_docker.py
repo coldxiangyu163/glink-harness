@@ -281,21 +281,42 @@ def test_the_acp_worker_dockerfile_pins_exactly_what_the_notes_measured() -> Non
     assert acp_worker_version(text, "CODEX_ACP_VERSION") == notes_package_pin(
         notes, "@agentclientprotocol/codex-acp"
     )
+    # M4 adds the claude pair: the ACP adapter and the CLI it drives. Both are
+    # pinned exactly, and the notes record the measured versions.
+    assert acp_worker_version(text, "CLAUDE_CODE_ACP_VERSION") == notes_package_pin(
+        notes, "@zed-industries/claude-code-acp"
+    )
+    assert acp_worker_version(text, "CLAUDE_CODE_VERSION") == notes_package_pin(
+        notes, "@anthropic-ai/claude-code"
+    )
     # The install line consumes the pins instead of repeating a literal.
     assert '"@deepseek-ai/dsh@${DSH_VERSION}"' in text
     assert '"@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}"' in text
+    assert '"@zed-industries/claude-code-acp@${CLAUDE_CODE_ACP_VERSION}"' in text
+    assert '"@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"' in text
 
 
-def test_the_acp_worker_dockerfile_self_checks_both_agents() -> None:
-    """构建期自检：两个 agent 的 --version 都能跑，且与 ARG 精确一致。"""
+def test_the_acp_worker_dockerfile_self_checks_every_agent() -> None:
+    """构建期自检：四个组件的版本都能跑，且与 ARG 精确一致。
+
+    原义务（M3a）：默认 CMD 直接跑 `dsh --version && codex-acp --version`。
+    新义务（M4）：默认 CMD 指向镜像内自检脚本 `acp-self-check`（与 e2b 模板同形），
+    覆盖 dsh、codex-acp、claude 与 claude-code-acp；claude-code-acp 没有 --version，
+    用 `npm ls -g` 的本行输出复验。
+    """
     text = ACP_DOCKERFILE.read_text(encoding="utf-8")
     assert "dsh --version" in text
     assert "codex-acp --version" in text
+    assert "claude --version" in text
     assert 'grep -qx "${DSH_VERSION}"' in text
     assert 'grep -qx "@agentclientprotocol/codex-acp ${CODEX_ACP_VERSION}"' in text
+    assert 'grep -qx "${CLAUDE_CODE_VERSION} (Claude Code)"' in text
+    assert 'grep -qx "${CLAUDE_CODE_ACP_VERSION}"' in text
+    assert "@zed-industries/claude-code-acp/package.json" in text
     # The default command is the same self-check, so an existing image can be
     # verified without knowing the pins.
-    assert 'CMD ["sh", "-c", "dsh --version && codex-acp --version"]' in text
+    assert "/usr/local/bin/acp-self-check" in text
+    assert 'CMD ["acp-self-check"]' in text
     assert "ENTRYPOINT []" in text, "宿主提供容器命令，镜像不得占用 entrypoint"
 
 
@@ -320,6 +341,8 @@ def test_the_acp_worker_shares_the_pi_node_tag_and_stays_self_contained() -> Non
         "ARG DSH_VERSION=0.1\n",
         "ARG CODEX_ACP_VERSION=1.13\n",
         "ARG CODEX_ACP_VERSION=${SOMETHING_ELSE}\n",
+        "ARG CLAUDE_CODE_VERSION=2.1\n",
+        "ARG CLAUDE_CODE_ACP_VERSION=latest\n",
         "",
     ],
 )

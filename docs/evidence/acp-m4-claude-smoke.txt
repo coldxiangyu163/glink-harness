@@ -1,0 +1,235 @@
+ACP M4 inproc 最小真实冒烟证据（第 1 次，任务授权 ≤2 次）
+============================================================
+日期: 2026-09-25
+宿主: macOS (arm64) / host pi-glink 0.1.0 / 随机端口 56127
+探针: scripts/spikes/acp_inproc/smoke_host.py（真实宿主进程 → POST /api/runs → SSE →
+  终态 → /report → 按已知 PID 收尾）
+语义: 该 run 由本机 claude CLI 配置的 Anthropic 兼容端点（第三方 provider）驱动；
+  brief 记为“Claude 订阅”，实际凭据是 settings.json env 的 AUTH_TOKEN + BASE_URL（见
+  acp-m4-claude-handshake.txt 的凭据实测）。模型调用的**次数**为 1 次（授权 ≤2）。
+脱敏: 家目录以 ~ 代替，临时数据根以 $TMP/glink-acp-inproc-smoke-<id> 代替；
+  凭据值不出现。
+
+原始输出
+--------
+ACP M4 最小真实冒烟（inproc）
+============================================
+日期: 2026-09-25 11:37:02
+宿主命令: python -m pi_glink.app --port 56127（harness=acp, executor=inproc）
+agent 命令: npx -y @zed-industries/claude-code-acp@0.16.2
+命令级 env 名: CLAUDE_CODE_EXECUTABLE, npm_config_cache
+权限白名单: allow_once,read,search,fetch,edit
+数据根: $TMP/glink-acp-inproc-smoke-<id>
+任务超时: 300s
+运行期 settings 派生自: ~/.claude/settings.json（源仅读；sha256=1c63541b737184c0…）
+
+宿主 PID: 4199（只按这个 PID 收尾）
+宿主健康检查: HTTP 200
+POST /api/runs -> HTTP 201
+runId: cff0653c804b
+终态: finished duration=47.567s events=141
+GET /api/runs/cff0653c804b/report -> HTTP 200（714 bytes）
+宿主按 PID 4199 终止: exit=-15
+
+run 期间采样的宿主后代进程: 4 个（只按 PID 记录）
+  4398 [exited] npm exec @zed-industries/claude-code-acp@0.16.2   
+  4576 [exited] node /tmp/glink-m4-scratch/npmcache/_npx/8e2f889e245897c3/node_modules/.bin/claude-code-acp
+  4579 [exited] ~/.nvm/versions/node/v24.16.0/bin/claude --output-format stream-json --verbose --input-format stream-json --permission-prompt-tool stdio --disa
+  4831 [exited] (claude.exe)
+
+SSE 流式（到达时间相对 run 创建）
+     0.15s run_started
+     2.24s session_ready
+     2.24s turn_started
+     2.24s kernel_status
+     5.83s thinking_delta
+     5.83s thinking_delta
+     5.83s thinking_delta
+     5.93s thinking_delta
+     6.07s thinking_delta
+     6.09s thinking_delta
+     6.15s thinking_delta
+     6.21s thinking_delta
+     6.21s thinking_delta
+     6.27s thinking_delta
+     6.27s thinking_delta
+     6.33s thinking_delta
+     6.39s thinking_delta
+     6.48s thinking_delta
+     6.59s thinking_delta
+     6.61s thinking_delta
+     6.70s thinking_delta
+     6.76s thinking_delta
+     6.76s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+    11.09s thinking_delta
+  SSE 帧数: 141
+
+事件类型统计（events.jsonl）
+  assistant_delta 55 · kernel_status 3 · run_finished 1 · run_started 1 · session_ready 1 · thinking_delta 70 · tool_finished 2 · tool_started 4 · tool_updated 2 · turn_finished 1 · turn_started 1
+
+权限决定（kernel_status）
+  acp_permission_allowed decision=allowed policy=allowlist kind=fetch source=tool_call
+  acp_permission_allowed decision=allowed policy=allowlist kind=edit source=tool_call
+
+事件时间线（seq/相对秒/type/摘要）
+     1   0.00s run_started        
+     2   2.19s session_ready      
+     3   2.19s turn_started       
+     4   2.19s kernel_status      acp_available_commands
+     5   5.78s thinking_delta     
+     6   5.78s thinking_delta     
+     7   5.78s thinking_delta     
+     8   5.88s thinking_delta     
+     9   6.02s thinking_delta     
+    10   6.04s thinking_delta     
+    11   6.10s thinking_delta     
+    12   6.16s thinking_delta     
+    13   6.16s thinking_delta     
+    14   6.22s thinking_delta     
+    15   6.22s thinking_delta     
+    16   6.28s thinking_delta     
+    17   6.34s thinking_delta     
+    18   6.43s thinking_delta     
+    19   6.54s thinking_delta     
+    20   6.56s thinking_delta     
+    21   6.65s thinking_delta     
+    22   6.71s thinking_delta     
+    23   6.71s thinking_delta     
+    24  11.04s thinking_delta     
+    25  11.04s thinking_delta     
+    26  11.04s thinking_delta     
+    27  11.04s thinking_delta     
+    28  11.04s thinking_delta     
+    29  11.04s thinking_delta     
+    30  11.04s thinking_delta     
+    31  11.04s thinking_delta     
+    32  11.04s thinking_delta     
+    33  11.04s thinking_delta     
+    34  11.04s thinking_delta     
+    35  11.04s thinking_delta     
+    36  11.04s thinking_delta     
+    37  11.04s thinking_delta     
+    38  11.04s thinking_delta     
+    39  11.04s thinking_delta     
+    40  11.05s thinking_delta     
+    41  11.05s thinking_delta     
+    42  11.05s thinking_delta     
+    43  11.05s thinking_delta     
+    44  11.05s thinking_delta     
+    45  11.05s thinking_delta     
+    46  11.05s thinking_delta     
+    47  11.05s thinking_delta     
+    48  11.05s thinking_delta     
+    49  11.05s thinking_delta     
+    50  11.05s thinking_delta     
+    51  11.05s thinking_delta     
+    52  11.05s thinking_delta     
+    53  11.05s thinking_delta     
+    54  11.05s thinking_delta     
+    55  11.05s thinking_delta     
+    56  11.05s thinking_delta     
+    57  11.05s thinking_delta     
+    58  11.05s thinking_delta     
+    59  11.05s thinking_delta     
+    60  11.05s thinking_delta     
+
+终态与清理事实（meta.json）
+  status=finished modelStopReason=end_turn reportStatus=ok
+  container_name=None sandbox_id=None
+  cleanup={"released": true, "failures": [], "external": {}}
+  report_path=$TMP/glink-acp-inproc-smoke-<id>/runs/cff0653c804b/artifacts/report.md
+
+settings 源只读核对: unchanged
+
+report.md（HTTP 200，714 bytes）
+------------------------------------------------------------
+# ACP 对宿主接多 harness 的价值
+
+- **消除 N×M 集成成本**：ACP 标准化编辑器/宿主与编码代理之间的通信，实现方一次接入即可互通，无需为每个 harness 做定制对接（[ACP 官方介绍](https://agentclientprotocol.com/overview/introduction/)）。
+- **解耦宿主与代理、避免锁定**：类似 LSP 之于语言服务器，支持 ACP 的宿主可直接触达整个兼容代理生态，随取随换，降低厂商锁定风险（同上来源）。
+
+来源：
+1. https://agentclientprotocol.com/overview/introduction/
+
+**一句话总结**：ACP 像 LSP 一样把宿主与代理解耦成标准接口，让宿主以一次集成接入多个 harness 并自由切换。
+
+------------------------------------------------------------
+
+宿主日志尾部
+  pi-glink 宿主已启动 / host listening: http://127.0.0.1:56127/
+  执行面 executor: inproc
+  内核 pi: ~/.nvm/versions/node/v24.16.0/bin/pi
+  模型 model: 未配置 / unset (缺少密钥 / no key)
+  2026-09-25 11:37:02,681 INFO pi_glink.kernel.acp_rpc: starting ACP agent: npx -y @zed-industries/claude-code-acp@0.16.2
+  2026-09-25 11:37:02,781 INFO pi_glink.host: event stream attached run=cff0653c804b after=0 live=True
+  2026-09-25 11:37:50,233 WARNING pi_glink.kernel.acp_rpc: ACP agent did not exit after stdin closed; terminating
+  2026-09-25 11:37:50,247 INFO pi_glink.kernel.runner: run finalized run=cff0653c804b status=finished stop=None committed=True report=$TMP/glink-acp-inproc-smoke-<id>/runs/cff0653c804b/artifacts/report.md released=True
+  2026-09-25 11:37:50,247 INFO pi_glink.host: event stream detached run=cff0653c804b
+
+[PASS] 冒烟（流式/终态/report.md/清理只操作已知 PID）
+
+非 delta 事件时间线（events.jsonl，seq/相对秒/type/摘要）
+--------------------------------------------------------
+   1    0.00s run_started      
+   2    2.19s session_ready    
+   3    2.19s turn_started     
+   4    2.19s kernel_status    message=acp_available_commands
+  75   11.08s tool_started     toolName=Fetch toolCallId=tool_MW32InWy0lIWut6p1PK1dPoz kind=fetch
+  76   11.08s tool_started     toolName=Fetch https://agentclientprotocol.com/overview/introduction/ toolCallId=tool_MW32InWy0lIWut6p1PK1dPoz kind=fetch
+  77   11.09s kernel_status    message=acp_permission_allowed toolCallId=tool_MW32InWy0lIWut6p1PK1dPoz
+  78   27.09s tool_updated     toolName=Fetch https://agentclientprotocol.com/overview/introduction/ toolCallId=tool_MW32InWy0lIWut6p1PK1dPoz
+  79   27.09s tool_finished    toolName=Fetch https://agentclientprotocol.com/overview/introduction/ toolCallId=tool_MW32InWy0lIWut6p1PK1dPoz
+  80   30.03s tool_started     toolName=Write toolCallId=tool_L9rCWqH8nKpNuul7lRkIDljp kind=edit
+  81   36.98s tool_started     toolName=Write /private/var/folders/78/dy70php52d9gpp38b_dx__w40000gn/T/glink-acp-inproc-smoke-sgmr_22r/workspaces/cff0653c804b/r toolCallId=tool_L9rCWqH8nKpNuul7lRkIDljp kind=edit
+  82   36.99s kernel_status    message=acp_permission_allowed toolCallId=tool_L9rCWqH8nKpNuul7lRkIDljp
+  83   37.00s tool_updated     toolName=Write /private/var/folders/78/dy70php52d9gpp38b_dx__w40000gn/T/glink-acp-inproc-smoke-sgmr_22r/workspaces/cff0653c804b/r toolCallId=tool_L9rCWqH8nKpNuul7lRkIDljp
+  84   37.00s tool_finished    toolName=Write /private/var/folders/78/dy70php52d9gpp38b_dx__w40000gn/T/glink-acp-inproc-smoke-sgmr_22r/workspaces/cff0653c804b/r toolCallId=tool_L9rCWqH8nKpNuul7lRkIDljp
+ 140   42.55s turn_finished    
+ 141   47.57s run_finished     status=finished reportStatus=ok durationSeconds=47.567
+
+事件类型统计
+------------
+assistant_delta 55 · kernel_status 3 · run_finished 1 · run_started 1 · session_ready 1 · thinking_delta 70 · tool_finished 2 · tool_started 4 · tool_updated 2 · turn_finished 1 · turn_started 1
+终态 payload: status=finished modelStopReason=end_turn stopReason=None reportStatus=ok cleanup={"released": true, "failures": [], "external": {}} usage=None
+sessionFile=None redacted=False
+
+脱敏核对（scripts/check-no-secrets.py）
+--------------------------------------
+命令: .venv/bin/python scripts/check-no-secrets.py --data-root $TMP/glink-acp-inproc-smoke-<id>
+结果: exit 0 —— “凭据来源 0 条 · 扫描文件 4 个 · 真实命中 0 处 · 占位符命中 0 处”。
+补充: grep -c ANTHROPIC runs/*/events.jsonl = 0；每 run HOME 的 settings.json 0600 且
+  不在扫描目标（host 凭据不进事件/报告）。
+
+清理与残留核对
+--------------
+* 宿主进程按脚本持有的 PID terminate（exit -15），未用 pkill -f / 名字通配。
+* run 期间采样的宿主后代进程 4 个（npm exec → node claude-code-acp → claude → claude.exe），
+  结束后全部 exited，无 leftover（脚本只对已知 PID 发信号）。
+* meta.cleanup = {"released": true, "failures": [], "external": {}}；
+  container_name/sandbox_id 均为 None（inproc 面无外部资源）。
+* 运行期派生 settings 的来源（~/.claude/settings.json）sha256 前后一致。
+
+结论
+----
+第 1 次冒烟通过：流式（141 SSE 帧，turn_finished 先于 run_finished）、终态 finished/
+end_turn、report.md 714 bytes 经 /api/runs/<id>/report HTTP 200 回收、清理只操作已知
+PID 且无残留。权限白名单（allow_once,read,search,fetch,edit）在真实 run 中放行了
+fetch 与 edit 两类请求，kind 均由同 toolCallId 的 tool_call 通知解析（toolKindSource=
+tool_call）；本次未出现 execute 类请求，execute 保持拒绝的合成回归见
+tests/test_kernel_acp_runner.py。

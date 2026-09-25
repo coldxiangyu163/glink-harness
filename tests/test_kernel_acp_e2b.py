@@ -759,12 +759,21 @@ def test_the_e2b_acp_dockerfile_pins_what_the_notes_measured() -> None:
 
     assert arg("DSH_VERSION") == notes_pin("@deepseek-ai/dsh")
     assert arg("CODEX_ACP_VERSION") == notes_pin("@agentclientprotocol/codex-acp")
+    # M4: the same claude pair as the docker image, pinned in this template too.
+    assert arg("CLAUDE_CODE_ACP_VERSION") == notes_pin("@zed-industries/claude-code-acp")
+    assert arg("CLAUDE_CODE_VERSION") == notes_pin("@anthropic-ai/claude-code")
     assert '"@deepseek-ai/dsh@${DSH_VERSION}"' in text
     assert '"@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}"' in text
+    assert '"@zed-industries/claude-code-acp@${CLAUDE_CODE_ACP_VERSION}"' in text
+    assert '"@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"' in text
     # Self-check: the versions are verified at build time and by the default CMD.
     assert "acp-self-check" in text
     assert 'CMD ["acp-self-check"]' in text
     assert "grep -qx" in text
+    # E2B's build rewrites the Dockerfile text, so the script is generated line
+    # by line and claude-code-acp is verified through `npm ls` (no --version).
+    assert "claude --version" in text
+    assert "npm ls -g --depth=0" in text
 
 
 def test_the_acp_e2b_template_is_not_the_production_or_pi_template() -> None:
