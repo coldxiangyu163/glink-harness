@@ -143,7 +143,9 @@ ACP prompt 是结构化 ContentBlock，不存在 pi 那样的「`/` 前缀先派
 `available_commands_update` 表明 agent 可能自带 slash 命令——准入层对 ACP 族拒绝
 以 `/` 开头的 prompt（同形复用现有门禁入口，允许清单为空集，从 harness 能力推导而非
 硬编码模板目录）。M2 实测 codex-acp 确实在 `session/new` 后广播 6 条命令，准入拒绝不受
-其影响。
+其影响。宿主侧另有**与 harness 无关**的准入项：可选的会话蓝图（`POST /api/runs` 的
+`blueprint` 字段，从 `blueprints/` 目录推导、未知或畸形即 400、pi 与 ACP 同规则）；
+格式与设计边界见 [会话蓝图模板](blueprint-templates.md)。
 
 ### 4.4 续接（resume）
 
@@ -177,6 +179,9 @@ ACP prompt 是结构化 ContentBlock，不存在 pi 那样的「`/` 前缀先派
 `HOME` 指向该根、`PI_GLINK_ACP_ENV` 作为命令环境通道（值不进命令行；见集成笔记 §6.3）。
 system prompt 的通道也已在 M2 定下：
 作为 `session/prompt` 的首个围栏文本块送达（ACP v1 无 system role；见集成笔记 §4.3）。
+该通道现在也承载宿主侧、harness 无关的**会话蓝图**：同一份渲染文本对 pi 面走
+`--append-system-prompt`、对 ACP 面进同一首块，用户 prompt 始终走自己的通道、不被替代；
+格式契约、记录字段与后续增量挂账见 [会话蓝图模板](blueprint-templates.md)。
 M4 补上 claude-code-acp 的凭据形态：它的登录态在本机来自 `~/.claude/settings.json` 的
 `env` 块（不是 Keychain 里的 OAuth），需把该 env 块抽成运行期 settings 经 CREDENTIAL_FILES
 复制进每 run HOME；真实 settings.json 含 hooks/plugins，不得整文件复制。细节与证据见
