@@ -11,6 +11,8 @@
 | `sandbox_handshake.py` | 生产装配路径（`build_config` → `prepare_acp_runtime` → `E2BAcpSandboxClient` → `build_adapter`）在沙箱内只做 `initialize` + `session/new`（不发 prompt、不消耗模型）；dsh / codex-acp 需凭据，claude-agent-acp（M6 起为后继包名）在全新 HOME 下无需凭据。`--recover-state`（M8）在握手后直接实测状态根回收：真实 SDK 的递归 listing/entry path/size、有界读取与宿主镜像，只记录文件数/字节数/路径样本 | `docs/evidence/acp-m3-e2b-agent-check.txt`、`docs/evidence/acp-m4-claude-e2b-handshake.txt`、`docs/evidence/acp-m6-migration-e2b-handshake.txt`、`docs/evidence/acp-m8-resume-e2b-handshake.txt` |
 | `smoke_host.py` | 一次最小真实 run：起真实宿主进程（随机端口、临时数据根、有界超时）→ `POST /api/runs` → 同时订阅 SSE → 终态 → `/report` → `confirm_sandbox_absent` 按 id 对账 | `docs/evidence/acp-m3-e2b-smoke.txt` |
 | `resume_smoke.py`（M8） | 跨沙箱续接冒烟：同一 agent 数据根先跑「首轮」（约定随机代号、不写入 report.md），再以 `parentRunId` 跑「追问」（复述代号并追加写入 report.md）；判据含新沙箱（sandbox id 不同）、同 sessionId、`session/resume`、两侧 `acp-agent/recovered` 状态根与内容一致的继承文件、代号回环，以及只按宿主 PID + 持久化 sandbox id 清理 | `docs/evidence/acp-m8-resume-e2b-dsh.txt` |
+| `recover_limit_probe.py`（M9） | 状态根回收上限触顶（**无模型**）：每个轴一个真实沙箱，先 `upload_home()` 再用沙箱内命令写合成状态（不走上传通道，所以 8 MiB 以上的单文件也能落进状态根），然后调生产 `recover_state()`；判据 = 整份拒绝（failures 指明对应上限）/ 不留半份（`recovered` 与 `.recovered.staging` 都不存在）/ 沙箱状态源不被改写 / 按 `sandbox_id` 终止；`control` 轴（小文件）证明回收本身可用，`single`/`total`/`count` 三轴任选，默认 `control,single,total` | `docs/evidence/acp-m9-e2b-recover-limits.txt` |
+| `recover_refusal_admission.py`（M9） | 回收失败 → 追问准入拒绝：真实宿主 + 真实沙箱跑一次父 run，在其回合内用 SDK 直连同一 sandbox 往状态根写合成超限文件，让真实 finalize 里的回收真的失败；判据 = 末帧 `stateRootRecovered=false`、终态帧 `artifactFailures` 记录上限、宿主无 `recovered`/staging、追问 POST 409 `session_unavailable`、不新建 run 与沙箱、按 id 终止。**消耗一次真实模型调用** | `docs/evidence/acp-m9-e2b-recover-refusal.txt` |
 
 复现命令（在仓库根目录；`--env-file` 指向含 `E2B_API_KEY` 的冻结配置）：
 
@@ -36,6 +38,15 @@
 .venv/bin/python scripts/spikes/acp_e2b/resume_smoke.py \
   --credential ~/.dsh/.credentials.yaml=.dsh/.credentials.yaml \
   --env-file .env --timeout 300
+
+# 6) 状态根回收上限触顶（M9；真实沙箱、无模型；count 轴约 13–15 分钟）
+.venv/bin/python scripts/spikes/acp_e2b/recover_limit_probe.py \
+  --axes control,single,total --env-file .env
+.venv/bin/python scripts/spikes/acp_e2b/recover_limit_probe.py --axes count --env-file .env
+
+# 7) 回收失败 → 追问准入拒绝（M9；会消耗一次模型调用、一个沙箱）
+.venv/bin/python scripts/spikes/acp_e2b/recover_refusal_admission.py --env-file .env \
+  --credential ~/.dsh/.credentials.yaml=.dsh/.credentials.yaml
 ```
 
 模板构建（E2B CLI，非 SDK；`--cpu-count/--memory-mb` 按需）：
