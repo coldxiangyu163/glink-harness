@@ -198,3 +198,48 @@ def test_credential_secrets_from_text_finds_json_yaml_shapes_and_skips_placehold
 
     placeholder = credential_secrets_from_text('{"apiKey": "your-key-here-please-replace"}')
     assert placeholder == ()
+
+
+def test_credential_secrets_from_text_reads_opencode_oauth_fields() -> None:
+    """opencode's auth.json names OAuth fields ``access``/``refresh``.
+
+    The generic rule only knows ``*token``-style names, so the M5 regression
+    pins the exact-field rule that makes those values join the run's redactor.
+    Ordinary neighbours (``type``, ``expires``, ``accountId``) stay out: an
+    account id is not a credential, and masking it would corrupt output.
+    """
+    document = json.dumps(
+        {
+            "openai": {
+                "type": "oauth",
+                "access": "opencode-access-value-0001",
+                "refresh": "opencode-refresh-value-0002",
+                "expires": 4_102_444_800_000,
+                "accountId": "acct-1234567890",
+            },
+            "codex": {
+                "access": "opencode-codex-access-0003",
+                "refresh": "opencode-codex-refresh-0004",
+            },
+        }
+    )
+    found = credential_secrets_from_text(document)
+    assert "opencode-access-value-0001" in found
+    assert "opencode-refresh-value-0002" in found
+    assert "opencode-codex-access-0003" in found
+    assert "opencode-codex-refresh-0004" in found
+    assert "acct-1234567890" not in found
+    assert "oauth" not in found
+    assert "4102444800000" not in found
+
+
+def test_a_field_that_merely_starts_with_access_is_not_a_credential() -> None:
+    document = json.dumps({"provider": {"accessMode": "workspace-wide-mode"}})
+    assert credential_secrets_from_text(document) == ()
+
+
+def test_oauth_fields_in_scalar_lines_join_the_redaction_boundary() -> None:
+    material = "access: opaque-oauth-access-0005\nrefresh: opaque-oauth-refresh-0006\n"
+    found = credential_secrets_from_text(material)
+    assert "opaque-oauth-access-0005" in found
+    assert "opaque-oauth-refresh-0006" in found
