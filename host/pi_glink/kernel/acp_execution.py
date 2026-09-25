@@ -38,7 +38,11 @@ agent offers no rejection — the request is answered ``cancelled``. Either way
 the refusal is emitted as a ``kernel_status`` frame, never silently swallowed.
 A run explicitly given ``PI_GLINK_ACP_PERMISSION_ALLOW`` (option kinds and
 optionally tool kinds) may instead select the narrowest matching ``allow_*``
-option; the decision is still recorded, with the policy that produced it.
+option; the decision is still recorded, with the policy that produced it. When
+the request omits ``toolCall.kind`` (the field is optional; claude-code-acp
+0.16.2 omits it), the kind the agent published for the same ``toolCallId`` in
+its ``tool_call`` notification is used, so a tool-kind allowlist keeps working
+without matching on titles or raw input.
 
 The host-side system prompt is delivered as the leading, fenced block of the
 ``session/prompt`` message (:func:`compose_prompt`): ACP v1 has no system-role
@@ -54,6 +58,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .. import __version__ as HOST_VERSION
 from ..config import (
     ACP_PERMISSION_OPTION_KINDS,
     ACP_PERMISSION_TOOL_KINDS,
@@ -101,6 +106,13 @@ _REJECT_KINDS = ("reject_once", "reject_always")
 
 #: Bound on the initialize response's auth method list carried into the record.
 _AUTH_METHODS_LIMIT = 20
+
+#: Bound on the remembered tool-call kinds used to resolve a permission request
+#: that omits ``toolCall.kind`` (see
+#: :meth:`AcpExecutionAdapter._remember_tool_kind`). One run's tool calls are
+#: bounded by the turn budget; the cap only keeps a misbehaving agent from
+#: growing the map without limit.
+_TOOL_KIND_MEMORY_LIMIT = 512
 
 #: Bound on the session config matrix carried into the ``session_ready`` frame.
 _CONFIG_OPTIONS_LIMIT = 20
@@ -186,6 +198,14 @@ class AcpExecutionAdapter(ExecutionAdapter):
         self._cancelled = threading.Event()
         self._cancel_lock = threading.Lock()
         self._cancel_sent = False
+        #: Tool-call id -> ACP tool kind as last announced by a ``tool_call``
+        #: notification. An agent may omit ``kind`` from
+        #: ``session/request_permission`` (claude-code-acp 0.16.2 does, measured
+        #: in M4) while having published it for the same ``toolCallId``; the
+        #: allowlist resolves the request against the agent's own classification
+        #: rather than guessing from a human-readable title. A kind never
+        #: published stays unknown and the allowlist keeps refusing it.
+        self._tool_kinds: dict[str, str] = {}
         self._outcome = ExecutionOutcome()
         self._session_id: str | None = None
         self._protocol_version: int | None = None
@@ -223,7 +243,13 @@ class AcpExecutionAdapter(ExecutionAdapter):
                 {
                     "protocolVersion": ACP_PROTOCOL_VERSION,
                     "clientCapabilities": CLIENT_CAPABILITIES,
-                    "clientInfo": {"name": "pi-glink"},
+                    # ACP's ``Implementation`` carries both ``name`` and
+                    # ``version``; claude-code-acp 0.16.2 validates the
+                    # initialize params strictly and rejects a clientInfo
+                    # without ``version`` with -32602 before any session
+                    # exists (measured, M4). The host's own version is the
+                    # truthful value for what is speaking.
+                    "clientInfo": {"name": "pi-glink", "version": HOST_VERSION},
                 },
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
@@ -538,7 +564,41 @@ class AcpExecutionAdapter(ExecutionAdapter):
 
     def _on_notification(self, frame: Mapping[str, Any]) -> None:
         """Hand one wire notification to the run's projection."""
+        self._remember_tool_kind(frame)
         self._on_frame(frame)
+
+    def _remember_tool_kind(self, frame: Mapping[str, Any]) -> None:
+        """Remember the kind a ``tool_call``/``tool_call_update`` announced.
+
+        ACP carries the tool category on the tool-call update itself; a later
+        permission request for the same ``toolCallId`` may legitimately omit it
+        (the field is optional). Remembering the agent's own classification lets
+        a tool-kind allowlist keep working for such agents without matching on
+        titles or raw input. Only the first non-empty kind per id is kept: the
+        initial ``tool_call`` is the classification, later updates must not be
+        able to re-label the same tool.
+        """
+        if frame.get("method") != "session/update":
+            return
+        params = frame.get("params")
+        update = params.get("update") if isinstance(params, Mapping) else None
+        if not isinstance(update, Mapping):
+            return
+        if update.get("sessionUpdate") not in ("tool_call", "tool_call_update"):
+            return
+        tool_call_id = update.get("toolCallId")
+        kind = update.get("kind")
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            return
+        if not isinstance(kind, str) or not kind:
+            return
+        if tool_call_id in self._tool_kinds:
+            return
+        if len(self._tool_kinds) >= _TOOL_KIND_MEMORY_LIMIT:
+            oldest = next(iter(self._tool_kinds), None)
+            if oldest is not None:
+                del self._tool_kinds[oldest]
+        self._tool_kinds[tool_call_id] = kind
 
     def _on_request(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
         if method == "session/request_permission":
@@ -552,7 +612,17 @@ class AcpExecutionAdapter(ExecutionAdapter):
         options = params.get("options")
         tool_call = params.get("toolCall")
         tool_call = tool_call if isinstance(tool_call, Mapping) else {}
-        tool_kind = str(tool_call.get("kind") or "")
+        tool_call_id = str(tool_call.get("toolCallId") or "")
+        # The request may carry the kind itself (dsh, codex-acp and the fake
+        # agent do) or omit it (claude-code-acp 0.16.2, measured in M4); in the
+        # latter case the agent already published the same tool's kind in its
+        # ``tool_call`` notification, so resolve it by ``toolCallId``. Neither
+        # source giving a kind leaves the request unclassified and the
+        # configured tool kinds (if any) refuse it.
+        request_kind = str(tool_call.get("kind") or "")
+        remembered_kind = self._tool_kinds.get(tool_call_id, "")
+        tool_kind = request_kind or remembered_kind
+        tool_kind_source = "request" if request_kind else ("tool_call" if remembered_kind else "")
         allow = self._allowed_permission_option(options, tool_kind)
         reject: Mapping[str, Any] | None = None
         if isinstance(options, (list, tuple)):
@@ -593,6 +663,7 @@ class AcpExecutionAdapter(ExecutionAdapter):
                 "optionId": option_id,
                 "optionKind": option_kind,
                 "toolKind": tool_kind,
+                "toolKindSource": tool_kind_source,
                 "toolCall": dict(tool_call),
             }
         )

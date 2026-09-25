@@ -146,6 +146,30 @@ def test_env_entries_are_applied_and_home_stays_the_run_root(tmp_path: Path) -> 
     assert "OPENAI_API_KEY" not in env
 
 
+def test_env_credential_values_join_the_redaction_boundary(tmp_path: Path) -> None:
+    """A credential-shaped ``PI_GLINK_ACP_ENV`` value is a secret of the run.
+
+    The env channel has no file to scan, so the variable name is the hint: a
+    credential-looking name adds its value to the run's redaction boundary, an
+    ordinary knob does not (adding it would mask unrelated output). Values the
+    redactor would skip anyway (too short, documentation placeholders) stay out.
+    """
+    cfg = config(
+        {
+            "PI_GLINK_ACP_ENV": (
+                "ANTHROPIC_API_KEY=opaque-env-credential-value-1;"
+                "ACME_MODE=workspace;"
+                "EMPTY_TOKEN=;"
+                "PLACEHOLDER_KEY=your-key-here-please-replace"
+            )
+        }
+    )
+    result = prepare_acp_runtime(cfg, runtime_dir=tmp_path / "acp-agent")
+    assert "opaque-env-credential-value-1" in result.secrets
+    assert "workspace" not in result.secrets
+    assert "your-key-here-please-replace" not in result.secrets
+
+
 def test_credential_secrets_from_text_finds_json_yaml_shapes_and_skips_placeholders() -> None:
     document = json.dumps(
         {
