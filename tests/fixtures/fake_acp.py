@@ -16,9 +16,11 @@ Settings come from an optional ``--config <file.json>`` argument (the host
 passes a filtered environment, so the harness has no other channel for them) and
 are overridden by ``FAKE_ACP_*`` environment variables when present. Facts worth
 asserting are appended to the ``log`` path as JSON lines: ``initialize`` (what
-the client asked for), ``session_new`` (the ``cwd``), ``home``, ``prompt`` (the
-user text), ``permission_outcome`` (the client's answer), ``cancel_received``
-and ``prompt_done`` (the stop reason).
+the client asked for), ``session_new`` (the ``cwd``), ``home``, ``env_probe``
+(``FAKE_ACP_ENV_PROBE`` names one variable to report), ``config_option``
+(``session/set_config_option`` calls), ``prompt`` (the user text),
+``permission_outcome`` (the client's answer), ``cancel_received`` and
+``prompt_done`` (the stop reason).
 
 Prompt markers select the terminal result:
 
@@ -297,17 +299,21 @@ def stop_reason(text: str) -> str:
 
 def ask_permission() -> None:
     options = structured("FAKE_ACP_PERMISSION_OPTIONS", DEFAULT_PERMISSION_OPTIONS)
+    tool_call: dict = {"toolCallId": "call_1", "title": "运行 ls -la"}
+    tool_kind = setting("FAKE_ACP_PERMISSION_TOOL_KIND")
+    if tool_kind:
+        tool_call["kind"] = str(tool_kind)
     frame = send_request(
         "session/request_permission",
         {
             "sessionId": session_id(),
-            "toolCall": {"toolCallId": "call_1", "title": "运行 ls -la"},
+            "toolCall": tool_call,
             "options": options,
         },
     )
     result = frame.get("result")
     outcome = result.get("outcome") if isinstance(result, dict) else None
-    log("permission_outcome", outcome=outcome, error=frame.get("error"))
+    log("permission_outcome", outcome=outcome, toolKind=tool_call.get("kind"), error=frame.get("error"))
 
 
 def run_prompt(request: dict, params: dict) -> None:
@@ -412,7 +418,17 @@ def handle_new_session(request: dict) -> None:
             )
         except OSError as exc:
             log("home_write_failed", error=str(exc))
-    respond(request, result={"sessionId": session_id()})
+    result: dict = {"sessionId": session_id()}
+    probe = os.environ.get("FAKE_ACP_ENV_PROBE")
+    if probe:
+        log("env_probe", name=probe, value=os.environ.get(probe))
+    config_options = structured("FAKE_ACP_CONFIG_OPTIONS", None)
+    if config_options is not None:
+        result["configOptions"] = config_options
+    modes = structured("FAKE_ACP_MODES", None)
+    if modes is not None:
+        result["modes"] = modes
+    respond(request, result=result)
     if not flag("FAKE_ACP_NO_COMMANDS"):
         notify(
             "session/update",
@@ -435,6 +451,24 @@ def handle_new_session(request: dict) -> None:
                 "update": {"sessionUpdate": "current_mode_update", "currentModeId": "code"},
             },
         )
+
+
+def handle_set_config_option(request: dict) -> None:
+    params = request.get("params") if isinstance(request.get("params"), dict) else {}
+    log("config_option", configId=params.get("configId"), value=params.get("value"))
+    if flag("FAKE_ACP_CONFIG_ERROR"):
+        respond(request, error={"code": -32000, "message": "config option refused by fake agent"})
+        return
+    config_options = structured("FAKE_ACP_CONFIG_OPTIONS", None)
+    if isinstance(config_options, list):
+        updated = []
+        for option in config_options:
+            if isinstance(option, dict) and option.get("id") == params.get("configId"):
+                option = {**option, "currentValue": params.get("value")}
+            updated.append(option)
+        respond(request, result={"configOptions": updated})
+        return
+    respond(request, result={})
 
 
 def deliver_response(frame: dict) -> None:
@@ -477,6 +511,8 @@ def main() -> int:
             handle_initialize(frame)
         elif method == "session/new":
             handle_new_session(frame)
+        elif method == "session/set_config_option":
+            handle_set_config_option(frame)
         elif method == "session/prompt":
             threading.Thread(
                 target=run_prompt, args=(frame, frame.get("params") or {}), daemon=True

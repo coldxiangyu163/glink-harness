@@ -211,7 +211,13 @@ def test_acp_run_projects_the_whole_lifecycle_and_the_report(tmp_path: Path) -> 
     assert session_new["cwd"] == str(Path(final.workspace))
     assert session_new["mcpServers"] == []
     prompt = next(entry for entry in entries if entry["event"] == "prompt")
-    assert prompt["text"] == "用一句话说明这个仓库是做什么的"
+    # The working agreement (agent/research-prompt.md) is delivered as the
+    # leading block of the same text message; ACP has no system-role channel,
+    # so the product cannot rely on one (see docs/acp-integration-notes.md M2).
+    system_text = (REPO_ROOT / "agent" / "research-prompt.md").read_text(encoding="utf-8").strip()
+    assert prompt["text"].startswith("以下是宿主工作台注入的 system prompt")
+    assert f"<system-prompt>\n{system_text}\n</system-prompt>" in prompt["text"]
+    assert prompt["text"].endswith("--- 用户请求 ---\n\n用一句话说明这个仓库是做什么的")
     assert prompt["sessionId"] == SESSION_ID
     # The order proves the adapter drove the ACP methods, not a private shortcut.
     order = [entry["event"] for entry in entries if entry["event"] in {"initialize", "session_new", "prompt"}]
@@ -415,6 +421,227 @@ def test_acp_permission_without_a_reject_option_is_cancelled(tmp_path: Path) -> 
         if payload.get("message") == "acp_permission_denied"
     ]
     assert notices[0]["decision"] == "cancelled"
+
+
+# -- the explicit permission allowlist (default stays fail-closed) -------------
+
+
+def test_acp_permission_allowlist_selects_the_narrow_allow_option(tmp_path: Path) -> None:
+    """``PI_GLINK_ACP_PERMISSION_ALLOW=allow_once`` is the smallest gate.
+
+    dsh offers only ``allow-once``/``reject-once`` and its request carries no
+    tool kind, so an option-kind allowlist is the narrowest policy that can
+    make an unattended run progress; the decision is still recorded.
+    """
+    log = tmp_path / "agent.jsonl"
+    settings = {"FAKE_ACP_PERMISSION": True, "FAKE_ACP_LOG": str(log)}
+    _config, store, manager = build_manager(
+        tmp_path, settings, PI_GLINK_ACP_PERMISSION_ALLOW="allow_once"
+    )
+    record = manager.start("允许一次权限请求")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FINISHED
+    outcome = next(
+        entry for entry in read_log(log) if entry["event"] == "permission_outcome"
+    )
+    assert outcome["outcome"] == {"outcome": "selected", "optionId": "allow-once"}
+    notices = [
+        payload
+        for payload in payloads(read_events(store, record.run_id), "kernel_status")
+        if payload.get("message", "").startswith("acp_permission_")
+    ]
+    assert notices[0]["message"] == "acp_permission_allowed"
+    assert notices[0]["decision"] == "allowed"
+    assert notices[0]["policy"] == "allowlist"
+    assert notices[0]["optionKind"] == "allow_once"
+
+
+def test_acp_permission_allowlist_gates_on_the_tool_kind(tmp_path: Path) -> None:
+    log = tmp_path / "agent.jsonl"
+    settings = {
+        "FAKE_ACP_PERMISSION": True,
+        "FAKE_ACP_LOG": str(log),
+        "FAKE_ACP_PERMISSION_TOOL_KIND": "read",
+    }
+    _config, store, manager = build_manager(
+        tmp_path,
+        settings,
+        PI_GLINK_ACP_PERMISSION_ALLOW="allow_once,execute",
+    )
+    record = manager.start("工具类型不在白名单")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FINISHED
+    outcome = next(
+        entry for entry in read_log(log) if entry["event"] == "permission_outcome"
+    )
+    assert outcome["outcome"] == {"outcome": "selected", "optionId": "reject-once"}
+    notices = [
+        payload
+        for payload in payloads(read_events(store, record.run_id), "kernel_status")
+        if payload.get("message") == "acp_permission_denied"
+    ]
+    assert notices[0]["decision"] == "rejected"
+    assert notices[0]["policy"] == "fail_closed"
+    assert notices[0]["toolKind"] == "read"
+
+
+def test_acp_permission_allowlist_refuses_a_kindless_request_when_kinds_are_set(
+    tmp_path: Path,
+) -> None:
+    """A tool-kind allowlist must not blanket-allow requests that carry no kind."""
+    log = tmp_path / "agent.jsonl"
+    settings = {"FAKE_ACP_PERMISSION": True, "FAKE_ACP_LOG": str(log)}
+    _config, store, manager = build_manager(
+        tmp_path,
+        settings,
+        PI_GLINK_ACP_PERMISSION_ALLOW="allow_once,execute",
+    )
+    record = manager.start("请求没有 tool kind")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FINISHED
+    outcome = next(
+        entry for entry in read_log(log) if entry["event"] == "permission_outcome"
+    )
+    assert outcome["outcome"] == {"outcome": "selected", "optionId": "reject-once"}
+
+
+# -- session configuration -----------------------------------------------------
+
+CONFIG_OPTIONS = [
+    {
+        "id": "mode",
+        "name": "Approval Preset",
+        "type": "select",
+        "currentValue": "read-only",
+        "options": [
+            {"value": "read-only", "name": "Read Only"},
+            {"value": "auto", "name": "Default"},
+        ],
+    },
+    {
+        "id": "reasoning_effort",
+        "name": "Reasoning effort",
+        "type": "select",
+        "currentValue": "high",
+        "options": [{"value": "high", "name": "High"}],
+    },
+]
+
+
+def test_acp_session_config_is_applied_and_recorded(tmp_path: Path) -> None:
+    log = tmp_path / "agent.jsonl"
+    settings = {
+        "FAKE_ACP_LOG": str(log),
+        "FAKE_ACP_CONFIG_OPTIONS": CONFIG_OPTIONS,
+        "FAKE_ACP_WRITE_REPORT": True,
+    }
+    _config, store, manager = build_manager(
+        tmp_path, settings, PI_GLINK_ACP_SESSION_CONFIG="mode=auto"
+    )
+    record = manager.start("选择可写工作区的会话模式")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FINISHED
+    applied = [entry for entry in read_log(log) if entry["event"] == "config_option"]
+    assert [entry["configId"] for entry in applied] == ["mode"]
+    assert applied[0]["value"] == "auto"
+    ready = payloads(read_events(store, record.run_id), "session_ready")[0]
+    modes = {option["id"]: option["currentValue"] for option in ready["configOptions"]}
+    assert modes["mode"] == "auto"
+    assert modes["reasoning_effort"] == "high"
+
+
+def test_acp_session_config_already_current_is_not_re_sent(tmp_path: Path) -> None:
+    log = tmp_path / "agent.jsonl"
+    settings = {
+        "FAKE_ACP_LOG": str(log),
+        "FAKE_ACP_CONFIG_OPTIONS": CONFIG_OPTIONS,
+        "FAKE_ACP_WRITE_REPORT": True,
+    }
+    _config, _store, manager = build_manager(
+        tmp_path, settings, PI_GLINK_ACP_SESSION_CONFIG="reasoning_effort=high"
+    )
+    record = manager.start("模式已经是目标值")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FINISHED
+    assert [entry for entry in read_log(log) if entry["event"] == "config_option"] == []
+
+
+def test_acp_session_config_the_agent_does_not_advertise_fails_the_run(
+    tmp_path: Path,
+) -> None:
+    """An explicitly configured option is never silently dropped (fail closed)."""
+    log = tmp_path / "agent.jsonl"
+    settings = {
+        "FAKE_ACP_LOG": str(log),
+        "FAKE_ACP_CONFIG_OPTIONS": CONFIG_OPTIONS,
+    }
+    _config, store, manager = build_manager(
+        tmp_path, settings, PI_GLINK_ACP_SESSION_CONFIG="mode=full-access"
+    )
+    record = manager.start("白名单外的模式值")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FAILED
+    assert [entry for entry in read_log(log) if entry["event"] == "prompt"] == []
+    terminal = read_events(store, record.run_id)[-1]["payload"]
+    assert "ACP 配置选项" in (terminal.get("error") or "")
+
+
+# -- credential injection ------------------------------------------------------
+
+
+def test_injected_credential_values_are_redacted_from_the_run(tmp_path: Path) -> None:
+    """A value only the injected file carries must be masked when echoed.
+
+    The secret is opaque (no provider shape) and lives under a credential-named
+    key in a file the host copies into the run HOME; nothing else — not the
+    host config, not the fake agent's settings — knows it. Redaction therefore
+    proves the injected values joined this run's boundary.
+    """
+    secret = "opaque-shared-value-1234567890"
+    source = tmp_path / "credentials.json"
+    source.write_text(json.dumps({"seedToken": secret}), encoding="utf-8")
+    log = tmp_path / "agent.jsonl"
+    settings = {
+        "FAKE_ACP_SECRET": secret,
+        "FAKE_ACP_LOG": str(log),
+        "FAKE_ACP_WRITE_REPORT": True,
+    }
+    config, store, manager = build_manager(
+        tmp_path,
+        settings,
+        PI_GLINK_ACP_CREDENTIAL_FILES=f"{source}=state/credentials.json",
+    )
+    record = manager.start("SECRET 请回显凭据")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FINISHED
+    run_home = store.run_dir(record.run_id) / "acp-agent" / "home"
+    copied = run_home / "state" / "credentials.json"
+    assert copied.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert (copied.stat().st_mode & 0o777) == 0o600
+    assert (copied.parent.stat().st_mode & 0o777) == 0o700
+    assert source.read_text(encoding="utf-8") == json.dumps({"seedToken": secret})
+    raw = store.events_path(record.run_id).read_text(encoding="utf-8")
+    assert secret not in raw
+    assert "[REDACTED]" in raw
+    # The host config did not carry the secret: only the copied file could
+    # have taught this run's redactor the value.
+    assert secret not in json.dumps(config.public_view())
+
+
+def test_acp_env_entries_reach_the_agent_process(tmp_path: Path) -> None:
+    log = tmp_path / "agent.jsonl"
+    settings = {"FAKE_ACP_LOG": str(log), "FAKE_ACP_WRITE_REPORT": True}
+    _config, _store, manager = build_manager(
+        tmp_path,
+        settings,
+        PI_GLINK_ACP_ENV="ACME_RESEARCH_MODE=workspace;FAKE_ACP_ENV_PROBE=ACME_RESEARCH_MODE",
+    )
+    record = manager.start("环境变量探测")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FINISHED
+    probe = next(entry for entry in read_log(log) if entry["event"] == "env_probe")
+    assert probe["name"] == "ACME_RESEARCH_MODE"
+    assert probe["value"] == "workspace"
 
 
 # -- admission: slash gate and follow-ups -------------------------------------

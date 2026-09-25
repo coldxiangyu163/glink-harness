@@ -34,6 +34,13 @@ this module maps it onto ACP's method set:
 the first ``reject_once``/``reject_always`` option is selected, or — when the
 agent offers no rejection — the request is answered ``cancelled``. Either way
 the refusal is emitted as a ``kernel_status`` frame, never silently swallowed.
+A run explicitly given ``PI_GLINK_ACP_PERMISSION_ALLOW`` (option kinds and
+optionally tool kinds) may instead select the narrowest matching ``allow_*``
+option; the decision is still recorded, with the policy that produced it.
+
+The host-side system prompt is delivered as the leading, fenced block of the
+``session/prompt`` message (:func:`compose_prompt`): ACP v1 has no system-role
+channel, and the baseline text block is the one channel every agent accepts.
 """
 
 from __future__ import annotations
@@ -44,6 +51,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from ..config import (
+    ACP_PERMISSION_OPTION_KINDS,
+    ACP_PERMISSION_TOOL_KINDS,
+)
 from .acp_rpc import (
     REQUEST_TIMEOUT_SECONDS,
     AcpClosed,
@@ -87,6 +98,43 @@ _REJECT_KINDS = ("reject_once", "reject_always")
 #: Bound on the initialize response's auth method list carried into the record.
 _AUTH_METHODS_LIMIT = 20
 
+#: Bound on the session config matrix carried into the ``session_ready`` frame.
+_CONFIG_OPTIONS_LIMIT = 20
+_CONFIG_VALUES_LIMIT = 100
+_CONFIG_TEXT_LIMIT = 300
+
+#: The host-side system prompt is delivered as a leading text block of the
+#: ``session/prompt`` message. ACP v1 has no system-role channel: ``session/new``
+#: carries no prompt field, ``_meta`` is explicitly "implementations MUST NOT
+#: make assumptions about values at these keys", and the session modes and
+#: configOptions are approval/model selectors, not prompts. The baseline text
+#: block is the one channel every ACP agent MUST accept, so the working
+#: agreement travels there, fenced and labelled so the model can tell it apart
+#: from the user's request. Measured on dsh and codex-acp in M2; see
+#: ``docs/acp-integration-notes.md``.
+_SYSTEM_PROMPT_HEADER = (
+    "以下是宿主工作台注入的 system prompt（本次会话的工作约定）；"
+    "请把它当作系统级工作准则执行，而不是用户请求。"
+)
+
+
+def compose_prompt(system_prompt: str, prompt: str) -> str:
+    """The text block one ``session/prompt`` carries, with the working agreement.
+
+    An empty system prompt leaves the user's text untouched (the M1 shape); a
+    non-empty one is prefixed as an explicitly fenced block so a model cannot
+    mistake the agreement for the request.
+    """
+    instructions = (system_prompt or "").strip()
+    request_text = prompt or ""
+    if not instructions:
+        return request_text
+    return (
+        f"{_SYSTEM_PROMPT_HEADER}\n\n"
+        f"<system-prompt>\n{instructions}\n</system-prompt>\n\n"
+        f"--- 用户请求 ---\n\n{request_text}"
+    )
+
 
 class AcpExecutionAdapter(ExecutionAdapter):
     """The ACP face: one agent process, one session, one prompt turn."""
@@ -123,6 +171,8 @@ class AcpExecutionAdapter(ExecutionAdapter):
         self._agent_info: dict[str, Any] = {}
         self._capabilities: dict[str, Any] = {}
         self._auth_methods: list[Any] = []
+        self._modes: dict[str, Any] = {}
+        self._config_options: list[dict[str, Any]] = []
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -174,6 +224,57 @@ class AcpExecutionAdapter(ExecutionAdapter):
         if not isinstance(session_id, str) or not session_id:
             raise AcpProtocolError("session/new 没有返回 sessionId")
         self._session_id = session_id
+        self._modes = (
+            dict(created["modes"]) if isinstance(created.get("modes"), Mapping) else {}
+        )
+        self._config_options = _project_config_options(created.get("configOptions"))
+        self._apply_session_config(client, session_id)
+
+    def _apply_session_config(self, client: AcpRpcClient, session_id: str) -> None:
+        """Apply ``PI_GLINK_ACP_SESSION_CONFIG`` right after ``session/new``.
+
+        Modes, model and reasoning options are advertised by the agent as
+        ``configOptions``; the values differ per agent, so nothing is hardcoded.
+        An explicitly configured option or value the agent does not advertise
+        fails the run: silently dropping it would run a policy the operator did
+        not choose (fail closed). When the advertised current value already
+        matches, no request is sent.
+        """
+        for config_id, value in self.spec.config.acp_session_config:
+            option = next(
+                (
+                    entry
+                    for entry in self._config_options
+                    if str(entry.get("id") or "") == config_id
+                ),
+                None,
+            )
+            if option is None:
+                raise AcpProtocolError(
+                    f"ACP agent 未提供配置选项 {config_id!r}；"
+                    "PI_GLINK_ACP_SESSION_CONFIG 不能被静默忽略"
+                )
+            if str(option.get("type") or "select") == "select":
+                values = _select_values(option)
+                if value not in values:
+                    raise AcpProtocolError(
+                        f"ACP 配置选项 {config_id!r} 不接受取值 {value!r}；"
+                        f"可选：{', '.join(values)}（协议要求先按 agent 声明取值）"
+                    )
+            if option.get("currentValue") == value:
+                continue
+            updated = client.request(
+                "session/set_config_option",
+                {"sessionId": session_id, "configId": config_id, "value": value},
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            options = updated.get("configOptions") if isinstance(updated, Mapping) else None
+            if isinstance(options, list):
+                self._config_options = _project_config_options(options)
+            else:
+                for entry in self._config_options:
+                    if str(entry.get("id") or "") == config_id:
+                        entry["currentValue"] = value
 
     def _accept_initialize(self, negotiated: Mapping[str, Any]) -> None:
         version = negotiated.get("protocolVersion")
@@ -203,6 +304,11 @@ class AcpExecutionAdapter(ExecutionAdapter):
             # this agent actually supported.
             "agentCapabilities": dict(self._capabilities),
             "authMethods": list(self._auth_methods),
+            # The session's own option state (model, reasoning, approval mode,
+            # …): the ACP channel that carries what a pi run would read from
+            # its rendered settings.
+            "modes": dict(self._modes),
+            "configOptions": [dict(option) for option in self._config_options],
             "cwd": str(self.spec.workspace),
         }
         return SessionInfo(payload=payload, session_id=self._session_id, session_file=None)
@@ -237,7 +343,14 @@ class AcpExecutionAdapter(ExecutionAdapter):
                 "session/prompt",
                 {
                     "sessionId": self._session_id,
-                    "prompt": [{"type": "text", "text": self.spec.prompt}],
+                    "prompt": [
+                        {
+                            "type": "text",
+                            "text": compose_prompt(
+                                self.spec.system_prompt, self.spec.prompt
+                            ),
+                        }
+                    ],
                 },
                 timeout=None,
             )
@@ -381,6 +494,10 @@ class AcpExecutionAdapter(ExecutionAdapter):
 
     def _answer_permission(self, params: Mapping[str, Any]) -> Mapping[str, Any]:
         options = params.get("options")
+        tool_call = params.get("toolCall")
+        tool_call = tool_call if isinstance(tool_call, Mapping) else {}
+        tool_kind = str(tool_call.get("kind") or "")
+        allow = self._allowed_permission_option(options, tool_kind)
         reject: Mapping[str, Any] | None = None
         if isinstance(options, (list, tuple)):
             for kind in _REJECT_KINDS:
@@ -390,28 +507,125 @@ class AcpExecutionAdapter(ExecutionAdapter):
                         break
                 if reject is not None:
                     break
-        option_id = ""
-        option_kind = ""
-        if reject is not None:
-            option_id = str(reject.get("optionId") or "")
-            option_kind = str(reject.get("kind") or "")
-        if self._cancelled.is_set() or not option_id:
-            # Either the turn was already cancelled (the spec requires the
-            # ``cancelled`` outcome then) or the agent offered no usable
-            # rejection: an unattended host must not allow the tool.
-            decision = "cancelled"
-            outcome: dict[str, Any] = {"outcome": "cancelled"}
+        if allow is not None:
+            option_id = str(allow.get("optionId") or "")
+            option_kind = str(allow.get("kind") or "")
+            decision = "allowed"
+            policy = "allowlist"
+            outcome: dict[str, Any] = {"outcome": "selected", "optionId": option_id}
         else:
-            decision = "rejected"
-            outcome = {"outcome": "selected", "optionId": option_id}
-        tool_call = params.get("toolCall")
+            option_id = ""
+            option_kind = ""
+            if reject is not None:
+                option_id = str(reject.get("optionId") or "")
+                option_kind = str(reject.get("kind") or "")
+            if self._cancelled.is_set() or not option_id:
+                # Either the turn was already cancelled (the spec requires the
+                # ``cancelled`` outcome then) or the agent offered no usable
+                # rejection: an unattended host must not allow the tool.
+                decision = "cancelled"
+                outcome = {"outcome": "cancelled"}
+            else:
+                decision = "rejected"
+                outcome = {"outcome": "selected", "optionId": option_id}
+            policy = "fail_closed"
         self._on_frame(
             {
                 "type": "acp_permission",
                 "decision": decision,
+                "policy": policy,
                 "optionId": option_id,
                 "optionKind": option_kind,
-                "toolCall": dict(tool_call) if isinstance(tool_call, Mapping) else {},
+                "toolKind": tool_kind,
+                "toolCall": dict(tool_call),
             }
         )
         return {"outcome": outcome}
+
+    def _allowed_permission_option(
+        self, options: Any, tool_kind: str
+    ) -> Mapping[str, Any] | None:
+        """The allow option this run's explicit allowlist selects, if any.
+
+        The default host policy is fail-closed, so an empty allowlist always
+        returns ``None``. An allowlist needs a configured **option kind**
+        (:data:`~pi_glink.config.ACP_PERMISSION_OPTION_KINDS`); when tool kinds
+        are configured too, the request's ``toolCall.kind`` must match them, and
+        a request without a tool kind is refused rather than trusted. The
+        narrowest option (``allow_once``) is preferred over ``allow_always``.
+        """
+        allowlist = self.spec.config.acp_permission_allow
+        if not allowlist:
+            return None
+        allow_option_kinds = tuple(
+            kind for kind in ACP_PERMISSION_OPTION_KINDS if kind in allowlist
+        )
+        allow_tool_kinds = frozenset(
+            token for token in allowlist if token in ACP_PERMISSION_TOOL_KINDS
+        )
+        if not allow_option_kinds or not isinstance(options, (list, tuple)):
+            return None
+        if allow_tool_kinds and tool_kind not in allow_tool_kinds:
+            return None
+        for kind in allow_option_kinds:
+            for option in options:
+                if (
+                    isinstance(option, Mapping)
+                    and option.get("kind") == kind
+                    and str(option.get("optionId") or "")
+                ):
+                    return option
+        return None
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _project_config_options(options: Any) -> list[dict[str, Any]]:
+    """A bounded, JSON-safe copy of the agent's advertised session options."""
+    if not isinstance(options, list):
+        return []
+    projected: list[dict[str, Any]] = []
+    for option in options[:_CONFIG_OPTIONS_LIMIT]:
+        if not isinstance(option, Mapping):
+            continue
+        entry: dict[str, Any] = {
+            key: option[key]
+            for key in ("id", "name", "type", "category", "currentValue")
+            if key in option
+        }
+        if isinstance(option.get("description"), str):
+            entry["description"] = _clip(option["description"], _CONFIG_TEXT_LIMIT)
+        values = option.get("options")
+        if isinstance(values, list):
+            entry["options"] = [
+                value
+                for value in values[:_CONFIG_VALUES_LIMIT]
+                if isinstance(value, Mapping)
+            ]
+        projected.append(entry)
+    return projected
+
+
+def _select_values(option: Mapping[str, Any]) -> tuple[str, ...]:
+    """Every selectable value id of one option, grouped or flat.
+
+    ACP's ``SessionConfigSelect`` allows either a flat option list or grouped
+    entries (dsh groups the model choices by provider); both shapes resolve to
+    the same value ids.
+    """
+    values: list[str] = []
+    entries = option.get("options")
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            grouped = entry.get("options")
+            if isinstance(grouped, list):
+                for inner in grouped:
+                    if isinstance(inner, Mapping) and inner.get("value") is not None:
+                        values.append(str(inner["value"]))
+            elif entry.get("value") is not None:
+                values.append(str(entry["value"]))
+    return tuple(values)
