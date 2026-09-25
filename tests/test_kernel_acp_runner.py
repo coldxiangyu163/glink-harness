@@ -435,7 +435,13 @@ def test_acp_cancel_sends_session_cancel_and_settles_cancelled(tmp_path: Path) -
     settings = {"FAKE_ACP_LOG": str(log)}
     _config, store, manager = build_manager(tmp_path, settings)
     record = manager.start("NOSETTLE 等着我取消")
-    assert wait_for(lambda: any(entry["event"] == "prompt" for entry in read_log(log)))
+    # Cancel only once streamed work has actually been projected. The prompt
+    # reaching the agent is not enough: the notifications are still in flight,
+    # and a cancel can legitimately land before any of them is committed, which
+    # would fail the assertion below on scheduling rather than on behaviour.
+    assert wait_for(
+        lambda: payloads(read_events(store, record.run_id), "assistant_delta")
+    )
     decision = manager.stop(record.run_id)
     assert decision.accepted is True
     final = manager.wait(record.run_id, timeout=30)
