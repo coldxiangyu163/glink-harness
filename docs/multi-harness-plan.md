@@ -20,9 +20,15 @@ dev 模板 `glink-acp-worker`（E2B CLI 构建、ARG 钉版同 M3a）跑通两�
 dsh 的一次最小真实 run（SSE 流式、终态、`report.md` 回收、`sandbox_id` 对账无残留）；
 实测与模板事实见 [ACP 集成笔记](acp-integration-notes.md) §6，证据在
 `docs/evidence/acp-m3-e2b-*.txt`。
+**M4（GLINK-ACP-05）已完成**：claude-code-acp（`@zed-industries/claude-code-acp@0.16.2`）
+接入三个执行面的事实面——inproc 握手与一次最小真实 run（流式/终态/report.md/清理只操作
+已知 PID）、每 run 凭据形态（运行期 `.claude/settings.json` 的 env 块，CREDENTIAL_FILES
+0600）、权限最小白名单（`allow_once,read,search,fetch,edit`；execute 保持拒绝）、镜像与
+dev 模板重建（docker 与 e2b 各加 claude 双包钉版层 + 无模型握手自检）；docker/e2b 面的
+真实模型 run 因无 API key 属预期阻塞，详见 [ACP 集成笔记](acp-integration-notes.md) §7
+与 `docs/evidence/acp-m4-claude-*.txt`。ACP 续接仍属后续里程碑。
 宿主默认 harness 仍是 `pi`，ACP 族只在显式配置下启用，执行面已覆盖 inproc / docker / e2b；
-claude-code-acp 与 ACP 续接仍属后续里程碑。本文是该方向的事实源：实现与
-本文出现偏差时回写本文，而不是让代码与文档各自漂移。
+本文是该方向的事实源：实现与本文出现偏差时回写本文，而不是让代码与文档各自漂移。
 
 ## 1. 决定与定位
 
@@ -101,8 +107,11 @@ run 生命周期、终帧即终态、提交先于发布等全部沿用架构 §3
 （`kernel_status`），不允许静默。M2 实测：dsh 0.1.5-rc.3 与 codex-acp 0.16.0 在
 workspace-write 会话模式下跑完两个最小真实研究 run，均未发出权限请求，因此**保持默认、
 不启用白名单**；配置级门控 `PI_GLINK_ACP_PERMISSION_ALLOW`（option kind，可选 tool kind）
-已实现并默认空集，留给未来确实需要逐次放行的 harness（决策与证据见
-[ACP 集成笔记](acp-integration-notes.md) §4.6）。
+已实现并默认空集。M4 首次真实启用：claude-code-acp 的研究 run 需要逐次放行 WebFetch 与
+Write/Edit（它的权限请求不带 tool kind，宿主按同一 `toolCallId` 的 `tool_call` 通知解析），
+最小集合为 `allow_once,read,search,fetch,edit`，execute/think/switch_mode/other 与未分类
+请求继续拒绝；决定、机制与真实 run 证据见
+[ACP 集成笔记](acp-integration-notes.md) §7.4。
 
 ### 4.3 准入与门禁
 
@@ -136,6 +145,10 @@ ACP prompt 是结构化 ContentBlock，不存在 pi 那样的「`/` 前缀先派
 `HOME` 指向该根、`PI_GLINK_ACP_ENV` 作为命令环境通道（值不进命令行；见集成笔记 §6.3）。
 system prompt 的通道也已在 M2 定下：
 作为 `session/prompt` 的首个围栏文本块送达（ACP v1 无 system role；见集成笔记 §4.3）。
+M4 补上 claude-code-acp 的凭据形态：它的登录态在本机来自 `~/.claude/settings.json` 的
+`env` 块（不是 Keychain 里的 OAuth），需把该 env 块抽成运行期 settings 经 CREDENTIAL_FILES
+复制进每 run HOME；真实 settings.json 含 hooks/plugins，不得整文件复制。细节与证据见
+[ACP 集成笔记](acp-integration-notes.md) §7.3。
 
 ## 5. 开源复用策略
 
@@ -158,7 +171,7 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 | M2（GLINK-ACP-02） | 真实冒烟：`dsh --profile acp` 与 `codex-acp` 各跑一次真实研究 run（inproc）；system prompt 送达通道；per-agent 凭据注入（每 run HOME/env、0600、并入 redactor）；能力矩阵、usage 口径与权限决策回写 | 真实 run 报告产物 + 集成笔记；`bash scripts/check.sh` 全绿 | **已完成**（2026-09-25）：两侧握手与最小真实 run 均成功，fail-closed 默认无需白名单；实测细节见 [ACP 集成笔记](acp-integration-notes.md) §4，证据 `docs/evidence/acp-m2-*.txt` |
 | M3a（GLINK-ACP-03） | Docker 执行面：`docker/Dockerfile.acp-worker`（自包含、ARG 钉版、镜像内自检）；`docker run -i` 双向 stdio 桥接复用 M1 客户端；每 run HOME 与只读凭据挂载；容器名/停止/对账复用 `docker_env` 约定；资源限制与降权与 pi 面对齐；解除 `harness=acp + executor=docker` 的启动拒绝 | `bash scripts/check.sh` 全绿；合成 plan/钉版边界回归；镜像自检 + 一次容器内最小真实 run（流式/终态/report.md/无容器残留） | **已完成**（2026-09-25）：docker 面可用，pi docker 面零回归；实测与钉版见 [ACP 集成笔记](acp-integration-notes.md) §5，证据 `docs/evidence/acp-m3-docker-*.txt` |
 | M3b | e2b 执行面：双向 stdio（`stdin=True` + `send_stdin`，SDK 2.x 已具备）帧完整性实测先行；模板钉版；`harness=acp + executor=e2b` 的启动拒绝随之解除 | e2b smoke | **已完成**（2026-09-25）：帧完整性正面、dev 模板 `glink-acp-worker` 构建+自检、两 agent 沙箱内握手、dsh 最小真实 run（report.md 与沙箱按 id 无残留）；实测见 [ACP 集成笔记](acp-integration-notes.md) §6，证据 `docs/evidence/acp-m3-e2b-*.txt` |
-| M4 | claude-code-acp 接入；能力矩阵补齐；如需，前端 harness 标识与按 run 选择 harness 的 API | 按当时验收 | 未开始 |
+| M4（GLINK-ACP-05） | claude-code-acp 接入（`@zed-industries/claude-code-acp@0.16.2`）；能力矩阵补齐；每 run 凭据与首启形态；权限最小白名单；镜像/dev 模板加 claude 双包钉版层 | inproc 握手 + 一次最小真实 run（流式/终态/report.md/清理）；容器与沙箱无模型握手自检；`bash scripts/check.sh` 全绿 | **已完成**（2026-09-25）：inproc 握手与真实 run 通过；docker 镜像重建后三个 agent 容器内握手（codex-acp 无凭据属预期）；e2b dev 模板重建后沙箱握手；docker/e2b 的真实模型 run 无 API key 属预期阻塞。详见 [ACP 集成笔记](acp-integration-notes.md) §7，证据 `docs/evidence/acp-m4-claude-*.txt` |
 
 每个里程碑独立验收、独立提交边界；里程碑之间允许因实测结论回写本文。
 
