@@ -1,0 +1,132 @@
+ACP M3b：E2B 沙箱内 ACP 握手证据（生产装配路径；不发 prompt，不消耗模型）
+======================================================================
+日期: 2026-09-25
+模板: glink-acp-worker（Template ID oen0rq47o2sizakry5v3 / Build 3a75d2b3-57aa-4876-b2fd-fee5276155b5）
+执行面: PI_GLINK_HARNESS=acp + LOCAL_WEB_EXECUTOR=e2b
+探针: scripts/spikes/acp_e2b/sandbox_handshake.py
+      走 build_config → prepare_acp_runtime → E2BAcpSandboxClient → build_adapter
+      → AcpSandboxExecutionAdapter（与运行期同一装配），只做 initialize + session/new。
+凭据: PI_GLINK_ACP_CREDENTIAL_FILES（源文件只读复制进每 run HOME，再上传进沙箱状态根；
+      沙箱内 chmod 0700/0600）。源文件 sha256 前后一致。
+清理: 每个沙箱按 sandbox_id 终止（adapter.close → sandbox.kill），无模式匹配操作。
+
+### dsh 0.1.5-rc.3（dsh --profile acp）
+
+{
+  "date": "2026-09-25 10:41:21",
+  "agent": "dsh",
+  "command": "dsh --profile acp",
+  "template": "glink-acp-worker",
+  "credential_source": "~/.dsh/.credentials.yaml",
+  "credential_dest": ".dsh/.credentials.yaml",
+  "credential_sha256_before": "16ae1904493e79651638c5b358baee4f1e12aa7bd41bfd99ca594b2e9cb74072",
+  "source_mtime": "2026-09-23 10:37:17",
+  "runtime_home": "/var/folders/78/dy70php52d9gpp38b_dx__w40000gn/T/glink-acp-e2b-handshake-te0kn_v3/acp-agent/home",
+  "credential_dests": [
+    ".dsh/.credentials.yaml"
+  ],
+  "secret_count": 5,
+  "sandbox_id": "i34jukoqca3dmajoiagp2",
+  "sandbox_command": "cd /home/user/workspace && exec dsh --profile acp",
+  "harden_command": "chmod 0700 /home/user/acp/home …",
+  "upload_manifest": [
+    {
+      "path": ".dsh/.credentials.yaml",
+      "sha256": "16ae1904493e79651638c5b358baee4f1e12aa7bd41bfd99ca594b2e9cb74072"
+    }
+  ],
+  "initializeOk": true,
+  "protocolVersion": 1,
+  "agentInfo": {
+    "name": "deepseek-harness-acp",
+    "version": "0.0.1"
+  },
+  "capabilities": [
+    "mcpCapabilities",
+    "promptCapabilities",
+    "sessionCapabilities"
+  ],
+  "authMethodIds": [],
+  "sessionId": "71719508-e37f-44d1-8365-4960751c0493",
+  "cwd": "/home/user/workspace",
+  "configOptionIds": [
+    "model",
+    "reasoning_effort"
+  ],
+  "cleanup": {
+    "released": true,
+    "failures": [],
+    "external": {
+      "sandbox": "i34jukoqca3dmajoiagp2"
+    }
+  },
+  "credential_sha256_after": "16ae1904493e79651638c5b358baee4f1e12aa7bd41bfd99ca594b2e9cb74072",
+  "source_unchanged": true
+}
+[PASS] dsh 真实沙箱 ACP 握手（initialize + session/new）
+
+### codex-acp 1.13.1（codex-acp）
+
+{
+  "date": "2026-09-25 10:41:31",
+  "agent": "codex-acp",
+  "command": "codex-acp",
+  "template": "glink-acp-worker",
+  "credential_source": "~/.codex/auth.json",
+  "credential_dest": ".codex/auth.json",
+  "credential_sha256_before": "1c4f2061e0e5a5a1d3eb9971aafc22b0a3085750aa1e0b4066602d2d685b6fd9",
+  "source_mtime": "2026-09-20 13:02:30",
+  "runtime_home": "/var/folders/78/dy70php52d9gpp38b_dx__w40000gn/T/glink-acp-e2b-handshake-bakpeo8g/acp-agent/home",
+  "credential_dests": [
+    ".codex/auth.json"
+  ],
+  "secret_count": 4,
+  "sandbox_id": "ip9arzt4b2znxuc95lvae",
+  "sandbox_command": "cd /home/user/workspace && exec codex-acp",
+  "harden_command": "chmod 0700 /home/user/acp/home …",
+  "upload_manifest": [
+    {
+      "path": ".codex/auth.json",
+      "sha256": "1c4f2061e0e5a5a1d3eb9971aafc22b0a3085750aa1e0b4066602d2d685b6fd9"
+    }
+  ],
+  "initializeOk": true,
+  "protocolVersion": 1,
+  "agentInfo": {
+    "name": "@agentclientprotocol/codex-acp",
+    "title": "Codex",
+    "version": "1.13.1"
+  },
+  "capabilities": [
+    "_meta",
+    "auth",
+    "loadSession",
+    "mcpCapabilities",
+    "promptCapabilities",
+    "providers",
+    "sessionCapabilities"
+  ],
+  "authMethodIds": [
+    "api-key",
+    "chat-gpt"
+  ],
+  "sessionId": "01a0d670-970a-7133-9804-c1d90bb3f39e",
+  "cwd": "/home/user/workspace",
+  "configOptionIds": [
+    "mode",
+    "collaboration_mode",
+    "model",
+    "reasoning_effort",
+    "fast-mode"
+  ],
+  "cleanup": {
+    "released": true,
+    "failures": [],
+    "external": {
+      "sandbox": "ip9arzt4b2znxuc95lvae"
+    }
+  },
+  "credential_sha256_after": "1c4f2061e0e5a5a1d3eb9971aafc22b0a3085750aa1e0b4066602d2d685b6fd9",
+  "source_unchanged": true
+}
+[PASS] codex-acp 真实沙箱 ACP 握手（initialize + session/new）

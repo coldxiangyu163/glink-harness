@@ -1,0 +1,157 @@
+ACP M3b：E2B 真实冒烟证据（harness=acp + executor=e2b）
+=====================================================
+日期: 2026-09-25
+宿主: macOS (arm64) / Python 3.12.10 / e2b SDK 2.51.0
+模板: glink-acp-worker（Template ID oen0rq47o2sizakry5v3 / Build 3a75d2b3-57aa-4876-b2fd-fee5276155b5）
+Agent: @deepseek-ai/dsh@0.1.5-rc.3（沙箱内 `dsh --profile acp`）
+凭据: PI_GLINK_ACP_CREDENTIAL_FILES=~/.dsh/.credentials.yaml=.dsh/.credentials.yaml
+      （只读复制进每 run HOME → 上传到沙箱 /home/user/acp/home/.dsh/.credentials.yaml
+       → 沙箱内 chmod 0700/0600；值不落命令、环境或事件）
+会话配置: <默认>；权限: <fail-closed 默认，未启用白名单>
+数据根: ~/tmp-gl-acp-e2b-smoke（临时；取证后删除）
+端口: 55500（随机分配）
+任务超时: LOCAL_WEB_TASK_TIMEOUT_SECONDS=300
+探针: scripts/spikes/acp_e2b/smoke_host.py
+      （起真实宿主进程 → POST /api/runs → 同时订阅 SSE 看流式 → 轮询终态 →
+       GET /api/runs/<id>/report → 生产对账助手 confirm_sandbox_absent 按 id 确认）
+
+授权与次数说明
+--------------
+本任务获授权“一次最小真实冒烟 run”：本文件即那一次（runId 60bee7fb64e6），
+没有其它真实模型调用。运行前的管道演练使用不存在的模板 glink-acp-worker-nonexistent
+（不消耗模型、不创建沙箱），不计入本证据的通过项。
+
+原始输出（scripts/spikes/acp_e2b/smoke_host.py，退出码 0）
+--------------------------------------------------------
+ACP M3b 最小真实冒烟
+日期: 2026-09-25 10:43:12
+宿主命令: python -m pi_glink.app --port 55500（harness=acp, executor=e2b）
+agent 命令: dsh --profile acp
+模板: glink-acp-worker
+数据根: /Users/coldxiangyu/tmp-gl-acp-e2b-smoke
+任务超时: 300s
+
+宿主 PID: 26575（只按这个 PID 收尾）
+宿主健康检查: HTTP 200
+POST /api/runs -> HTTP 201
+runId: 60bee7fb64e6
+终态: finished duration=29.621s events=28
+GET /api/runs/60bee7fb64e6/report -> HTTP 200（994 bytes）
+宿主按 PID 26575 终止: exit=-15
+
+SSE 流式（到达时间相对 run 创建）
+     0.14s run_started
+     8.09s session_ready
+     8.09s turn_started
+    10.08s thinking_delta
+    10.08s usage_reported
+    10.08s tool_started
+    17.60s tool_finished
+    18.67s thinking_delta
+    18.67s usage_reported
+    18.67s tool_started
+    18.67s tool_started
+    19.10s tool_finished
+    19.27s tool_finished
+    21.46s thinking_delta
+    21.46s usage_reported
+    21.46s tool_started
+    21.46s tool_started
+    21.86s tool_finished
+    21.86s tool_finished
+    26.51s thinking_delta
+    26.51s usage_reported
+    26.51s tool_started
+    26.51s tool_finished
+    28.15s thinking_delta
+    28.15s assistant_delta
+    28.15s usage_reported
+    28.15s turn_finished
+    29.67s run_finished
+  SSE 帧数: 28
+
+事件类型统计（events.jsonl）
+  assistant_delta 1 · run_finished 1 · run_started 1 · session_ready 1 · thinking_delta 5 · tool_finished 6 · tool_started 6 · turn_finished 1 · turn_started 1 · usage_reported 5
+
+事件时间线（seq/相对秒/type/摘要）
+     1   0.00s run_started        
+     2   8.03s session_ready      
+     3   8.04s turn_started       
+     4  10.03s thinking_delta     
+     5  10.03s usage_reported     
+     6  10.03s tool_started       web_search
+     7  17.55s tool_finished      web_search
+     8  18.62s thinking_delta     
+     9  18.62s usage_reported     
+    10  18.62s tool_started       web_fetch
+    11  18.62s tool_started       web_fetch
+    12  19.05s tool_finished      web_fetch
+    13  19.22s tool_finished      web_fetch
+    14  21.41s thinking_delta     
+    15  21.41s usage_reported     
+    16  21.41s tool_started       web_fetch
+    17  21.41s tool_started       web_fetch
+    18  21.80s tool_finished      web_fetch
+    19  21.81s tool_finished      web_fetch
+    20  26.46s thinking_delta     
+    21  26.46s usage_reported     
+    22  26.46s tool_started       write
+    23  26.46s tool_finished      write
+    24  28.10s thinking_delta     
+    25  28.10s assistant_delta    
+    26  28.10s usage_reported     
+    27  28.10s turn_finished      
+    28  29.62s run_finished       finished
+
+终态与清理事实（meta.json）
+  status=finished modelStopReason=end_turn reportStatus=ok
+  sandbox_id=i9865hh296nza5lt7az2l container_name=None
+  cleanup={"released": true, "failures": [], "external": {"sandbox": "i9865hh296nza5lt7az2l"}}
+  report_path=/Users/coldxiangyu/tmp-gl-acp-e2b-smoke/runs/60bee7fb64e6/artifacts/report.md
+
+沙箱终止对账（只按持久化 sandbox_id，SDK 查/杀同一 id）
+  sandbox_id=i9865hh296nza5lt7az2l confirmed_absent=True detail=SDK 确认沙箱不存在
+
+report.md（HTTP 200，994 bytes）
+------------------------------------------------------------
+# 云沙箱隔离对 AI 编程 agent 运行安全的价值
+
+- **限制爆炸半径**：agent 会执行自己生成的代码和第三方脚本；云沙箱把执行放进加固的容器/沙箱，限定文件系统、资源配额与生命周期，代码行为异常时也波及不到宿主与生产数据。
+- **收敛网络与能力边界**：沙箱收紧出网（egress 白名单）、只暴露窄接口而非通用 shell/网络权限，可降低数据外泄与横向移动风险，并使高危操作可审批、可审计。
+
+来源：[Microsoft Learn — 6. Runtime Isolation and Sandboxing](https://learn.microsoft.com/en-us/security/zero-trust/catalog-ai-defense-capabilities/runtime-isolation-sandboxing)（2026-08-01 更新，已打开核验）
+
+一句话总结：云沙箱隔离把 AI 编程 agent 的代码执行关进受限、短生命周期且出网受控的环境，用可审计的边界换取「即使 agent 出错或被诱导也难以伤及宿主与生产系统」的安全下限。
+
+------------------------------------------------------------
+
+宿主日志尾部
+  pi-glink 宿主已启动 / host listening: http://127.0.0.1:55500/
+  执行面 executor: e2b
+  内核 pi: /Users/coldxiangyu/.nvm/versions/node/v24.16.0/bin/pi
+  模型 model: 未配置 / unset (缺少密钥 / no key)
+  2026-09-25 10:43:13,004 INFO pi_glink.host: event stream attached run=60bee7fb64e6 after=0 live=True
+  2026-09-25 10:43:14,502 INFO httpx: HTTP Request: POST https://api.e2b.app/v2/sandboxes "HTTP/1.1 201 Created"
+  2026-09-25 10:43:15,753 INFO httpx: HTTP Request: POST https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2F.credentials.yaml "HTTP/1.1 200 OK"
+  2026-09-25 10:43:16,166 INFO pi_glink.kernel.acp_rpc: starting ACP agent in its execution face: dsh --profile acp
+  2026-09-25 10:43:42,050 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Fworkspace%2Freport.md "HTTP/1.1 200 OK"
+  2026-09-25 10:43:42,528 INFO httpx: HTTP Request: DELETE https://api.e2b.app/sandboxes/i9865hh296nza5lt7az2l "HTTP/1.1 204 No Content"
+  2026-09-25 10:43:42,533 INFO pi_glink.kernel.runner: run finalized run=60bee7fb64e6 status=finished stop=None committed=True report=/Users/coldxiangyu/tmp-gl-acp-e2b-smoke/runs/60bee7fb64e6/artifacts/report.md released=True
+  2026-09-25 10:43:42,533 INFO pi_glink.host: event stream detached run=60bee7fb64e6
+
+[PASS] 冒烟（流式/终态/report.md/沙箱按 id 无残留）
+
+脱敏与清理核对
+--------------
+脱敏扫描（scripts/check-no-secrets.py，退出码 0）:
+  数据根: 凭据来源 2 条 · 扫描文件 4 个 · 真实命中 0 处 · 占位符命中 0 处
+  证据文件本身: 密钥形状 0 命中
+凭据源文件 sha256 前后一致（16ae1904493e79651638c5b358baee4f1e12aa7bd41bfd99ca594b2e9cb74072），
+mtime 2026-09-23（早于本次 run，未被修改）。
+
+宿主与沙箱清理（只操作已知身份）:
+  - 宿主 PID 26575：脚本持有的 PID 发 terminate()（SIGTERM），退出码 -15；未用 pkill -f。
+  - 沙箱 i9865hh296nza5lt7az2l：适配器 close() 调 SDK 按 id 终止（宿主日志
+    DELETE /v2/sandboxes/i9865hh296nza5lt7az2l -> 204），随后 confirm_sandbox_absent(id)
+    -> True「SDK 确认沙箱不存在」；无名字通配、无其它沙箱操作。
+  - 临时数据根（含每 run HOME 的凭据副本）在取证后删除；只保留本证据文件与提交的脚本。
