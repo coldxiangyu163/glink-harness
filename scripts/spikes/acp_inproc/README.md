@@ -1,13 +1,14 @@
-# ACP inproc 面的 live 探针（GLINK-ACP-05 / M4 起，M5 扩展）
+# ACP inproc 面的 live 探针（GLINK-ACP-05 / M4 起，M5 扩展，M7 增续接冒烟）
 
-这两个脚本操作**本机 inproc 面**，不是默认检查的一部分（`bash scripts/check.sh`
-不运行它们）。凭据源只读，值不打印、不落证据；`smoke_host.py` 会消耗一次真实模型
-调用，只在获得授权时使用。
+这几个脚本操作**本机 inproc 面**，不是默认检查的一部分（`bash scripts/check.sh`
+不运行它们）。凭据源只读，值不打印、不落证据；`smoke_host.py` 与
+`resume_smoke.py` 会消耗真实模型调用，只在获得授权时使用。
 
 | 脚本 | 用途 | 证据 |
 |---|---|---|
 | `handshake.py` | 生产装配路径（`build_config` → `prepare_acp_runtime` → `AcpExecutionAdapter`）只做 `initialize` + `session/new`（不发 prompt、不消耗模型）：能力矩阵、`session/new` 选项、每 run HOME 落点、凭据源 sha256 前后一致、agent 子进程命令行 | `docs/evidence/acp-m4-claude-handshake.txt`、`docs/evidence/acp-m6-migration-handshake.txt` |
 | `smoke_host.py` | 一次最小真实 run：起真实宿主进程（随机端口、临时数据根、有界超时）→ `POST /api/runs` → 同时订阅 SSE → 终态 → `/report` → 采样宿主后代 PID 并只按 PID 收尾 | `docs/evidence/acp-m4-claude-smoke.txt`、`docs/evidence/acp-m6-migration-smoke.txt` |
+| `resume_smoke.py`（M7） | 续接冒烟：同一 agent 数据根先跑「首轮」（约定随机代号、不写入 report.md），再以 `parentRunId` 跑「追问」（复述代号并写入新 report.md）；判据含同 sessionId、`session_ready.resumed`、连续性代号、状态继承、报告回收与只按 PID 清理。`--parent-run-id` + `--codename` 可只跑追问 | `docs/evidence/acp-m7-resume-claude-agent-acp.txt`、`docs/evidence/acp-m7-resume-opencode.txt` |
 
 复现命令（仓库根目录；`npx` 钉版调用不全局安装，`--npm-cache` 让每 run 的新
 HOME 共享一份 npx 缓存，避免冷下载超过 initialize 的 60s 上限）：
@@ -45,6 +46,20 @@ HOME 共享一份 npx 缓存，避免冷下载超过 initialize 的 60s 上限�
   --npm-cache /tmp/glink-acp-npx \
   --credential ~/.local/share/opencode/auth.json=.local/share/opencode/auth.json \
   --session-config "model=openai/gpt-6-astra-fast" \
+  --timeout 300
+
+# 3) 真实续接：首轮 + 追问（会消耗两次模型调用）
+.venv/bin/python scripts/spikes/acp_inproc/resume_smoke.py \
+  --npm-cache /tmp/glink-acp-npx \
+  --derive-settings-from ~/.claude/settings.json \
+  --permission-allow allow_once,read,search,fetch,edit \
+  --timeout 300
+
+# 3a) 续接冒烟——opencode（M7 实测：OAuth 复制件过期且 refresh 被 401 拒绝，
+#     改用无凭据的 OpenCode Zen 免费模型，即默认 opencode/big-pickle，不传 credential）
+.venv/bin/python scripts/spikes/acp_inproc/resume_smoke.py \
+  --agent "npx -y opencode-ai@1.18.32 acp" \
+  --npm-cache /tmp/glink-acp-npx \
   --timeout 300
 ```
 
