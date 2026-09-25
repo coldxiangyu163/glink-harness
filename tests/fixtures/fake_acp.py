@@ -28,9 +28,11 @@ Session state lives in ``$HOME/fake-acp-state.json`` — the stand-in for a real
 agent's session store. A ``session/resume`` only succeeds when that file exists
 and records the session id being resumed, so state inheritance is observable:
 the same file must have been copied into the child run's HOME. The first prompt
-remembers a marker (``REMEMBER:<word>``) in the state file, and a later prompt
-containing ``RECALL`` appends the remembered word to the answer (or ``UNKNOWN``
-when nothing was remembered/read) — the synthetic continuity check.
+remembers a marker (``REMEMBER:<word>`` or the live probe's ``代号：<word>``) in
+the state file, and a later prompt containing ``RECALL`` appends the remembered
+word to the answer and to ``report.md`` (``UNKNOWN`` when nothing was
+remembered/read) — the synthetic continuity check. ``write_report`` strips the
+marker from the deliverable, exactly as the probe instructs the real agent.
 
 Prompt markers select the terminal result:
 
@@ -154,13 +156,19 @@ def write_state(state: dict) -> None:
 
 
 def remember(text: str) -> None:
-    """Record the ``REMEMBER:<word>`` marker of a prompt in the state file."""
+    """Record the prompt's codename marker in the state file.
+
+    Two spellings mean the same session fact: the synthetic fixtures use
+    ``REMEMBER:<word>`` and the live probe asks in Chinese (``代号：<word>``).
+    """
     marker = "REMEMBER:"
     index = text.find(marker)
-    if index < 0:
-        return
-    tail = text[index + len(marker) :]
-    word = re.split(r"[\s,，。.;；、：:）)(（\"']", tail, maxsplit=1)[0].strip()
+    if index >= 0:
+        tail = text[index + len(marker) :]
+        word = re.split(r"[\s,，。.;；、：:）)(（\"']", tail, maxsplit=1)[0].strip()
+    else:
+        match = re.search(r"代号[：:]\s*([A-Za-z0-9][A-Za-z0-9-]*)", text)
+        word = match.group(1) if match else ""
     if not word:
         return
     state = read_state()
@@ -248,8 +256,27 @@ def prompt_text(params: dict) -> str:
     return "\n".join(parts)
 
 
+def asks_to_recall(text: str) -> bool:
+    """Does this prompt ask the agent to state the remembered codename?
+
+    The synthetic fixtures say ``RECALL``; the live probe asks in Chinese
+    (``…代号是什么？``). Both are the same request to the stand-in agent.
+    """
+    return "RECALL" in text or "复述" in text or "代号是什么" in text
+
+
 def write_report(text: str) -> None:
-    body = f"# 研究报告（fake acp）\n\n原始问题：{text}\n\n结论：这是 ACP 测试替身产出的报告。\n"
+    """Write the run's deliverable, obeying the codename instructions.
+
+    A ``REMEMBER:<word>`` / ``代号：<word>`` marker is a session fact the probe
+    asks the agent **not** to persist, so it is stripped from the report body;
+    a ``RECALL`` prompt appends the remembered word, which is what the real
+    continuity check asks the agent to do.
+    """
+    body_text = re.sub(r"(?:REMEMBER:|代号[：:])\s*\S+", "（代号已按指令隐去）", text)
+    body = f"# 研究报告（fake acp）\n\n原始问题：{body_text}\n\n结论：这是 ACP 测试替身产出的报告。\n"
+    if asks_to_recall(text):
+        body += f"\n代号 = {recalled_word()}\n"
     Path("report.md").write_text(body, encoding="utf-8")
 
 
@@ -357,7 +384,7 @@ def prompt_updates(text: str) -> list[dict]:
                 "content": {"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"},
             }
         )
-    if "RECALL" in text:
+    if asks_to_recall(text):
         updates.append(
             _text_chunk("agent_message_chunk", f"REMEMBERED:{recalled_word()}")
         )

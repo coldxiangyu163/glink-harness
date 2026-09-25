@@ -223,6 +223,15 @@ def test_acp_followup_resumes_parent_session_and_inherits_state(tmp_path: Path) 
     # The continuation keeps the parent's session id — no new session was made.
     assert child_final.session_id == parent.session_id
     assert child_final.parent_run_id == parent.run_id
+    # Original obligation (pi family, and the ACP family's first cut): every run
+    # got its own freshly allocated workspace. New obligation (M7, ACP): an
+    # agent session records its ``cwd`` and keeps working there however the next
+    # request is phrased (the opencode live probe wrote to the remembered parent
+    # path), so the continuation runs in the conversation's workspace — the
+    # parent run's — and the child's own artifacts are still published under
+    # ``runs/<child>/artifacts``. The parent's record, events and artifacts stay
+    # immutable.
+    assert Path(child.workspace) == Path(parent.workspace)
 
     child_home = state_home(store, child.run_id)
     assert child_home != parent_home
@@ -239,6 +248,9 @@ def test_acp_followup_resumes_parent_session_and_inherits_state(tmp_path: Path) 
     assert ready["sessionId"] == parent.session_id
     assert ready["resumed"] is True
     assert ready["resumeMethod"] == RESUME_METHOD
+    # The resumed session keeps its own cwd: the same directory the parent's
+    # session recorded, so the agent's remembered paths stay inside the run.
+    assert ready["cwd"] == str(Path(parent.workspace))
     resumed = [
         payload
         for payload in payloads(events, "kernel_status")
@@ -252,8 +264,8 @@ def test_acp_followup_resumes_parent_session_and_inherits_state(tmp_path: Path) 
     assert resume_entries[0]["sessionId"] == parent.session_id
     # The agent really found the inherited state: it logged the state file's id.
     assert resume_entries[0]["stateSessionId"] == parent.session_id
-    # The child resumed with its **own** workspace as cwd, not the parent's.
-    assert resume_entries[0]["cwd"] == str(Path(child.workspace))
+    # The resume request carries the parent session's own cwd.
+    assert resume_entries[0]["cwd"] == str(Path(parent.workspace))
     assert resume_entries[0]["mcpServers"] == []
     # Exactly one session was ever created: the parent's first turn.
     assert sum(1 for entry in entries if entry["event"] == "session_new") == 1

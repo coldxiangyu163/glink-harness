@@ -425,19 +425,32 @@ class RunManager:
 
         with self._lock:
             self._check_admission(context)
+            continuation_workspace: Path | None = None
             if parent_run_id is not None:
                 # Authoritative recheck (the snapshot above may have raced a
                 # concurrent follow-up of the same parent): a refusal here
                 # discards the seed, nothing has been written yet.
                 self._resumable_parent(context, parent_run_id)
                 if self.config.harness == "acp":
-                    self._acp_resumable_parent(context, parent_run_id)
+                    acp_parent = self._acp_resumable_parent(context, parent_run_id)
+                    # An ACP continuation keeps the conversation's working
+                    # directory: an agent session records its ``cwd``, and the
+                    # resumed agent (and the model's remembered paths) stay in
+                    # it regardless of what a request claims. Making the child
+                    # run use that same workspace is what keeps the agent's
+                    # tools and the host's report contract pointed at one place.
+                    continuation_workspace = Path(acp_parent.workspace)
             # The store allocates the id and creates the run directory
             # exclusively (a generated collision is retried there): a new run can
-            # never adopt or overwrite an existing record.
+            # never adopt or overwrite an existing record. An ACP continuation
+            # records the conversation's workspace; every other run gets its own
+            # freshly allocated one.
             record = self.store.create(
                 redactor.redact(text),
-                workspace_root=self.config.workspace_root,
+                workspace=continuation_workspace,
+                workspace_root=(
+                    None if continuation_workspace is not None else self.config.workspace_root
+                ),
                 tenant_id=context.tenant_id if context is not None else None,
                 creator_user_id=context.user_id if context is not None else None,
                 parent_run_id=parent_run_id,
@@ -595,6 +608,15 @@ class RunManager:
         sandbox could never resume. Recovering the sandbox state root is the
         recorded follow-up (integration notes, M7); until then this is a
         fail-closed refusal rather than a guaranteed resume failure.
+
+        The admitted continuation also reuses the parent run's workspace (the
+        caller reads :attr:`RunRecord.workspace`): the ACP session's ``cwd`` is
+        recorded in the agent's own state and the agent keeps working there.
+        Giving the child a fresh directory would leave the agent's writes (and
+        the model's remembered absolute paths) outside the run whose report the
+        host recovers. The parent's **record and published artifacts** stay
+        immutable; the conversation's workspace is the one piece the turns
+        share.
 
         The inheritance source is checked to exist as a directory so the common
         failure is an admission refusal; the copy itself happens off the
