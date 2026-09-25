@@ -1,18 +1,16 @@
 """One run driven over the ACP client.
 
-The face is ``inproc`` in M1: the agent process shares the host machine, the
-workspace is the host workspace, and no artifact has to be pulled back. The
-protocol work is identical for the container/sandbox faces (M3); only the
-process launch and teardown differ.
-
-The :class:`~pi_glink.kernel.execution.ExecutionAdapter` contract is unchanged;
-this module maps it onto ACP's method set:
+The ACP family shares this adapter across transmission faces: ``inproc`` (the
+agent process shares the host machine), ``docker`` (the agent runs in a
+container, ``AcpRpcClient`` speaking to ``docker run -i``'s stdio) and, later,
+E2B (M3b). Only the process launch, the agent-visible workspace and the
+teardown differ; the protocol work — and therefore this module — is the same.
 
 ``start()``
     Spawn the agent, ``initialize`` (protocol version + capability negotiation)
-    and ``session/new``. A continuation request is refused outright: M1 has no
-    ``session/resume`` implementation, and starting a fresh session instead
-    would fake a continuation.
+    and ``session/new``. A continuation request is refused outright: the ACP
+    family has no ``session/resume`` implementation, and starting a fresh
+    session instead would fake a continuation.
 ``session_info()``
     The ACP session id plus the negotiated capability matrix, for the run
     record's ``session_ready`` frame.
@@ -26,9 +24,11 @@ this module maps it onto ACP's method set:
 ``cancel()``
     ``session/cancel`` notification. Idempotent, safe from another thread.
 ``recover_artifacts()``
-    No-op: the workspace already is the host directory.
+    No-op: the workspace already is the host directory (mounted into the
+    container on the Docker face).
 ``close()``
-    Stop the agent process and report whether that succeeded.
+    Stop the agent process, force-remove the container by its persisted name
+    when there is one, and report whether that succeeded.
 
 ``session/request_permission`` is answered fail-closed (no human is watching):
 the first ``reject_once``/``reject_always`` option is selected, or — when the
@@ -46,6 +46,7 @@ channel, and the baseline text block is the one channel every agent accepts.
 from __future__ import annotations
 
 import logging
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -150,12 +151,23 @@ class AcpExecutionAdapter(ExecutionAdapter):
         cwd: Path | None,
         client_factory: Callable[..., AcpRpcClient] = AcpRpcClient,
         on_frame: FrameCallback,
+        session_cwd: str | None = None,
+        container_name: str | None = None,
+        container_stop: Callable[[str], list[str]] | None = None,
     ) -> None:
         super().__init__(spec, on_frame=on_frame)
         self._argv = list(argv)
         self._env = dict(env)
         self._cwd = cwd
         self._client_factory = client_factory
+        #: The ``cwd`` handed to ``session/new``: the workspace as the *agent*
+        #: sees it. In-process that is the host workspace; in a container it is
+        #: the mount point (:data:`~pi_glink.kernel.docker_env.CONTAINER_WORKSPACE`),
+        #: because the host path does not exist inside the container.
+        self._session_cwd = session_cwd or str(spec.workspace)
+        #: Durable container identity, for the run record and reconciliation.
+        self._container_name = container_name
+        self._container_stop = container_stop
         self._client: AcpRpcClient | None = None
         self._driver: threading.Thread | None = None
         self._done = threading.Event()
@@ -207,7 +219,7 @@ class AcpExecutionAdapter(ExecutionAdapter):
             self._accept_initialize(negotiated)
             created = client.request(
                 "session/new",
-                {"cwd": str(self.spec.workspace), "mcpServers": []},
+                {"cwd": self._session_cwd, "mcpServers": []},
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
         except Exception:
@@ -319,7 +331,10 @@ class AcpExecutionAdapter(ExecutionAdapter):
             # its rendered settings.
             "modes": dict(self._modes),
             "configOptions": [dict(option) for option in self._config_options],
-            "cwd": str(self.spec.workspace),
+            # The ACP session's cwd (the agent-visible workspace): the host
+            # workspace in-process, the container mount point on the Docker
+            # face. This is the ACP fact, not a host path.
+            "cwd": self._session_cwd,
         }
         return SessionInfo(payload=payload, session_id=self._session_id, session_file=None)
 
@@ -470,8 +485,9 @@ class AcpExecutionAdapter(ExecutionAdapter):
 
     def identity(self) -> Mapping[str, str]:
         # An in-process agent has no durable external identity (no container, no
-        # sandbox), exactly like the pi inproc face.
-        return {}
+        # sandbox), exactly like the pi inproc face. A containerised ACP agent
+        # has one: the frozen container name.
+        return {"container": self._container_name} if self._container_name else {}
 
     def close(self) -> CleanupReport:
         failures: list[str] = []
@@ -484,6 +500,25 @@ class AcpExecutionAdapter(ExecutionAdapter):
                     self._outcome.exit_code = exit_code
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 failures.append(f"关闭 ACP agent 进程失败: {type(exc).__name__}: {exc}")
+        if self._container_name and self._container_stop is not None:
+            # Closing stdin ends the agent; with ``--rm`` the container is then
+            # removed by the daemon. The force-remove is the belt-and-braces
+            # confirmation that nothing keeps running, addressed by the one
+            # identity this run persisted — never a name pattern.
+            try:
+                result = subprocess.run(
+                    self._container_stop(self._container_name),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                stderr = (result.stderr or "").strip()
+                if result.returncode != 0 and "No such container" not in stderr:
+                    failures.append(
+                        f"删除容器失败: exit {result.returncode}: {stderr[-200:]}"
+                    )
+            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+                failures.append(f"删除容器失败: {type(exc).__name__}: {exc}")
         return CleanupReport(
             released=not failures, failures=tuple(failures), external=dict(self.identity())
         )

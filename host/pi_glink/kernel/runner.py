@@ -71,6 +71,7 @@ from .agent_env import (
     prompt_template_names,
 )
 from .docker_env import (
+    build_acp_plan as build_acp_docker_plan,
     build_plan as build_docker_plan,
     confirm_absent as docker_confirm_absent,
     container_name_for as docker_container_name,
@@ -1429,7 +1430,9 @@ class RunManager:
         while keeping two runs apart.
 
         ACP: the run gets its own agent state root (:mod:`acp_env`), which the
-        agent process sees as ``HOME``; no host credential is rendered into it.
+        agent process sees as ``HOME`` — the in-process child directly, the
+        container through the ``HOME`` mount. Credentials are injected into it
+        by read-only copy (:data:`PI_GLINK_ACP_CREDENTIAL_FILES`).
         """
         run_id = execution.record.run_id
         run_dir = self.store.run_dir(run_id)
@@ -1527,12 +1530,13 @@ class RunManager:
             docker_plan=self._docker_plan,
             docker_stop=docker_stop_argv,
             acp_plan=self._acp_plan,
+            acp_docker_plan=self._acp_docker_plan,
         )
 
     def _acp_plan(
         self, spec: ExecutionSpec
     ) -> tuple[list[str], dict[str, str], Path | None]:
-        """Launch inputs for the ACP agent: argv, filtered env, cwd.
+        """Launch inputs for the in-process ACP agent: argv, filtered env, cwd.
 
         The argv comes from the frozen ``PI_GLINK_ACP_COMMAND`` and is never
         shell-expanded; the environment is the pi face's minimal passthrough
@@ -1545,6 +1549,32 @@ class RunManager:
             build_acp_env(spec.config, spec.runtime),
             spec.workspace,
         )
+
+    def _acp_docker_plan(
+        self, spec: ExecutionSpec
+    ) -> tuple[list[str], dict[str, str], str]:
+        """Launch inputs for the containerised ACP agent (M3a).
+
+        Same composition rules as :meth:`_docker_plan` (reachable daemon, frozen
+        image, persisted container name, resource ceilings), but the container's
+        stdio carries ACP JSON-RPC and its ``HOME`` is the run's own agent state
+        root with the injected credentials mounted read-only inside it. The
+        command is the frozen ``PI_GLINK_ACP_COMMAND`` executed *inside* the
+        image, so it must name an image-local executable.
+        """
+        if not isinstance(spec.runtime, AcpRuntime):
+            raise ConfigError("ACP harness 的运行期配置没有按 AcpRuntime 渲染")
+        if not docker_available():
+            raise ConfigError(
+                "LOCAL_WEB_EXECUTOR=docker requires a reachable Docker daemon"
+            )
+        plan = build_acp_docker_plan(
+            spec.config,
+            spec.runtime,
+            run_id=spec.run_id,
+            workspace=spec.workspace,
+        )
+        return plan.argv, plan.env, plan.container_name
 
     def _rpc_plan(
         self, spec: ExecutionSpec

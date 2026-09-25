@@ -779,11 +779,31 @@ def test_acp_adapter_is_composed_through_the_same_contract(tmp_path: Path) -> No
     )
     assert isinstance(pi_adapter, RpcExecutionAdapter)
 
+    # M3a：docker 面由同一 ACP 适配器承载（容器 stdio 交给同一个 M1 客户端）。
+    # 原义务（M1）：harness=acp + executor=docker 在装配层即拒绝；新义务：
+    # 可装配，且容器身份/停止语义走 docker 面约定（详见
+    # tests/test_kernel_acp_docker.py 的 plan 组合回归）。
+    docker_adapter = build_adapter(
+        spec,
+        harness="acp",
+        executor="docker",
+        client_factory=PiRpcClient,
+        on_frame=lambda _frame: None,
+        rpc_plan=lambda _spec: ([], {}, None),
+        docker_plan=lambda _spec: ([], {}, "container"),
+        docker_stop=lambda _name: [],
+        acp_plan=lambda _spec: ([], {}, None),
+        acp_docker_plan=lambda _spec: (["docker", "run", "-i"], {}, "pi-glink-contract"),
+    )
+    assert isinstance(docker_adapter, AcpExecutionAdapter)
+    assert docker_adapter.identity() == {"container": "pi-glink-contract"}
+
+    # M3b（e2b）仍被拒绝，且不静默降级。
     with pytest.raises(ConfigError):
         build_adapter(
             spec,
             harness="acp",
-            executor="docker",
+            executor="e2b",
             client_factory=PiRpcClient,
             on_frame=lambda _frame: None,
             rpc_plan=lambda _spec: ([], {}, None),

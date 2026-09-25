@@ -9,9 +9,14 @@
 宿主 HTTP API 各跑一次最小真实研究 run（流式事件、终态、`report.md` 回收全部验证）；
 system prompt 送达通道与每 run 凭据注入已实现。逐条实测事实、能力矩阵与权限决策见
 [ACP 集成笔记](acp-integration-notes.md) §4，证据在 `docs/evidence/acp-m2-*.txt`。
-宿主默认 harness 仍是 `pi`，ACP 族只在显式配置下启用且限 inproc；claude-code-acp 与
-docker/e2b 面仍属后续里程碑。本文是该方向的事实源：实现与本文出现偏差时回写本文，而不是
-让代码与文档各自漂移。
+**M3a（GLINK-ACP-03）已完成**：ACP 族的 Docker 执行面可用——新增自包含的 ACP worker
+镜像（`docker/Dockerfile.acp-worker`），容器 stdio 直接桥接 M1 客户端，每 run HOME 与只读
+凭据挂载、cpus/memory/pids 限制与降权与 pi 面对齐，容器名/停止/对账复用既有的
+`docker_env` 约定，并经宿主 HTTP API 跑过一次容器内最小真实 run；实测与镜像钉版见
+[ACP 集成笔记](acp-integration-notes.md) §5，证据在 `docs/evidence/acp-m3-docker-*.txt`。
+宿主默认 harness 仍是 `pi`，ACP 族只在显式配置下启用，执行面限 inproc 与 docker；
+claude-code-acp、ACP 续接与 e2b 面（M3b）仍属后续里程碑。本文是该方向的事实源：实现与
+本文出现偏差时回写本文，而不是让代码与文档各自漂移。
 
 ## 1. 决定与定位
 
@@ -118,7 +123,10 @@ ACP prompt 是结构化 ContentBlock，不存在 pi 那样的「`/` 前缀先派
 注入值抽入该 run 的 redactor。已实测：codex-acp 读 `$HOME/.codex/auth.json`、dsh 读
 `$HOME/.dsh/.credentials.yaml`（dsh harness home 默认 `$DSH_HOME` 或 `~/.dsh`）；两者都
 尊重每 run `HOME`，真实用户目录未被修改。逐 agent 落点与证据见
-[ACP 集成笔记](acp-integration-notes.md) §4.4。system prompt 的通道也已在 M2 定下：
+[ACP 集成笔记](acp-integration-notes.md) §4.4。Docker 面沿用同一“只读复制进 run HOME”，
+再在容器内对每个凭据文件加嵌套只读挂载（HOME 本身可写，agent 要写会话/缓存）；
+`PI_GLINK_ACP_ENV` 在 docker 面按名字传给容器，值不进 argv（见集成笔记 §5.2）。
+system prompt 的通道也已在 M2 定下：
 作为 `session/prompt` 的首个围栏文本块送达（ACP v1 无 system role；见集成笔记 §4.3）。
 
 ## 5. 开源复用策略
@@ -140,7 +148,8 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 |---|---|---|---|
 | M1（GLINK-ACP-01） | ACP 族 inproc 骨架：ACP stdio JSON-RPC 客户端（复用 LF 分帧）、projector、harness 注册与配置级选择（默认仍为 pi，不动 API/前端）、run 全生命周期接入（受理/流式/取消/终态/产物回收）、fail-closed 权限应答、合成 fake ACP server 测试 | `bash scripts/check.sh` 全绿；合成测试覆盖 §4.1 映射、取消、stopReason 判定、权限拒绝、门禁；现有 pi 三面测试零回归 | 已完成（合成验证；实现口径与待实测项见 [ACP 集成笔记](acp-integration-notes.md)） |
 | M2（GLINK-ACP-02） | 真实冒烟：`dsh --profile acp` 与 `codex-acp` 各跑一次真实研究 run（inproc）；system prompt 送达通道；per-agent 凭据注入（每 run HOME/env、0600、并入 redactor）；能力矩阵、usage 口径与权限决策回写 | 真实 run 报告产物 + 集成笔记；`bash scripts/check.sh` 全绿 | **已完成**（2026-09-25）：两侧握手与最小真实 run 均成功，fail-closed 默认无需白名单；实测细节见 [ACP 集成笔记](acp-integration-notes.md) §4，证据 `docs/evidence/acp-m2-*.txt` |
-| M3 | docker / e2b 执行面扩展；e2b 双向 stdio（`stdin=True` + `send_stdin`，SDK 2.x 已具备）帧完整性实测先行；模板钉版 | 三面 smoke | 未开始 |
+| M3a（GLINK-ACP-03） | Docker 执行面：`docker/Dockerfile.acp-worker`（自包含、ARG 钉版、镜像内自检）；`docker run -i` 双向 stdio 桥接复用 M1 客户端；每 run HOME 与只读凭据挂载；容器名/停止/对账复用 `docker_env` 约定；资源限制与降权与 pi 面对齐；解除 `harness=acp + executor=docker` 的启动拒绝 | `bash scripts/check.sh` 全绿；合成 plan/钉版边界回归；镜像自检 + 一次容器内最小真实 run（流式/终态/report.md/无容器残留） | **已完成**（2026-09-25）：docker 面可用，pi docker 面零回归；实测与钉版见 [ACP 集成笔记](acp-integration-notes.md) §5，证据 `docs/evidence/acp-m3-docker-*.txt` |
+| M3b | e2b 执行面：双向 stdio（`stdin=True` + `send_stdin`，SDK 2.x 已具备）帧完整性实测先行；模板钉版；`harness=acp + executor=e2b` 的启动拒绝随之解除 | e2b smoke | 未开始（M3a 继续拒绝该组合） |
 | M4 | claude-code-acp 接入；能力矩阵补齐；如需，前端 harness 标识与按 run 选择 harness 的 API | 按当时验收 | 未开始 |
 
 每个里程碑独立验收、独立提交边界；里程碑之间允许因实测结论回写本文。
@@ -148,8 +157,9 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 ### M1 落地偏差（相对 §3–§4；详细口径见 [ACP 集成笔记](acp-integration-notes.md)）
 
 * **配置开关**：`PI_GLINK_HARNESS=pi|acp`（默认 `pi`）+ `PI_GLINK_ACP_COMMAND`；只在配置层，
-  无 API/前端参数，`public_view()` 不暴露 harness。ACP 与 docker/e2b 组合在启动即拒绝
-  （M3 做传输面）。
+  无 API/前端参数，`public_view()` 不暴露 harness。M1 落地时 ACP 只接 `inproc`；M3a 起
+  `docker` 组合可用（镜像走独立的 `LOCAL_WEB_ACP_WORKER_IMAGE`，见 §5），`e2b` 组合继续在
+  启动即拒绝（M3b）。
 * **续接（§4.4）**：M1 不实现 ACP 的 `session/resume`；ACP run 不落会话文件，追问在准入层以
   `session_unavailable` 拒绝，适配器也不会以新会话冒充追问。
 * **用量（§4.1）**：`usage_update` 保留 ACP 的「上下文窗口占用 + 累计成本」视角，投影为

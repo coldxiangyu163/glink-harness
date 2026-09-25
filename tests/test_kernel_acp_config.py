@@ -53,17 +53,9 @@ def test_the_harness_is_not_part_of_the_browser_visible_configuration() -> None:
             {
                 "PI_GLINK_HARNESS": "acp",
                 "PI_GLINK_ACP_COMMAND": "dsh acp",
-                "LOCAL_WEB_EXECUTOR": "docker",
-            },
-            "只支持 LOCAL_WEB_EXECUTOR=inproc",
-        ),
-        (
-            {
-                "PI_GLINK_HARNESS": "acp",
-                "PI_GLINK_ACP_COMMAND": "dsh acp",
                 "LOCAL_WEB_EXECUTOR": "e2b",
             },
-            "只支持 LOCAL_WEB_EXECUTOR=inproc",
+            "M3b",
         ),
     ],
 )
@@ -75,6 +67,26 @@ def test_an_unusable_harness_configuration_is_refused_at_startup(
     assert fragment in str(excinfo.value)
 
 
+def test_the_acp_docker_combination_is_accepted_since_m3a() -> None:
+    """原义务（M1）：ACP 只允许 inproc，docker/e2b 在启动即拒绝。
+
+    新义务（M3a）：docker 面已实现，配置不再拒绝；e2b 仍由 M3b 拒绝（见上一
+    个参数化用例）。这是行为决定变更，实现/测试/文档同步修改。
+    """
+    acp = config(
+        {
+            "PI_GLINK_HARNESS": "acp",
+            "PI_GLINK_ACP_COMMAND": "dsh --profile acp",
+            "LOCAL_WEB_EXECUTOR": "docker",
+        }
+    )
+    assert acp.harness == "acp" and acp.executor == "docker"
+    assert acp.acp_worker_image == "pi-glink-acp-worker:latest"
+    # A dedicated image knob: the ACP image is not the pi worker image.
+    assert acp.worker_image != acp.acp_worker_image
+    assert "acpWorkerImage" not in acp.public_view()
+
+
 def test_the_harness_invariants_are_rechecked_after_construction() -> None:
     """A directly built/overridden config still passes the same gate."""
     base = config({})
@@ -82,10 +94,14 @@ def test_the_harness_invariants_are_rechecked_after_construction() -> None:
         validate_host_config(dataclasses.replace(base, harness="acp", acp_command=""))
     with pytest.raises(ConfigError):
         validate_host_config(
-            dataclasses.replace(base, harness="acp", acp_command="dsh acp", executor="docker")
+            dataclasses.replace(base, harness="acp", acp_command="dsh acp", executor="e2b")
         )
     with pytest.raises(ConfigError):
         validate_host_config(dataclasses.replace(base, harness="nope"))
+    # M3a：ACP + docker 现在是合法组合，直接构造的配置同样被接受。
+    validate_host_config(
+        dataclasses.replace(base, harness="acp", acp_command="dsh --profile acp", executor="docker")
+    )
     # The valid pi default is accepted unchanged.
     validate_host_config(base)
 
