@@ -760,13 +760,16 @@ def test_the_e2b_acp_dockerfile_pins_what_the_notes_measured() -> None:
     assert arg("DSH_VERSION") == notes_pin("@deepseek-ai/dsh")
     assert arg("CODEX_ACP_VERSION") == notes_pin("@agentclientprotocol/codex-acp")
     # M4: the same claude pair as the docker image, pinned in this template too.
-    assert arg("CLAUDE_CODE_ACP_VERSION") == notes_pin("@zed-industries/claude-code-acp")
+    # 原义务（M4）：CLAUDE_CODE_ACP_VERSION == @zed-industries/claude-code-acp。
+    # 新义务（M6 / GLINK-ACP-08）：后继包 @agentclientprotocol/claude-agent-acp
+    # （入口 claude-agent-acp），ARG 改名 CLAUDE_AGENT_ACP_VERSION。
+    assert arg("CLAUDE_AGENT_ACP_VERSION") == notes_pin("@agentclientprotocol/claude-agent-acp")
     assert arg("CLAUDE_CODE_VERSION") == notes_pin("@anthropic-ai/claude-code")
     # M5: opencode, pinned to the same version as the docker image.
     assert arg("OPENCODE_AI_VERSION") == notes_pin("opencode-ai")
     assert '"@deepseek-ai/dsh@${DSH_VERSION}"' in text
     assert '"@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}"' in text
-    assert '"@zed-industries/claude-code-acp@${CLAUDE_CODE_ACP_VERSION}"' in text
+    assert '"@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_VERSION}"' in text
     assert '"@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"' in text
     assert '"opencode-ai@${OPENCODE_AI_VERSION}"' in text
     # Self-check: the versions are verified at build time and by the default CMD.
@@ -774,10 +777,10 @@ def test_the_e2b_acp_dockerfile_pins_what_the_notes_measured() -> None:
     assert 'CMD ["acp-self-check"]' in text
     assert "grep -qx" in text
     # E2B's build rewrites the Dockerfile text, so the script is generated line
-    # by line and claude-code-acp is verified through `npm ls` (no --version).
+    # by line; M6 起 claude 适配器自带 --version，不再用 `npm ls` 复验安装。
     assert "claude --version" in text
     assert "opencode --version" in text
-    assert "npm ls -g --depth=0" in text
+    assert "claude-agent-acp --version" in text
 
 
 def test_the_acp_e2b_template_is_not_the_production_or_pi_template() -> None:

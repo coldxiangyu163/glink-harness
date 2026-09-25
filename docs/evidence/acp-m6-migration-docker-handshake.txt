@@ -1,0 +1,180 @@
+ACP M6 迁移 Docker 面证据（镜像重建 + 容器内握手；不消耗模型调用）
+============================================================
+日期: 2026-09-25
+任务: GLINK-ACP-08（ACP 适配器后继包迁移）
+构建: docker/Dockerfile.acp-worker（claude 层换后继包 @agentclientprotocol/
+  claude-agent-acp@0.81.2，ARG 改名 CLAUDE_AGENT_ACP_VERSION，自检改用
+  `claude-agent-acp --version`）
+网络: 本机到官方源慢，按 Dockerfile 已声明的覆盖参数用 mirrors.aliyun.com +
+  registry.npmmirror.com 重建（组件版本不变）。
+脱敏: 家目录以 ~ 代替，临时目录以 $TMP/glink-acp-* 代替；凭据值不出现。
+
+一、构建命令与退出码
+------------------------------------
+$ docker build -t pi-glink-acp-worker:latest -f docker/Dockerfile.acp-worker . \
+    --build-arg DEBIAN_MIRROR=mirrors.aliyun.com \
+    --build-arg NPM_REGISTRY=https://registry.npmmirror.com
+exit=0（BUILD_EXIT=0）
+$ docker inspect --format '{{.Id}} {{.Size}} {{.Architecture}}' pi-glink-acp-worker:latest
+sha256:fb0b9c40f065aa297fad9a6cb832dfb859a961c0efc02a5c9f19c9a00b9efb0f 599274932 arm64
+
+二、构建日志尾部（含五组件自检输出）
+------------------------------------
+#5 17.87 Setting up curl (7.88.1-10+deb12u15) ...
+#5 17.87 Setting up libperl5.36:arm64 (5.36.0-7+deb12u3) ...
+#5 17.88 Setting up libcurl3-gnutls:arm64 (7.88.1-10+deb12u15) ...
+#5 17.88 Setting up perl (5.36.0-7+deb12u3) ...
+#5 17.89 Setting up liberror-perl (0.17029-2) ...
+#5 17.90 Setting up git (1:2.39.5-0+deb12u3) ...
+#5 17.91 Processing triggers for libc-bin (2.36-9+deb12u14) ...
+#5 17.92 Processing triggers for ca-certificates (20250419~deb12u1) ...
+#5 17.93 Updating certificates in /etc/ssl/certs...
+#5 18.15 0 added, 0 removed; done.
+#5 18.15 Running hooks in /etc/ca-certificates/update.d...
+#5 18.15 done.
+#5 42.86 npm warn deprecated node-domexception@1.0.0: Use your platform's native DOMException instead
+#5 61.52 
+#5 61.52 added 649 packages in 43s
+#5 61.52 npm warn install-scripts 7 packages have install scripts not yet covered by allowScripts:
+#5 61.52 npm warn install-scripts   @anthropic-ai/claude-code@2.1.282 (postinstall: node install.cjs)
+#5 61.52 npm warn install-scripts   opencode-ai@1.18.32 (postinstall: node ./postinstall.mjs)
+#5 61.52 npm warn install-scripts   @deepseek-ai/dsh-subprocess-local@0.1.5-rc.3 (postinstall: node scripts/ensure-spawn-helper.mjs)
+#5 61.52 npm warn install-scripts   koffi@3.3.1 (install: node ./cnoke.cjs -P . -D src/koffi --prebuild --release)
+#5 61.52 npm warn install-scripts   node-pty@1.2.0-beta.15 (install: node scripts/prebuild.js || node-gyp rebuild; postinstall: node scripts/post-install.js)
+#5 61.52 npm warn install-scripts   @google/genai@1.52.0 (preinstall: echo 'preinstall: no-op')
+#5 61.52 npm warn install-scripts   protobufjs@7.6.6 (postinstall: node scripts/postinstall)
+#5 61.52 npm warn install-scripts
+#5 61.52 npm warn install-scripts Run `npm install -g --allow-scripts=@anthropic-ai/claude-code,opencode-ai,@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs` to allow these scripts once, or `npm config set allow-scripts=@anthropic-ai/claude-code,opencode-ai,@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs --location=user` to allow them for all global installs.
+#5 63.20 npm warn using --force Recommended protections disabled.
+#5 DONE 63.7s
+
+#6 [3/4] RUN {       echo '#!/bin/sh';       echo 'set -eu';       echo 'dsh --version';       echo 'codex-acp --version';       echo 'claude --version';       echo 'opencode --version';       echo 'claude-agent-acp --version';     } > /usr/local/bin/acp-self-check     && chmod 0755 /usr/local/bin/acp-self-check     && /usr/local/bin/acp-self-check
+#6 0.458 0.1.5-rc.3
+#6 0.550 @agentclientprotocol/codex-acp 1.13.1
+#6 0.561 2.1.282 (Claude Code)
+#6 0.992 1.18.32
+#6 1.221 0.81.2
+#6 DONE 1.3s
+
+#7 [4/4] WORKDIR /workspace
+#7 DONE 0.0s
+
+#8 exporting to image
+#8 exporting layers
+#8 exporting layers 42.4s done
+#8 exporting manifest sha256:01f21dc9aa6cda44a449734a3efafa068d4992baad58462e5faad8bc408b726a done
+#8 exporting config sha256:f61d4046b9a4423853c7daa1ea833f2dc4cfb2d7c4220f05d9f73a47d2f6dce3 done
+#8 exporting attestation manifest sha256:34fdd10eea4d46e3943ee04912c4d720b5a1a09e3a0d9c6cadbdecc2315b3d7d 0.0s done
+#8 exporting manifest list sha256:fb0b9c40f065aa297fad9a6cb832dfb859a961c0efc02a5c9f19c9a00b9efb0f 0.0s done
+#8 naming to docker.io/library/pi-glink-acp-worker:latest done
+#8 unpacking to docker.io/library/pi-glink-acp-worker:latest
+#8 unpacking to docker.io/library/pi-glink-acp-worker:latest 10.1s done
+#8 DONE 52.6s
+
+View build details: docker-desktop://dashboard/build/colima/colima/2p3x5tmsbz5dfr7savbgpy3wl
+
+三、默认 CMD 复验（docker run --rm）
+------------------------------------
+=== docker run --rm (default CMD self-check) ===
+0.1.5-rc.3
+@agentclientprotocol/codex-acp 1.13.1
+2.1.282 (Claude Code)
+1.18.32
+0.81.2
+v24.21.0
+
+
+四、容器内握手：claude-agent-acp（生产装配路径，不发 prompt）
+------------------------------------
+ACP docker 容器内握手实测（不消耗模型调用）
+============================================
+日期: 2026-09-25 14:37:20
+镜像: pi-glink-acp-worker:latest
+容器名: pi-glink-acp-handshake-claude-agent-acp
+容器内命令: claude-agent-acp
+命令级 env 名: （无）
+凭据落点: HOME/（无）（源只读；容器内为嵌套只读挂载）
+会话配置: （无）
+数据根: $TMP/glink-acp-docker-handshake-<id>
+docker 二进制: Docker version 29.2.1, build a5c7197
+
+握手成功（2.2s）
+protocolVersion: 1
+agentInfo: {"name": "@agentclientprotocol/claude-agent-acp", "title": "Claude Agent", "version": "0.81.2"}
+agentCapabilities: {"_meta": {"claudeCode": {"promptQueueing": true}, "authStatus": {}}, "promptCapabilities": {"image": true, "embeddedContext": true}, "mcpCapabilities": {"http": true, "sse": true}, "auth": {"logout": {}}, "providers": {}, "loadSession": true, "sessionCapabilities": {"additionalDirectories": {}, "close": {}, "delete": {}, "fork": {}, "list": {}, "resume": {}, "subagents": {}}}
+authMethods: []
+sessionId: 1b5f33cc-9cb3-48fc-a836-40e6a85bcda8
+cwd: /workspace
+modes: {"currentModeId": "default", "availableModes": [{"id": "default", "name": "Manual", "description": "Always ask before making changes", "_meta": {"kind": "standard"}}, {"id": "acceptEdits", "name": "Accept edits", "description": "Automatically accept all file edits", "_meta": {"kind": "standard"}}, {"id": "plan", "name": "Plan", "description": "Create a plan before making changes", "_meta": {"kind": "plan"}}, {"id": "auto", "name": "Auto", "description": "Claude handles permission decisions", "_meta": {"kind": "auto_review"}}]}
+configOptions: [{"id": "mode", "name": "Mode", "type": "select", "category": "mode", "currentValue": "default", "description": "Session permission mode", "options": [{"value": "default", "name": "Manual", "description": "Always ask before making changes", "_meta": {"kind": "standard"}}, {"value": "acceptEdits", "name": "Accept edits", "description": "Automatically accept all file edits", "_meta": {"kind": "standard"}}, {"value": "plan", "name": "Plan", "description": "Create a plan before making changes", "_meta": {"kind": "plan"}}, {"value": "auto", "name": "Auto", "description": "Claude handles permission decisions", "_meta": {"kind": "auto_review"}}]}, {"id": "model", "name": "Model", "type": "select", "category": "model", "currentValue": "default", "description": "AI model to use", "options": [{"value": "default", "name": "Default (recommended)", "description": "Opus (1M context)"}, {"value": "opus[1m]", "name": "Opus 5.5", "description": "Opus 5.5 with 1M context · Best for everyday, complex tasks · $4/$20 per Mtok"}, {"value": "claude-fable-5-1", "name": "Fable 5.1", "description": "Fable 5.1 · Most capable for your hardest and longest-running tasks · $10/$50 per Mtok"}, {"value": "sonnet", "name": "Sonnet 5", "description": "Sonnet 5 · Efficient for routine tasks · $2/$10 per Mtok"}, {"value": "haiku", "name": "Haiku 4.5", "description": "Haiku 4.5 · Fastest for quick answers · $1/$5 per Mtok"}]}, {"id": "effort", "name": "Effort", "type": "select", "category": "thought_level", "currentValue": "default", "description": "Available effort levels for this model", "options": [{"value": "default", "name": "Default"}, {"value": "low", "name": "Low"}, {"value": "medium", "name": "Medium"}, {"value": "high", "name": "High"}, {"value": "xhigh", "name": "Xhigh"}, {"value": "max", "name": "Max"}]}, {"id": "fast", "name": "Fast mode", "type": "select", "category": "model_config", "currentValue": "off", "description": "Faster responses on supported models", "options": [{"value": "on", "name": "On"}, {"value": "off", "name": "Off"}]}]
+
+client.close(): released=True failures=[]
+容器按名对账: confirmed_absent=True detail=docker inspect 确认容器不存在 同名容器列表=''
+临时目录: $TMP/glink-acp-docker-handshake-<id>（按本脚本创建的路径清理；未做模式匹配删除）
+
+
+五、容器内握手回归：dsh（同一镜像）
+------------------------------------
+ACP docker 容器内握手实测（不消耗模型调用）
+============================================
+日期: 2026-09-25 14:37:30
+镜像: pi-glink-acp-worker:latest
+容器名: pi-glink-acp-handshake-dsh
+容器内命令: dsh --profile acp
+命令级 env 名: （无）
+凭据落点: HOME/（无）（源只读；容器内为嵌套只读挂载）
+会话配置: （无）
+数据根: $TMP/glink-acp-docker-handshake-<id>
+docker 二进制: Docker version 29.2.1, build a5c7197
+
+握手成功（1.3s）
+protocolVersion: 1
+agentInfo: {"name": "deepseek-harness-acp", "version": "0.0.1"}
+agentCapabilities: {"mcpCapabilities": {"http": true}, "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false}, "sessionCapabilities": {"close": {}, "list": {}, "resume": {}}}
+authMethods: []
+sessionId: 0d20c404-28ae-4edd-bab2-9e5eddebe1ad
+cwd: /workspace
+modes: {}
+configOptions: [{"id": "model", "name": "Model", "type": "select", "category": "model", "currentValue": "[\"deepseek-official\",\"deepseek-v4-flash\"]", "options": [{"group": "deepseek-official", "name": "DeepSeek", "options": [{"value": "[\"deepseek-official\",\"deepseek-flash\"]", "name": "DeepSeek-V41-Flash"}, {"value": "[\"deepseek-official\",\"deepseek-v4-flash\"]", "name": "DeepSeek-V4-Flash", "description": "Fast, efficient, and economical; suited to focused, routine, or parallel tasks."}, {"value": "[\"deepseek-official\",\"deepseek-v4-pro\"]", "name": "DeepSeek-V4-Pro", "description": "Stronger agentic coding, knowledge, and difficult reasoning; suited to complex or quality-critical tasks at higher cost."}, {"value": "[\"deepseek-official\",\"deepseek-v4-flash-vision-exp\"]", "name": "DeepSeek-V4-Flash-Vision-Exp"}]}]}, {"id": "reasoning_effort", "name": "Reasoning effort", "type": "select", "category": "thought_level", "currentValue": "high", "options": [{"value": "off", "name": "Off", "description": "Use for simple tasks that do not need reasoning."}, {"value": "low", "name": "Low", "description": "Prefer for routine or latency-sensitive tasks."}, {"value": "high", "name": "High", "description": "The default balance for most tasks."}, {"value": "max", "name": "Max", "description": "Reserve for the hardest quality-first tasks."}]}]
+
+client.close(): released=True failures=[]
+容器按名对账: confirmed_absent=True detail=docker inspect 确认容器不存在 同名容器列表=''
+临时目录: $TMP/glink-acp-docker-handshake-<id>（按本脚本创建的路径清理；未做模式匹配删除）
+
+
+六、容器内握手：codex-acp（无凭据，属预期阻塞；本任务禁触 ~/.codex）
+------------------------------------
+ACP docker 容器内握手实测（不消耗模型调用）
+============================================
+日期: 2026-09-25 14:37:32
+镜像: pi-glink-acp-worker:latest
+容器名: pi-glink-acp-handshake-codex-acp
+容器内命令: codex-acp
+命令级 env 名: （无）
+凭据落点: HOME/（无）（源只读；容器内为嵌套只读挂载）
+会话配置: （无）
+数据根: $TMP/glink-acp-docker-handshake-<id>
+docker 二进制: Docker version 29.2.1, build a5c7197
+
+[FAIL] initialize/session/new: AcpRequestError: session/new failed: -32000: Authentication required
+
+client.close(): released=True failures=[]
+容器按名对账: confirmed_absent=True detail=docker inspect 确认容器不存在 同名容器列表=''
+临时目录: $TMP/glink-acp-docker-handshake-<id>（按本脚本创建的路径清理；未做模式匹配删除）
+
+
+七、结论
+------------------------------------
+* 重建后的镜像五个组件版本正确（0.1.5-rc.3 / @agentclientprotocol/codex-acp
+  1.13.1 / 2.1.282 (Claude Code) / 1.18.32 / 0.81.2），默认 CMD 自检通过。
+* 容器内 claude-agent-acp 完成 initialize + session/new（cwd=/workspace），
+  能力矩阵与 inproc 一致；容器按持久化名字对账无残留。
+* dsh 回归成功；codex-acp 无凭据时 session/new 仍以 Authentication required
+  拒绝（与 M4/M3a 观测一致），三个容器都无同名残留。
+
+
+脱敏核对（本文件）
+------------------------------------
+扫描: scripts/check-no-secrets.py 的同一函数集（SecretRedactor + find_credential_shapes，
+  --repo-root 指向含 .env 的冻结 checkout；已知凭据值 2 条），2026-09-25。
+结果: 真实命中 0 处 · 占位符命中 0 处（本文件不含凭据值与密钥形状）。

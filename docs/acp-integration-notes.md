@@ -12,15 +12,17 @@
 | `合成实测` | 本仓库 M1/M2 回归（`tests/test_kernel_acp*.py` + `tests/fixtures/fake_acp.py`）。**只证明宿主侧客户端/投影/生命周期行为，不证明任何真实 agent 的实现** |
 | `dsh 实测` | dsh 0.1.5-rc.3 的真实 initialize/session/new 与真实运行（证据 `docs/evidence/acp-m2-handshake.txt`、`acp-m2-smoke-dsh.txt`） |
 | `codex-acp 实测` | codex-acp 0.16.0 的真实 initialize/session/new 与真实运行（证据 `docs/evidence/acp-m2-handshake.txt`、`acp-m2-smoke-codex-acp.txt`） |
-| `docker 实测` | M3a 的真实容器证据（`docs/evidence/acp-m3-docker-*.txt`）：镜像构建与容器内自检、容器内 ACP 握手、经宿主 HTTP API 的一次最小真实 run；M4 重建镜像后的三个 agent 容器内握手见 `docs/evidence/acp-m4-claude-docker-handshake.txt` |
+| `docker 实测` | M3a 的真实容器证据（`docs/evidence/acp-m3-docker-*.txt`）：镜像构建与容器内自检、容器内 ACP 握手、经宿主 HTTP API 的一次最小真实 run；M4 重建镜像后的三个 agent 容器内握手见 `docs/evidence/acp-m4-claude-docker-handshake.txt`；M6 重建镜像后的 claude 后继包容器内握手与回归见 `docs/evidence/acp-m6-migration-docker-handshake.txt` |
 | `e2b 帧实测` | M3b 帧完整性探针的真实沙箱输出（`docs/evidence/acp-m3-e2b-framing.txt`，base 模板，e2b SDK 2.51.0）：保序、字节一致、LF 分帧、大帧与 `close_stdin` |
-| `e2b 模板实测` | M3b 的 dev 模板 CLI 构建与真实沙箱自检（`docs/evidence/acp-m3-e2b-template.txt`）：`glink-acp-worker`、构建日志、两次失败与修复 |
-| `e2b 握手实测` | M3b 用生产装配路径在两个 agent 上的真实沙箱 `initialize`/`session/new`（`docs/evidence/acp-m3-e2b-agent-check.txt`）；M4 的同路径 claude-code-acp 沙箱握手见 `docs/evidence/acp-m4-claude-e2b-handshake.txt` |
+| `e2b 模板实测` | M3b 的 dev 模板 CLI 构建与真实沙箱自检（`docs/evidence/acp-m3-e2b-template.txt`）：`glink-acp-worker`、构建日志、两次失败与修复；M6 的后继钉版重建见 `docs/evidence/acp-m6-migration-e2b-handshake.txt` |
+| `e2b 握手实测` | M3b 用生产装配路径在两个 agent 上的真实沙箱 `initialize`/`session/new`（`docs/evidence/acp-m3-e2b-agent-check.txt`）；M4 的同路径 claude-code-acp 沙箱握手见 `docs/evidence/acp-m4-claude-e2b-handshake.txt`；M6 的同路径 claude-agent-acp 握手见 `docs/evidence/acp-m6-migration-e2b-handshake.txt` |
 | `e2b 实测` | M3b 经宿主 HTTP API 的一次最小真实 run（`docs/evidence/acp-m3-e2b-smoke.txt`）：SSE 流式、终态、report 回收、沙箱按 id 终止 |
-| `claude 实测` | M4 的真实 claude-code-acp 事实（`docs/evidence/acp-m4-claude-handshake.txt`、`acp-m4-claude-smoke.txt`）：钉版入口、能力矩阵、每 run HOME/凭据落点、源码级权限 kind 观测、一次真实模型的 inproc 最小 run |
+| `claude 实测` | M4 的真实 claude-code-acp 事实（`docs/evidence/acp-m4-claude-handshake.txt`、`acp-m4-claude-smoke.txt`）：钉版入口、能力矩阵、每 run HOME/凭据落点、源码级权限 kind 观测、一次真实模型的 inproc 最小 run（M4 钉版 0.16.2；后继包对照见下一行） |
+| `claude-agent 实测` | M6 的真实 `@agentclientprotocol/claude-agent-acp@0.81.2` 事实（`docs/evidence/acp-m6-migration-handshake.txt`、`acp-m6-migration-smoke.txt`、`acp-m6-migration-docker-handshake.txt`、`acp-m6-migration-e2b-handshake.txt`）：入口/版本、能力矩阵差异、settings env 凭据形态（原生 cli 与 `CLAUDE_CODE_EXECUTABLE` 两条通道）、两次 inproc 最小真实 run、镜像/dev 模板重建与容器/沙箱握手 |
+| `M6 源码` | 只读参考 `@agentclientprotocol/claude-agent-acp@0.81.2` 的安装产物（`dist/acp-agent.js` 的 `claudeCliPath()`、`dist/managed-policy.js` 等）；不作为运行时事实，用于解释真实观测 |
 | `opencode 实测` | M5 的真实 opencode 事实（`docs/evidence/acp-m5-opencode-handshake.txt`、`acp-m5-opencode-smoke.txt`、`acp-m5-opencode-docker-handshake.txt`、`acp-m5-opencode-e2b-handshake.txt`）：钉版入口、能力矩阵、每 run HOME/凭据落点（inproc/docker/e2b）、一次真实模型的 inproc 最小 run 与 0 条权限请求 |
 | `opencode 源码` | 只读参考 opencode 1.18.32 的上游源码（`anomalyco/opencode` v1.18.32 的 `packages/opencode/src/acp/{permission,event,tool}.ts` 等）；不作为运行时事实，用于解释真实观测 |
-| `镜像自检` | `pi-glink-acp-worker` 镜像内各组件的版本输出（构建期日志与本机 `docker run --rm` 复验，M4 起含 claude 双包；证据同 `docker 实测` 与 `docs/evidence/acp-m4-claude-docker-handshake.txt`） |
+| `镜像自检` | `pi-glink-acp-worker` 镜像内各组件的版本输出（构建期日志与本机 `docker run --rm` 复验，M4 起含 claude 双包，M6 起为后继包 claude-agent-acp；证据同 `docker 实测` 与 `docs/evidence/acp-m6-migration-docker-handshake.txt`） |
 | `npm` | npm registry 元数据（`npm view`） |
 | `宿主代码` | 本仓库实现（`host/pi_glink/kernel/`、`config.py`） |
 | `待实测` | 需要真实 agent/授权或其它执行面才能确认 |
@@ -41,6 +43,11 @@ initialize + session/new（不消耗模型）并经宿主 HTTP API 各跑一次�
 `opencode acp`）接入：inproc 握手、每 run `auth.json` 注入（OAuth access/refresh 并入
 redactor）、状态目录落点、权限形态与一次最小真实 run 均已实测；镜像与 dev 模板加
 opencode 钉版层并完成容器/沙箱握手，见 §8。
+**M6 完成（GLINK-ACP-08，2026-09-25）**：claude 适配器迁到后继包
+`@agentclientprotocol/claude-agent-acp@0.81.2`（入口 `claude-agent-acp`）——inproc 握手与
+能力矩阵重新实测、settings env 凭据形态在新版成立、两次最小真实 run（原生通道与
+`CLAUDE_CODE_EXECUTABLE` 通道）通过；镜像与 dev 模板换后继钉版层并完成容器/沙箱握手；
+codex 侧的旧包引用收尾清零，见 §9。
 
 ## 1. 协议事实（v1）
 
@@ -386,7 +393,7 @@ ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现
   `@agentclientprotocol/codex-acp`：旧包 `@zed-industries/codex-acp`（0.16.0，M2 实测）
   已被 npm 标记 deprecated（“replaced by @agentclientprotocol/codex-acp”，`npm`），
   后继包 1.13.1 用仓库 M1 客户端实测 `initialize` 协商回 `protocolVersion=1`
-  并声明 `sessionCapabilities`（`docker 实测`）；本次只验证握手，真实模型 run 仍列在 §10。
+  并声明 `sessionCapabilities`（`docker 实测`）；本次只验证握手，真实模型 run 仍列在 §11。
 * 镜像默认命令即自检：`dsh --version && codex-acp --version`；构建期还用 ARG 精确比对
   两个 `--version` 输出（不一致即构建失败），因此“镜像里装的是声明版本”是可复核事实
   （`镜像自检`/`宿主代码`）。实测：`pi-glink-acp-worker:latest`（sha256:4268dca9d9ed…，
@@ -467,11 +474,11 @@ ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现
 ### 5.5 与 M2 的差异与风险
 
 * **codex-acp 包替换**：0.16.0（旧包）→ 1.13.1（后继包）。M3a 只验证了容器内
-  initialize/session/new；M3b 在 e2b 沙箱内也只验证握手；后继包的真实模型 run 仍待授权（§10）。
+  initialize/session/new；M3b 在 e2b 沙箱内也只验证握手；后继包的真实模型 run 仍待授权（§11）。
 * **只读范围**：只读的是凭据文件（嵌套 `:ro` 挂载），HOME 本身可写——agent 必须能写
   sessions/cache；不是整个 HOME 只读（`宿主代码`/`docker 实测`）。
 * **容器 root 与宿主挂载**：容器内是 root，但 macOS/Colima 下 bind mount 的属主仍是宿主
-  用户；Linux 宿主上 root 写 bind mount 的 uid 归属与文件属主变化**待实测**（§10）。
+  用户；Linux 宿主上 root 写 bind mount 的 uid 归属与文件属主变化**待实测**（§11）。
 * **共享路径约束**：Colima 只共享 home 树，数据根必须在共享路径内（见 §5.4）；
   不同 Docker 后端（Docker Desktop/Linux 原生）的共享范围与“非共享路径静默空挂载”行为
   待逐环境实测。
@@ -620,7 +627,7 @@ pi 面模板 `pi-glink-worker` 也未动（`e2b 模板实测`）。
 * **模板独立性**：`glink-acp-worker` 是 dev 模板，未发布/未移动任何 tag；升级同样需要
   重新构建与沙箱自检（§6.2）。
 * **仍未实测**：`@agentclientprotocol/codex-acp@1.13.1` 在 e2b 面的真实模型 run、
-  e2b 面的真实 `session/cancel` 响应时延（§10）。
+  e2b 面的真实 `session/cancel` 响应时延（§11）。
 
 ## 7. M4 实测（2026-09-25，claude-code-acp 接入）
 
@@ -634,11 +641,12 @@ pi 面模板 `pi-glink-worker` 也未动（`e2b 模板实测`）。
 
 | 组件 | 钉版与入口 | 实测事实 |
 |---|---|---|
-| claude-code-acp | `@zed-industries/claude-code-acp@0.16.2`（npm `latest`），入口 `claude-code-acp`（无参数即 stdio ACP server） | npm 告警该包已 deprecated（"renamed to @agentclientprotocol/claude-agent-acp"），本任务按 brief 钉 0.16.2，后继包迁移评估留后续（`npm`/`claude 实测`） |
+| claude-code-acp（M4 钉版） | `@zed-industries/claude-code-acp@0.16.2`（npm `latest`），入口 `claude-code-acp`（无参数即 stdio ACP server） | npm 告警该包已 deprecated（"renamed to @agentclientprotocol/claude-agent-acp"）；M4 按 brief 钉 0.16.2，**M6 已完成后继包迁移，见 §9**（`npm`/`claude 实测`） |
 | 被驱动的 claude CLI | 适配器依赖 `@anthropic-ai/claude-agent-sdk@0.2.44`，后者自带 vendor `cli.js`（版本 2.1.44）；环境变量 `CLAUDE_CODE_EXECUTABLE` 可覆盖 | SDK 按路径后缀识别“原生二进制”并直接 spawn；指向本机 claude（2.1.281）时子进程命令行实测为 `…/bin/claude --output-format stream-json … --permission-mode default`（`claude 实测`/`宿主代码`） |
 | 镜像/模板内 claude CLI | `@anthropic-ai/claude-code@2.1.282`（构建时 npm `latest`） | 官方包用平台可选依赖 + postinstall 放置原生二进制；npm 11 默认不跑生命周期脚本，构建里显式执行包内 `install.cjs`（`镜像自检`/`e2b 模板实测`） |
 
-inproc 面的钉版调用是 `npx -y @zed-industries/claude-code-acp@0.16.2`（不全局安装）；因为
+inproc 面的钉版调用是 `npx -y @zed-industries/claude-code-acp@0.16.2`（不全局安装；M6 起
+为 `npx -y @agentclientprotocol/claude-agent-acp@0.81.2`，见 §9）；因为
 每 run 的 `HOME` 是新的，npx 缓存也随 run 新建，探针用 `PI_GLINK_ACP_ENV` 注入
 `npm_config_cache` 共享一份缓存，避免冷下载超过 initialize 的 60s 上限（`宿主代码`/`claude 实测`）。
 
@@ -656,7 +664,7 @@ inproc 面的钉版调用是 `npx -y @zed-industries/claude-code-acp@0.16.2`（�
 | `session/new` 返回 | `sessionId` + `configOptions`（model、reasoning_effort） | `sessionId` + `modes` + `configOptions`（5 项） | `sessionId` + `models`（default/opus/opus[1m]/haiku）+ `modes`（default/acceptEdits/plan/dontAsk/bypassPermissions）；**`configOptions` 为空数组** | `sessionId` + `modes`（空对象）+ `configOptions`（`model`、`mode`；选中具体模型后联出 `effort`）（`opencode 实测`） |
 | 会话配置面 | `session/set_config_option` 可用 | `session/set_config_option` 可用 | 无 `configOptions`：`PI_GLINK_ACP_SESSION_CONFIG` 对它不适用（配了会失败闭环，缺省不配即是无操作）（`claude 实测`） | `session/set_config_option` 可用；实测 `model=openai/gpt-5.6-sol-fast` 生效，`model=…` 后 `configOptions` 多出 `effort`（`opencode 实测`） |
 
-补充实测：
+补充实测（M4 钉版 0.16.2 的记录；M6 后继包 0.81.2 的逐条差异见 §9.2）：
 
 * `session/new` 后立即广播 `available_commands_update`（claude 本次 47 条；opencode 3 条：
   customize-opencode、init、review）；宿主对 ACP 族仍拒绝一切 `/` 开头 prompt，agent 声明命令
@@ -691,7 +699,8 @@ inproc 面的钉版调用是 `npx -y @zed-industries/claude-code-acp@0.16.2`（�
 5. **驱动哪个 CLI 会影响 auth 判定。** SDK 自带 cli.js 2.1.44 在同一份运行期 settings 下
    `auth status` 报 `loggedIn=false`，本机 2.1.281 报 `true`；inproc 冒烟因此按适配器官方通道设
    `CLAUDE_CODE_EXECUTABLE=本机 claude`（2.1.281），而不是赌 2.1.44 是否会在真实请求上应用
-   settings env（`claude 实测`）。
+   settings env（`claude 实测`）。**M6 重测**：后继包的 SDK 0.3.280 原生 cli 2.1.280 认
+   settings env（§9.3），该绕行不再是必选项。
 6. **每 run HOME 落点**：`.claude/settings.json`（0600，注入值并入该 run 的 redactor）、
    `.claude.json`（0600）、`.claude/{backups,debug,sessions,projects}` 与 `Library/Caches`
    都在 run HOME 内，随 run 销毁；docker 面再对凭据文件加嵌套只读挂载，e2b 面在沙箱内
@@ -785,14 +794,15 @@ API key，否则属预期阻塞。
 ### 7.8 与既有面的差异与风险
 
 * **claude-code-acp 与它的后继包**：0.16.2 已被 npm 标记 deprecated（改名
-  `@agentclientprotocol/claude-agent-acp`）；本任务按要求钉旧包，升级路径是改 ARG →
-  重建 → 边界测试 → 握手/冒烟（§7.5）。
+  `@agentclientprotocol/claude-agent-acp`）；M4 按 brief 钉旧包，升级路径是改 ARG →
+  重建 → 边界测试 → 握手/冒烟。**M6 已按该路径完成迁移**（ARG/包名/入口、镜像与 dev
+  模板重建、边界测试、握手与两次冒烟），旧包钉版记录留作 M4 历史，见 §9。
 * **usage 面**：本次 claude 的 141 条事件里没有 `usage_update`（终态 `usage=null`），适配器
   不发就该如实空着，不伪造；token 用量在 claude 的 ACP 面上暂不可得（`claude 实测`）。
 * **重复的 `tool_call` 通知**：claude-code-acp 对同一个 `toolCallId` 会先后发两条
   `tool_call`（先程序名、后完整标题），产品面因此出现成对的 `tool_started`；这是适配器
   行为，不是宿主丢帧或重复执行，本次如实记录，未改投影语义（`claude 实测`/`宿主代码`）。
-* **`session/cancel`、续接、docker/e2b 真实模型 run**：仍未实测，见 §10。
+* **`session/cancel`、续接、docker/e2b 真实模型 run**：仍未实测，见 §11。
 * **Keychain 形态因机而异**：本机条目为空壳，其他机器若真用订阅登录，keychain 读路径同样
   “按用户不按 HOME”，但 inproc 之外仍不可用；升级/换机时应重跑 §7.3 的检查（`claude 实测`）。
 
@@ -875,7 +885,7 @@ API key，否则属预期阻塞。
   分类，不需要 M4 那种按 `toolCallId` 回查通知（`opencode 源码`/`宿主代码`）。
 * **决策**：**不为 opencode 启用白名单**；`PI_GLINK_ACP_PERMISSION_ALLOW` 默认空集不变，M4 的
   最小集合仍然只属于 claude-code-acp 的运行配置。哪些工具会触发 prompt（源码里的 `bash`、
-  外部目录路径等）本轮未在真实 run 观测到，记入 §10（`opencode 实测`/`opencode 源码`）。
+  外部目录路径等）本轮未在真实 run 观测到，记入 §11（`opencode 实测`/`opencode 源码`）。
 
 ### 8.5 一次 inproc 最小真实冒烟
 
@@ -974,11 +984,141 @@ API key，否则属预期阻塞。
 * **会话选项的实时变化不投影**：`config_option_update` 只记一条 `kernel_status`（§8.2）；
   产品侧看到的仍是 `session_ready` 时的快照（`宿主代码`/`opencode 实测`）。
 * **权限请求的触发面未闭环**：本轮真实 run 没有触发任何请求，源码里的 `bash`/外部目录路径
-  等触发点未在真实 run 观测（§10）。
+  等触发点未在真实 run 观测（§11）。
 * **能力位形态差异**：opencode 的 `sessionCapabilities` 值全是空对象、`modes` 也是空对象，
   宿主只按存在性/整体形状记录，不解析内部字段（`opencode 实测`）。
 
-## 9. M1 合成验证覆盖
+## 9. M6 实测（2026-09-25，claude 后继包迁移）
+
+本节每条都标来源。证据文件：`docs/evidence/acp-m6-migration-handshake.txt`（inproc
+握手、入口/版本与凭据形态，不消耗模型）、`acp-m6-migration-smoke.txt`（两次最小真实
+run）、`acp-m6-migration-docker-handshake.txt`（镜像重建、容器内握手与回归）、
+`acp-m6-migration-e2b-handshake.txt`（dev 模板重建、沙箱自检与握手）。协议侧零新增：
+claude-agent-acp 走的仍是同一份 `AcpRpcClient`、投影与生命周期判定；宿主 `kernel/`
+无需行为改动（新适配器满足同一契约，见 §9.7）。
+
+### 9.1 版本与入口
+
+| 组件 | 钉版与入口 | 实测事实 |
+|---|---|---|
+| claude-agent-acp | `@agentclientprotocol/claude-agent-acp@0.81.2`（npm `latest`），入口 `claude-agent-acp`（无参数即 stdio ACP server，自带 `--version`） | 旧包 `@zed-industries/claude-code-acp@0.16.2` 被 npm 标记 renamed（旧 bin `claude-code-acp` 无 `--version`，M4 只能读安装包 package.json）；版本跨度大，能力/凭据/权限按本节重新实测，M4 结论不直接平移（`npm`/`claude-agent 实测`） |
+| 被驱动的 claude CLI | `@anthropic-ai/claude-agent-sdk@0.3.280` 自带平台原生 cli（实测 2.1.280）；`CLAUDE_CODE_EXECUTABLE` 仍优先（适配器 `claudeCliPath()`，M6 源码只读核对） | M4 的 SDK 0.2.44 自带 vendor cli.js 2.1.44；新版改原生二进制且**认运行期 settings 的 env**（同一派生 HOME 下 `auth status` loggedIn=true、空 HOME false），M4 的 `CLAUDE_CODE_EXECUTABLE` 不再是必选项；旧通道仍实测可用（`claude-agent 实测`/`M6 源码`） |
+| 镜像/模板内 claude CLI | `@anthropic-ai/claude-code@2.1.282`（不变） | 构建期与自检见 §9.5 |
+
+### 9.2 能力矩阵差异（M4 0.16.2 → M6 0.81.2，逐条）
+
+`protocolVersion` 仍为 1；`promptCapabilities`（image、embeddedContext）与
+`mcpCapabilities`（http、sse）与 M4 相同。其余变化（响应原文见证据文件）：
+
+| 字段 | M4（claude-code-acp 0.16.2） | M6（claude-agent-acp 0.81.2） |
+|---|---|---|
+| `agentInfo` | `{"name":"@zed-industries/claude-code-acp","title":"Claude Code","version":"0.16.2"}` | `{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"0.81.2"}` |
+| `authMethods` | `[claude-login]`（Run `claude /login`） | `[]`（登录态改由 `agentCapabilities.auth={logout}` 与 `_meta.authStatus` 表达） |
+| `sessionCapabilities` | fork/list/resume | additionalDirectories/close/delete/fork/list/resume/subagents |
+| 其他新增能力位 | — | `_meta.claudeCode.promptQueueing=true`、`_meta.authStatus`、`auth={logout}`、`providers={}` |
+| `session/new` | sessionId + models + modes（default/acceptEdits/plan/dontAsk/bypassPermissions）+ **`configOptions` 空数组** | sessionId + modes（default/acceptEdits/plan/auto/bypassPermissions；`dontAsk`→`auto`）+ **`configOptions` = mode/model/effort**（容器/沙箱另有第 4 项 fast）；不再单列 models |
+| `PI_GLINK_ACP_SESSION_CONFIG` | 不适用（无 configOptions，配了会失败闭环） | 适用：`mode=plan` 生效（modes.currentModeId 与 configOptions 同步） |
+| `available_commands` | 47 条 | 45 条（宿主门禁仍拒绝 `/` 开头 prompt） |
+| 每 run HOME 落点（握手期观测） | `.claude/{backups,debug,sessions,projects}` + `.claude.json` + `Library/Caches` | `.claude/{backups,sessions}` + `.claude.json`（debug/projects 握手期未创建，落点全在 run HOME 内） |
+| 权限请求 `kind` | 请求不带 kind（宿主按同 `toolCallId` 回查，`toolKindSource=tool_call`） | 请求自带 kind（冒烟 `toolKindSource=request`） |
+| `usage_update` | 141 条事件里 0 条，终态 usage=null | 每次 run 7 条，终态落 totalTokens/contextSize/cost（basis=acp_usage_update） |
+| 重复 `tool_call` 通知 | 同一 `toolCallId` 两条 | 单条（无成对重复） |
+
+环境差异（各面如实记录）：docker 容器（root）下 `bypassPermissions` 不在会话选项里、
+却有 `fast`；inproc 有 `bypassPermissions`、无 `fast`；e2b 沙箱（user 1001）握手
+`configOptions` = mode/model/effort/fast（`claude-agent 实测`）。
+
+### 9.3 凭据形态与每 run HOME（inproc 实测）
+
+结论：**M4 的 settings env 派生在新版仍然成立**，而且不再需要 `CLAUDE_CODE_EXECUTABLE`
+绕行；该通道也仍受支持（两次冒烟各走一条，见 §9.6）。
+
+* 派生方式不变：只取 `~/.claude/settings.json` 的 `env` 块（本次 11 个键）写成运行期
+  settings（0600，经 `PI_GLINK_ACP_CREDENTIAL_FILES` 复制进 `HOME/.claude/settings.json`），
+  真实文件全程只读（sha256 前后一致）；hooks/plugins/statusLine 不进入 run。
+* 新版 SDK 0.3.280 的原生 cli 2.1.280 在同一份派生 settings 下 `auth status --json` 报
+  `loggedIn=true / authMethod=oauth_token`，空 HOME 报 `loggedIn=false`；M4 的 vendor
+  cli.js 2.1.44 在同探针报 false。两次真实冒烟分别在原生通道与
+  `CLAUDE_CODE_EXECUTABLE=宿主 claude 2.1.281` 通道完成（`claude-agent 实测`）。
+* 每 run HOME 落点全在 run 目录内、随 run 销毁；docker/e2b 面仍无 Keychain，真实模型
+  run 需要宿主提供 API key 或本机 settings env（M6 未覆盖 docker/e2b 真实模型 run）。
+
+### 9.4 权限（实测变化）
+
+* 新版权限请求**自带 `kind`**（两次冒烟的 2 条 `acp_permission_allowed` 全是
+  `toolKindSource=request`）；M4 的“无 kind 请求 + 按同一 `toolCallId` 回查”路径仍是
+  兼容分支（宿主保留，合成回归不变）。
+* 白名单沿用 M4 最小集合 `allow_once,read,search,fetch,edit`：两次冒烟都只放行
+  fetch/edit，本次未出现 execute 类请求（execute 仍由合成回归钉住拒绝）。
+* 会话模式选项变化（`dontAsk` → `auto`）对宿主是数据面差异：宿主只透传
+  `configOptions`，不按取值分支；`PI_GLINK_ACP_SESSION_CONFIG` 只按 id=value 应用。
+
+### 9.5 镜像与 dev 模板（后继钉版层）
+
+* `docker/Dockerfile.acp-worker`：claude 层换 `@agentclientprotocol/claude-agent-acp@0.81.2`，
+  ARG 改名 `CLAUDE_AGENT_ACP_VERSION`，自检改用 `claude-agent-acp --version`（新入口
+  自带）；dsh/codex/opencode/claude CLI 四个钉版不变。重建实测（mirrors.aliyun.com +
+  registry.npmmirror.com）：`pi-glink-acp-worker:latest` =
+  `sha256:fb0b9c40f065…`（linux/arm64，`docker inspect` 599274932 字节）；默认 CMD 输出
+  五组件版本（0.1.5-rc.3 / `@agentclientprotocol/codex-acp` 1.13.1 / 2.1.282
+  (Claude Code) / 1.18.32 / 0.81.2），镜像内 `node -v` = v24.21.0（`docker 实测`/`镜像自检`）。
+* 容器内握手（生产装配路径，不发 prompt）：claude-agent-acp 完成 initialize +
+  session/new（`cwd=/workspace`，agentInfo/authMethods/sessionCapabilities 与 §9.2 一致），
+  容器按持久化名字对账无残留；dsh 回归成功；codex-acp 无凭据仍报
+  `-32000 Authentication required`（与 M3a/M4 一致）（`docker 实测`）。
+* `docker/e2b/Dockerfile.acp-e2b`：同一后继钉版与同一自检（`claude-agent-acp --version`）；
+  用 E2B CLI 重建 dev 模板 `glink-acp-worker`（同一 Template ID
+  `oen0rq47o2sizakry5v3`，新 Build ID `b39f87fc-e829-4c67-8e9d-0bff53b8c8f5`，1m53s），
+  构建期与 finalize 的 start command 都输出五组件版本；真实沙箱内 claude-agent-acp 完成
+  initialize + session/new（`cwd=/home/user/workspace`，configOptions mode/model/effort/fast），
+  沙箱按 id 终止无残留；生产模板 `glink-frontier-e2b` 与 pi 模板 `pi-glink-worker` 未被
+  触碰（`e2b 模板实测`/`e2b 握手实测`）。
+* 钉版边界回归同步：docker 与 e2b 测试的 claude 断言改到后继包/新 ARG/`--version`
+  自检（注释写明原义务/新义务），dsh/codex/opencode 与自检形态断言不变（`合成实测`）。
+
+### 9.6 两次 inproc 最小真实冒烟（授权 ≤2 次，本任务即两次）
+
+`harness=acp + executor=inproc`、临时数据根、随机端口、300s 有界超时、同一短题；宿主
+HTTP API 创建 run，SSE 与终态从 HTTP 面核对（证据 `acp-m6-migration-smoke.txt`）：
+
+* **#1 原生通道**（只给派生 settings，不设 `CLAUDE_CODE_EXECUTABLE`）：终态
+  `finished`、`modelStopReason=end_turn`、`reportStatus=ok`，67.8s、147 条事件；
+  `/report` 200（806 bytes）；`turn_finished` 先于 `run_finished`；终态
+  `usage={"totalTokens":18939,"contextSize":1000000,"basis":"acp_usage_update",
+  "cost":{"amount":0.142636,"currency":"USD"}}`。
+* **#2 M4 通道**（`CLAUDE_CODE_EXECUTABLE=宿主 claude 2.1.281`）：33.3s、175 条事件；
+  `/report` 200（787 bytes）；终态同上（usage 7 条快照）。
+* 两次都：2 条 `acp_permission_allowed`（fetch/edit，`toolKindSource=request`）、
+  `tool_started`/`tool_finished` 各 2 条（无重复 tool_call）、宿主按持有 PID
+  `terminate`（exit -15）、后代进程全部退出、`cleanup.released=true`、
+  `container_name/sandbox_id` 均为 None。
+* 脱敏：两次数据根经 `scripts/check-no-secrets.py` 均“扫描文件 4 个 · 真实命中 0 处”；
+  events 里 `ANTHROPIC` 0 命中；真实 settings.json sha256 前后一致。
+* 本机语义沿 M4：仍由 settings env 的第三方 Anthropic 兼容端点驱动，不是 Claude 订阅
+  （`claude-agent 实测`）。
+
+### 9.7 宿主侧实现变更（M6）
+
+* **零行为改动**：新适配器在协议面满足同一份 `AcpRpcClient`/投影/生命周期契约
+  （inproc 握手 + 两次真实冒烟 + 容器/沙箱握手直接复用生产装配路径），`kernel/` 只更新
+  了注释里的 agent 名单；`PI_GLINK_ACP_COMMAND` 等配置面不变（命令仍是显式配置）。
+* inproc/docker/e2b 三个 live 探针的默认 claude 入口改到 `claude-agent-acp@0.81.2`
+  （docker/e2b 面命令名为 `claude-agent-acp`），e2b 模板自检增加 claude 组件版本断言。
+
+### 9.8 与既有面的差异与风险
+
+* **M4 结论不可平移的部分已逐条重测**：能力矩阵（§9.2）、凭据形态（§9.3）、权限 kind
+  来源与 usage（§9.4/§9.6）。旧包 0.16.2 的兼容分支（无 kind 请求、configOptions 为空）
+  保留在宿主与合成回归里，不因迁移删除。
+* **docker/e2b 面真实模型 run 仍未实测**：两面没有 Keychain，宿主未提供
+  `ANTHROPIC_API_KEY`；M6 只做无模型握手（延续 M4 的预期阻塞口径，见 §11）。
+* **会话选项面扩大**：`configOptions` 现在有 mode/model/effort(/fast)，
+  `PI_GLINK_ACP_SESSION_CONFIG` 对 claude 从“不适用”变为“可用”，但宿主不校验取值域
+  （agent 拒绝即失败闭环）；路径级权限策略仍属后续能力。
+* **版本跨度大**：0.16.2 → 0.81.2 的其余未观测行为（`session/cancel`、续接、e2b/docker
+  真实 run）按 §11 继续待实测。
+
+## 10. M1 合成验证覆盖
 
 `tests/test_kernel_acp.py`（客户端/投影）与 `tests/test_kernel_acp_runner.py`（run 生命周期），
 fixture 为 `tests/fixtures/fake_acp.py`（真实子进程、真实 stdio）：
@@ -1015,16 +1155,13 @@ M5 新增/更新（`合成实测`）：`tests/test_kernel_acp_env.py` 增三项 
 `OPENCODE_AI_VERSION`（Dockerfile ARG 必须等于本笔记记录的实测版本）与五组件自检断言，
 既有四项钉版、`acp-self-check`/CMD 与 dev 模板独立性断言不变。
 
-## 10. 剩余待实测项（§4–§8 已覆盖的不再列）
+## 11. 剩余待实测项（§4–§9 已覆盖的不再列）
 
 | 待测事实 | 为什么重要 | 验证方式 |
 |---|---|---|
-| `session/resume` / `session/load` 真实续接（含 dsh 的持久会话语义；claude-code-acp 声明了 `resume`/`fork`/`list`） | M1 起追问仍显式拒绝；M2 只确认能力位存在，M4 只记录 claude 的能力位 | 授权后的真实续接 run + 终态/状态目录核对 |
+| `session/resume` / `session/load` 真实续接（含 dsh 的持久会话语义；claude 一列声明了 `resume`/`fork`/`list`，M6 的 claude-agent-acp 另增 `close`/`delete`/`subagents`） | M1 起追问仍显式拒绝；M2 只确认能力位存在，M4/M6 只记录 claude 的能力位 | 授权后的真实续接 run + 终态/状态目录核对 |
 | `session/cancel` 真实响应时延与终态（含工具收敛） | 取消体验；M2 两次 run 未触发取消；M3a docker 面、M3b e2b 面、M4 inproc 面同样未触发 | 真实 run + 计时 |
-| claude-code-acp 的真实模型 run（docker / e2b 面） | M4 只验证了这两面的无模型握手：容器/沙箱没有 Keychain，宿主也未提供 `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` | 提供 API key 后按 §7.6 同形冒烟（需新授权） |
-| `@zed-industries/claude-code-acp` 后继包 `@agentclientprotocol/claude-agent-acp` 的迁移评估 | 钉版 0.16.2 已被 npm 标记 deprecated（与 M3a 的 codex-acp 包替换同类问题） | 后继包版本核对 + 能力矩阵/握手/冒烟对照 |
-| `@anthropic-ai/claude-agent-sdk` 自带 cli.js（2.1.44）是否会在真实请求上应用 settings 的 env | 本机实测它的 `auth status` 不认 settings env（2.1.281 认）；M4 因此用 `CLAUDE_CODE_EXECUTABLE` 走了本机 CLI | 无模型：换用 2.1.44 直接发一次请求/检查请求头；或升级适配器版本后重测 |
-| claude-code-acp 的 `usage_update`（本次 141 条事件里 0 条）与重复 `tool_call` 通知（同一 `toolCallId` 两条） | 前者影响用量呈现，后者影响工具卡片时序；两者都是适配器行为，宿主如实记录 | 升级适配器版本后对照事件流；必要时与上游反馈 |
+| claude-agent-acp 的真实模型 run（docker / e2b 面） | M4/M6 都只验证了这两面的无模型握手：容器/沙箱没有 Keychain，宿主也未提供 `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`（M6 的 inproc 两次真实 run 见 §9.6） | 提供 API key 后按 §7.6/§9.6 同形冒烟（需新授权） |
 | opencode 的权限请求触发面（`bash`、外部目录路径等） | M5 真实 run 的 `webfetch`/`apply_patch` 未发请求，白名单未被引用（§8.4）；触发点来自上游源码而非实测 | 授权后一次会用到 shell/外部路径的真实 run，对照 `toolKindSource=request` 与决定记录 |
 | opencode 的真实模型 run（e2b 面，含只读凭据下的刷新写回） | M5 已验证 docker 面（用 inproc 刷新后的副本，只读挂载成立）；e2b 面的真实 run 与容器/沙箱内能否在只读凭据下刷新 token 未实测 | 提供有效凭据后按 §8.7 同形冒烟（需新授权） |
 | opencode 的 `session/cancel` 真实响应时延与终态 | M5 的 run 正常结束，未触发取消路径 | 真实 run + 计时 |
