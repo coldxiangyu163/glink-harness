@@ -527,12 +527,21 @@ CONFIG_OPTIONS = [
     },
 ]
 
+MODES = {
+    "currentModeId": "read-only",
+    "availableModes": [
+        {"id": "read-only", "name": "Read Only"},
+        {"id": "auto", "name": "Default"},
+    ],
+}
+
 
 def test_acp_session_config_is_applied_and_recorded(tmp_path: Path) -> None:
     log = tmp_path / "agent.jsonl"
     settings = {
         "FAKE_ACP_LOG": str(log),
         "FAKE_ACP_CONFIG_OPTIONS": CONFIG_OPTIONS,
+        "FAKE_ACP_MODES": MODES,
         "FAKE_ACP_WRITE_REPORT": True,
     }
     _config, store, manager = build_manager(
@@ -548,6 +557,11 @@ def test_acp_session_config_is_applied_and_recorded(tmp_path: Path) -> None:
     modes = {option["id"]: option["currentValue"] for option in ready["configOptions"]}
     assert modes["mode"] == "auto"
     assert modes["reasoning_effort"] == "high"
+    assert ready["modes"]["currentModeId"] == "auto"
+    assert [mode["id"] for mode in ready["modes"]["availableModes"]] == [
+        "read-only",
+        "auto",
+    ]
 
 
 def test_acp_session_config_already_current_is_not_re_sent(tmp_path: Path) -> None:

@@ -275,6 +275,16 @@ class AcpExecutionAdapter(ExecutionAdapter):
                 for entry in self._config_options:
                     if str(entry.get("id") or "") == config_id:
                         entry["currentValue"] = value
+            # codex-acp models its approval presets both as a ``mode`` config
+            # option and as ``modes``; keep the run record's mode state truthful
+            # when the value really is one of the advertised mode ids.
+            mode_ids = {
+                str(mode.get("id"))
+                for mode in self._modes.get("availableModes", [])
+                if isinstance(mode, Mapping)
+            }
+            if config_id == "mode" and value in mode_ids:
+                self._modes["currentModeId"] = value
 
     def _accept_initialize(self, negotiated: Mapping[str, Any]) -> None:
         version = negotiated.get("protocolVersion")
