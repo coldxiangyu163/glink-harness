@@ -583,6 +583,114 @@ def test_stop_that_lands_before_the_sandbox_starts_is_still_cancelled(
     assert sandbox.killed is True, "a cancelled run must still destroy its sandbox"
 
 
+# -- the deadline's late-write race -------------------------------------------
+#
+# GLINK-ACP-11 fixed this family on the ACP face: the outcome is a shared,
+# mutable object, and a driver write that lands after ``wait()`` decided the
+# deadline could rewrite the decided error text. The E2B pi face had no freeze:
+# its ``_drive`` checkpoint (``if self._cancelled.is_set(): return``) refuses
+# writes the cancellation got to see first, but a driver that already passed
+# that checkpoint before the deadline was decided still writes afterwards.
+# This regression holds that window open deterministically.
+
+
+class LateWriteGate:
+    """The window between the driver's checkpoint and its outcome write."""
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.open = threading.Event()
+
+
+class _GatedExitCode:
+    """An exit code whose ``int()`` blocks inside the late-write window.
+
+    ``_drive`` converts the result's exit code with ``int()`` after its
+    cancellation checkpoint and before writing the outcome, so blocking
+    exactly there makes the race deterministic instead of hoping for a
+    scheduling coincidence.
+    """
+
+    def __init__(self, code: int, gate: LateWriteGate) -> None:
+        self._code = code
+        self._gate = gate
+
+    def __int__(self) -> int:
+        self._gate.entered.set()
+        # A bounded wait keeps a failing test from hanging the suite.
+        self._gate.open.wait(timeout=10)
+        return self._code
+
+    def __eq__(self, other: object) -> bool:
+        return self._code == other
+
+    def __ne__(self, other: object) -> bool:
+        return self._code != other
+
+    def __hash__(self) -> int:
+        return hash(self._code)
+
+    def __str__(self) -> str:
+        return str(self._code)
+
+
+class _GatedResult:
+    """The real run result with its exit code replaced by the gated one."""
+
+    def __init__(self, result: Any, gate: LateWriteGate) -> None:
+        self._result = result
+        self.exit_code = _GatedExitCode(result.exit_code, gate)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._result, name)
+
+
+class DeadlineRaceSandbox(FakeSandbox):
+    """FakeSandbox that opens the late-write window when the deadline kills it."""
+
+    def __init__(self, *, gate: LateWriteGate, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._gate = gate
+
+    def kill(self) -> None:
+        super().kill()
+        self._gate.open.set()
+
+
+def test_e2b_timeout_error_text_survives_a_late_driver_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deadline's error text is final; the driver's late write cannot rewrite it.
+
+    The window is deterministic: the driver's exit code is converted with a
+    gated ``int()`` that releases when the deadline path kills the sandbox, so
+    the ``kernel_exit`` write lands after ``wait()`` wrote the timeout verdict.
+    Without a freeze the run keeps ``stop_reason=timeout`` but its error text
+    becomes the kernel-exit report.
+    """
+    gate = LateWriteGate()
+    config = make_config(tmp_path, LOCAL_WEB_TASK_TIMEOUT_SECONDS="1")
+    sandbox = DeadlineRaceSandbox(gate=gate, exit_code=1, events=_FAKE_EVENTS)
+    original = E2BSandboxClient.run_prompt
+
+    def gated_run_prompt(self: Any, *args: Any, **kwargs: Any) -> _GatedResult:
+        return _GatedResult(original(self, *args, **kwargs), gate)
+
+    monkeypatch.setattr(E2BSandboxClient, "run_prompt", gated_run_prompt)
+    manager, storage = _manager(config, sandbox, tmp_path)
+    record = manager.start("超时后 driver 才写完 outcome")
+    # The driver passed its cancellation checkpoint and is held before its
+    # outcome write, so the deadline cannot settle the run while it is held.
+    assert gate.entered.wait(timeout=10), "the driver never reached the late-write window"
+
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None
+    assert (final.status, final.stop_reason) == ("failed", "timeout")
+    assert "run did not settle within" in (final.error or "")
+    assert sandbox.killed is True, "the deadline must still destroy its sandbox"
+    assert _event_kinds(storage, record.run_id)[-1] == "run_failed"
+
+
 # -- stream parsing -----------------------------------------------------------
 
 

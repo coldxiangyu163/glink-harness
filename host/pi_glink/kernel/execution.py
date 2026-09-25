@@ -407,6 +407,15 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
         self._on_identity = on_identity
         self._client: E2BSandboxClient | None = None
         self._outcome = ExecutionOutcome()
+        #: The outcome is shared: the driver thread reports the sandbox
+        #: command's result into it while the run thread decides the verdict
+        #: from it. ``wait`` freezes it in the same critical section that
+        #: writes each decision (and, on the settled path, as soon as the
+        #: driver is done), so every driver write lands either before that
+        #: decision or after the freeze -- a late ``kernel_exit`` report can
+        #: no longer rewrite a decided timeout error text.
+        self._outcome_lock = threading.Lock()
+        self._outcome_sealed = False
         self._done = threading.Event()
         self._cancelled = threading.Event()
         self._released = True
@@ -496,21 +505,13 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
                 )
             if self.spec.expected_session_id and self._session_id != self.spec.expected_session_id:
                 raise PiRpcError("continued session identity did not match the parent")
-            self._outcome.exit_code = int(result.exit_code)
-            if result.exit_code != 0:
-                self._outcome.stop_reason = "kernel_exit"
-                self._outcome.error = (
-                    f"sandbox pi exited with {result.exit_code}: {result.stderr_tail[-300:]}"
-                )
-            else:
-                # ``--mode json`` exits after the supplied prompt finishes: a
-                # zero exit is this face's settle signal.
-                self._outcome.settled = True
+            self._record_result(
+                exit_code=int(result.exit_code), stderr_tail=result.stderr_tail
+            )
         except Exception as exc:  # noqa: BLE001 - reported in the outcome
             if self._cancelled.is_set():
                 return
-            self._outcome.stop_reason = "execution_error"
-            self._outcome.error = f"{type(exc).__name__}: {exc}"
+            self._record_failure(f"{type(exc).__name__}: {exc}")
         finally:
             self._done.set()
 
@@ -527,25 +528,97 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
             self._session_id = frame["id"]
         self._on_frame(frame)
 
+    # -- the outcome's writers ------------------------------------------------
+    #
+    # Every write below is guarded by ``_outcome_lock`` and refused once the
+    # outcome is sealed. ``wait`` seals it in the same critical section that
+    # writes the decision (and, on the settled path, as soon as the driver is
+    # done), so a driver write either precedes that decision (and is
+    # overridden by it) or follows the seal (and is dropped). Unlike the ACP
+    # face there is no controlled late write here: ``close`` does not complete
+    # this outcome.
+
+    def _record_result(self, *, exit_code: int, stderr_tail: str) -> None:
+        """Record the sandbox command's result unless the verdict is decided."""
+        with self._outcome_lock:
+            if self._outcome_sealed:
+                logger.debug(
+                    "late sandbox result ignored run=%s: the verdict is decided",
+                    self.spec.run_id,
+                )
+                return
+            self._outcome.exit_code = exit_code
+            if exit_code != 0:
+                self._outcome.stop_reason = "kernel_exit"
+                self._outcome.error = (
+                    f"sandbox pi exited with {exit_code}: {stderr_tail[-300:]}"
+                )
+            else:
+                # ``--mode json`` exits after the supplied prompt finishes: a
+                # zero exit is this face's settle signal.
+                self._outcome.settled = True
+
+    def _record_failure(self, message: str) -> None:
+        """Record the driver's error unless the verdict is decided."""
+        with self._outcome_lock:
+            if self._outcome_sealed:
+                logger.debug(
+                    "late failure report ignored run=%s: the verdict is decided",
+                    self.spec.run_id,
+                )
+                return
+            self._outcome.stop_reason = "execution_error"
+            self._outcome.error = message
+
+    def _settle_timeout(self) -> None:
+        """Decide the deadline and freeze the outcome in one critical section."""
+        with self._outcome_lock:
+            self._outcome.timed_out = True
+            self._outcome.stop_reason = "timeout"
+            self._outcome.error = (
+                f"run did not settle within {self.spec.timeout_seconds}s"
+            )
+            self._outcome_sealed = True
+
+    def _settle_cancelled(self) -> None:
+        """Decide cancellation and freeze the outcome in one critical section.
+
+        An accepted cancellation stays the verdict even when the deadline (or
+        a settled turn) was decided first, exactly as before the freeze: the
+        flag is written and the outcome resealed rather than refused.
+        """
+        with self._outcome_lock:
+            self._outcome.cancelled = True
+            self._outcome.stop_reason = "abort"
+            self._outcome_sealed = True
+
+    def _seal_outcome(self) -> None:
+        """Freeze the driver-written decision before the verdict is read."""
+        with self._outcome_lock:
+            self._outcome_sealed = True
+
     def wait(self, *, cancel: Callable[[], bool], deadline: float) -> ExecutionOutcome:
         while True:
             if cancel() and not self._done.is_set():
                 self.cancel()
             remaining = deadline - time.monotonic()
             if self._done.wait(min(_POLL_SECONDS, max(remaining, 0.0))):
+                # The driver's report is complete the moment ``_done`` is set
+                # (its outcome writes precede the ``finally``): seal it before
+                # the verdict reads it.
+                self._seal_outcome()
                 break
             if remaining <= 0:
-                self._outcome.timed_out = True
-                self._outcome.stop_reason = "timeout"
-                self._outcome.error = (
-                    f"run did not settle within {self.spec.timeout_seconds}s"
-                )
+                # The decision and its freeze are one critical section: a
+                # driver write racing this point lands either before it (where
+                # this decision overrides it) or after the seal (where it is
+                # refused), never between the two.
+                self._settle_timeout()
                 self.cancel()
                 self._done.wait(30.0)
                 break
         if cancel():
-            self._outcome.cancelled = True
-            self._outcome.stop_reason = "abort"
+            self._settle_cancelled()
         return self._outcome
 
     def cancel(self) -> None:

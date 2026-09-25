@@ -371,6 +371,8 @@ node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 26 个角�
 与 FrontierAgent 保持同一套命名：模型 `OPENAI_*`，云沙箱 `E2B_*`，服务与执行面 `LOCAL_WEB_*`；本项目独有概念使用 `PI_GLINK_*`。完整列表（含注释）见 [.env.example](.env.example)。
 
 宿主读一次配置后冻结，运行中的 host 不会因为改环境变量而改变行为。
+配置来源优先级固定为：进程环境同名变量 > `.env` 文件 > 内置默认值；
+`OPENAI_CONTEXT_WINDOW` / `OPENAI_MAX_TOKENS` 与表内其它键遵循同一顺序。
 
 操作员常改、且此前未进文档的键（每条写明默认值与何时需要改）：
 
