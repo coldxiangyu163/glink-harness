@@ -129,6 +129,29 @@ def test_process_environment_wins_over_env_file(tmp_path: Path) -> None:
     assert config.port == 9999
 
 
+def test_process_environment_inherits_the_pi_model_metadata_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two ``OPENAI_*`` metadata keys inherit the process environment too.
+
+    原义务：``OPENAI_CONTEXT_WINDOW`` / ``OPENAI_MAX_TOKENS`` 不在
+    ``_looks_configured`` 白名单里，导出到进程环境时被 ``load_config`` 过滤，
+    只有写进 ``.env``（或显式传入 ``env``）才生效——与同族 ``OPENAI_API_KEY``
+    等键以及 ``load_config`` 的"进程环境优先"承诺不一致。
+
+    新义务：它们与同族键一样按进程环境、``.env``、默认值的顺序生效。
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "OPENAI_CONTEXT_WINDOW=1111\nOPENAI_MAX_TOKENS=2222\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("OPENAI_CONTEXT_WINDOW", "3333")
+    monkeypatch.setenv("OPENAI_MAX_TOKENS", "4444")
+    config = load_config(None, REPO_ROOT, env_file=env_file)
+    assert config.context_window == 3333
+    assert config.max_output_tokens == 4444
+
+
 def test_public_view_never_leaks_credentials_or_paths() -> None:
     config = build_config(
         {

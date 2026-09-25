@@ -598,10 +598,25 @@ def _default_repo_root() -> Path:
 
 
 def _looks_configured(key: str) -> bool:
+    """Whether a process-environment variable belongs to this host's configuration.
+
+    The allowlist keeps an unrelated variable from relabelling a run; it lists
+    every key the host itself reads, not a prefix. ``OPENAI_CONTEXT_WINDOW``
+    and ``OPENAI_MAX_TOKENS`` (the pi face's model metadata) belong here too.
+
+    Old obligation: the two keys were missing from the list, so an exported
+    value was silently filtered out and only a ``.env`` entry took effect --
+    contradicting ``load_config``'s documented "process environment over
+    ``.env``" precedence, which the other host-owned ``OPENAI_*`` keys keep.
+    New obligation: they are inherited like the rest of the list and still
+    go through ``build_config``'s fail-closed integer validation.
+    """
     return key.startswith(("LOCAL_WEB_", "PI_GLINK_", "PI_CODING_AGENT_")) or key in {
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENAI_MODEL",
+        "OPENAI_CONTEXT_WINDOW",
+        "OPENAI_MAX_TOKENS",
         "E2B_API_KEY",
     }
 
