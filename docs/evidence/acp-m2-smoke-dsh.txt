@@ -117,6 +117,14 @@ assistant_delta 1 · run_finished 1 · run_started 1 · session_ready 1 · think
   59 1790298529.601 turn_finished     
   60 1790298529.642 run_finished      status=finished modelStopReason=end_turn reportStatus=ok cleanup=True
 
+每 run HOME 凭据落点核对（真实 run 后实测）
+------------------------------------------------------------------------------
+HOME 目录模式        0o700（run 的 acp-agent 目录同样 0700）
+注入文件             .dsh/.credentials.yaml
+注入文件模式/大小    0o600 / 463 bytes
+源文件 ~/.dsh/.credentials.yaml 的 sha256 在握手与冒烟前后一致
+（源文件从未被写入/改权限；每次运行只读复制）
+
 report.md 回收
 ------------------------------------------------------------------------------
 GET /api/runs/<id>/report -> 200 text/markdown; charset=utf-8
