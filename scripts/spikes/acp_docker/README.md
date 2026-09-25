@@ -1,4 +1,4 @@
-# ACP docker 面的 live 探针（GLINK-ACP-05 / M4）
+# ACP docker 面的 live 探针（GLINK-ACP-05 / M4 起，M5 扩展）
 
 `handshake.py` 用生产装配路径（`build_config` → `prepare_acp_runtime` →
 `docker_env.build_acp_plan` → `AcpExecutionAdapter`）在本地 `pi-glink-acp-worker`
@@ -6,10 +6,16 @@
 持久化容器名 force-remove、确认无同名容器残留。不是默认检查的一部分。
 
 ```bash
-# 握手（claude-code-acp 是 M4 新增；dsh / codex-acp 可复跑作回归）
+# 握手（claude-code-acp 是 M4 新增；opencode 是 M5 新增；其余可复跑作回归）
 .venv/bin/python scripts/spikes/acp_docker/handshake.py --command claude-code-acp
+.venv/bin/python scripts/spikes/acp_docker/handshake.py --command 'opencode acp'
 .venv/bin/python scripts/spikes/acp_docker/handshake.py --command 'dsh --profile acp'
 .venv/bin/python scripts/spikes/acp_docker/handshake.py --command codex-acp
+
+# M5：同时验证每 run HOME 的凭据与容器内嵌套只读挂载（不打印凭据值）
+.venv/bin/python scripts/spikes/acp_docker/handshake.py --command 'opencode acp' \
+  --credential ~/.local/share/opencode/auth.json=.local/share/opencode/auth.json \
+  --session-config model=openai/gpt-5.6-sol-fast
 ```
 
 前置：`docker build -t pi-glink-acp-worker:latest -f docker/Dockerfile.acp-worker .`

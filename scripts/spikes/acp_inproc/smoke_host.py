@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ACP inproc 最小真实冒烟（GLINK-ACP-05 / M4）。
+"""ACP inproc / docker 面最小真实冒烟（GLINK-ACP-05 / M4 起，M5 扩展）。
 
 一次短题、有界超时、临时数据根、随机端口：起真实宿主进程（``python -m
 pi_glink.app``）→ ``POST /api/runs`` → 同时订阅 SSE 看流式 → 轮询终态 →
@@ -165,8 +165,20 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="PI_GLINK_ACP_PERMISSION_ALLOW（默认留空 = fail-closed 原行为）",
     )
+    parser.add_argument(
+        "--session-config",
+        default="",
+        help="PI_GLINK_ACP_SESSION_CONFIG（; 分隔的 id=value，如 model=openai/gpt-6-astra-fast）",
+    )
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--data-root", default="")
+    parser.add_argument(
+        "--executor",
+        default="inproc",
+        choices=("inproc", "docker"),
+        help="执行面（docker 面需把 --data-root 放在 $HOME 下：Colima 只共享 home 树）",
+    )
+    parser.add_argument("--image", default="", help="docker 面的 ACP worker 镜像（LOCAL_WEB_ACP_WORKER_IMAGE）")
     parser.add_argument("--log", default="")
     args = parser.parse_args(argv)
 
@@ -205,21 +217,35 @@ def main(argv: list[str] | None = None) -> int:
             "PI_GLINK_RESOURCE_RECONCILE_SECONDS": "0",
         }
     )
+    if args.executor == "docker":
+        env["LOCAL_WEB_EXECUTOR"] = "docker"
+        if args.image:
+            env["LOCAL_WEB_ACP_WORKER_IMAGE"] = args.image
+        home = Path.home()
+        if not str(data_root).startswith(str(home)):
+            print(
+                f"[warn] docker 面数据根 {data_root} 不在 $HOME 下：Colima 只共享 home 树，"
+                "非共享路径会被静默空挂载（见集成笔记 §5.4）",
+                file=sys.stderr,
+            )
     if credentials:
         env["PI_GLINK_ACP_CREDENTIAL_FILES"] = ";".join(credentials)
     if env_entries:
         env["PI_GLINK_ACP_ENV"] = ";".join(env_entries)
     if args.permission_allow:
         env["PI_GLINK_ACP_PERMISSION_ALLOW"] = args.permission_allow
+    if args.session_config:
+        env["PI_GLINK_ACP_SESSION_CONFIG"] = args.session_config
     env.pop("PI_GLINK_WEB_SEARCH_CONFIG", None)
 
     print("ACP M4 最小真实冒烟（inproc）")
     print("=" * 44)
     print(f"日期: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"宿主命令: python -m pi_glink.app --port {port}（harness=acp, executor=inproc）")
+    print(f"宿主命令: python -m pi_glink.app --port {port}（harness=acp, executor={args.executor}）")
     print(f"agent 命令: {args.agent}")
     print(f"命令级 env 名: {', '.join(name for name, _ in (e.split('=', 1) for e in env_entries)) or '（无）'}")
     print(f"权限白名单: {args.permission_allow or '（空 = fail-closed）'}")
+    print(f"会话配置: {args.session_config or '（无）'}")
     print(f"数据根: {data_root}")
     print(f"任务超时: {args.timeout}s")
     if source_settings is not None:

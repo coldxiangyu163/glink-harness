@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""ACP docker 面容器内握手探针（GLINK-ACP-05 / M4，不消耗模型调用）。
+"""ACP docker 面容器内握手探针（GLINK-ACP-05 / M4 起，GLINK-ACP-06 / M5 扩展，不消耗模型调用）。
 
 用**生产装配路径**（``build_config`` → ``prepare_acp_runtime`` →
 ``docker_env.build_acp_plan`` → ``AcpExecutionAdapter``）在本地 ACP worker
 镜像里跑 ``initialize`` + ``session/new``，不发 ``session/prompt``：
 
-* 证明镜像里的 claude-code-acp 经 ``docker run -i`` 的容器 stdio 完成 ACP 握手；
+* 证明镜像里的 ACP agent 经 ``docker run -i`` 的容器 stdio 完成 ACP 握手；
 * 记录 ``session/new`` 的 ``cwd``（容器路径 ``/workspace``）、能力矩阵与会话选项；
+* ``--credential`` 把源文件只读复制进 run HOME（容器内以嵌套只读挂载呈现，
+  M5 用 opencode 的 ``auth.json`` 验证这条通道）；``--session-config`` 实测
+  ``PI_GLINK_ACP_SESSION_CONFIG``；
 * 结束时按持久化容器名 force-remove，并确认无同名容器残留。
 
-容器内无 macOS Keychain、本机也没有 ANTHROPIC_API_KEY：**这条探针不发 prompt**，
-因此不需要模型凭据；docker/e2b 面的真实模型 run 属预期阻塞，如实记录。
-不打印任何凭据值。
+容器内没有宿主凭据时，**这条探针不发 prompt**，因此不需要模型凭据；
+docker/e2b 面的真实模型 run 属预期阻塞，如实记录。不打印任何凭据值。
 """
 
 from __future__ import annotations
@@ -46,6 +48,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--command", default=DEFAULT_COMMAND)
     parser.add_argument("--image", default="pi-glink-acp-worker:latest")
     parser.add_argument("--env", action="append", default=[], help="NAME=value，可重复")
+    parser.add_argument("--credential", action="append", default=[], help="source=dest，可重复")
+    parser.add_argument(
+        "--session-config",
+        default="",
+        help="PI_GLINK_ACP_SESSION_CONFIG（; 分隔的 id=value）",
+    )
     parser.add_argument("--timeout", type=int, default=180)
     args = parser.parse_args(argv)
 
@@ -63,6 +71,10 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.env:
         values["PI_GLINK_ACP_ENV"] = ";".join(args.env)
+    if args.credential:
+        values["PI_GLINK_ACP_CREDENTIAL_FILES"] = ";".join(args.credential)
+    if args.session_config:
+        values["PI_GLINK_ACP_SESSION_CONFIG"] = args.session_config
     config = build_config(values, REPO_ROOT)
 
     run_id = "m4-handshake-" + args.command.split()[0].replace("/", "_")
@@ -78,6 +90,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"容器名: {plan.container_name}")
     print(f"容器内命令: {args.command}")
     print(f"命令级 env 名: {', '.join(name for name, _ in config.acp_env) or '（无）'}")
+    credential_dests = ", ".join(dest for _source, dest in config.acp_credential_files) or "（无）"
+    print(f"凭据落点: HOME/{credential_dests}（源只读；容器内为嵌套只读挂载）")
+    session_config = "; ".join(
+        f"{name}={value}" for name, value in config.acp_session_config
+    )
+    print(f"会话配置: {session_config or '（无）'}")
     print(f"数据根: {workdir}")
     print(f"docker 二进制: {subprocess.run(['docker', '--version'], capture_output=True, text=True).stdout.strip()}")
 
