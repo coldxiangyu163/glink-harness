@@ -1,0 +1,134 @@
+ACP M9 E2B 回收失败 → 追问准入拒绝证据（真实 run + 真实沙箱）
+==========================================================
+日期: 2026-09-25
+任务: GLINK-ACP-15 项 2（回收上限触顶后的追问准入拒绝；与 acp-m9-e2b-recover-limits.txt 同项）
+宿主/执行面: python -m pi_glink.app，harness=acp，executor=e2b
+模板: glink-acp-worker（dev 模板，未重建）
+agent: dsh --profile acp（模板内钉版；能力位 sessionCapabilities.resume）
+凭据: ~/.dsh/.credentials.yaml=.dsh/.credentials.yaml（只读复制进每 run HOME；本证据不含其内容）
+探针: scripts/spikes/acp_e2b/recover_refusal_admission.py
+代码范围: e565452 基线（探针为本任务新增；kernel/ 无改动）
+数据根: $TMP/glink-acp15-e2b-refusal-b/data（尝试 1 为 ...-refusal-a）
+脱敏: 家目录以 ~ 代替、工作目录以 $TMP/... 代替；凭据值与 E2B_API_KEY 不出现。
+模型调用: 本项 2 轮（尝试 1 判据缺陷、尝试 2 干净通过；两次都是同一个真实 run 形状）。
+  本任务合计 4 轮真实模型调用（docker 首轮+追问 2 轮 + 本项 2 轮），等于授权上限 ≤4。
+
+机制（为什么这构成“真实回收失败 → 追问拒绝”）
+------------------------------------------------
+1. 真实宿主 + 真实沙箱跑一次父 run（dsh + 真实模型）。
+2. 回合进行中（session_ready 已出现、run 仍 running），探针用真实 SDK
+   `Sandbox.connect(sandbox_id)` 连到**同一个沙箱**，用沙箱内命令把合成大文件写进其 ACP
+   状态根（`/home/user/acp/home/bloat.bin` = 9437184 B > 单文件上限 8388608 B）。文件不
+   经宿主上传通道，所以能超过 e2b 上传上限而仍落在状态根里。
+3. run finalize 调用**生产回收函数**（e2b 面 `recover_state()`）：它整份拒绝、不发布
+   `recovered` 根，并把原因写进终态帧 `artifactFailures`。
+4. 以该 run 作父再 POST `/api/runs`（`parentRunId`）：准入层读不到父状态根，按
+   `session_unavailable` 拒绝（HTTP 409），**在起沙箱之前**，不预支一次注定失败的云端 run。
+
+尝试 1（判据缺陷；实质事实与尝试 2 同形）
+----------------------------------------
+runId 046248b3cceb / sandbox hibb9luw13y2h4safdngg（原始输出关键行）:
+
+  [注入] 等待 sandbox_id/session_ready: sandbox_id=ihib9luw13y2h4safdngg session_ready=True status=running
+  [注入] {"sandboxId": "ihib9luw13y2h4safdngg", "sessionReadySeen": true, "runStatusAtInject": "running", "command": "head -c 9437184 /dev/zero > /home/user/acp/home/bloat.bin", "exitCode": 0, "seconds": 1.03, "bloatSizeInSandbox": 9437184}
+  [追问准入] POST /api/runs（parentRunId=046248b3cceb）-> HTTP 409
+  [追问准入] 响应: {"error": "session_unavailable"}
+  宿主按 PID 59274 终止: exit=-15
+  终态帧 artifactFailures: ["沙箱状态文件不可读取或超过上限: bloat.bin: 文件超过上限（9437184 > 8388608 字节）"]
+  acp-agent/recovered 存在: False
+  acp-agent/.recovered.staging 存在: False
+  新建沙箱: 无
+  新建 run: 无
+  sandbox_id=ihib9luw13y2h4safdngg confirmed_absent=True detail=SDK 确认沙箱不存在
+  注入生效: True；父 run 判据: False；追问拒绝判据: True
+  [FAIL] …
+
+缺陷：探针把“父 run 记录了 resume 能力位”写成
+`capabilities["sessionCapabilities"]["resume"] is True`，而 dsh 的真实能力矩阵是
+`{"close": {}, "list": {}, "resume": {}}`——resume 位是**存在**（空对象），不是布尔 true；
+宿主自身用生产函数 `acp_resume_method()` 判定，所以真正的准入条件已经满足，只有探针这一条
+自检判据错。修复：改用同一个生产函数 `acp_resume_method(capabilities) == "session/resume"`。
+尝试 1 的其余事实（注入、拒绝码、无新建 run/沙箱、按 id 终止）与尝试 2 一致，上面的关键行
+就是原文。
+
+尝试 2（修复后，原始输出）
+--------------------------
+ACP M9 E2B 回收失败 → 追问准入拒绝实测
+================================================
+日期: 2026-09-25 20:11:43
+宿主命令: python -m pi_glink.app --port 56947（harness=acp, executor=e2b）
+agent 命令: dsh --profile acp
+模板: glink-acp-worker（dev 模板，未重建）
+凭据目标: .dsh/.credentials.yaml（只读复制进每 run HOME）
+数据根: $TMP/glink-acp15-e2b-refusal-b/data
+任务超时: 300s
+合成超限文件: /home/user/acp/home/bloat.bin = 9437184 B（单文件上限 8388608 B；在 run 回合内用 SDK 直连同一沙箱写入）
+
+宿主 PID: 74568（只按这个 PID 收尾）
+宿主健康检查: HTTP 200
+[父 run] POST /api/runs -> HTTP 201
+[父 run] runId: 92b9557281c0
+[注入] 等待 sandbox_id/session_ready: sandbox_id=istvs26tzbbx30jrujzl7 session_ready=True status=running
+[注入] {"sandboxId": "istvs26tzbbx30jrujzl7", "sessionReadySeen": true, "runStatusAtInject": "running", "command": "head -c 9437184 /dev/zero > /home/user/acp/home/bloat.bin", "exitCode": 0, "seconds": 0.83, "bloatSizeInSandbox": 9437184}
+[父 run] 终态: finished report=ok session_id=262dd3f3-eea5-46d7-bf2d-51c1203e7f3c
+[追问准入] 拒绝前：运行中沙箱 ['ity9h1lxjuq5alb1lah8f']；run 数 1
+[追问准入] POST /api/runs（parentRunId=92b9557281c0）-> HTTP 409
+[追问准入] 响应: {"error": "session_unavailable"}
+[追问准入] 拒绝后：运行中沙箱 ['ity9h1lxjuq5alb1lah8f']；run 数 1
+宿主按 PID 74568 终止: exit=-15
+
+父 run 回收事实
+  runId: 92b9557281c0  status=finished modelStopReason=end_turn
+  sessionId: 262dd3f3-eea5-46d7-bf2d-51c1203e7f3c
+  session_ready 条数: 2
+  首帧: {"harness": "acp", "sessionId": "262dd3f3-eea5-46d7-bf2d-51c1203e7f3c", "resumed": null, "stateRootRecovered": null, "sandboxId": "istvs26tzbbx30jrujzl7"}
+  末帧: {"resumed": null, "stateRootRecovered": false, "sandboxId": "istvs26tzbbx30jrujzl7"}
+  记录的能力位 sessionCapabilities: {"close": {}, "list": {}, "resume": {}}
+  记录的能力位判定（生产函数 acp_resume_method）: session/resume
+  loadSession: None
+  终态帧 artifactFailures: ["沙箱状态文件不可读取或超过上限: bloat.bin: 文件超过上限（9437184 > 8388608 字节）"]
+  宿主 acp-agent 目录存在: True；条目: ['home']
+  acp-agent/recovered 存在: False
+  acp-agent/.recovered.staging 存在: False
+  cleanup: {"released": true, "failures": [], "external": {"sandbox": "istvs26tzbbx30jrujzl7"}}
+
+追问准入事实
+  POST 返回: HTTP 409 body={"error": "session_unavailable"}
+  拒绝前运行中沙箱: ['ity9h1lxjuq5alb1lah8f']
+  拒绝后运行中沙箱: ['ity9h1lxjuq5alb1lah8f']
+  新建沙箱: 无
+  拒绝前 run 列表: ['92b9557281c0']
+  拒绝后 run 列表: ['92b9557281c0']
+  新建 run: 无
+
+沙箱按 id 对账
+  sandbox_id=istvs26tzbbx30jrujzl7 confirmed_absent=True detail=SDK 确认沙箱不存在
+
+宿主日志尾部
+  2026-09-25 20:12:17,139 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Fworkspace%2Freport.md "HTTP/1.1 200 OK"
+  2026-09-25 20:12:22,126 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2F.anonymous-user-id "HTTP/1.1 200 OK"
+  2026-09-25 20:12:22,356 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2F.credentials.yaml "HTTP/1.1 200 OK"
+  2026-09-25 20:12:22,550 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2Fprofiles%2Facp%2Fcordis.patch.yml "HTTP/1.1 200 OK"
+  2026-09-25 20:12:22,755 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2Fprofiles%2Facp%2Fcordis.yml "HTTP/1.1 200 OK"
+  2026-09-25 20:12:22,947 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2Fprofiles%2Facp%2Fpackage.json "HTTP/1.1 200 OK"
+  2026-09-25 20:12:23,175 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2Fprofiles%2Facp%2Fpnpm-workspace.yaml "HTTP/1.1 200 OK"
+  2026-09-25 20:12:23,371 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2Fsessions%2F--home-user-workspace--%2F262dd3f3-eea5-46d7-bf2d-51c1203e7f3c%2Fsession.lock "HTTP/1.1 200 OK"
+  2026-09-25 20:12:23,577 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2Fsessions%2F--home-user-workspace--%2F262dd3f3-eea5-46d7-bf2d-51c1203e7f3c%2Fsession.v3.jsonl.zstd "HTTP/1.1 200 OK"
+  2026-09-25 20:12:24,108 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2Fstorages%2Fsession_projcache%2Fsessions%2F262dd3f3-eea5-46d7-bf2d-51c1203e7f3c.json "HTTP/1.1 200 OK"
+  2026-09-25 20:12:24,607 INFO httpx: HTTP Request: DELETE https://api.e2b.app/sandboxes/istvs26tzbbx30jrujzl7 "HTTP/1.1 204 No Content"
+  2026-09-25 20:12:24,616 INFO pi_glink.kernel.runner: run finalized run=92b9557281c0 status=finished stop=None committed=True report=$TMP/glink-acp15-e2b-refusal-b/data/runs/92b9557281c0/artifacts/report.md released=True
+
+  注入生效: True；父 run 判据: True；追问拒绝判据: True
+[PASS] E2B 回收失败 → 追问准入拒绝（真实回收失败 / 末帧 stateRootRecovered=false / 409 session_unavailable / 不新建 run 与沙箱 / 按 id 终止）
+
+脱敏扫描
+--------
+$ .venv/bin/python scripts/check-no-secrets.py --data-root $TMP/glink-acp15-e2b-refusal-b/data --repo-root ~/AI/git/pi-glink
+凭据来源 2 条 · 扫描文件 4 个 · 真实命中 0 处 · 占位符命中 0 处
+未发现真实凭据残留。
+exit=0
+$ .venv/bin/python scripts/check-no-secrets.py --data-root $TMP/glink-acp15-e2b-refusal-a/data --repo-root ~/AI/git/pi-glink
+凭据来源 2 条 · 扫描文件 4 个 · 真实命中 0 处 · 占位符命中 0 处
+未发现真实凭据残留。
+exit=0
+证据文件形状自检（docs/evidence/acp-m9-e2b-recover-refusal.txt）：0 命中。

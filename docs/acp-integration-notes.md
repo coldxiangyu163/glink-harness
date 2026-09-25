@@ -1277,9 +1277,9 @@ HTTP API 创建 run，SSE 与终态从 HTTP 面核对（证据 `acp-m6-migration
 
 * **e2b 面追问**（M7 时点）：状态根随沙箱销毁，需要“销毁前回收状态根、追问时灌回新沙箱”；
   M7 按 §10.3 显式拒绝。**M8 已实现并实测**（dsh 跨沙箱续接），见 §14。
-* **docker 面续接未 live 验证**：实现复用同一适配器，工作区与状态根都在宿主可见
-  （§5.2），但本任务未授权 docker live；“隔离替身不能替代镜像/模板验证”的口径仍适用
-  （`待实测`）。
+* **docker 面续接已 live 验证（M9，§15.1）**：实现复用同一适配器，工作区与状态根都在
+  宿主可见（§5.2）；本机 live 冒烟（dsh 首轮 + 追问）确认新容器、同 sessionId、代号
+  回环与按名对账无残留（`docs/evidence/acp-m9-docker-resume-dsh.txt`）。
 * **dsh/codex-acp 的真实 resume 未跑**：两者都声明 `resume`，宿主分支相同；列入 §12 待实测。
 * **继承上限**：64 MiB 总量 / 8 MiB 单文件对长会话（opencode 的 sqlite、claude transcript）
   可能触顶；触顶时 fail-closed 拒绝追问。是否改为“只继承会话存储白名单”或提高上限，等
@@ -1336,13 +1336,17 @@ M5 新增/更新（`合成实测`）：`tests/test_kernel_acp_env.py` 增三项 
 
 ## 12. 剩余待实测项（§4–§10 已覆盖的不再列）
 
+**2026-09-25 更新（M9）**：下表中「docker 面的 ACP 真实续接 run」与「e2b 面状态根回收
+对长会话/大状态的边界」两行已实测（§15.1/§15.2），行内保留原表述并标出实测结果与仍
+未覆盖的部分；「长会话的状态继承上限」一行的追问准入半边也已被 M9 覆盖（§15.3）。
+
 | 待测事实 | 为什么重要 | 验证方式 |
 |---|---|---|
-| docker 面的 ACP 真实续接 run | M7 的 live 只到 inproc；docker 面实现复用同一适配器（工作区与状态根都在宿主可见），但按纪律不能由合成测试替代镜像/模板验证（§10.7） | 授权后按 `resume_smoke.py` 同形冒烟（docker 执行面） |
+| docker 面的 ACP 真实续接 run | M7 的 live 只到 inproc；docker 面实现复用同一适配器（工作区与状态根都在宿主可见），但按纪律不能由合成测试替代镜像/模板验证（§10.7） | **已实测（M9，§15.1，`docs/evidence/acp-m9-docker-resume-dsh.txt`）**：dsh 首轮+追问；新容器、同 sessionId、`session/resume`、代号回环、两轮 report 200、按名对账无残留。原文「按 `resume_smoke.py` 同形冒烟」已完成 |
 | dsh 以外 agent（codex-acp / claude-agent-acp / opencode）在 e2b 面的真实续接 | M8 只对 dsh 跑了 e2b 跨沙箱续接（能力与凭据都可注入）；其余 agent 的沙箱内持久会话落点未逐个实测（§14.6） | 授权后按 `resume_smoke.py` 同形各跑一次 |
-| e2b 面状态根回收对长会话/大状态的边界 | 上限（4096 文件 / 8 MiB 单文件 / 64 MiB 总量）触顶即 fail-closed；真实长会话未测（与 §10.7 同源） | 多轮长会话续接 + 回收体积核对 |
+| e2b 面状态根回收对长会话/大状态的边界 | 上限（4096 文件 / 8 MiB 单文件 / 64 MiB 总量）触顶即 fail-closed；真实长会话未测（与 §10.7 同源） | **触顶路径已实测（M9，§15.2，`docs/evidence/acp-m9-e2b-recover-limits.txt`）**：真实沙箱 + 合成超限状态走生产 `recover_state()`，单文件/总量（文件数轴见 §15.2 的取舍与实测）各自整份拒绝、不留半份；**自然长会话涨到上限仍未观测**（原文「多轮长会话续接 + 回收体积核对」中只剩这一半） |
 | `session/load` 的 replay 抑制（真实 agent） | 本机三个声明 `loadSession` 的 agent 都同时声明 `resume`，宿主优先 `resume`，load 分支只有合成回归（§10.1/§10.7） | 找一个只声明 `loadSession` 的 agent，或强制配置后真实 run |
-| 长会话的状态继承上限 | 64 MiB 总量 / 8 MiB 单文件对长会话可能触顶；触顶即 fail-closed 拒绝追问（§10.7） | 真实长会话（多轮）续接 + 状态根体积核对 |
+| 长会话的状态继承上限 | 64 MiB 总量 / 8 MiB 单文件对长会话可能触顶；触顶即 fail-closed 拒绝追问（§10.7） | 真实长会话（多轮）续接 + 状态根体积核对；**回收失败 → 追问拒绝这一半已实测（M9，§15.3）** |
 | `session/cancel` 真实响应时延与终态（含工具收敛） | 取消体验；M2 两次 run 未触发取消；M3a docker 面、M3b e2b 面、M4 inproc 面同样未触发 | 真实 run + 计时 |
 | claude-agent-acp 的真实模型 run（docker / e2b 面） | M4/M6 都只验证了这两面的无模型握手：容器/沙箱没有 Keychain，宿主也未提供 `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`（M6 的 inproc 两次真实 run 见 §9.6） | 提供 API key 后按 §7.6/§9.6 同形冒烟（需新授权） |
 | opencode 的权限请求触发面（`bash`、外部目录路径等） | M5 真实 run 的 `webfetch`/`apply_patch` 未发请求，白名单未被引用（§8.4）；触发点来自上游源码而非实测 | 授权后一次会用到 shell/外部路径的真实 run，对照 `toolKindSource=request` 与决定记录 |
@@ -1449,6 +1453,11 @@ ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上
   （符号链接不跟随、不导入）；相对路径逐条校验（越界即拒绝整份）；读取经 SDK 元数据或流式
   有界读。任一违规或读失败 = **整份拒绝**：不发布 recovered 根、不留 staging，宿主在终态帧的
   `artifactFailures` 里记录原因。
+* 实测（`e2b 实测`，M9）：真实沙箱 + 合成超限状态走同一份 `recover_state()`，单文件轴
+  与总量轴各自整份拒绝、不留半份（`recovered` 与 `.recovered.staging` 都不存在）、
+  拒绝原因写进 verdict；真实 SDK 的递归 listing 条目带 `size`（目录条目也有），所以
+  单文件轴走元数据预检而不是先读满再拒。见 §15.2 与
+  `docs/evidence/acp-m9-e2b-recover-limits.txt`。
 * 发布顺序（`宿主代码`/`合成实测`）：先写 `.<recovered>.staging`（目录 0700、文件 0600、
   父目录 0700），全部写完后一次 `rename` 发布；因此 `acp-agent/recovered` 的**存在**就是
   “父状态根回收成功”这个持久事实，准入层不读回调、不猜。
@@ -1562,7 +1571,106 @@ ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上
   `acp-agent/recovered`。两者由 `_acp_state_home` 按 `LOCAL_WEB_EXECUTOR` 选择（`宿主代码`）。
 * **回收上限对长会话**：与 §10.7 同一个 64 MiB / 8 MiB 上限；e2b 面另有 listing 深度 12 与
   单次 listing 体积（SDK 一次性返回）未由宿主直接限制，超出时以错误/超时拒绝（fail-closed）。
+  **M9 实测补充（§15.2）**：单次 listing 在 4101 条目（4100 文件 + 1 目录）下完整返回；
+  文件数刚触顶时代价是逐个流式读取（实测约 0.2s/文件，4096 文件约 13–15 分钟）——
+  长会话逼近文件数上限时 finalize 会明显变长，这是当前整份镜像设计的已知成本。
 * **状态文件权限**：沙箱内状态文件权限由 agent 自己决定（上传期是 0600/0700）；宿主侧落盘
   固定 0600/0700（`宿主代码`）。
 * **回收期间 run 仍在流**：回收发生在 finalize、终态帧之前；回收文本发现的值只并入 redactor，
   不把内容投影进事件流（`宿主代码`）。
+
+## 15. M9 实测（2026-09-25，docker 面续接 + e2b 回收上限触顶）
+
+本节每条都标来源。证据文件：`docs/evidence/acp-m9-docker-resume-dsh.txt`（docker 面 dsh
+首轮+追问）、`docs/evidence/acp-m9-e2b-recover-limits.txt`（真实沙箱 + 合成超限状态走生产
+回收路径；无模型）、`docs/evidence/acp-m9-e2b-recover-refusal.txt`（真实 run 回收失败 →
+追问准入拒绝）。**本任务没有 kernel 行为改动**：live 未暴露需要修 kernel 的真实缺陷，两处
+缺陷都在本任务新增的探针里（§15.4）。
+
+### 15.1 docker 面 ACP 续接（dsh，首轮 + 追问）
+
+* 事实（`docker 实测`，`acp-m9-docker-resume-dsh.txt`；镜像 `pi-glink-acp-worker:latest`
+  sha256:fb0b9c40f065…，未重建）：父 run `finished`/report 200（967 B），追问 `finished`/
+  report 200（988 B，末尾 `代号 = ODOPA-6785`）；两轮容器名 `pi-glink-5e7a4bef2ea2` →
+  `pi-glink-efda45c14262`（**新容器**）；`sessionId` 两轮相同
+  （3c113656-6f28-46d1-8f66-d53c524448f7）、`session_ready.resumed=true`、
+  `resumeMethod=session/resume`、`cwd=/workspace`，事件流有 `acp_session_resumed`。
+* 状态继承（`docker 实测`）：父/子 run 的宿主可见 HOME 各 8 个文件、6 个内容一致，其中
+  3 个文件名含父 sessionId（`.dsh/sessions/--workspace--/<sessionId>/session.lock`、
+  `session.v3.jsonl.zstd`、`.dsh/storages/session_projcache/sessions/<sessionId>.json`）。
+  子容器的 `docker run` argv（宿主日志原文）把这份 HOME 以 rw 挂到 `/home/acp`、把凭据
+  文件嵌套 `:ro`；容器内 `session/resume` 成功并复述首轮代号，即“继承状态根经挂载进入
+  容器”的直接观测（挂载契约本身见 §5.2/§5.4）。
+* 清理（`docker 实测`）：两轮 `cleanup.released=true`，`confirm_absent` 都按**精确容器名**
+  确认不存在，`docker ps -a` 无 `pi-glink-` 前缀容器；宿主只按脚本持有的 PID `terminate`
+  （exit=-15），后代只按已知 PID 记录。没有 `pkill`、没有名字通配。
+* 模型调用：2 轮（首轮 + 追问）。
+
+### 15.2 e2b 状态根回收上限触顶（真实沙箱，合成状态；无模型）
+
+* 方法（`e2b 实测`，`acp-m9-e2b-recover-limits.txt`）：每个轴一个真实沙箱，
+  `E2BAcpSandboxClient.start()` → `upload_home()` → 沙箱内命令写合成状态（**不走宿主上传
+  通道**，所以单文件可以超过 8 MiB 上传上限）→ 生产 `recover_state()`。`control` 轴（2 个
+  小文件）证明这条路径本身可用。
+* 三条轴的实测（`e2b 实测`，e2b SDK 2.51.0）：
+  - `control`：ok=true，2 文件 / 30 B，发布 `state-a.json` 与 `sub/state-b.txt`，发布内容
+    sha256 与沙箱内合成内容一致；
+  - `single`（9437184 B > 8388608 B 单文件上限）：ok=false，
+    `failures=["沙箱状态文件不可读取或超过上限: bloat.bin: 文件超过上限（9437184 > 8388608 字节）"]`，
+    0.23s；
+  - `total`（9 × 8 MiB，共 75497501 B > 64 MiB）：ok=false，
+    `failures=["沙箱状态超过总量上限 67108864 字节"]`，3.74s；
+  - `count`（4100 个空文件 > 4096 文件数上限）：ok=false，
+    `failures=["沙箱状态文件数超过上限 4096"]`，1026.73s。
+  - 三条轴都：宿主 `acp-agent` 只有 `home`（无 `recovered`、无 `.recovered.staging`），
+    沙箱内状态前后一致，沙箱按 id `confirm_sandbox_absent` 终止。
+* 真实 SDK 形状（`e2b 实测`）：递归 listing 条目带 `size`（`EntryInfo.size`，目录条目也有
+  size），单文件轴因此走元数据预检而不是先读满再拒；一次 `files.list(depth=12)` 在 4101
+  条目（4100 文件 + 1 目录）下完整返回。`_read_file_bounded` docstring 里“真实 SDK 的
+  size/stream 形状待实测”由此闭合。
+* 风险（`e2b 实测`）：文件数轴的处理代价是逐文件一次流式读取，实测约 0.25s/文件（4096
+  文件 1026.73s）；本次沙箱寿命 `900+300=1200s` 只剩约 3 分钟余量。按默认任务超时 300s
+  （寿命 600s）跑同一状态根，读会在沙箱到期时失败——结论仍是 fail-closed（不发布 recovered
+  根、追问被拒），但拒绝原因会变成读失败而不是计数上限。见 §14.8 与 §12（自然长会话仍未观测）。
+
+### 15.3 回收失败 → 追问准入拒绝（真实 run）
+
+* 事实（`e2b 实测`，`acp-m9-e2b-recover-refusal.txt`）：真实宿主 + 真实沙箱跑一次 dsh 父
+  run（真实模型），在回合进行中（`session_ready` 已出现、run 仍 `running`）用真实 SDK
+  `Sandbox.connect(sandbox_id)` 连到**同一个沙箱**，把 9437184 B 的合成文件写进
+  `acp-agent` 状态根；父 run finalize 里的生产回收**真的失败**：
+  - 末条 `session_ready.stateRootRecovered=false`，终态帧
+    `artifactFailures=["沙箱状态文件不可读取或超过上限: bloat.bin: 文件超过上限（9437184 > 8388608 字节）"]`；
+  - 宿主 `acp-agent` 只有 `home`（无 `recovered`、无 `.recovered.staging`）；
+  - `POST /api/runs`（`parentRunId`）→ HTTP 409 `{"error":"session_unavailable"}`，且拒绝
+    前后 `GET /api/runs` 与 `Sandbox.list()` 对比没有新建 run、没有新建沙箱（沙箱在起
+    之前就被拒）；
+  - 父沙箱按持久化 `sandbox_id` 终止（`cleanup.released=true`）。
+* 准入条件逐条核对（`宿主代码`/`e2b 实测`）：同 harness（首帧 `harness=acp`）、终态、
+  无后续轮次、`sessionId` 已记录、`acp_resume_method()` 判为 `session/resume`——唯一不
+  满足的是 `acp-agent/recovered` 不存在，所以这次 409 就是 §14.1/§14.3「回收失败 → 追问
+  拒绝」这条规则的拒绝。
+* 模型调用：2 轮（尝试 1 判据缺陷、尝试 2 干净通过，缺陷见 §15.4）。
+
+### 15.4 探针缺陷与取舍（都在探针里，kernel 无改动）
+
+1. `scripts/spikes/acp_docker/resume_smoke.py` 的 `docker_inspect()` 用 Go template 的
+   `{{range}}` 拼 JSON 数组，尾逗号让 `json.loads` 失败 → 快照恒为 None，两条由快照派生的
+   自检判据打印 False。已修（env 名逐行读取 + 记录失败原因），修复后的函数在一次性容器上
+   实测通过；为守授权上限（≤4 轮）没有重跑模型部分。
+2. `scripts/spikes/acp_e2b/recover_refusal_admission.py` 把 `sessionCapabilities.resume`
+   当布尔判断，而 dsh 报的是空对象 `{}`（存在即声明）；已改用生产函数
+   `acp_resume_method()`，重跑得到 PASS。
+3. `count` 轴代价：逐文件流式读取（实测约 0.25s/文件）让 4096 文件的触顶耗时 1026.73s；
+   本任务把它跑完并记录，而不是用更小的合成上限替代真实上限。
+4. 本任务新增两个探针（§15.2/§15.3）与一个 docker 续接探针（§15.1）；**没有**改
+   `tests/` 里的既有断言，也没有改 `host/pi_glink/kernel/`。
+
+### 15.5 M9 与既有面的差异与风险
+
+* **docker 面续接与 inproc 同形**：同一份适配器与准入规则，区别只在状态根的承载（bind
+  mount vs 宿主目录），本次 live 未出现行为差异（`docker 实测`）。
+* **回收是整份镜像**：文件数上限触顶的代价与文件数线性（§15.2）；长会话逼近上限时 finalize
+  会变长，沙箱寿命可能先到（结论仍 fail-closed，但拒绝原因不同）。若要缩短，需要按 agent
+  白名单收缩状态根或提高限制，属产品决策（未在本任务改动）。
+* **e2b 面回收失败后的追问**：拒绝发生在起沙箱之前（§15.3），不预支一次注定失败的云端 run。

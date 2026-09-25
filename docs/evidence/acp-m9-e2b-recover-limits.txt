@@ -1,0 +1,202 @@
+ACP M9 E2B 状态根回收上限触顶证据（真实沙箱 + 合成状态，无模型）
+==============================================================
+日期: 2026-09-25
+任务: GLINK-ACP-15 项 2（e2b 长会话回收上限触顶实测）
+探针: scripts/spikes/acp_e2b/recover_limit_probe.py
+回收函数: pi_glink.kernel.e2b_env.E2BAcpSandboxClient.recover_state()
+          （生产路径，与 run finalize 调用的是同一份）
+上限: 文件数 4096 / 单文件 8388608 B / 总量 67108864 B / listing 深度 12
+模板: glink-acp-worker（dev 模板，未重建）；e2b SDK 2.51.0
+沙箱: 每个轴一个真实沙箱；结束时按持久化 sandbox_id 经 confirm_sandbox_absent 终止
+      （SDK 单 id 操作，无模式匹配/批量清理）
+脱敏: 家目录以 ~ 代替、工作目录以 $TMP/... 代替；凭据值与 E2B_API_KEY 不出现。
+模型调用: 0（本项不需要模型）
+工作目录: 运行 1 $TMP/glink-acp15-e2b-limits-a；运行 2 $TMP/glink-acp15-e2b-limits-b；
+          运行 3 $TMP/glink-acp15-e2b-limits-f
+轴对照: control（2 个小文件，期望成功）/ single（9 MiB 单文件）/ total（9 × 8 MiB 总量）/
+        count（4100 个空文件）。三个上限轴各自：整份拒绝（ok=false 且 failures 指明对应
+        上限）、不留半份（acp-agent 只有 home，无 recovered / 无 .recovered.staging）、
+        沙箱状态源前后一致（拒绝是只读判断）、按 sandbox_id 终止。
+
+尝试记录（同一探针的 count 轴前后共 4 次运行）
+--------------------------------------------
+count 轴逐文件流式读取 4096 个状态文件，实测总耗时 1026.73s（约 17.1 分钟）。
+前三次运行（--workdir ...-c / -d / -e）都在恢复阶段被本机的外部中断打断（工具调用
+超时/进程被杀，无 traceback）：每次中断后都**按沙箱 id** 终止了当次沙箱（-e 的沙箱
+iw42j5xzgntxc60vxmjiu 与 -c/-d 的沙箱都确认不存在），本文件记录的是最后一次完整运行。
+另：前三次中断本身不构成产品缺陷证据，只说明 count 轴耗时长于一次交互式工具调用的
+预算；本任务最终把三条轴都跑完。
+
+运行 1（对照组 + 单文件轴）
+----------------------------
+ACP M9 E2B 状态根回收上限触顶实测（真实沙箱，无模型）
+========================================================
+日期: 2026-09-25 19:43:26
+模板: glink-acp-worker（dev 模板，未重建）
+e2b SDK: 未知
+回收函数: pi_glink.kernel.e2b_env.E2BAcpSandboxClient.recover_state()（生产路径）
+上限: 文件数 4096 / 单文件 8388608 B / 总量 67108864 B / 深度 12
+轴: control, single
+工作目录: $TMP/glink-acp15-e2b-limits-a
+
+--- 轴 control：对照组：两个小文件（普通状态形状）→ 期望整份发布成功
+  sandbox_id: inod3a3xhwxss4172laok
+  种子命令: 3 条（沙箱内执行，不走宿主上传通道）
+  沙箱内状态（before）: {"files": 2, "bytes": 30}
+  真实 listing 形状: entry 数=3 首条: type='file' path='/home/user/acp/home/state-a.json' size=26
+  回收耗时: 1.4s
+  recover_state(): ok=True files=2 bytes=30
+  failures: []
+  宿主 recovered 目录存在: True
+  宿主 .recovered.staging 存在: False
+  宿主 acp-agent 目录条目: ['home', 'recovered']
+  已发布条目: ['state-a.json', 'sub', 'sub/state-b.txt']
+  沙箱内状态（after）: {"files": 2, "bytes": 30}
+  沙箱 kill failures: []
+  沙箱按 id 对账: confirmed_absent=True detail=SDK 确认沙箱不存在
+  [PASS] 轴 control
+
+--- 轴 single：轴 1（单文件）：9 MiB 文件 > 8 MiB 单文件上限
+  sandbox_id: iq5xed598fmzku04y40j1
+  种子命令: 2 条（沙箱内执行，不走宿主上传通道）
+  沙箱内状态（before）: {"files": 2, "bytes": 9437211}
+  真实 listing 形状: entry 数=2 首条: type='file' path='/home/user/acp/home/bloat.bin' size=9437184
+  回收耗时: 0.23s
+  recover_state(): ok=False files=0 bytes=0
+  failures: ["沙箱状态文件不可读取或超过上限: bloat.bin: 文件超过上限（9437184 > 8388608 字节）"]
+  宿主 recovered 目录存在: False
+  宿主 .recovered.staging 存在: False
+  宿主 acp-agent 目录条目: ['home']
+  已发布条目: []
+  沙箱内状态（after）: {"files": 2, "bytes": 9437211}
+  沙箱 kill failures: []
+  沙箱按 id 对账: confirmed_absent=True detail=SDK 确认沙箱不存在
+  [PASS] 轴 single
+
+
+汇总
+----
+  control: ok=True files=2 bytes=30 published=True staging=False absent=True → [PASS]
+  single: ok=False files=0 bytes=0 published=False staging=False absent=True → [PASS]
+[PASS] E2B 状态根回收上限触顶实测（整份拒绝 / 不留半份 / 拒绝可观测 / 按 id 终止）
+
+运行 2（总量轴）
+----------------
+ACP M9 E2B 状态根回收上限触顶实测（真实沙箱，无模型）
+========================================================
+日期: 2026-09-25 19:44:17
+模板: glink-acp-worker（dev 模板，未重建）
+e2b SDK: 未知
+回收函数: pi_glink.kernel.e2b_env.E2BAcpSandboxClient.recover_state()（生产路径）
+上限: 文件数 4096 / 单文件 8388608 B / 总量 67108864 B / 深度 12
+轴: total
+工作目录: $TMP/glink-acp15-e2b-limits-b
+
+--- 轴 total：轴 2（总量）：9 × 8 MiB = 72 MiB > 64 MiB 总量上限（单文件都在上限内）
+  sandbox_id: ikzxvdtb3qu911etfgq3o
+  种子命令: 2 条（沙箱内执行，不走宿主上传通道）
+  沙箱内状态（before）: {"files": 10, "bytes": 75497501}
+  真实 listing 形状: entry 数=10 首条: type='file' path='/home/user/acp/home/part1.bin' size=8388608
+  回收耗时: 3.74s
+  recover_state(): ok=False files=0 bytes=0
+  failures: ["沙箱状态超过总量上限 67108864 字节"]
+  宿主 recovered 目录存在: False
+  宿主 .recovered.staging 存在: False
+  宿主 acp-agent 目录条目: ['home']
+  已发布条目: []
+  沙箱内状态（after）: {"files": 10, "bytes": 75497501}
+  沙箱 kill failures: []
+  沙箱按 id 对账: confirmed_absent=True detail=SDK 确认沙箱不存在
+  [PASS] 轴 total
+
+
+汇总
+----
+  total: ok=False files=0 bytes=0 published=False staging=False absent=True → [PASS]
+[PASS] E2B 状态根回收上限触顶实测（整份拒绝 / 不留半份 / 拒绝可观测 / 按 id 终止）
+
+运行 3（文件数轴，完整运行）
+------------------------------
+ACP M9 E2B 状态根回收上限触顶实测（真实沙箱，无模型）
+========================================================
+日期: 2026-09-25 20:09:28
+模板: glink-acp-worker（dev 模板，未重建）
+e2b SDK: 2.51.0
+回收函数: pi_glink.kernel.e2b_env.E2BAcpSandboxClient.recover_state()（生产路径）
+上限: 文件数 4096 / 单文件 8388608 B / 总量 67108864 B / 深度 12
+轴: count
+工作目录: $TMP/glink-acp15-e2b-limits-f
+
+--- 轴 count：轴 3（文件数）：4100 个空文件 > 4096 文件数上限
+  [step] 沙箱已创建 sandbox_id=ity9h1lxjuq5alb1lah8f
+  [step] 种子命令 1/2
+  [step] 种子命令 2/2
+  [step] 沙箱内状态: files=4100 bytes=0
+  [step] entry 数=4101 首条: type='dir' path='/home/user/acp/home/many' size=135168
+  [step] 开始 recover_state()
+  sandbox_id: ity9h1lxjuq5alb1lah8f
+  种子命令: 2 条（沙箱内执行，不走宿主上传通道）
+  沙箱内状态（before）: {"files": 4100, "bytes": 0}
+  真实 listing 形状: entry 数=4101 首条: type='dir' path='/home/user/acp/home/many' size=135168
+  回收耗时: 1026.73s
+  recover_state(): ok=False files=0 bytes=0
+  failures: ["沙箱状态文件数超过上限 4096"]
+  宿主 recovered 目录存在: False
+  宿主 .recovered.staging 存在: False
+  宿主 acp-agent 目录条目: ['home']
+  已发布条目: []
+  沙箱内状态（after）: {"files": 4100, "bytes": 0}
+  沙箱 kill failures: []
+  沙箱按 id 对账: confirmed_absent=True detail=SDK 确认沙箱不存在
+  [PASS] 轴 count
+
+
+汇总
+----
+  count: ok=False files=0 bytes=0 published=False staging=False absent=True → [PASS]
+[PASS] E2B 状态根回收上限触顶实测（整份拒绝 / 不留半份 / 拒绝可观测 / 按 id 终止）
+
+结论（逐轴）
+------------
+* control：ok=true，2 文件 / 30 B，发布 state-a.json 与 sub/state-b.txt，发布内容 sha256
+  与沙箱内合成内容一致 → 回收路径本身可用，失败不是“路径坏了”。
+* single（轴 1，单文件）：ok=false，
+  failures=["沙箱状态文件不可读取或超过上限: bloat.bin: 文件超过上限（9437184 > 8388608 字节）"]，
+  0.23s；宿主无 recovered / 无 staging；沙箱内状态 2 文件 / 9437211 B 前后一致。
+* total（轴 2，总量）：ok=false，failures=["沙箱状态超过总量上限 67108864 字节"]，3.74s；
+  沙箱内 10 文件 / 75497501 B 前后一致；每个文件都在单文件上限内（8388608 B）。
+* count（轴 3，文件数）：ok=false，failures=["沙箱状态文件数超过上限 4096"]，
+  1026.73s；沙箱内 4100 文件 / 0 B 前后一致。该轴也是 listing 规模的实测：一次
+  `files.list(depth=12)` 完整返回 4101 条目（4100 文件 + 1 目录）。
+* 三条轴的共同事实：拒绝时 `recovered` 与 `.recovered.staging` 都不存在（**不留半份**），
+  拒绝原因在 verdict `failures` 里可读（**事实可观测**），沙箱按 id 终止
+  （`confirmed_absent=True`，`SDK 确认沙箱不存在`）。
+
+真实 SDK 形状与风险（`e2b 实测`）
+--------------------------------
+* 真实 SDK 的递归 listing 条目带 `size`（`EntryInfo.size`；目录条目也有 size），所以
+  单文件轴走元数据预检、不必先读满再拒——`_read_file_bounded` docstring 里“真实 SDK 的
+  size/stream 形状待实测”这一条由此闭合（对应 §14.1 与 §15.2）。
+* 文件数轴的处理代价是**逐文件一次流式读取**：实测 4096 个空文件 1026.73s（约 0.25s/文件）。
+  本次沙箱寿命为 `LOCAL_WEB_TASK_TIMEOUT_SECONDS=900` → `900+300=1200s`，即该轴在寿命
+  内只剩约 3 分钟余量。若按默认任务超时 300s（寿命 600s）跑同一状态根，读会在沙箱到期时
+  失败——结论仍是 fail-closed（不发布 recovered 根、追问被拒），但拒绝原因会变成读失败
+  而不是“文件数超过上限”。这是当前“整份镜像”设计在长会话逼近文件数上限时的已知代价，
+  记录在 §15.2/§15.5，未在本任务改动行为。
+
+脱敏扫描
+--------
+$ .venv/bin/python scripts/check-no-secrets.py --data-root $TMP/glink-acp15-e2b-limits-a --repo-root ~/AI/git/pi-glink
+凭据来源 2 条 · 扫描文件 0 个 · 真实命中 0 处 · 占位符命中 0 处
+未发现真实凭据残留。
+exit=0
+$ .venv/bin/python scripts/check-no-secrets.py --data-root $TMP/glink-acp15-e2b-limits-b --repo-root ~/AI/git/pi-glink
+凭据来源 2 条 · 扫描文件 0 个 · 真实命中 0 处 · 占位符命中 0 处
+未发现真实凭据残留。
+exit=0
+$ .venv/bin/python scripts/check-no-secrets.py --data-root $TMP/glink-acp15-e2b-limits-f --repo-root ~/AI/git/pi-glink
+凭据来源 2 条 · 扫描文件 0 个 · 真实命中 0 处 · 占位符命中 0 处
+未发现真实凭据残留。
+exit=0
+
+证据文件形状自检（同一 redaction 检测器）：0 命中。
