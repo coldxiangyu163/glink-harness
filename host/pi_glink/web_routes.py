@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from .artifacts import ArtifactError, ArtifactTree
+from .blueprints import Blueprint, list_blueprints
 from .config import ConfigError
 from .kernel.runner import (
     REPORT_MAX_BYTES,
@@ -88,6 +89,22 @@ def run_view(
         # progression state.
         "blueprint": record.blueprint,
         "blueprintStages": [dict(stage) for stage in record.blueprint_stages],
+    }
+
+
+def blueprint_view(blueprint: Blueprint) -> dict[str, Any]:
+    """Public projection of one usable blueprint: identity and stage metadata.
+
+    The stage records use the same shape a run carries in ``blueprintStages``
+    (:meth:`pi_glink.blueprints.Stage.as_record`), so a client can compare the
+    catalogue with the contract a run was admitted with. The rendered body is
+    deliberately absent: the listing names the contract, it does not ship the
+    system-prompt text to the browser.
+    """
+    return {
+        "name": blueprint.name,
+        "description": blueprint.description,
+        "stages": [stage.as_record() for stage in blueprint.stages],
     }
 
 
@@ -213,6 +230,28 @@ class RoutesMixin:
             self._send_json(
                 HTTPStatus.OK,
                 self._public_config(context),
+                head_only=head_only,
+            )
+            return
+        if path == "/api/blueprints":
+            # A read-only catalogue of the host's own repository content, so it
+            # is a host-level resource: every authenticated identity (any tenant
+            # in multi-tenant mode) sees the same derived list, exactly like
+            # ``/api/config``. Identity is still required — the gate above is the
+            # same one every other /api route uses. An empty or missing
+            # directory answers 200 with an empty list: no blueprints is a
+            # legitimate deployment (admission treats it the same way and never
+            # fails startup), so it must not look like a broken endpoint; the
+            # two states are deliberately indistinguishable and the host path is
+            # never echoed.
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "blueprints": [
+                        blueprint_view(blueprint)
+                        for blueprint in list_blueprints(self.server.config.blueprints_dir)
+                    ]
+                },
                 head_only=head_only,
             )
             return

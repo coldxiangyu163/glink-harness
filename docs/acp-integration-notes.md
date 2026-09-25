@@ -1340,3 +1340,81 @@ M5 新增/更新（`合成实测`）：`tests/test_kernel_acp_env.py` 增三项 
 | Linux 宿主上容器 root 写 bind mount 的 uid/属主行为 | macOS/Colima 下属主不变；Linux 原生 Docker 未测 | Linux 宿主上的 docker smoke + 文件属主核对 |
 | 不同 Docker 后端（Docker Desktop 虚拟化 / Linux 原生）的共享路径与空挂载行为 | Colima 只共享 home 树；非共享路径会静默空挂载 | 逐环境 smoke + 挂载内容核对 |
 | 各适配器版本升级冒烟步骤与 license 记录 | 方案 §5/§7 纪律 | 集成笔记逐项补齐 |
+| E2B stdin 单条记录 >1 MiB 的上限 | 已测下界 1 MiB；蓝图+题面的最坏 ACP 帧 ≈196 KiB（§13.3），再往上未探测 | 真实沙箱内逐步加大单条 `send_stdin`（不需要模型） |
+| pi 面 E2B 命令串近上限（>131 KiB）能否启动 | 命令串把题面与 system prompt base64 内插；E2B 文档未声明上限，未实测（§13.3） | 真实沙箱用近上限命令串跑无模型命令（如自检脚本） |
+
+## 13. 蓝图 system prompt 在 E2B 通道上的体积评估（调查）
+
+GLINK-ACP-12 的调查结论，**没有改行为**。问题：blueprint 渲染使 system prompt 变长，
+ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上限、现状距上限多远、
+长蓝图有什么风险。每条标来源：`宿主代码`（本仓库实现）/`e2b SDK 源码`（已安装 2.51.0，
+与 `uv.lock` 同版）/`e2b 文档`（官方 API 参考）/`e2b 帧实测`
+（`docs/evidence/acp-m3-e2b-framing.txt`）/`合成实测`（本次用生产函数直接测量）/`推断`。
+
+### 13.1 通道判定：ACP e2b 的 prompt 不在命令串里
+
+* ACP e2b 的沙箱命令串只有 agent argv：`cd /home/user/workspace && exec <shlex.join(argv)>`
+  （`E2BAcpSandboxClient.command()`）；argv 来自冻结配置 `PI_GLINK_ACP_COMMAND`，不含题面、
+  工作约定或蓝图渲染。（`宿主代码`；装配见 §6.3）
+* prompt 走 ACP 的 `session/prompt` 文本块：`runner._system_prompt_text()` 把工作约定与
+  `render_blueprint()` 拼成 system prompt，`compose_prompt()` 包成前置围栏块，
+  `AcpRpcClient._write()` 以 `json.dumps(..., ensure_ascii=False) + "\n"` 写出；e2b 面的
+  `SandboxCommandProcess` 把 `process.stdin.write` 映射到 `handle.send_stdin(payload)`——
+  一次调用一条记录，SDK 不分块。（`宿主代码`/`e2b SDK 源码`；通道决定见 §4.3，桥接见 §6.3）
+* **反例（容易误判）**：pi 面 E2B 的题面与 system prompt **确实**进命令串：
+  `E2BSandboxClient._command()` 把两者各自 base64 后内插为
+  `PROMPT=$(printf … | base64 -d)`、`SYSTEM=$(printf … | base64 -d)`，再
+  `pi … --append-system-prompt "$SYSTEM" "$PROMPT"`。（`宿主代码`）
+  所以「命令串被 prompt 撑大」只对 pi 面成立；ACP 面的命令串长度与蓝图/题面无关。
+
+### 13.2 上限：E2B 未声明体积上限，唯一实测下界是 1 MiB
+
+* E2B 官方 `commands.run` / `process.SendInput`（`send_stdin` 走的 RPC）参考与 Python SDK
+  文档只给 schema，没有声明命令串或 stdin 记录的字节上限：
+  `https://docs.e2b.dev/api-reference/process/sendinput`、
+  `https://docs.e2b.dev/sdk-reference/python-sdk/v2.37.0/sandbox_sync`（查阅日期 2026-09-25；
+  本仓库锁定的 SDK 是 2.51.0，同一路由的 SDK 源码 `sandbox_sync/commands/command.py` 里
+  `send_stdin` 直接构造一条 `SendInputRequest`，没有分块/大小检查）。（`e2b 文档`/`e2b SDK 源码`）
+* 本项目在真实 base 沙箱测过该 stdin 通道：host→agent 单条 **1,048,640 字节（1 MiB）**
+  记录通过，agent→host 1,048,576 字节正文同样通过；这条通道只承诺「可承载 ≥1 MiB 单条
+  记录」，不是已证上限。（`e2b 帧实测`，§6.1）
+* 宿主自己的两个上限（与云端无关）：`POST /api/runs` 请求体 ≤ **64 KiB**
+  （`web_http.MAX_REQUEST_BYTES`，题面因此在略小于 64 KiB 处被拒绝）；蓝图源文件 ≤ **32 KiB**
+  （`blueprints.MAX_BLUEPRINT_BYTES`）。（`宿主代码`）
+
+### 13.3 现状余量
+
+| 量 | 当前（`deep-research`） | 上限内最坏 | 来源 |
+|---|---|---|---|
+| 蓝图源文件 | 5,550 B | 32,768 B（32 KiB 上限） | `宿主代码` |
+| 蓝图渲染文本 | 5,535 B | 33,003 B | `合成实测` |
+| 工作约定 `agent/research-prompt.md` | 1,512 B | 1,512 B（不随蓝图变） | `宿主代码` |
+| system prompt 合计 | 7,049 B | 34,517 B | `合成实测` |
+| ACP 单条 `session/prompt` 帧 | 7,498 B | ≈98 KiB（32 KiB 蓝图 + 64 KiB 题面） | `合成实测` |
+| 同上，JSON 转义病态（全是 `"`/`\`） | — | ≈196 KiB | `推断`（转义上界） |
+| pi 面 E2B 命令串 | base64(system) 9,400 B + 679 B 包装 | ≈131 KiB（46,024 + 87,384 + 679） | `合成实测`/`宿主代码` |
+| 实测已通过的 stdin 单条记录 | — | 1,048,640 B | `e2b 帧实测` |
+
+结论：ACP e2b 的可用余量 ≥5 倍（病态转义下 ≈196 KiB vs 已证 1 MiB）；当前蓝图 ~7.5 KiB
+帧则 ≈140 倍。pi 面命令串的最坏值 ≈131 KiB 未触任何**已知**边界，但 >1 MiB 的 stdin 与
+>131 KiB 的命令串都没有实测（见 §12）。
+
+### 13.4 风险与建议
+
+* 长的 blueprint 不会撑爆 ACP e2b 的通道：它在 stdin 帧里，余量至少 5 倍；真正的代价是
+  **模型上下文**——32 KiB 渲染 ≈1 万 token 量级（CJK 与 ASCII 同量级，`推断`），
+  长蓝图应作为产品决策而不是通道决策。
+* 建议：① 保留 32 KiB 源上限，未实测前不要抬高；② 要放长文档时，优先走「沙箱文件 +
+  沙箱内读取」（像凭据上传那样），而不是加大 stdin 帧或命令串；③ 若产品确实要 >32 KiB
+  蓝图，先做一次「近上限命令串 + 已测帧大小」的真实沙箱启动自检（不需要模型调用），
+  并把结果回写本节与 §12；④ 不要依赖「E2B 有某个上限保护我们」——文档没写，实测只到 1 MiB。
+* **缺陷记录**：本次未发现需要修复的真实缺陷；两个**未实测边界**已记入 §12。ACP 面不需要
+  为蓝图体积新增客户端分块或落文件机制（当前余量足够）；若将来改动，先按本节复现测量。
+
+### 13.5 测量方法（可复现）
+
+本次测量用生产的 `load_blueprint`/`render_blueprint`/`parse_blueprint` 与 `compose_prompt`：
+把 `deep-research.md`（5,550 B）与一个恰好 32 KiB 的合成合法文档分别渲染，再把结果放进
+`session/prompt` 的 `params`，用 `json.dumps(..., ensure_ascii=False, separators=(",", ":"))`
+量帧；题面上下界用 `web_http.MAX_REQUEST_BYTES`。脚本是临时文件、未入仓（纯合成，
+不建沙箱、不调模型）。

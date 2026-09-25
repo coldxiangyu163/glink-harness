@@ -403,6 +403,7 @@ def read_stream(
 def test_unauthenticated_api_requests_are_refused_without_details(server: PiGlinkServer) -> None:
     for path, method in (
         ("/api/config", "GET"),
+        ("/api/blueprints", "GET"),
         ("/api/runs", "GET"),
         ("/api/runs", "POST"),
         ("/api/runs/whatever", "GET"),
@@ -483,6 +484,25 @@ def test_public_config_reports_the_callers_own_model_credential(server: PiGlinkS
     # The public view never names another tenant or a credential.
     for name in ("tenant-alpha", "tenant-beta", ALPHA_KEY, BETA_KEY, HOST_KEY):
         assert name not in json.dumps(alpha_view)
+
+
+def test_blueprints_are_host_level_and_identical_for_every_tenant(
+    server: PiGlinkServer,
+) -> None:
+    """蓝图是宿主级资源：任何已认证租户看到同一份目录推导结果（与 /api/config 同形）。"""
+    alpha = request(server, "/api/blueprints", token=assertion("tenant-alpha", "user-a"))
+    beta = request(server, "/api/blueprints", token=assertion("tenant-beta", "user-b"))
+    assert alpha[0] == beta[0] == 200
+    assert alpha[2] == beta[2], "宿主级资源不得逐租户分叉"
+    payload = json.loads(alpha[2])
+    names = [item["name"] for item in payload["blueprints"]]
+    assert names == sorted(names)
+    assert "deep-research" in names
+    assert payload["blueprints"][0]["stages"], "阶段元数据随列表下发"
+    # 列表不携带路径/凭据，也不回显任何租户凭据值。
+    rendered = alpha[2].decode("utf-8")
+    for secret in (ALPHA_KEY, BETA_KEY, GAMMA_KEY, HOST_KEY):
+        assert secret not in rendered
 
 
 def test_malformed_role_assertion_is_a_401_not_a_500(server: PiGlinkServer) -> None:

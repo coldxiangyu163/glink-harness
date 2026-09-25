@@ -449,6 +449,7 @@ def test_unauthenticated_requests_are_uniform_401_with_mode(server: PiGlinkServe
     for path, method in (
         ("/api/me", "GET"),
         ("/api/config", "GET"),
+        ("/api/blueprints", "GET"),
         ("/api/runs", "GET"),
         ("/api/runs", "POST"),
         ("/api/runs/whatever", "GET"),

@@ -143,6 +143,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 |---|---|---|
 | GET | `/api/health` | 宿主与 pi 可用性、当前活跃 run |
 | GET | `/api/config` | 公开配置（无密钥、无宿主路径） |
+| GET | `/api/blueprints` | 可用会话蓝图目录（`name`/`description`/阶段元数据；与准入同源推导，只读） |
 | POST | `/api/runs` | 创建并启动一次 run，body `{"prompt": "…"}` |
 | GET | `/api/runs` | run 列表（含状态与报告标记） |
 | GET | `/api/runs/{id}` | run 详情 |
@@ -158,7 +159,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 本机（`local`）执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。以 `/` 开头的 prompt 只有命令名等于 `agent/prompts/` 下模板文件名的才被接受（当前仅 `/deepresearch`），其余返回 `400 unsupported_command`（错误体只给允许的命令列表，不回显被拒输入）——pi 对这类消息会先执行扩展命令，而 pi-subagents 注册了 `/run --bg`、`/subagents-detach` 等后台入口；拒绝在任何 run 目录/执行面创建之前，追问同样适用。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
 
-多租户模式（`PI_GLINK_TENANCY=multitenant`）下所有 `/api/*`（健康的存活性探测除外）都要求可信身份——网关断言或站内会话：未认证 `401`，权限不足 `403`，未知/异租户/legacy 记录统一 `404`，超过并发上限 `429 quota_exceeded`。下一节说明完整语义。
+多租户模式（`PI_GLINK_TENANCY=multitenant`）下所有 `/api/*`（健康的存活性探测除外）都要求可信身份——网关断言或站内会话：未认证 `401`，权限不足 `403`，未知/异租户/legacy 记录统一 `404`，超过并发上限 `429 quota_exceeded`。下一节说明完整语义。`/api/blueprints` 是宿主级资源的只读目录：认证后各租户看到同一份列表（与 `/api/config` 同形）；空目录/缺失目录都返回 `200 {"blueprints": []}`，格式不合契约的文件不进列表（原因只进日志）。
 
 ## 多租户（单宿主，`PI_GLINK_TENANCY=multitenant`）
 
@@ -367,9 +368,29 @@ node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 26 个角�
 
 ## 环境变量
 
-与 FrontierAgent 保持同一套命名：模型 `OPENAI_*`，云沙箱 `E2B_*`，服务与执行面 `LOCAL_WEB_*`；本项目独有概念使用 `PI_GLINK_*`。完整列表见 [.env.example](.env.example)。
+与 FrontierAgent 保持同一套命名：模型 `OPENAI_*`，云沙箱 `E2B_*`，服务与执行面 `LOCAL_WEB_*`；本项目独有概念使用 `PI_GLINK_*`。完整列表（含注释）见 [.env.example](.env.example)。
 
 宿主读一次配置后冻结，运行中的 host 不会因为改环境变量而改变行为。
+
+操作员常改、且此前未进文档的键（每条写明默认值与何时需要改）：
+
+| 键 | 默认 | 何时需要改 |
+|---|---|---|
+| `PI_GLINK_HARNESS` | `pi` | 改用 ACP 族内核（dsh / claude / codex / opencode 等）时设 `acp`；一次部署只跑一种，启动冻结 |
+| `PI_GLINK_ACP_COMMAND` | 空 | `PI_GLINK_HARNESS=acp` 时必填，缺失拒绝启动；宿主只做 shell 拆分、不经 shell 执行 |
+| `PI_GLINK_ACP_CREDENTIAL_FILES` | 空 | ACP agent 需要宿主只读凭据时，按 `source=dest`（`;` 分隔）注入每 run `HOME` |
+| `PI_GLINK_ACP_ENV` | 空 | 给 ACP agent 进程传环境变量时；`HOME` 不可覆盖（每 run 状态根是隔离边界） |
+| `PI_GLINK_ACP_PERMISSION_ALLOW` | 空（全拒） | agent 在 fail-closed 下跑不动（逐次询问编辑/抓取）时，按最小集合放开 |
+| `PI_GLINK_ACP_SESSION_CONFIG` | 空 | 需要用 `session/new` 后的会话选项（如 `mode=auto`）固定 agent 行为时；声明不合即 run 失败 |
+| `LOCAL_WEB_ACP_WORKER_IMAGE` | `pi-glink-acp-worker:latest` | ACP + `docker` 面换镜像时（与 pi 面镜像分开，二者装的 agent 不同） |
+| `LOCAL_WEB_E2B_ACP_TEMPLATE` | `glink-acp-worker` | ACP + `e2b` 面换模板时（与 pi 面模板分开，同上） |
+| `PI_GLINK_BLUEPRINTS_DIR` | `<repo>/blueprints` | 蓝图模板放在别处时；目录缺失不是启动错误，只表示可用蓝图集合为空 |
+| `LOCAL_WEB_TASK_TIMEOUT_SECONDS` | `1800` | 单次 run 的整体超时（秒）；题型明显更长/更短时。E2B 沙箱寿命按它 + 300s 取值 |
+| `OPENAI_CONTEXT_WINDOW` | `400000` | pi 面模型元数据的上下文窗口；provider 窗口更小时 |
+| `OPENAI_MAX_TOKENS` | `65536` | pi 面模型元数据的输出上限；provider 上限更短时 |
+
+ACP 族的送达通道、凭据注入与体积边界见 [ACP 集成笔记](docs/acp-integration-notes.md)；
+蓝图格式、准入与列举接口见 [会话蓝图](docs/blueprint-templates.md)。
 
 ## 验证
 

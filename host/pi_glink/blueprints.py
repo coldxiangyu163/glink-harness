@@ -121,6 +121,28 @@ def blueprint_names(directory: Path | str) -> tuple[str, ...]:
     )
 
 
+def list_blueprints(directory: Path | str) -> tuple[Blueprint, ...]:
+    """The usable blueprints ``directory`` currently offers, in name order.
+
+    Built on :func:`blueprint_names` and :func:`load_blueprint`, so the listing
+    is the same derivation admission uses: a file added, removed or rewritten on
+    disk is reflected immediately, and a candidate admission would refuse
+    (malformed, oversized, non-UTF-8) is not listed as usable. A missing or
+    empty directory yields an empty tuple — that is a legitimate deployment,
+    not an error — and the directory is never hardcoded here.
+    """
+    base = Path(directory)
+    usable: list[Blueprint] = []
+    for name in blueprint_names(base):
+        try:
+            usable.append(load_blueprint(base, name))
+        except BlueprintError:
+            # The reason stays in the log at admission time; the listing just
+            # does not claim an unusable candidate.
+            continue
+    return tuple(usable)
+
+
 def load_blueprint(directory: Path | str, name: str) -> Blueprint:
     """Parse the blueprint ``name`` out of ``directory``; never a partial read.
 
