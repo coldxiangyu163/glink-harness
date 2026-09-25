@@ -247,11 +247,20 @@ class AcpExecutionAdapter(ExecutionAdapter):
         #: published stays unknown and the allowlist keeps refusing it.
         self._tool_kinds: dict[str, str] = {}
         self._outcome = ExecutionOutcome()
+        #: The outcome is shared: the driver thread reports the turn's end
+        #: into it while the run thread decides the verdict from it. ``wait``
+        #: freezes it in the same critical section that writes the final
+        #: decision, so every driver write lands either before that decision
+        #: (which overrides it) or after the freeze (which rejects it) -- the
+        #: late-write race can no longer rewrite a decided error text.
+        self._outcome_lock = threading.Lock()
+        self._outcome_sealed = False
         #: The cause of a pending ``kernel_exit`` report: the agent's stream
         #: ended before it answered ``session/prompt``. The exit status is
         #: deliberately not part of it -- the stream ending and the process
         #: exiting are two events, and a status exists only once the child has
-        #: been reaped. :meth:`close` completes the report from that status.
+        #: been reaped. :meth:`close` completes the report from that status,
+        #: and only while the frozen decision *is* that report.
         self._kernel_exit_cause: str | None = None
         self._session_id: str | None = None
         #: Which continuation method this run used (``session/resume`` or
@@ -529,8 +538,7 @@ class AcpExecutionAdapter(ExecutionAdapter):
             if self._cancelled.is_set():
                 # The flag may have been set between deliver_input's check and
                 # this thread starting: no turn exists to cancel.
-                self._outcome.cancelled = True
-                self._outcome.stop_reason = "abort"
+                self._record_cancel()
                 return
             # The turn boundary the product's streaming model needs: streamed
             # text/thinking blocks are only closed (and rendered as Markdown)
@@ -556,8 +564,7 @@ class AcpExecutionAdapter(ExecutionAdapter):
             self._fail("execution_error", f"session/prompt 被拒绝: {exc}")
         except (AcpClosed, AcpProtocolError) as exc:
             if self._cancelled.is_set():
-                self._outcome.cancelled = True
-                self._outcome.stop_reason = "abort"
+                self._record_cancel()
             else:
                 # The stream ended before the answer. Whether the agent itself
                 # exited, and with what status, is a fact about the reaped
@@ -565,8 +572,7 @@ class AcpExecutionAdapter(ExecutionAdapter):
                 # the child is not yet reapable, so no status is sampled here.
                 # close() reaps the child before the verdict is decided and
                 # completes the report from that status.
-                self._kernel_exit_cause = str(exc)
-                self._fail("kernel_exit", self._kernel_exit_message(None))
+                self._record_kernel_exit(str(exc))
         except Exception as exc:  # noqa: BLE001 - reported in the outcome
             self._fail("execution_error", f"{type(exc).__name__}: {exc}")
         else:
@@ -577,16 +583,14 @@ class AcpExecutionAdapter(ExecutionAdapter):
                 {"type": "acp_prompt_result", "stopReason": stop if isinstance(stop, str) else None}
             )
             if self._cancelled.is_set():
-                self._outcome.cancelled = True
-                self._outcome.stop_reason = "abort"
-            elif stop == "cancelled" and not self._outcome.timed_out:
+                self._record_cancel()
+            elif stop == "cancelled" and not self._timed_out():
                 # The agent stopped the turn itself. A ``cancelled`` answer to
                 # this adapter's own timeout teardown is not that case: the
                 # deadline verdict was already decided and must stay ``timeout``.
-                self._outcome.cancelled = True
-                self._outcome.stop_reason = "abort"
+                self._record_cancel()
             else:
-                self._outcome.settled = True
+                self._record_settled()
         finally:
             # The turn ended (answered, rejected or the process died): close the
             # streamed blocks and release any withheld delta tail. Emitted from
@@ -600,13 +604,93 @@ class AcpExecutionAdapter(ExecutionAdapter):
                 )
             self._done.set()
 
+    # -- the outcome's writers ------------------------------------------------
+    #
+    # Every write below is guarded by ``_outcome_lock`` and refused once the
+    # outcome is sealed. Only ``wait`` seals it, and it does so in the same
+    # critical section that writes the decision, so a driver write either
+    # precedes that decision (and is overridden by it) or follows the seal
+    # (and is dropped). The one write the seal deliberately leaves open is
+    # ``close``'s exit-status completion, and that one is conditional on the
+    # sealed decision actually being the ``kernel_exit`` report.
+
+    def _timed_out(self) -> bool:
+        with self._outcome_lock:
+            return self._outcome.timed_out
+
     def _fail(self, stop_reason: str, error: str) -> None:
+        """Record the driver's failure unless the decision is already final."""
         if self._cancelled.is_set():
+            self._record_cancel()
+            return
+        with self._outcome_lock:
+            if self._outcome_sealed:
+                logger.debug(
+                    "late %s report ignored run=%s: the verdict is decided",
+                    stop_reason,
+                    self.spec.run_id,
+                )
+                return
+            self._outcome.stop_reason = stop_reason
+            self._outcome.error = error
+
+    def _record_cancel(self) -> None:
+        """Record a host cancellation unless the decision is already final."""
+        with self._outcome_lock:
+            if self._outcome_sealed:
+                logger.debug(
+                    "late cancellation report ignored run=%s: the verdict is decided",
+                    self.spec.run_id,
+                )
+                return
             self._outcome.cancelled = True
             self._outcome.stop_reason = "abort"
-            return
-        self._outcome.stop_reason = stop_reason
-        self._outcome.error = error
+
+    def _record_settled(self) -> None:
+        """Record a settled turn unless the decision is already final."""
+        with self._outcome_lock:
+            if self._outcome_sealed:
+                logger.debug(
+                    "late settle report ignored run=%s: the verdict is decided",
+                    self.spec.run_id,
+                )
+                return
+            self._outcome.settled = True
+
+    def _record_kernel_exit(self, cause: str) -> None:
+        """Record the stream loss; :meth:`close` completes it from the reap."""
+        with self._outcome_lock:
+            if self._outcome_sealed:
+                logger.debug(
+                    "late kernel_exit report ignored run=%s: the verdict is decided",
+                    self.spec.run_id,
+                )
+                return
+            self._kernel_exit_cause = cause
+            self._outcome.stop_reason = "kernel_exit"
+            self._outcome.error = self._kernel_exit_message(None)
+
+    def _settle_cancelled(self) -> None:
+        """Decide cancellation and freeze the outcome in one critical section."""
+        with self._outcome_lock:
+            self._outcome.cancelled = True
+            self._outcome.stop_reason = "abort"
+            self._outcome_sealed = True
+
+    def _settle_timeout(self) -> None:
+        """Decide the deadline and freeze the outcome in one critical section."""
+        with self._outcome_lock:
+            self._outcome.timed_out = True
+            self._outcome.stop_reason = "timeout"
+            self._outcome.error = (
+                f"run did not settle within {self.spec.timeout_seconds}s"
+            )
+            self._outcome_sealed = True
+
+    def _seal_outcome(self) -> None:
+        """Freeze the driver-written decision before the verdict is read."""
+        with self._outcome_lock:
+            self._outcome_sealed = True
 
     def _kernel_exit_message(self, exit_code: int | None) -> str:
         """The ``kernel_exit`` report, with the agent's status once it is known."""
@@ -624,31 +708,43 @@ class AcpExecutionAdapter(ExecutionAdapter):
         to the agent only when the teardown did not have to stop it -- a status
         produced by terminate/kill is the host's doing, not the agent's own.
         """
-        if self._kernel_exit_cause is None or exit_code is None:
+        if exit_code is None or client.stopped_process:
             return
-        if client.stopped_process:
-            return
-        self._outcome.error = self._kernel_exit_message(exit_code)
+        with self._outcome_lock:
+            if self._kernel_exit_cause is None:
+                return
+            if (
+                self._outcome.timed_out
+                or self._outcome.cancelled
+                or self._outcome.stop_reason != "kernel_exit"
+            ):
+                logger.debug(
+                    "kernel_exit status not attributed run=%s: the verdict is %s",
+                    self.spec.run_id,
+                    self._outcome.stop_reason,
+                )
+                return
+            self._outcome.error = self._kernel_exit_message(exit_code)
 
     def wait(self, *, cancel: Callable[[], bool], deadline: float) -> ExecutionOutcome:
         while True:
             if cancel():
-                self._outcome.cancelled = True
-                self._outcome.stop_reason = "abort"
+                # Each decision below and its freeze are one critical section:
+                # a driver write racing this point lands either before it (where
+                # this decision overrides it) or after it (where the seal
+                # refuses it), never between the two.
+                self._settle_cancelled()
                 self.cancel()
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                self._outcome.timed_out = True
-                self._outcome.stop_reason = "timeout"
-                self._outcome.error = (
-                    f"run did not settle within {self.spec.timeout_seconds}s"
-                )
+                self._settle_timeout()
                 # Teardown only: the deadline verdict is ``timeout``, so this
                 # does not set the host-cancellation flag.
                 self._request_cancel()
                 break
             if self._done.wait(min(_POLL_SECONDS, remaining)):
+                self._seal_outcome()
                 break
         return self._outcome
 
@@ -697,7 +793,10 @@ class AcpExecutionAdapter(ExecutionAdapter):
                 failures.append(f"关闭 ACP agent 进程失败: {type(exc).__name__}: {exc}")
             else:
                 if exit_code is not None:
-                    self._outcome.exit_code = exit_code
+                    # The reaped status is a fact about the process, not a
+                    # verdict: it is recorded even after the decision froze.
+                    with self._outcome_lock:
+                        self._outcome.exit_code = exit_code
                 # The client has reaped the child: a pending stream-loss report
                 # gets its exit status here, where that status really exists.
                 self._complete_kernel_exit(client, exit_code)
