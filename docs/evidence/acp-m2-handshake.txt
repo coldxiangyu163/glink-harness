@@ -1,0 +1,95 @@
+ACP M2 握手实测证据（不消耗模型调用）
+========================================
+日期: 2026-09-25
+宿主: macOS (arm64) / Python 3.12.10 / Node v24.16.0
+
+钉版依赖（本地前缀安装，非全局；npx 等价调用亦验证）
+----------------------------------------
+命令: npm install --prefix /tmp/glink-m2-scratch/pkgs --no-audit --no-fund \
+        @deepseek-ai/dsh@0.1.5-rc.3 @zed-industries/codex-acp@0.16.0
+  npm view @deepseek-ai/dsh@0.1.5-rc.3 version   -> 0.1.5-rc.3 (dist-tag latest)
+  npx -y @deepseek-ai/dsh@0.1.5-rc.3 --profile acp --help
+    -> 'Serve automation clients over Agent Client Protocol stdio.'
+  注意: 0.1.5-rc.3 的 dsh CLI 没有 `acp` 子命令，入口是 `dsh --profile acp`；brief 中
+        'dsh acp' 是简写。
+  codex-acp 0.16.0 安装时 npm warn deprecated：包已被 @agentclientprotocol/codex-acp 取代；
+  本任务按 brief 钉 @zed-industries/codex-acp@0.16.0，后继包迁移留待 M4 评估。
+
+执行方式（宿主自身适配器，未发 session/prompt）
+----------------------------------------
+命令: .venv/bin/python /tmp/glink-m2-scratch/handshake.py both
+路径: prepare_acp_runtime（每 run HOME + 凭据复制）-> AcpExecutionAdapter.start()
+      = initialize + session/new（+ PI_GLINK_ACP_SESSION_CONFIG 的 set_config_option）
+凭据: ~/.codex/auth.json=.codex/auth.json；~/.dsh/.credentials.yaml=.dsh/.credentials.yaml
+
+能力矩阵（原样来自 initialize / session/new 响应）
+----------------------------------------
+字段                          | dsh 0.1.5-rc.3 | codex-acp 0.16.0
+agentInfo                   | {"name": "deepseek-harness-acp", "version": "0.0.1"} | {"name": "codex-acp", "title": "Codex", "version": "0.16.0"}
+protocolVersion             | 1 | 1
+loadSession                 | 未声明 | True
+sessionCapabilities         | close,list,resume | close,list,resume
+promptCapabilities          | {"image": false, "audio": false, "embeddedContext": false} | {"image": true, "audio": false, "embeddedContext": true}
+mcpCapabilities             | {"http": true} | {"http": true, "sse": false, "acp": false}
+authMethods                 | []（无需认证） | chatgpt / codex-api-key(env) / openai-api-key(env)
+session/new                 | sessionId + configOptions | sessionId + modes + configOptions
+session 配置应用                | reasoning_effort=low 成功 | mode=auto 成功，modes.currentModeId 同步
+状态目录                        | HOME/.dsh/{profiles,sessions,storages} | HOME/.codex/{auth.json,config.toml,cache,…}
+凭据落点                        | HOME/.dsh/.credentials.yaml 0600 | HOME/.codex/auth.json 0600
+源文件只读                       | sha256 前后一致 | sha256 前后一致
+
+capabilities 原文
+----------------------------------------
+dsh: {"mcpCapabilities": {"http": true}, "promptCapabilities": {"image": false, "audio": false, "embeddedContext": false}, "sessionCapabilities": {"close": {}, "list": {}, "resume": {}}}
+codex-acp: {"loadSession": true, "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true}, "mcpCapabilities": {"http": true, "sse": false, "acp": false}, "sessionCapabilities": {"list": {}, "resume": {}, "close": {}}, "auth": {"logout": {}}}
+
+codex-acp 会话配置原文（configOptions，节选 currentValue）
+----------------------------------------
+  mode = auto (select)
+  model = gpt-5.5 (select)
+  reasoning_effort = medium (select)
+
+dsh 会话配置原文（configOptions，节选 currentValue）
+----------------------------------------
+  model = ["deepseek-official","deepseek-v4-flash"] (select)
+  reasoning_effort = low (select)
+
+会话内 HOME 落点（实测文件树节选）
+----------------------------------------
+  dsh      .dsh
+  dsh      .dsh/.anonymous-user-id
+  dsh      .dsh/.credentials.yaml
+  dsh      .dsh/profiles
+  dsh      .dsh/profiles/acp
+  dsh      .dsh/profiles/acp/.dsh-module-fallback
+  dsh      .dsh/profiles/acp/.dsh-module-fallback/node_modules
+  dsh      .dsh/profiles/acp/cordis.patch.yml
+  dsh      .dsh/profiles/acp/cordis.yml
+  dsh      .dsh/profiles/acp/node_modules
+  dsh      .dsh/profiles/acp/package.json
+  dsh      .dsh/profiles/acp/pnpm-workspace.yaml
+  dsh      .dsh/profiles/node_modules
+  dsh      .dsh/profiles/node_modules/@agentclientprotocol
+  codex-acp .codex
+  codex-acp .codex/auth.json
+  codex-acp .codex/cache
+  codex-acp .codex/cache/codex_apps_server_info
+  codex-acp .codex/cache/codex_apps_server_info/b732a593c158ccd20f6ecf58be80b63a32f0dc99.json
+  codex-acp .codex/cache/codex_apps_tools
+  codex-acp .codex/cache/codex_apps_tools/b732a593c158ccd20f6ecf58be80b63a32f0dc99.json
+  codex-acp .codex/config.toml
+  codex-acp .codex/goals_1.sqlite
+  codex-acp .codex/goals_1.sqlite-shm
+  codex-acp .codex/goals_1.sqlite-wal
+  codex-acp .codex/installation_id
+  codex-acp .codex/logs_2.sqlite
+  codex-acp .codex/logs_2.sqlite-shm
+
+已知限制/待后续
+----------------------------------------
+* dsh 的权限请求只给 allow-once/reject-once 且 toolCall 不含 kind（源码核对）；
+  按工具类型白名单对 dsh 不可用，只能按 option kind 放行（M2 未启用）。
+* codex-acp 会话模式 read-only/auto/full-access；默认 read-only。
+* dsh 不返回 modes，仅 configOptions（model/reasoning_effort）。
+* 两个 agent 都不读取 session/new 的 _meta 作为 system prompt（schema 明确保留字段；
+  dsh 源码无 _meta 消费，codex-acp 未声明该约定）。

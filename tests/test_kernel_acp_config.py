@@ -9,6 +9,7 @@ refused at startup rather than falling back to pi (which would mislabel runs).
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 from typing import Mapping
 
@@ -87,3 +88,64 @@ def test_the_harness_invariants_are_rechecked_after_construction() -> None:
         validate_host_config(dataclasses.replace(base, harness="nope"))
     # The valid pi default is accepted unchanged.
     validate_host_config(base)
+
+
+# -- M2 ACP knobs -------------------------------------------------------------
+
+
+def test_m2_knobs_are_parsed_into_typed_entries() -> None:
+    acp = config(
+        {
+            "PI_GLINK_HARNESS": "acp",
+            "PI_GLINK_ACP_COMMAND": "fake --acp",
+            "PI_GLINK_ACP_CREDENTIAL_FILES": "~/a.json=.codex/auth.json; /b.yaml=.dsh/.credentials.yaml",
+            "PI_GLINK_ACP_ENV": "ACME_MODE=workspace;ACME_EMPTY=",
+            "PI_GLINK_ACP_PERMISSION_ALLOW": "allow_once, execute, allow_once",
+            "PI_GLINK_ACP_SESSION_CONFIG": "mode=auto;reasoning_effort=high",
+        }
+    )
+    assert acp.acp_credential_files == (
+        ("~/a.json", ".codex/auth.json"),
+        ("/b.yaml", ".dsh/.credentials.yaml"),
+    )
+    assert acp.acp_env == (("ACME_MODE", "workspace"), ("ACME_EMPTY", ""))
+    assert acp.acp_permission_allow == ("allow_once", "execute")
+    assert acp.acp_session_config == (("mode", "auto"), ("reasoning_effort", "high"))
+    # The browser-visible view never carries any of it.
+    view = json.dumps(acp.public_view())
+    assert "allow_once" not in view and "mode=auto" not in view
+
+
+@pytest.mark.parametrize(
+    "key, value, fragment",
+    [
+        ("PI_GLINK_ACP_CREDENTIAL_FILES", "/a.json=../escape.json", "相对路径"),
+        ("PI_GLINK_ACP_CREDENTIAL_FILES", "/a.json=/abs.json", "相对路径"),
+        ("PI_GLINK_ACP_CREDENTIAL_FILES", "/a.json=.codex/auth.json;/b.json=.codex/auth.json", "重复"),
+        ("PI_GLINK_ACP_CREDENTIAL_FILES", "just-a-path", "source=dest"),
+        ("PI_GLINK_ACP_ENV", "HOME=/tmp/other", "HOME"),
+        ("PI_GLINK_ACP_ENV", "9BAD=x", "NAME=value"),
+        ("PI_GLINK_ACP_PERMISSION_ALLOW", "reject_once", "allow 选项类型"),
+        ("PI_GLINK_ACP_PERMISSION_ALLOW", "everything", "allow 选项类型"),
+        ("PI_GLINK_ACP_SESSION_CONFIG", "mode", "id=value"),
+    ],
+)
+def test_a_malformed_m2_knob_is_refused_at_startup(
+    key: str, value: str, fragment: str
+) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        config({"PI_GLINK_HARNESS": "acp", "PI_GLINK_ACP_COMMAND": "fake --acp", key: value})
+    assert fragment in str(excinfo.value)
+
+
+def test_m2_knobs_are_refused_when_the_host_drives_pi() -> None:
+    """A security-relevant ACP knob must not be a silent no-op under pi."""
+    for key, value in (
+        ("PI_GLINK_ACP_CREDENTIAL_FILES", "/a.json=.codex/auth.json"),
+        ("PI_GLINK_ACP_ENV", "ACME_MODE=workspace"),
+        ("PI_GLINK_ACP_PERMISSION_ALLOW", "allow_once"),
+        ("PI_GLINK_ACP_SESSION_CONFIG", "mode=auto"),
+    ):
+        with pytest.raises(ConfigError) as excinfo:
+            config({key: value})
+        assert "只在 PI_GLINK_HARNESS=acp 下生效" in str(excinfo.value)

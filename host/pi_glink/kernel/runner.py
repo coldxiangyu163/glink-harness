@@ -1447,6 +1447,12 @@ class RunManager:
                 execution.redactor = self._redactor_for(
                     execution.credentials or RunCredentials.from_host(self.config)
                 )
+            # Credential material copied into this run's HOME joins this run's
+            # redaction boundary (and only this run's): a value the agent echoes
+            # into a stream, tool result or report is masked like every other
+            # secret the host knows. The values themselves never reach a log.
+            for value in runtime.secrets:
+                execution.redactor.add(value)
             execution.projector = AcpProjector(execution.redactor)
             return runtime
         runtime = prepare_agent_dir(

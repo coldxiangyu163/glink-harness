@@ -178,22 +178,37 @@ class AcpProjector:
         tool_call_id = str(tool.get("toolCallId") or "")
         title = _clip(str(tool.get("title") or ""), COMMAND_NAME_LIMIT)
         decision = str(frame.get("decision") or "rejected")
+        policy = str(frame.get("policy") or "fail_closed")
         option_id = str(frame.get("optionId") or "")
         option_kind = str(frame.get("optionKind") or "")
-        detail = f"ACP 权限请求按 fail-closed 应答：decision={decision}"
+        tool_kind = str(frame.get("toolKind") or tool.get("kind") or "")
+        if decision == "allowed":
+            # The run was explicitly given an allowlist; the answer is still
+            # recorded (an allowed tool is a fact the operator must be able to
+            # audit), just not as a refusal.
+            message = "acp_permission_allowed"
+            detail = f"ACP 权限请求按显式白名单应答：decision={decision}"
+        else:
+            message = "acp_permission_denied"
+            detail = f"ACP 权限请求按 fail-closed 应答：decision={decision}"
         if title or tool_call_id:
             detail += f"；tool={title or tool_call_id}"
+        if tool_kind:
+            detail += f"；kind={tool_kind}"
         if option_id or option_kind:
             detail += f"；option={option_id}({option_kind})"
         payload: dict[str, Any] = {
             "level": "warning",
-            "message": "acp_permission_denied",
+            "message": message,
             "detail": _clip(detail, DETAIL_LIMIT),
             "decision": decision,
+            "policy": policy,
             "toolCallId": tool_call_id,
         }
         if title:
             payload["toolTitle"] = title
+        if tool_kind:
+            payload["toolKind"] = tool_kind
         if option_id:
             payload["optionId"] = option_id
         if option_kind:

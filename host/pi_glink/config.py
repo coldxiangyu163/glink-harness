@@ -10,12 +10,33 @@ be relabelled by editing the environment afterwards.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
 
 from .dotenv import parse_env_file
+
+#: ACP permission options the host may select when a run is explicitly given
+#: an allowlist (``PI_GLINK_ACP_PERMISSION_ALLOW``). The default host answer is
+#: fail-closed; see :data:`HostConfig.acp_permission_allow`.
+ACP_PERMISSION_OPTION_KINDS = ("allow_once", "allow_always")
+#: The ACP tool-kind vocabulary (schema ``ToolKind``); only these tokens may be
+#: named in the permission allowlist, so a typo cannot silently stop matching.
+ACP_PERMISSION_TOOL_KINDS = (
+    "read",
+    "edit",
+    "delete",
+    "move",
+    "search",
+    "execute",
+    "think",
+    "fetch",
+    "switch_mode",
+    "other",
+)
+_ACP_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 EXECUTORS = ("inproc", "docker", "e2b")
 #: Kernel adapter families the host can drive. ``pi`` is the existing kernel
@@ -82,6 +103,32 @@ class HostConfig:
     #: shell; frozen at startup so a run cannot be relabelled later. Only
     #: consulted when ``harness`` is ``acp``.
     acp_command: str = ""
+    #: Credential files to copy into each run's exclusive ``HOME``
+    #: (``PI_GLINK_ACP_CREDENTIAL_FILES``): ``source=dest`` entries separated by
+    #: ``;``. ``source`` is read only (a leading ``~/`` expands to the operator's
+    #: home) and ``dest`` is a path under the run HOME. ACP agents read their
+    #: credentials from their own state directory inside ``HOME``, so this is the
+    #: per-agent injection point; values never enter the host environment.
+    #: Each entry's credential values are added to the run's redaction boundary.
+    acp_credential_files: tuple[tuple[str, str], ...] = ()
+    #: Extra ``NAME=value`` entries for the ACP agent process
+    #: (``PI_GLINK_ACP_ENV``, ``;``-separated). ``HOME`` may not be overridden:
+    #: the per-run state root stays the isolation boundary. A value whose name
+    #: looks credential-shaped joins the run's redaction boundary.
+    acp_env: tuple[tuple[str, str], ...] = ()
+    #: Explicit allowlist for ACP permission answers
+    #: (``PI_GLINK_ACP_PERMISSION_ALLOW``, comma/space separated). Empty (the
+    #: default) keeps the fail-closed answer. Tokens are ACP option kinds
+    #: (:data:`ACP_PERMISSION_OPTION_KINDS`) and/or tool kinds
+    #: (:data:`ACP_PERMISSION_TOOL_KINDS`). An allow answer needs a matching
+    #: option kind; when any tool kind is configured the request's tool kind
+    #: must match too (a request without a tool kind is refused).
+    acp_permission_allow: tuple[str, ...] = ()
+    #: ACP session configuration applied right after ``session/new``
+    #: (``PI_GLINK_ACP_SESSION_CONFIG``, ``;``-separated ``id=value`` entries;
+    #: e.g. ``mode=auto``). An agent that does not advertise the option/value
+    #: fails the run: an explicitly configured value is never silently dropped.
+    acp_session_config: tuple[tuple[str, str], ...] = ()
     openai_api_key: str = field(repr=False, default="")
     context_window: int = _DEFAULT_CONTEXT_WINDOW
     max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS
@@ -244,6 +291,10 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     executor = _text(values, "LOCAL_WEB_EXECUTOR", "inproc").lower()
     harness = _text(values, "PI_GLINK_HARNESS", "pi").lower()
     acp_command = _text(values, "PI_GLINK_ACP_COMMAND", "")
+    acp_credential_files = _acp_credential_files(values)
+    acp_env = _acp_env_entries(values)
+    acp_permission_allow = _acp_permission_allow(values)
+    acp_session_config = _acp_session_config(values)
     tenancy_mode = _text(values, "PI_GLINK_TENANCY", "local").lower()
     auth_mode = _text(values, "PI_GLINK_AUTH_MODE", "gateway").lower()
     model_credentials = _text(values, "PI_GLINK_MODEL_CREDENTIALS", "tenant").lower()
@@ -347,6 +398,10 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         executor=executor,
         harness=harness,
         acp_command=acp_command,
+        acp_credential_files=acp_credential_files,
+        acp_env=acp_env,
+        acp_permission_allow=acp_permission_allow,
+        acp_session_config=acp_session_config,
         pi_bin=_text(values, "PI_GLINK_PI_BIN", "pi"),
         agent_config_dir=agent_config_dir,
         session_dir=_path(values, "PI_CODING_AGENT_SESSION_DIR", data_root / "sessions"),
@@ -482,6 +537,7 @@ def validate_host_config(config: HostConfig) -> None:
         raise ConfigError(
             "PI_GLINK_TENANCY=multitenant 要求 Docker/E2B 执行面；inproc 仅用于本地单用户调试"
         )
+    _acp_knobs_are_acp_only(config)
 
 
 def _require_multitenant(
@@ -524,6 +580,134 @@ def _looks_configured(key: str) -> bool:
         "OPENAI_MODEL",
         "E2B_API_KEY",
     }
+
+
+def _acp_credential_files(values: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """Parse ``PI_GLINK_ACP_CREDENTIAL_FILES``: ``source=dest`` entries.
+
+    ``dest`` must stay under the run HOME: an absolute path or a ``..`` segment
+    would put a credential somewhere other than the run's own state directory
+    (and could overwrite host files), so it is refused at startup. Two entries
+    may not target the same destination.
+    """
+    raw = _text(values, "PI_GLINK_ACP_CREDENTIAL_FILES", "")
+    if not raw:
+        return ()
+    entries: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for chunk in raw.split(";"):
+        item = chunk.strip()
+        if not item:
+            continue
+        source, separator, dest = item.partition("=")
+        source, dest = source.strip(), dest.strip()
+        if not separator or not source or not dest:
+            raise ConfigError(
+                f"PI_GLINK_ACP_CREDENTIAL_FILES 条目必须是 source=dest；当前 {item!r}"
+            )
+        parts = Path(dest).parts
+        if Path(dest).is_absolute() or ".." in parts or dest.startswith("~"):
+            raise ConfigError(
+                f"PI_GLINK_ACP_CREDENTIAL_FILES 的目标必须是 run HOME 内的相对路径；当前 {dest!r}"
+            )
+        if dest in seen:
+            raise ConfigError(f"PI_GLINK_ACP_CREDENTIAL_FILES 目标重复：{dest!r}")
+        seen.add(dest)
+        entries.append((source, dest))
+    return tuple(entries)
+
+
+def _acp_env_entries(values: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """Parse ``PI_GLINK_ACP_ENV``: ``NAME=value`` entries.
+
+    ``HOME`` is the run's isolation boundary and may not be overridden from the
+    configuration; a value may be empty (an empty proxy variable is meaningful).
+    """
+    raw = _text(values, "PI_GLINK_ACP_ENV", "")
+    if not raw:
+        return ()
+    entries: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for chunk in raw.split(";"):
+        item = chunk.strip()
+        if not item:
+            continue
+        name, separator, value = item.partition("=")
+        name, value = name.strip(), value.strip()
+        if not separator or not _ACP_ENV_NAME_RE.match(name):
+            raise ConfigError(
+                f"PI_GLINK_ACP_ENV 条目必须是 NAME=value；当前 {item!r}"
+            )
+        if name == "HOME":
+            raise ConfigError("PI_GLINK_ACP_ENV 不允许覆盖 HOME（每 run 状态根是隔离边界）")
+        if name in seen:
+            raise ConfigError(f"PI_GLINK_ACP_ENV 变量重复：{name}")
+        seen.add(name)
+        entries.append((name, value))
+    return tuple(entries)
+
+
+def _acp_permission_allow(values: Mapping[str, str]) -> tuple[str, ...]:
+    """Parse ``PI_GLINK_ACP_PERMISSION_ALLOW``: option and/or tool kinds."""
+    raw = _text(values, "PI_GLINK_ACP_PERMISSION_ALLOW", "")
+    if not raw:
+        return ()
+    allowed = set(ACP_PERMISSION_OPTION_KINDS) | set(ACP_PERMISSION_TOOL_KINDS)
+    tokens: list[str] = []
+    for token in re.split(r"[,\s]+", raw):
+        if not token:
+            continue
+        if token not in allowed:
+            raise ConfigError(
+                "PI_GLINK_ACP_PERMISSION_ALLOW 只接受 ACP 的 allow 选项类型或工具类型；"
+                f"当前 {token!r}"
+            )
+        if token not in tokens:
+            tokens.append(token)
+    return tuple(tokens)
+
+
+def _acp_session_config(values: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """Parse ``PI_GLINK_ACP_SESSION_CONFIG``: ``id=value`` entries."""
+    raw = _text(values, "PI_GLINK_ACP_SESSION_CONFIG", "")
+    if not raw:
+        return ()
+    entries: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for chunk in raw.split(";"):
+        item = chunk.strip()
+        if not item:
+            continue
+        config_id, separator, value = item.partition("=")
+        config_id, value = config_id.strip(), value.strip()
+        if not separator or not config_id or not value:
+            raise ConfigError(
+                f"PI_GLINK_ACP_SESSION_CONFIG 条目必须是 id=value；当前 {item!r}"
+            )
+        if config_id in seen:
+            raise ConfigError(f"PI_GLINK_ACP_SESSION_CONFIG 选项重复：{config_id}")
+        seen.add(config_id)
+        entries.append((config_id, value))
+    return tuple(entries)
+
+
+def _acp_knobs_are_acp_only(config: HostConfig) -> None:
+    """Refuse ACP-only knobs on a non-ACP host instead of ignoring them.
+
+    ``PI_GLINK_ACP_COMMAND`` keeps its M1 behaviour (inert under ``pi``); every
+    knob added in M2 changes what a run's process may see or do, so an operator
+    who set one while the host drives pi gets a startup error rather than a
+    silent no-op.
+    """
+    if config.harness == "acp":
+        return
+    if config.acp_credential_files or config.acp_env or config.acp_permission_allow or config.acp_session_config:
+        raise ConfigError(
+            "PI_GLINK_ACP_CREDENTIAL_FILES / PI_GLINK_ACP_ENV / "
+            "PI_GLINK_ACP_PERMISSION_ALLOW / PI_GLINK_ACP_SESSION_CONFIG "
+            "只在 PI_GLINK_HARNESS=acp 下生效；当前 harness="
+            f"{config.harness!r}"
+        )
 
 
 def _text(values: Mapping[str, str], key: str, default: str) -> str:

@@ -1,0 +1,153 @@
+ACP M2 真实冒烟证据（dsh）
+========================================
+日期: 2026-09-25
+宿主: macOS (arm64) / Python 3.12.10 / Node v24.16.0
+执行面: inproc；PI_GLINK_HARNESS=acp（ACP 族 M1 起仅支持 inproc）
+Agent: @deepseek-ai/dsh@0.1.5-rc.3（--profile acp）
+钉版: 本地前缀安装 @deepseek-ai/dsh@0.1.5-rc.3（npx 钉版同款）
+模型: deepseek-v4-flash（会话默认；reasoning_effort=high）
+凭据注入: ~/.dsh/.credentials.yaml=.dsh/.credentials.yaml（只读复制到每 run HOME，0600；源文件 sha256 前后一致）
+会话配置: <默认，未调用 session/set_config_option>
+题目: 用一份不超过 400 字的简短调研回答：为什么 2026 年的 AI 编程 agent 需要 ACP（Agent Client Protocol）这类开放协议？给出 2-3 条要点，能为关键结论附上可核验来源链接就附上。
+
+宿主与清理（命令与原始输出，见 summary.txt 全文）
+------------------------------------------------------------------------------
+  == dsh ==
+  acp_command: /tmp/glink-m2-scratch/pkgs/node_modules/.bin/dsh --profile acp
+  credential_files: /Users/coldxiangyu/.dsh/.credentials.yaml=.dsh/.credentials.yaml
+  session_config: 
+  permission_allow: <fail-closed default>
+  host_pid: 28095
+  port: 55013
+  POST /api/runs -> 201
+  {"run": {"runId": "36ee78fda582", "status": "running", "prompt": "用一份不超过 400 字的简短调研回答：为什么 2026 年的 AI 编程 agent 需要 ACP（Agent Client Protocol）这类开放协议？给出 2-3 条要点，能为关键结论附上可核验来源链接就附上。", "parentRunId": null, "createdAt": 1790298486.590195, "finishedAt": null, "durationSeconds": null, "sessionId": null, "hasReport": false, "stopReason": null, "error": null, "eventCount": 0, "usage": null, "redacted": false}}
+  run_id: 36ee78fda582
+  stream_pid: 28131
+  final status: finished
+  GET report -> HTTP/1.1 200 OK
+  report bytes:     1607
+  cleanup: kill -TERM 28095
+  cleanup: host exit status 143
+
+宿主日志关键行
+------------------------------------------------------------------------------
+  pi-glink 宿主已启动 / host listening: http://127.0.0.1:55013/
+  2026-09-25 09:08:06,593 INFO pi_glink.kernel.acp_rpc: starting ACP agent: /tmp/glink-m2-scratch/pkgs/node_modules/.bin/dsh --profile acp
+  2026-09-25 09:08:49,642 INFO pi_glink.kernel.runner: run finalized run=36ee78fda582 status=finished stop=None committed=True report=/tmp/glink-m2-scratch/smoke-dsh/data/runs/36ee78fda582/artifacts/report.md released=True
+
+run 结果
+------------------------------------------------------------------------------
+runId           36ee78fda582
+status          finished（API run view: finished）
+stopReason      None
+modelStopReason end_turn
+error           None
+duration        43.051 s
+sessionId       28275309-0e9f-4c56-ad7c-61aa2e6e4f70
+事件数          60
+usage           {"totalTokens": 27328, "contextSize": 1000000, "basis": "acp_usage_update"}
+cleanup         released=True failures=[]
+
+事件类型统计（events.jsonl）
+------------------------------------------------------------------------------
+assistant_delta 1 · run_finished 1 · run_started 1 · session_ready 1 · thinking_delta 9 · tool_finished 16 · tool_started 16 · turn_finished 1 · turn_started 1 · usage_reported 13
+
+权限请求: acp_permission_* 事件 0 条（fail-closed 默认；决策见集成笔记 M2）
+
+事件时间线（seq ts type 摘要）
+------------------------------------------------------------------------------
+   1 1790298486.591 run_started       prompt=用一份不超过 400 字的简短调研回答：为什么 2026 年的 AI 编程 agent 需要 ACP（Agent Cli…
+   2 1790298487.971 session_ready     harness=acp session=28275309-0e9f-4c56-ad7c-61aa2e6e4f70 mode=[]
+   3 1790298487.981 turn_started      
+   4 1790298489.944 thinking_delta    The user wants a short research answer (under 40
+   5 1790298489.945 usage_reported    totalTokens=7962 basis=acp_usage_update
+   6 1790298489.945 tool_started      web_search kind=other
+   7 1790298489.946 tool_started      web_search kind=other
+   8 1790298497.884 tool_finished     web_search isError=False
+   9 1790298497.887 tool_finished     web_search isError=False
+  10 1790298498.851 thinking_delta    Let me fetch key pages: agentclientprotocol.com 
+  11 1790298498.852 usage_reported    totalTokens=8810 basis=acp_usage_update
+  12 1790298498.852 tool_started      web_fetch kind=other
+  13 1790298498.852 tool_started      web_fetch kind=other
+  14 1790298498.853 tool_started      web_fetch kind=other
+  15 1790298501.027 tool_finished     web_fetch isError=False
+  16 1790298501.030 tool_finished     web_fetch isError=False
+  17 1790298501.032 tool_finished     web_fetch isError=False
+  18 1790298502.521 thinking_delta    I have strong sources. Let me get the ACP Regist
+  19 1790298502.522 usage_reported    totalTokens=17410 basis=acp_usage_update
+  20 1790298502.523 tool_started      web_fetch kind=other
+  21 1790298502.524 tool_started      web_fetch kind=other
+  22 1790298503.974 tool_finished     web_fetch isError=False
+  23 1790298503.976 tool_finished     web_fetch isError=False
+  24 1790298510.602 thinking_delta    I have enough verifiable sources. Now write repo
+  25 1790298510.606 usage_reported    totalTokens=22829 basis=acp_usage_update
+  26 1790298510.608 tool_started      write kind=other
+  27 1790298510.621 tool_finished     write isError=False
+  28 1790298512.014 thinking_delta    Check character count of body (excluding URLs/so
+  29 1790298512.014 usage_reported    totalTokens=23126 basis=acp_usage_update
+  30 1790298512.015 tool_started      bash kind=other
+  31 1790298512.084 tool_finished     bash isError=False
+  32 1790298516.175 thinking_delta    586 chars for body, over 400. Need to trim to ≤4
+  33 1790298516.182 usage_reported    totalTokens=24153 basis=acp_usage_update
+  34 1790298516.183 tool_started      write kind=other
+  35 1790298516.197 tool_finished     write isError=False
+  36 1790298517.436 usage_reported    totalTokens=24367 basis=acp_usage_update
+  37 1790298517.436 tool_started      bash kind=other
+  38 1790298517.495 tool_finished     bash isError=False
+  39 1790298521.737 thinking_delta    447 still slightly over 400. Trim ~50 more chars
+  40 1790298521.745 usage_reported    totalTokens=25545 basis=acp_usage_update
+  41 1790298521.747 tool_started      edit kind=other
+  42 1790298521.763 tool_finished     edit isError=False
+  43 1790298522.973 usage_reported    totalTokens=25770 basis=acp_usage_update
+  44 1790298522.974 tool_started      bash kind=other
+  45 1790298523.183 tool_finished     bash isError=False
+  46 1790298525.939 thinking_delta    407 non-space, CJK 176. Close enough? "不超过400字" 
+  47 1790298525.944 usage_reported    totalTokens=26315 basis=acp_usage_update
+  48 1790298525.945 tool_started      edit kind=other
+  49 1790298525.957 tool_finished     edit isError=False
+  50 1790298527.255 usage_reported    totalTokens=26516 basis=acp_usage_update
+  51 1790298527.255 tool_started      bash kind=other
+  52 1790298527.315 tool_finished     bash isError=False
+  53 1790298528.070 thinking_delta    396 non-space, under 400. Good. Let me read fina
+  54 1790298528.070 usage_reported    totalTokens=26620 basis=acp_usage_update
+  55 1790298528.071 tool_started      read kind=other
+  56 1790298528.080 tool_finished     read isError=False
+  57 1790298529.599 assistant_delta   已完成，报告写入 `report.md`（正文 396 字，符合 ≤400 字要求）。  结论要
+  58 1790298529.600 usage_reported    totalTokens=27328 basis=acp_usage_update
+  59 1790298529.601 turn_finished     
+  60 1790298529.642 run_finished      status=finished modelStopReason=end_turn reportStatus=ok cleanup=True
+
+每 run HOME 凭据落点核对（真实 run 后实测）
+------------------------------------------------------------------------------
+HOME 目录模式        0o700（run 的 acp-agent 目录同样 0700）
+注入文件             .dsh/.credentials.yaml
+注入文件模式/大小    0o600 / 463 bytes
+源文件 ~/.dsh/.credentials.yaml 的 sha256 在握手与冒烟前后一致
+（源文件从未被写入/改权限；每次运行只读复制）
+
+report.md 回收
+------------------------------------------------------------------------------
+GET /api/runs/<id>/report -> 200 text/markdown; charset=utf-8
+sha256(host 下载内容) 3f7fb5b66bd50f5607768f1dd8ce4ea9ee183c4a3647ee950914a99ff68040d9
+字节数 1607
+工作区 report.md、artifacts/report.md 与 API 下载内容一致（diff 无输出）
+
+---- report.md（宿主下载，已过 run redactor） ----
+# 为什么 2026 年的 AI 编程 agent 需要 ACP 这类开放协议
+
+**1. 消除 M×N 重复集成（LSP 式解耦）**
+没有协议时，每家编辑器为每个 agent 写适配，每个 agent 又实现各编辑器 API，胶水代码随组合成倍增长。ACP 让双方各实现一次：agent 可跑在任何兼容编辑器，编辑器可接入整个 agent 生态。— [ACP 官方 Introduction](https://agentclientprotocol.com/get-started/introduction)
+
+**2. 打破锁定，补上统一分发层**
+协议把"选 agent"与"选编辑器"解耦。2026-01-28 ACP Registry 上线：agent 注册一次即可被所有 ACP 客户端安装，含 Claude Code、Codex CLI、Copilot CLI 等。— [Zed 公告](https://zed.dev/blog/acp-registry)、[ACP agents 目录](https://agentclientprotocol.com/get-started/agents)
+
+**3. 与 MCP 分层互补**
+MCP 管 agent→工具/数据；ACP 管编辑器→agent：会话、流式更新、diff 预览与改前授权。终端 agent 只需 MCP，进入编辑器则两者都要。— [CircleCI: ACP vs MCP](https://circleci.com/blog/acp-vs-mcp-whats-the-difference-for-agentic-coding/)
+
+## 来源
+1. [ACP 官方 Introduction](https://agentclientprotocol.com/get-started/introduction)
+2. [CircleCI: ACP vs MCP（2026-07-02）](https://circleci.com/blog/acp-vs-mcp-whats-the-difference-for-agentic-coding/)
+3. [Zed: The ACP Registry is Live（2026-01-28）](https://zed.dev/blog/acp-registry)
+4. [Zed: How the Community is Driving ACP Forward（2025-10-02）](https://zed.dev/blog/acp-progress-report)
+5. [ACP agents 目录](https://agentclientprotocol.com/get-started/agents)
+

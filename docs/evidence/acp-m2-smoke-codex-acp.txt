@@ -1,0 +1,162 @@
+ACP M2 真实冒烟证据（codex-acp）
+========================================
+日期: 2026-09-25
+宿主: macOS (arm64) / Python 3.12.10 / Node v24.16.0
+执行面: inproc；PI_GLINK_HARNESS=acp（ACP 族 M1 起仅支持 inproc）
+Agent: @zed-industries/codex-acp@0.16.0
+钉版: 本地前缀安装 @zed-industries/codex-acp@0.16.0（npx 钉版同款）
+模型: gpt-5.5（会话默认；reasoning_effort=medium；mode=auto）
+凭据注入: ~/.codex/auth.json=.codex/auth.json（只读复制到每 run HOME，0600；源文件 sha256 前后一致）
+会话配置: mode=auto
+题目: 用一份不超过 400 字的简短调研回答：为什么 2026 年的 AI 编程 agent 需要 ACP（Agent Client Protocol）这类开放协议？给出 2-3 条要点，能为关键结论附上可核验来源链接就附上。
+
+宿主与清理（命令与原始输出，见 summary.txt 全文）
+------------------------------------------------------------------------------
+  == codex-acp ==
+  acp_command: /tmp/glink-m2-scratch/pkgs/node_modules/.bin/codex-acp
+  credential_files: /Users/coldxiangyu/.codex/auth.json=.codex/auth.json
+  session_config: mode=auto
+  permission_allow: <fail-closed default>
+  host_pid: 14957
+  port: 54640
+  POST /api/runs -> 201
+  {"run": {"runId": "702a3f006d11", "status": "running", "prompt": "用一份不超过 400 字的简短调研回答：为什么 2026 年的 AI 编程 agent 需要 ACP（Agent Client Protocol）这类开放协议？给出 2-3 条要点，能为关键结论附上可核验来源链接就附上。", "parentRunId": null, "createdAt": 1790298402.4843478, "finishedAt": null, "durationSeconds": null, "sessionId": null, "hasReport": false, "stopReason": null, "error": null, "eventCount": 0, "usage": null, "redacted": false}}
+  run_id: 702a3f006d11
+  stream_pid: 15244
+  final status: finished
+  GET report -> HTTP/1.1 200 OK
+  report bytes:     1607
+  cleanup: kill -TERM 14957
+  cleanup: host exit status 143
+
+宿主日志关键行
+------------------------------------------------------------------------------
+  pi-glink 宿主已启动 / host listening: http://127.0.0.1:54640/
+  2026-09-25 09:06:42,487 INFO pi_glink.kernel.acp_rpc: starting ACP agent: /tmp/glink-m2-scratch/pkgs/node_modules/.bin/codex-acp
+  2026-09-25 09:07:36,481 INFO pi_glink.kernel.runner: run finalized run=702a3f006d11 status=finished stop=None committed=True report=/tmp/glink-m2-scratch/smoke-codex/data/runs/702a3f006d11/artifacts/report.md released=True
+
+run 结果
+------------------------------------------------------------------------------
+runId           702a3f006d11
+status          finished（API run view: finished）
+stopReason      None
+modelStopReason end_turn
+error           None
+duration        53.996 s
+sessionId       01a0d619-bd6d-79b0-b8a2-bac70be6f1b6
+事件数          73
+usage           {"totalTokens": 45116, "contextSize": 258400, "basis": "acp_usage_update"}
+cleanup         released=True failures=[]
+
+事件类型统计（events.jsonl）
+------------------------------------------------------------------------------
+assistant_delta 48 · kernel_status 1 · run_finished 1 · run_started 1 · session_ready 1 · tool_finished 6 · tool_started 6 · tool_updated 5 · turn_finished 1 · turn_started 1 · usage_reported 2
+
+权限请求: acp_permission_* 事件 0 条（fail-closed 默认；决策见集成笔记 M2）
+
+事件时间线（seq ts type 摘要）
+------------------------------------------------------------------------------
+   1 1790298402.485 run_started       prompt=用一份不超过 400 字的简短调研回答：为什么 2026 年的 AI 编程 agent 需要 ACP（Agent Cli…
+   2 1790298410.347 kernel_status     acp_available_commands ACP agent 声明了 6 个斜杠命令；本宿主对 ACP 族一律拒绝以 / 开头的 prompt
+   3 1790298413.665 session_ready     harness=acp session=01a0d619-bd6d-79b0-b8a2-bac70be6f1b6 mode=['auto']
+   4 1790298413.665 turn_started      
+   5 1790298416.693 assistant_delta   我
+   6 1790298416.719 assistant_delta   会
+   7 1790298416.720 assistant_delta   先
+   8 1790298416.770 assistant_delta   核
+   9 1790298416.771 assistant_delta   验
+  10 1790298416.781 assistant_delta    AC
+  11 1790298416.782 assistant_delta   P 
+  12 1790298416.803 assistant_delta   及
+  13 1790298416.834 assistant_delta   相关
+  14 1790298416.866 assistant_delta   生态
+  15 1790298416.866 assistant_delta   材料
+  16 1790298416.879 assistant_delta   ，再
+  17 1790298416.918 assistant_delta   把
+  18 1790298416.919 assistant_delta   不
+  19 1790298416.949 assistant_delta   超过
+  20 1790298416.950 assistant_delta    
+  21 1790298417.059 assistant_delta   400
+  22 1790298417.062 assistant_delta    字
+  23 1790298417.062 assistant_delta   的
+  24 1790298417.063 assistant_delta   简
+  25 1790298417.063 assistant_delta   短
+  26 1790298417.063 assistant_delta   回答
+  27 1790298417.076 assistant_delta   写
+  28 1790298417.092 assistant_delta   入
+  29 1790298417.110 assistant_delta   工作
+  30 1790298417.127 assistant_delta   区
+  31 1790298417.150 assistant_delta   的
+  32 1790298417.166 assistant_delta    `
+  33 1790298417.185 assistant_delta   repo
+  34 1790298417.205 assistant_delta   rt.md
+  35 1790298417.228 assistant_delta   `
+  36 1790298417.245 assistant_delta   。
+  37 1790298417.442 tool_started      Searching the Web kind=fetch
+  38 1790298423.713 tool_updated      ws_01a9c00c580062a7016ab5c931580887d0a1d7aeb97b5150c7
+  39 1790298423.875 tool_finished     Searching for: Agent Client Protocol ACP AI coding agents open protocol 2026, Agent Client Protocol specification Zed AI coding agents, Model Context Protocol clients tools standard AI agents Anthropic isError=False
+  40 1790298423.876 tool_started      Searching the Web kind=fetch
+  41 1790298425.444 tool_updated      ws_01a9c00c580062a7016ab5c937c2e487d0a26eba40981c40f8
+  42 1790298425.857 tool_finished     Opening: https://zed.dev/blog/bring-your-own-agent-to-zed isError=False
+  43 1790298425.857 tool_started      Searching the Web kind=fetch
+  44 1790298427.222 tool_updated      ws_01a9c00c580062a7016ab5c939bd5c87d096e869f34a3c5736
+  45 1790298427.545 tool_finished     Opening: https://blog.jetbrains.com/blog/2025/10/06/jetbrains-zed-open-interoperability-for-ai-coding-agents/ isError=False
+  46 1790298427.546 tool_started      Searching the Web kind=fetch
+  47 1790298437.062 tool_updated      ws_01a9c00c580062a7016ab5c93b622c87d0a55d17abaf3d1e84
+  48 1790298437.174 tool_finished     Searching for: JetBrains Zed Open Interoperability for AI Coding Agents ACP October 2025 isError=False
+  49 1790298437.175 tool_started      Searching the Web kind=fetch
+  50 1790298438.592 tool_updated      ws_01a9c00c580062a7016ab5c9450b5087d0a95346694496639c
+  51 1790298439.079 assistant_delta   已核验 Zed、JetBrains 和 MCP 文
+  52 1790298439.163 assistant_delta   档。接下来我会把结论压缩到 
+  53 1790298439.284 assistant_delta   2-3 个要点，并在 `report.md` 里附上来源
+  54 1790298439.473 assistant_delta   列表。
+  55 1790298448.524 tool_finished     Opening: https://www.jetbrains.com/acp/ isError=False
+  56 1790298448.524 tool_started      Edit /tmp/glink-m2-scratch/smoke-codex/data/workspaces/702a3f006d11/report.md kind=edit
+  57 1790298448.604 tool_finished     Edit /tmp/glink-m2-scratch/smoke-codex/data/workspaces/702a3f006d11/report.md isError=False
+  58 1790298448.698 usage_reported    totalTokens=45799 basis=acp_usage_update
+  59 1790298450.613 assistant_delta   已写入 [repo
+  60 1790298450.614 assistant_delta   rt.md
+  61 1790298450.657 assistant_delta   ](/private/tmp/glink
+  62 1790298450.698 assistant_delta   -m2-scratch/smoke-c
+  63 1790298450.767 assistant_delta   odex/dat
+  64 1790298450.847 assistant_delta   a/workspaces/702
+  65 1790298450.925 assistant_delta   a3f006d
+  66 1790298450.998 assistant_delta   11/report.md)。
+  67 1790298451.137 assistant_delta   内容控制为
+  68 1790298451.141 assistant_delta   简短 3
+  69 1790298451.268 assistant_delta    点，并附
+  70 1790298451.359 assistant_delta   了可核验来源链接。
+  71 1790298451.472 usage_reported    totalTokens=45116 basis=acp_usage_update
+  72 1790298451.473 turn_finished     
+  73 1790298456.480 run_finished      status=finished modelStopReason=end_turn reportStatus=ok cleanup=True
+
+每 run HOME 凭据落点核对（真实 run 后实测）
+------------------------------------------------------------------------------
+HOME 目录模式        0o700（run 的 acp-agent 目录同样 0700）
+注入文件             .codex/auth.json
+注入文件模式/大小    0o600 / 3963 bytes
+源文件 ~/.codex/auth.json 的 sha256 在握手与冒烟前后一致
+（源文件从未被写入/改权限；每次运行只读复制）
+
+report.md 回收
+------------------------------------------------------------------------------
+GET /api/runs/<id>/report -> 200 text/markdown; charset=utf-8
+sha256(host 下载内容) 9667d1f2d710b7f5b5ede2880476b45fd903bd72970d63b30afa87142552a4ff
+字节数 1607
+工作区 report.md、artifacts/report.md 与 API 下载内容一致（diff 无输出）
+
+---- report.md（宿主下载，已过 run redactor） ----
+2026 年 AI 编程 agent 需要 ACP 这类开放协议，核心原因是：
+
+1. 避免编辑器和 agent 互相锁定。ACP 让开发者“换 agent 不换编辑器”，JetBrains 也把它称为避免 vendor lock-in 的开放协议：[Zed](https://zed.dev/blog/bring-your-own-agent-to-zed)、[JetBrains](https://blog.jetbrains.com/ai/2025/10/jetbrains-zed-open-interoperability-for-ai-coding-agents-in-your-ide/)。
+2. 降低集成成本。ACP 定义客户端与编码 agent 的初始化、认证、提示、流式更新、工具调用和权限流程；agent 实现一次，就可进入 Zed、JetBrains、Neovim、Emacs 等客户端生态：[Microsoft AHP/ACP guide](https://github.com/microsoft/agent-host-protocol/blob/main/docs/guide/ahp-and-acp.md)、[Zed Codex](https://zed.dev/blog/codex-is-live-in-zed)。
+3. 把能力开放给用户可控的本地工作流。IDE 可展示计划、diff、终端输出，并让用户审批文件、终端和工具访问；这与 MCP 对工具/数据连接的标准化趋势一致：[JetBrains](https://blog.jetbrains.com/ai/2025/10/jetbrains-zed-open-interoperability-for-ai-coding-agents-in-your-ide/)、[MCP](https://modelcontextprotocol.io/docs/2026-07-28/getting-started/intro)。
+
+来源：
+
+1. https://zed.dev/blog/bring-your-own-agent-to-zed
+2. https://blog.jetbrains.com/ai/2025/10/jetbrains-zed-open-interoperability-for-ai-coding-agents-in-your-ide/
+3. https://github.com/microsoft/agent-host-protocol/blob/main/docs/guide/ahp-and-acp.md
+4. https://zed.dev/blog/codex-is-live-in-zed
+5. https://modelcontextprotocol.io/docs/2026-07-28/getting-started/intro
+

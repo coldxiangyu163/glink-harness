@@ -9,11 +9,18 @@
 | `schema` | ACP v1 的 JSON Schema / 官方 schema 页（本机核对副本：`@agentclientprotocol/sdk` 1.4.0 的 `schema/schema.json`，`$defs` 中的 v1 定义） |
 | `docs` | `agentclientprotocol.com/protocol/v1/*` 官方文档 |
 | `dsh 源码` | 只读参考 `/Users/coldxiangyu/AI/git/deepseek-harness/packages/acp/acp`（M1 不接真实 dsh；不作为运行时事实） |
-| `合成实测` | 本仓库 M1 回归（`tests/test_kernel_acp*.py` + `tests/fixtures/fake_acp.py`）。**只证明宿主侧客户端/投影/生命周期行为，不证明任何真实 agent 的实现** |
-| `待 M2` | 需要真实 agent 与授权才能确认 |
+| `合成实测` | 本仓库 M1/M2 回归（`tests/test_kernel_acp*.py` + `tests/fixtures/fake_acp.py`）。**只证明宿主侧客户端/投影/生命周期行为，不证明任何真实 agent 的实现** |
+| `dsh 实测` | dsh 0.1.5-rc.3 的真实 initialize/session/new 与真实运行（证据 `docs/evidence/acp-m2-handshake.txt`、`acp-m2-smoke-dsh.txt`） |
+| `codex-acp 实测` | codex-acp 0.16.0 的真实 initialize/session/new 与真实运行（证据 `docs/evidence/acp-m2-handshake.txt`、`acp-m2-smoke-codex-acp.txt`） |
+| `npm` | npm registry 元数据（`npm view`） |
+| `宿主代码` | 本仓库实现（`host/pi_glink/kernel/`、`config.py`） |
+| `待实测` | 需要真实 agent/授权或其它执行面才能确认 |
 
-状态（2026-09-24）：M1 合成验证完成（GLINK-ACP-01，回归在 `tests/test_kernel_acp*.py`）。
-真实 dsh / codex-acp / claude-code-acp 冒烟与真实模型调用属 M2，未执行。
+状态（2026-09-25）：M1 合成验证完成（GLINK-ACP-01）；**M2 真实冒烟完成**（GLINK-ACP-02）：
+`@deepseek-ai/dsh@0.1.5-rc.3` 与 `@zed-industries/codex-acp@0.16.0` 均完成真实
+initialize + session/new（不消耗模型）并经宿主 HTTP API 各跑一次最小真实研究 run。
+实测结论、能力矩阵、凭据注入点与权限决策见 §4；`claude-code-acp` 与 docker/e2b 面仍属后续
+里程碑。
 
 ## 1. 协议事实（v1）
 
@@ -43,8 +50,11 @@
 * 版本不一致时宿主在 `session/new` 之前失败收口（run `failed/execution_error`），不带着
   未知线格式继续。（`合成实测`）
 * `initialize` 报错（如 `auth_required`）走同一条失败路径，不静默降级。（`合成实测`）
-* 认证能力（`authMethods` 的 `terminal`/`env_var` 等）M1 不消费，只把前 20 条并入 run 记录；
-  dsh 当前返回空数组。（`dsh 源码`/`待 M2`）
+* 认证能力（`authMethods` 的 `terminal`/`env_var` 等）宿主不消费，只把前 20 条并入 run 记录。
+  M2 实测：dsh 返回 `[]`（`--profile acp` 组合无需认证）；codex-acp 返回 `chatgpt` 与两个
+  `env_var` 方法（`CODEX_API_KEY`/`OPENAI_API_KEY`），另声明可选 `auth.logout`；未注入凭据时
+  `session/new` 以 `-32000 Authentication required` 拒绝，是凭据注入生效的直接观测点。
+  （`dsh 实测`/`codex-acp 实测`；证据 §4.4）
 
 ### 1.3 会话与 prompt
 
@@ -112,7 +122,8 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
   终态记录的 `usage` 采用同一次转换的最后一个快照（替换语义，不是累加）。（`合成实测`）
 * `used`/`size` 非法或 `cost` 形状不对时不猜数：写一条 `kernel_status`（`acp_usage_invalid` /
   `acp_usage_cost_invalid`）并跳过相应字段。（`合成实测`）
-* `usage_update` 是可选能力，真实 agent 是否发送、粒度如何，待 M2 实测。（`待 M2`）
+* `usage_update` 是可选能力。M2 实测两 agent 都发送，频率与数值见 §4.5；宿主仍按替换语义
+  记录终态快照。（`dsh 实测`/`codex-acp 实测`）
 
 ### 1.7 权限
 
@@ -120,9 +131,14 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
   `toolCallId`）、`options[{optionId, name, kind}]`；`kind` ∈ allow_once/allow_always/
   reject_once/reject_always。响应 `outcome` 只有两种：`selected{optionId}` 或 `cancelled`。
   （`schema`）
-* M1 无人值守，策略是 **fail-closed 全拒**：优先选 `reject_once`，其次 `reject_always`；
+* M1/M2 默认策略是 **fail-closed 全拒**：优先选 `reject_once`，其次 `reject_always`；
   没有可用的拒绝项（或缺 `optionId`）时回 `cancelled`；若 `session/cancel` 已经发出，按规范
   必须回 `cancelled`。（`合成实测`）
+* M2 增加了一个显式配置门控的白名单：`PI_GLINK_ACP_PERMISSION_ALLOW`（option kind，
+  可选 tool kind）。默认空集不改变 fail-closed 行为；只有配置了 `allow_once`/`allow_always`
+  时才会选择匹配的 allow 选项，且当同时配置了 tool kind 时请求的 `toolCall.kind` 必须命中
+  （没有 kind 的请求一律拒绝）。决定与策略都进事件流（`acp_permission_allowed` /
+  `acp_permission_denied`）。（`宿主代码`/`合成实测`；M2 未启用，理由见 §4.6）
 * 每次拒绝都写 `kernel_status`（`acp_permission_denied`，warning），带 `decision`、
   `toolCallId`、选中的 `optionId`/`optionKind`——拒绝不允许静默。（`合成实测`；方案 §4.2）
 * dsh 侧的权限请求只给 `allow-once`/`reject-once` 两个一次性选项（`dsh 源码`，待实测确认）。
@@ -143,7 +159,7 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
 
 | ACP | 产品事件 | 实现口径 |
 |---|---|---|
-| `initialize` 响应 | `session_ready` | payload 带 `harness: "acp"`、`protocolVersion`、`sessionId`、`agentInfo`、`agentCapabilities`、`authMethods`、`cwd`；`sessionFile` 为 null |
+| `initialize` 响应 | `session_ready` | payload 带 `harness: "acp"`、`protocolVersion`、`sessionId`、`agentInfo`、`agentCapabilities`、`authMethods`、`cwd`，以及 `session/new` 的 `modes` 与 `configOptions`（会话选项状态，含宿主应用 `PI_GLINK_ACP_SESSION_CONFIG` 后的值）；`sessionFile` 为 null |
 | `agent_message_chunk` | `assistant_delta` | 只投影 text 块；其他块型记一次性 `kernel_status`；文本走与 pi 相同的 `StreamRedactor` |
 | `agent_thought_chunk` | `thinking_delta` | 同上 |
 | `tool_call` | `tool_started`（若已含终态再补 `tool_finished`） | `toolName`/`args` 见 §1.5 |
@@ -173,14 +189,151 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
    显式拒绝」）
 4. **状态目录**：每 run 渲染 `<run_dir>/acp-agent/home` 并作为子进程 `HOME`，agent 的
    `~/.claude`、`~/.codex`、dsh sessions 与 npm 状态都落在本 run 内；环境沿用 pi 面的最小
-   透传清单，**不注入任何宿主凭据**（凭据注入点逐个实测属 M2，方案 §4.5）。
+   透传清单。M2 补上显式凭据注入：`PI_GLINK_ACP_CREDENTIAL_FILES` 把 `source=dest` 的源
+   文件**只读复制**进 run HOME（父目录 0700、文件 0600），`PI_GLINK_ACP_ENV` 注入显式 env
+   （不允许覆盖 `HOME`）；注入值抽入该 run 的 redactor，源文件不被修改（sha256 前后一致）。
+   逐 agent 实测落点见 §4.4。（`宿主代码`/`dsh 实测`/`codex-acp 实测`）
 5. **未投影不等于丢失**：`max_turn_requests` 目前在记录里保留原词，前端尚无对应提示
    （只有 `length` 会显示「交付不完整」）；`current_mode_update`/`session_info_update`
    等只留一条 `kernel_status` 提示。
 6. **`session/close` 未调用**：M1 用一个 run 一个进程，teardown 由进程退出完成；agent 是否
    需要显式关闭会话（`sessionCapabilities.close`）待 M2 实测后决定。
 
-## 4. M1 合成验证覆盖
+## 4. M2 实测（2026-09-25）
+
+本节每条都标来源。`dsh 实测` / `codex-acp 实测` 的证据文件：
+`docs/evidence/acp-m2-handshake.txt`（真实 initialize/session/new，未消耗模型）、
+`docs/evidence/acp-m2-smoke-dsh.txt`、`docs/evidence/acp-m2-smoke-codex-acp.txt`（各一次
+经宿主 HTTP API 的最小真实研究 run）。真实模型调用仅限这两次冒烟。
+
+### 4.1 版本与入口
+
+| agent | 钉版与入口 | 实测事实 |
+|---|---|---|
+| dsh | `@deepseek-ai/dsh@0.1.5-rc.3`（npm dist-tag `latest`），入口 `dsh --profile acp` | 0.1.5-rc.3 的 dsh CLI 没有 `acp` 子命令；brief 里的 “dsh acp” 是简写。长驻 stdio 服务器，`--help` 自述 “Serve automation clients over Agent Client Protocol stdio.”（`npm`/`dsh 实测`） |
+| codex-acp | `@zed-industries/codex-acp@0.16.0`，入口 `codex-acp`（随平台可选包带二进制） | 无参数即 stdio ACP server；支持 `-c key=value` 覆盖 `~/.codex/config.toml`。npm 安装时告警：该包已被 `@agentclientprotocol/codex-acp` 取代，后继包迁移评估留给 M4（`npm`/`codex-acp 实测`） |
+
+两者都只用钉版本地安装（`npm install --prefix`）或 npx 钉版调用，未全局安装。
+
+### 4.2 能力矩阵（initialize / session/new 响应原文）
+
+| 字段 | dsh 0.1.5-rc.3 | codex-acp 0.16.0 |
+|---|---|---|
+| `agentInfo` | `{"name": "deepseek-harness-acp", "version": "0.0.1"}` | `{"name": "codex-acp", "title": "Codex", "version": "0.16.0"}` |
+| `protocolVersion` | `1` | `1` |
+| `loadSession` | 未声明（不支持） | `true` |
+| `sessionCapabilities` | `close` / `list` / `resume` | `list` / `resume` / `close` |
+| `promptCapabilities` | image=false, audio=false, embeddedContext=false | image=true, audio=false, embeddedContext=true |
+| `mcpCapabilities` | `{http: true}` | `{http: true, sse: false, acp: false}` |
+| `authMethods` | `[]`（无需认证） | `chatgpt` + `codex-api-key`/`openai-api-key`（`env_var`，各带变量名） |
+| `session/new` 返回 | `sessionId` + `configOptions`（`model`、`reasoning_effort`） | `sessionId` + `modes`（read-only/auto/full-access）+ `configOptions`（`mode`、`model`、`reasoning_effort`） |
+| 附件能力位 | prompt 不接受图片 | image/embeddedContext 已声明（宿主只发 text block） |
+
+补充实测事实：
+
+* dsh 的 `model` 取值是 **JSON 编码字符串**（`["deepseek-official","deepseek-v4-flash"]`），且
+  select 选项按 provider 分组（`options[].options[]`）；宿主的选择值校验需要展平分组。
+  （`dsh 实测`/`宿主代码`）
+* dsh 不返回 `modes`：ACP 的 modes 面不在它的 automation 契约里。（`dsh 实测`/`dsh 源码`）
+* codex-acp 在 `session/new` 后立即发 `available_commands_update`（本次 6 条：review、
+  review-branch、review-commit、init 等）。宿主对 ACP 族仍拒绝一切 `/` 开头 prompt——
+  agent 声明命令不改变准入门禁。（`codex-acp 实测`；§2 词表不变）
+* 未认证时 codex-acp 的 `session/new` 回 `-32000 Authentication required`；dsh 无此要求。
+  （`codex-acp 实测`）
+* 两侧都接受 `session/set_config_option`（`configId`+`value`）：codex-acp `mode=auto` 与
+  dsh `reasoning_effort=low` 均生效，且 codex-acp 的 `modes.currentModeId` 随之更新。
+  （`合成实测`/`dsh 实测`/`codex-acp 实测`）
+
+### 4.3 system prompt 通道（决定与实测）
+
+ACP v1 没有 system role：`session/new` 只有 `cwd`/`mcpServers`/`additionalDirectories`
+与保留字段 `_meta`，而 schema 明确 “Implementations MUST NOT make assumptions about values
+at these keys”；modes/configOptions 是审批与模型选择器，不是 prompt。
+
+**决定（M2）**：工作约定作为 `session/prompt` 文本块的**前置围栏段**送达：
+`compose_prompt()` 把 `spec.system_prompt` 包在 `<system-prompt>…</system-prompt>` 中，
+后接 `--- 用户请求 ---` 与原始题面。理由：text block 是 ACP 基线能力（agent MUST
+support），不依赖可选能力位、不依赖任何 agent 私有扩展；围栏让模型能区分工作约定与用户
+请求。系统提示为空时保持 M1 的原样单文本块。（`宿主代码`/`合成实测`）
+
+真实接收证据：两次真实 run 中 agent 都按工作约定把交付写成工作区 `report.md`、回复里只
+给结论文本（codex-acp 出现对 `report.md` 的 `edit` 工具调用与短回复；dsh 出现 `write`/
+`edit` 与 “报告写入 report.md” 回复），且报告合约（来源列表）生效。（证据时间线，
+`dsh 实测`/`codex-acp 实测`）
+
+未采用的通道（逐条实测）：
+
+* `_meta` 注入 systemPrompt：schema 保留、无 agent 消费者；dsh 源码不读 `_meta`，codex-acp
+  也未声明该约定。（`schema`/`dsh 源码`）
+* agent 私有配置：codex 有 `-c developer_instructions=…`、dsh 有 `--patch` 改 system-prompt
+  插件的路径，但都属于单 harness 的配置渲染器（方案 §4.5 已有预留），M2 选协议通用通道，
+  不把产品契约挂在某个 agent 的私有面。（`npm`/`dsh 源码`）
+
+### 4.4 凭据注入（逐 agent 实测落点）
+
+| agent | 注入材料 | 每 run 落点 | 生效证据 |
+|---|---|---|---|
+| codex-acp | `~/.codex/auth.json`（ChatGPT 登录） | `HOME/.codex/auth.json`（0600） | 无该文件时 `session/new` 报 “Authentication required”；注入后握手成功并完成真实 run；`~/.codex` 状态（cache/config.toml/sqlite）均落在 run HOME，真实目录未被修改 |
+| dsh | `~/.dsh/.credentials.yaml`（harness home 凭据） | `HOME/.dsh/.credentials.yaml`（0600） | harness home 默认 `$DSH_HOME` 或 `~/.dsh`（dsh docs）；实测 profiles/sessions/storages 都落在 run HOME/.dsh，真实 `~/.dsh` 未被修改 |
+
+* 注入用 `PI_GLINK_ACP_CREDENTIAL_FILES`（`;` 分隔的 `source=dest`）：源文件只读，目标必须是
+  run HOME 内相对路径；目标文件 0600、父目录 0700，已存在或为符号链接则失败（不覆盖、不
+  跟随）。（`宿主代码`/`合成实测`）
+* 本机 dsh 的真实状态目录是 `~/.dsh`（`$DSH_HOME` 未设置时的默认值），**`~/.config/dsh`
+  不存在**（`ls` 实测）；任务描述里的 `~/.config/dsh` 在本机不是 dsh 的读写路径，两种路径
+  都未被本实现或冒烟修改。（`dsh 实测`）
+* `PI_GLINK_ACP_ENV` 提供命令级 env（`NAME=value`），不允许覆盖 `HOME`（隔离边界）。（`宿主代码`）
+* 注入值抽取（JSON 凭据键、YAML 标量行、provider shape）并入**该 run** 的 redactor：
+  两个真实 run 的 events/report/API 下载对真实凭据值 0 命中；源文件 sha256 前后一致。
+  （`合成实测`/`dsh 实测`/`codex-acp 实测`）
+* 真实凭据 mtime/hash 在握手与冒烟前后均未变化；凭据值不落日志、不落 evidence、不进命令
+  行或进程环境（文件形态注入）。（`握手中脚本输出`/`宿主代码`）
+
+### 4.5 usage 口径（实测）
+
+* 两 agent 都发送 `usage_update`，宿主按 M1 口径**替换**快照并标 `basis: "acp_usage_update"`；
+  终态记录采用最后一个快照。（`dsh 实测`/`codex-acp 实测`）
+* dsh 本次 run：`used` 7,962 → 27,328，`size` 1,000,000；每个模型 step 一条。
+  codex-acp：`used` 45,799 → 45,116（上下文压缩/重算导致回落），`size` 258,400；每轮助手
+  消息前后一条。（证据 events.jsonl）
+* 两次 run 都未出现 `cost`（订阅制/会话计数不提供金额）；schema 允许省略，宿主不伪造。
+  （`dsh 实测`/`codex-acp 实测`）
+* `session/prompt` 响应里的 UNSTABLE `usage` 字段仍未观测到。
+
+### 4.6 权限（决策：保持 fail-closed，不启用白名单）
+
+* 两次真实 run 都在 fail-closed 默认下完成，`acp_permission_*` 事件 0 条：codex-acp 以
+  `mode=auto`（workspace-write，会话配置显式指定）运行，编辑/命令/内置 web 搜索未触发审批；
+  dsh 的默认组合是 `workspace-write + approval=ask`（dsh 源码），实测 web_search、web_fetch、
+  write、bash、edit、read 也都未被要求审批。（`dsh 实测`/`codex-acp 实测`）
+* **决定**：默认继续全拒；不启用任何白名单。`PI_GLINK_ACP_PERMISSION_ALLOW` 作为配置级
+  门控已实现并有合成回归（默认空集 = 原行为），留给将来某个 agent 在真实 run 证明全拒不可
+  用时按最小集合启用，并须回写本节。
+* 依据：dsh 的权限请求只给 `allow-once`/`reject-once` 且 `toolCall` 不含 `kind`（`dsh 源码`/
+  `合成实测`），tool-kind 白名单对 dsh 不可用；codex-acp 的 `mode` 会话选项是比逐次放行更
+  窄、更可审计的政策面。（`宿主代码`）
+
+### 4.7 会话配置与模式
+
+* `PI_GLINK_ACP_SESSION_CONFIG`（`id=value`）在 `session/new` 后应用；agent 未声明该选项或
+  取值不在其声明集合内则 run 失败闭环，不静默忽略。（`宿主代码`/`合成实测`）
+* 真实应用记录：codex-acp `mode=auto`（`modes.currentModeId` 同步为 auto），dsh
+  `reasoning_effort=low`（握手时验证）。冒烟 run 使用 codex-acp `mode=auto`、dsh 默认。
+  （`dsh 实测`/`codex-acp 实测`）
+* 客户端能力声明仍是全空（无 `fs/*`、无 `terminal/*`、无 `auth.terminal`）：agent 在自己的
+  文件系统上工作（`合成实测`；§1.2）。
+
+### 4.8 两个真实 run 的其余事实
+
+* 终态：均为 `finished`，`modelStopReason=end_turn`，`cleanup.released=true`；
+  `reportStatus=ok`，`report.md` 经 `/api/runs/<id>/report` 200 回收，工作区/
+  artifacts/API 下载三者内容一致。（`dsh 实测`/`codex-acp 实测`）
+* 流式：run 期间 `assistant_delta`/`thinking_delta`/`tool_*` 按 seq/ts 逐条到达（codex-acp 73
+  条事件/54s；dsh 60 条/43s），结束时 `turn_finished` 先于 `run_finished`。（证据 events.jsonl）
+* 宿主清理：宿主 PID 由 `$!` 记录，运行结束后只对已知 PID 发 `kill -TERM`（未用 `pkill -f` 等
+  宽匹配）。（证据 summary.txt）
+
+## 5. M1 合成验证覆盖
 
 `tests/test_kernel_acp.py`（客户端/投影）与 `tests/test_kernel_acp_runner.py`（run 生命周期），
 fixture 为 `tests/fixtures/fake_acp.py`（真实子进程、真实 stdio）：
@@ -197,16 +350,13 @@ fixture 为 `tests/fixtures/fake_acp.py`（真实子进程、真实 stdio）：
 * 流式与工具结果中的凭据脱敏、每 run 状态根隔离、宿主无模型 key 也能跑 ACP；
 * `build_adapter` 的 harness 分派与 `ExecutionAdapter` 契约（pi 路径默认行为不变）。
 
-## 5. 待 M2 实测项（未验证不能当成已成立）
+## 6. 剩余待实测项（§4 已覆盖的不再列）
 
-| 待测事实 | 为什么重要 | 验证方式（M2） |
+| 待测事实 | 为什么重要 | 验证方式 |
 |---|---|---|
-| dsh / codex-acp / claude-code-acp 的实际能力矩阵（loadSession、resume、usage_update、available_commands、promptCapabilities） | 决定哪些映射真有数据、哪些必须显式降级 | `initialize` 响应原文 + 各 agent 版本记录 |
-| 各 agent 的凭据注入点（`ANTHROPIC_API_KEY` env、`OPENAI_API_KEY`/`auth.json`、dsh credentials） | 方案 §4.5；错了就会把 key 交给错误的进程或根本不生效 | 逐 agent 一次性真实 run + 环境/文件核对 |
-| `HOME` 重定向是否被各 agent 尊重；是否需要 `CODEX_HOME`/`CLAUDE_CONFIG_DIR` 等专用变量 | 每 run 状态隔离与 M3 的状态目录回收都依赖它 | 真实 run 后检查状态文件落点 |
-| `usage_update` 真实字段与频率；`cost.currency` 取值 | 前端口径与成本展示 | 真实 run 事件原文 |
-| 权限请求真实选项种类与频次；白名单策略 | 现在全拒，真实研究 run 会被大量拒绝 | 真实 run 日志 + 逐 harness 策略记录 |
-| `stopReason` 的真实取值分布（`max_turn_requests`/`refusal` 是否出现） | 终态提示是否需要前端补充 | 真实 run 记录 |
-| `session/cancel` 的真实响应时延与终态 | 取消体验 | 真实 run + 计时 |
+| `session/resume` / `session/load` 真实续接（含 dsh 的持久会话语义） | M1 起追问仍显式拒绝；M2 只确认能力位存在 | 授权后的真实续接 run + 终态/状态目录核对 |
+| `session/cancel` 真实响应时延与终态（含工具收敛） | 取消体验；M2 两次 run 未触发取消 | 真实 run + 计时 |
+| claude-code-acp 能力矩阵与凭据（`ANTHROPIC_API_KEY` env） | M4 接入 | 同 M2 握手 + 冒烟 |
 | docker/e2b 面的 stdio 桥接与帧完整性（M3 前置） | 传输面扩展 | 逐面 smoke |
-| 各适配器版本钉版、来源、license、升级冒烟步骤 | 方案 §5/§7 纪律 | 集成笔记逐项补齐（本节升级为版本记录） |
+| 各适配器版本升级冒烟步骤与 license 记录 | 方案 §5/§7 纪律 | 集成笔记逐项补齐 |
+| codex-acp 后继包（`@agentclientprotocol/codex-acp`）迁移评估 | 0.16.0 已被标记 deprecated | 版本对比握手 + 冒烟 |
