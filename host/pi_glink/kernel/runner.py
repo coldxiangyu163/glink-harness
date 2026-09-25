@@ -65,6 +65,8 @@ from ..store import (
 )
 from .acp_execution import acp_resume_method
 from .acp_env import (
+    ACP_HOME_DIRNAME,
+    ACP_RECOVERED_DIRNAME,
     ACP_RUNTIME_DIRNAME,
     AcpRuntime,
     AcpStateInheritError,
@@ -682,12 +684,15 @@ class RunManager:
           here, before a child run exists — it is never downgraded to a new
           session.
 
-        The E2B face is refused for now: an ACP sandbox's agent state lives
-        inside the sandbox and is destroyed with it (only the workspace is
-        recovered), so the host has no state root to inherit and a started
-        sandbox could never resume. Recovering the sandbox state root is the
-        recorded follow-up (integration notes, M7); until then this is a
-        fail-closed refusal rather than a guaranteed resume failure.
+        The E2B face needs one more fact and is admitted by it:
+
+        * **原义务（M7）**：e2b 面一律拒绝（``session_unavailable``）。ACP 沙箱的
+          agent 状态随沙箱销毁，宿主没有可继承的状态根，起沙箱也必然无法 resume。
+        * **新义务（M8）**：沙箱销毁前把该 run 的状态根有界回收到宿主；追问在
+          「父状态根回收成功」时与 inproc/docker 面同样受理。回收到
+          ``acp-agent/recovered`` 是整份成功的才发布，所以下面这个目录检查就是
+          “回收成功”这个事实本身：失败（或未尝试）的回收什么都不留下，追问维持
+          拒绝，而不是先花一个注定 resume 失败的云端沙箱。
 
         The admitted continuation also reuses the parent run's workspace (the
         caller reads :attr:`RunRecord.workspace`): the ACP session's ``cwd`` is
@@ -704,9 +709,6 @@ class RunManager:
         it cannot complete.
         """
         parent = self._resumable_parent(context, parent_run_id)
-        if self.config.executor == "e2b":
-            # Owner gate first (above), so a foreign parent is still invisible.
-            raise FollowupUnavailable("session_unavailable")
         capabilities = self._recorded_acp_capabilities(parent)
         if capabilities is None:
             raise FollowupUnavailable("session_unavailable")
@@ -714,7 +716,7 @@ class RunManager:
             raise FollowupUnavailable("session_unavailable")
         if acp_resume_method(capabilities) is None:
             raise FollowupUnavailable("session_unavailable")
-        state_home = self._acp_state_home(parent.run_id)
+        state_home = self._acp_state_home(parent)
         try:
             info = os.stat(state_home, follow_symlinks=False)
         except OSError as exc:
@@ -747,9 +749,20 @@ class RunManager:
             return dict(capabilities) if isinstance(capabilities, Mapping) else {}
         return None
 
-    def _acp_state_home(self, run_id: str) -> Path:
-        """The ACP agent state root of one run (never a caller-supplied path)."""
-        return self.store.run_dir(run_id) / ACP_RUNTIME_DIRNAME / "home"
+    def _acp_state_home(self, run: RunRecord) -> Path:
+        """The ACP agent state root of one run a follow-up could inherit.
+
+        In-process and Docker runs keep the state root the run rendered and the
+        agent wrote (``acp-agent/home``). An E2B run's agent state only ever
+        existed inside the sandbox, so the face recovers it to
+        ``acp-agent/recovered`` before destroying the sandbox; that path is
+        derived from the run record like the other one — never from caller
+        input — and its existence is the recovered-state fact itself.
+        """
+        base = self.store.run_dir(run.run_id) / ACP_RUNTIME_DIRNAME
+        if self.config.executor == "e2b":
+            return base / ACP_RECOVERED_DIRNAME
+        return base / ACP_HOME_DIRNAME
 
     def _resume_seed(
         self,
@@ -1374,7 +1387,14 @@ class RunManager:
             self._store_external_identity(execution, adapter)
 
             session = adapter.session_info()
-            if execution.parent_run_id and self.config.executor != "e2b":
+            if execution.parent_run_id and (
+                self.config.executor != "e2b" or self.config.harness == "acp"
+            ):
+                # The pi E2B face discovers its session id mid-stream, so it can
+                # only verify the continuation after the turn; the ACP faces —
+                # including the sandbox one — know the resumed session id right
+                # after ``session/resume``, so the child's session identity is
+                # proven against the parent's before the turn starts.
                 parent = self._authorized_parent(
                     execution.context, execution.parent_run_id
                 )
@@ -1428,9 +1448,23 @@ class RunManager:
             try:
                 recovery = adapter.recover_artifacts(execution.workspace)
                 execution.artifact_failures.extend(recovery.failures)
+                # Values the host only learned from recovered material (the E2B
+                # face's state root) join this run's boundary exactly like an
+                # injected credential: a later echo is masked, and the values
+                # are never written anywhere else.
+                for value in recovery.secrets:
+                    self._run_redactor(execution).add(value)
                 if self.config.executor == "e2b":
                     recovered_session = adapter.session_info()
-                    if recovered_session and recovered_session.session_file:
+                    # A pi run republishes when its session file travelled back
+                    # with the recovery; an ACP e2b run publishes the
+                    # state-root recovery verdict of its own (``session_file``
+                    # stays None on that face).
+                    if recovered_session and (
+                        recovered_session.session_file
+                        or recovered_session.payload.get("stateRootRecovered")
+                        is not None
+                    ):
                         self._publish_session_ready(execution, recovered_session)
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 execution.artifact_failures.append(
@@ -1661,7 +1695,7 @@ class RunManager:
                 )
                 if parent is None:
                     raise FollowupUnavailable("session_unavailable")
-                inherit_from = self._acp_state_home(parent.run_id)
+                inherit_from = self._acp_state_home(parent)
             try:
                 runtime = prepare_acp_runtime(
                     self.config,

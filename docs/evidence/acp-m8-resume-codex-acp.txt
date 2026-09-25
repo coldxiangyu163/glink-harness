@@ -1,0 +1,192 @@
+ACP M8 真实续接冒烟证据（codex-acp；inproc）
+========================================
+日期: 2026-09-25
+任务: GLINK-ACP-13（e2b 面续接 + dsh/codex-acp 真实 resume）
+钉版入口: npx -y @agentclientprotocol/codex-acp@1.13.1（能力矩阵含
+  sessionCapabilities.resume 与 loadSession，见脚本手测）
+探针: scripts/spikes/acp_inproc/resume_smoke.py（真实宿主进程 + HTTP API + SSE；首轮 + 追问）
+代码范围: cbfb805（e2b 续接内核提交；inproc 路径与基线 367eee3 一致）
+凭据: ~/.codex/auth.json 只读复制进每 run HOME（0600；源文件 sha256 前后只读未变）
+脱敏: 家目录以 ~ 代替，临时目录以 $TMP/... 代替；凭据值不出现。
+模型调用: 2 轮（首轮 + 追问）；本任务授权 ≤8 轮（inproc dsh 2 + inproc codex-acp 2 + e2b 4）。
+附加核对: 数据根经 scripts/check-no-secrets.py 扫描（结果附后）；本证据文件经同一形状检测器扫描 0 命中。
+备注: 本钉版 codex-acp 的 mode 取值为 read-only / agent / agent-full-access（默认 agent），
+  M2 的 mode=auto 是该包旧版取值，不在本次探针参数中使用。
+
+原始输出
+--------
+ACP M7 真实续接冒烟（inproc / codex-acp）
+====================================================
+日期: 2026-09-25 18:43:08
+宿主命令: python -m pi_glink.app --port 49496（harness=acp, executor=inproc）
+agent 命令: npx -y @agentclientprotocol/codex-acp@1.13.1
+命令级 env 名: npm_config_cache
+权限白名单: （空 = fail-closed）
+会话配置: （无）
+数据根: $TMP/glink-acp13-codex
+任务超时: 300s
+连续性判据: 首轮约定随机代号（不写入首轮 report.md），追问要求复述并写入新 report.md
+
+宿主 PID: 99163（只按这个 PID 收尾）
+宿主健康检查: HTTP 200
+[首轮] POST /api/runs -> HTTP 201
+[首轮] runId: f66dcdc4ea2f
+[首轮] 终态: finished duration=36.964s events=78 sessionId=01a0d829-8e06-7c13-bdff-564ebca27f7d error=None
+[首轮] GET /api/runs/f66dcdc4ea2f/report -> HTTP 200（406 bytes）
+[追问] POST /api/runs -> HTTP 201
+[追问] runId: 86ace146d912
+[追问] 终态: finished duration=22.982s events=48 sessionId=01a0d829-8e06-7c13-bdff-564ebca27f7d error=None
+[追问] GET /api/runs/86ace146d912/report -> HTTP 200（427 bytes）
+宿主按 PID 99163 终止: exit=-15
+
+run 期间采样的宿主后代进程: 10 个（只按 PID 记录）
+  99411 [exited] npm exec @agentclientprotocol/codex-acp@1.13.1   
+  99462 [exited] node ~/.npm/_npx/e5042b4359cce62b/node_modules/.bin/codex-acp
+  99475 [exited] ~/.nvm/versions/node/v24.16.0/bin/node ~/.npm/_npx/e5042b4359cce62b/node_modules/@openai/codex/bin/codex.js app-server
+  99476 [exited] ~/.npm/_npx/e5042b4359cce62b/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex app-server
+  2996 [exited] ~/.npm/_npx/e5042b4359cce62b/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex-code-mode-host
+  5700 [exited] npm exec @agentclientprotocol/codex-acp@1.13.1   
+  6024 [exited] node ~/.npm/_npx/e5042b4359cce62b/node_modules/.bin/codex-acp
+  6025 [exited] ~/.nvm/versions/node/v24.16.0/bin/node ~/.npm/_npx/e5042b4359cce62b/node_modules/@openai/codex/bin/codex.js app-server
+  6026 [exited] ~/.npm/_npx/e5042b4359cce62b/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex app-server
+  8401 [exited] ~/.npm/_npx/e5042b4359cce62b/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex-code-mode-host
+
+SSE 流式（到达时间相对各自 run 创建）
+  [parent] SSE 帧数: 78
+       0.00s run_started
+       8.64s kernel_status
+       8.65s session_ready
+       8.65s turn_started
+       8.67s kernel_status
+      20.38s thinking_delta
+      20.38s thinking_delta
+      20.44s assistant_delta
+      20.44s assistant_delta
+      20.44s assistant_delta
+      20.44s assistant_delta
+      20.44s assistant_delta
+      20.44s assistant_delta
+      20.44s assistant_delta
+      20.44s assistant_delta
+      20.44s assistant_delta
+      20.44s assistant_delta
+      20.44s assistant_delta
+      20.46s assistant_delta
+      20.46s assistant_delta
+      20.46s assistant_delta
+      20.46s assistant_delta
+      20.46s assistant_delta
+      20.46s assistant_delta
+      20.46s assistant_delta
+      20.46s assistant_delta
+      20.46s assistant_delta
+      20.62s assistant_delta
+      20.62s assistant_delta
+      22.97s tool_started
+    … 其余 48 帧；类型序列尾部: ['assistant_delta', 'assistant_delta', 'assistant_delta', 'usage_reported', 'turn_finished', 'run_finished']
+  [child] SSE 帧数: 48
+       0.00s run_started
+       4.34s kernel_status
+       4.34s kernel_status
+       4.34s kernel_status
+       4.34s session_ready
+       4.34s turn_started
+      17.04s assistant_delta
+      17.05s assistant_delta
+      17.05s assistant_delta
+      17.05s assistant_delta
+      17.05s assistant_delta
+      17.05s assistant_delta
+      17.05s assistant_delta
+      17.06s assistant_delta
+      17.06s assistant_delta
+      17.07s assistant_delta
+      17.07s assistant_delta
+      17.08s assistant_delta
+      17.08s assistant_delta
+      18.26s tool_started
+      18.26s tool_finished
+      18.26s usage_reported
+      19.99s assistant_delta
+      20.01s assistant_delta
+      20.01s assistant_delta
+      20.05s assistant_delta
+      20.10s assistant_delta
+      20.14s assistant_delta
+      20.18s assistant_delta
+      20.22s assistant_delta
+    … 其余 18 帧；类型序列尾部: ['assistant_delta', 'assistant_delta', 'assistant_delta', 'usage_reported', 'turn_finished', 'run_finished']
+
+续接事实（events.jsonl）
+  child session_ready: {"sessionId": "01a0d829-8e06-7c13-bdff-564ebca27f7d", "resumed": true, "resumeMethod": "session/resume", "cwd": "$TMP/glink-acp13-codex/workspaces/f66dcdc4ea2f"}
+  parent sessionId: 01a0d829-8e06-7c13-bdff-564ebca27f7d
+  工作区: parent=$TMP/glink-acp13-codex/workspaces/f66dcdc4ea2f · child=$TMP/glink-acp13-codex/workspaces/f66dcdc4ea2f（ACP 会话 cwd 跨轮稳定，应相同）
+  session_ready.cwd == parent workspace: True
+  child acp_session_resumed: [{"level": "info", "message": "acp_session_resumed", "detail": "ACP 追问续接到已有会话（method=session/resume）", "resumeMethod": "session/resume", "sessionId": "01a0d829-8e06-7c13-bdff-564ebca27f7d", "replayedUpdates": 0}]
+
+连续性判据
+  代号出现在 child 助手正文: True
+  代号出现在 child report: True
+  代号出现在 parent report（应为 False）: False
+  代号出现在 child 题面（应为 False）: False
+  child.sessionId == parent.sessionId: True
+  child 助手正文尾部: '我会仅在 report.md 末尾追加一行。上一个会话里你要求我记住的代号是：KNGQK-2694。'
+
+状态继承（父/子 run 各自 HOME 的同一文件内容一致，凭据目标已排除）
+  parent HOME 文件数: 81；child HOME 文件数: 82
+  内容一致的继承文件: 68 个
+    .codex/.sandbox_migration
+    .codex/cache/codex_apps_server_info/b732a593c158ccd20f6ecf58be80b63a32f0dc99.json
+    .codex/cache/codex_apps_tools/b732a593c158ccd20f6ecf58be80b63a32f0dc99.json
+    .codex/installation_id
+    .codex/queue_1.sqlite
+    .codex/skills/.system/.codex-system-skills.marker
+    .codex/skills/.system/imagegen/LICENSE.txt
+    .codex/skills/.system/imagegen/SKILL.md
+    .codex/skills/.system/imagegen/agents/openai.yaml
+    .codex/skills/.system/imagegen/assets/imagegen-small.svg
+    .codex/skills/.system/imagegen/assets/imagegen.png
+    .codex/skills/.system/imagegen/references/cli.md
+  child HOME 文件（前 20）: ['.codex/.sandbox_migration', '.codex/cache/codex_apps_server_info/b732a593c158ccd20f6ecf58be80b63a32f0dc99.json', '.codex/cache/codex_apps_tools/b732a593c158ccd20f6ecf58be80b63a32f0dc99.json', '.codex/goals_1.sqlite', '.codex/installation_id', '.codex/logs_2.sqlite', '.codex/logs_2.sqlite-shm', '.codex/logs_2.sqlite-wal', '.codex/memories_1.sqlite', '.codex/memories_1.sqlite-wal', '.codex/models_cache.json', '.codex/queue_1.sqlite', '.codex/queue_1.sqlite-shm', '.codex/queue_1.sqlite-wal', '.codex/sessions/2026/09/25/rollout-2026-09-25T18-43-17-01a0d829-8e06-7c13-bdff-564ebca27f7d.jsonl', '.codex/skills/.system/.codex-system-skills.marker', '.codex/skills/.system/imagegen/LICENSE.txt', '.codex/skills/.system/imagegen/SKILL.md', '.codex/skills/.system/imagegen/agents/openai.yaml', '.codex/skills/.system/imagegen/assets/imagegen-small.svg']
+
+终态与清理事实（meta.json）
+  [parent] status=finished modelStopReason=end_turn reportStatus=ok session_id=01a0d829-8e06-7c13-bdff-564ebca27f7d
+    cleanup={"released": true, "failures": [], "external": {}}
+  [child] status=finished modelStopReason=end_turn reportStatus=ok session_id=01a0d829-8e06-7c13-bdff-564ebca27f7d
+    cleanup={"released": true, "failures": [], "external": {}}
+  parent report_status / child report_status: 200 / 200
+
+child report.md（HTTP 200，427 bytes）
+------------------------------------------------------------
+- 降低接入成本：ACP 统一宿主与 agent 的通信接口，宿主支持协议后即可接入多种兼容 agent，减少逐一开发专用适配的工作。[1]
+- 增强可替换性：宿主与 agent 解耦，用户可按任务选择或切换兼容 agent，减少工具绑定，双方也能独立演进。[1]
+
+来源：[1] [ACP 官方介绍](https://agentclientprotocol.com/get-started/introduction)
+
+代号 = KNGQK-2694
+
+------------------------------------------------------------
+
+宿主日志尾部
+  内核 pi: ~/.nvm/versions/node/v24.16.0/bin/pi
+  模型 model: 未配置 / unset (缺少密钥 / no key)
+  2026-09-25 18:43:08,410 INFO pi_glink.kernel.acp_rpc: starting ACP agent: npx -y @agentclientprotocol/codex-acp@1.13.1
+  2026-09-25 18:43:08,502 INFO pi_glink.host: event stream attached run=f66dcdc4ea2f after=0 live=True
+  2026-09-25 18:43:45,384 INFO pi_glink.kernel.runner: run finalized run=f66dcdc4ea2f status=finished stop=None committed=True report=$TMP/glink-acp13-codex/runs/f66dcdc4ea2f/artifacts/report.md released=True
+  2026-09-25 18:43:45,384 INFO pi_glink.host: event stream detached run=f66dcdc4ea2f
+  2026-09-25 18:43:45,996 INFO pi_glink.host: event stream attached run=86ace146d912 after=0 live=True
+  2026-09-25 18:43:46,281 INFO pi_glink.kernel.acp_rpc: starting ACP agent: npx -y @agentclientprotocol/codex-acp@1.13.1
+  2026-09-25 18:44:08,870 INFO pi_glink.kernel.runner: run finalized run=86ace146d912 status=finished stop=None committed=True report=$TMP/glink-acp13-codex/runs/86ace146d912/artifacts/report.md released=True
+  2026-09-25 18:44:08,870 INFO pi_glink.host: event stream detached run=86ace146d912
+
+  parent 通过: True；child 通过: True
+[PASS] ACP 真实续接冒烟（首轮+追问，流式/终态/report/清理只按已知 PID）
+
+脱敏扫描
+--------
+$ ./.venv/bin/python scripts/check-no-secrets.py --data-root $TMP/glink-acp13-codex \
+      --repo-root ~/AI/git/pi-glink
+凭据来源 2 条 · 扫描文件 7 个 · 真实命中 0 处 · 占位符命中 0 处
+未发现真实凭据残留。
+
+证据文件形状自检（同一 redaction 检测器）：0 命中。

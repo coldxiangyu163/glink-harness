@@ -1,0 +1,180 @@
+ACP M8 真实续接冒烟证据（e2b / dsh，跨沙箱）
+========================================
+日期: 2026-09-25
+任务: GLINK-ACP-13（e2b 面续接：销毁前回收状态根、追问灌回新沙箱后 session/resume）
+宿主/执行面: python -m pi_glink.app，harness=acp，executor=e2b，模板 glink-acp-worker（dev 模板，未重建）
+agent: dsh --profile acp（模板内钉版 @deepseek-ai/dsh@0.1.5-rc.3；能力矩阵含 sessionCapabilities.resume）
+探针: scripts/spikes/acp_e2b/resume_smoke.py（首轮 + 追问；每轮一个真实 E2B 沙箱）
+代码范围: cbfb805（状态根回收/灌回 + e2b 追问准入放开）；探针判定修复见尝试 1 附录
+凭据: ~/.dsh/.credentials.yaml 只读复制进每 run HOME，沙箱内 0600；源文件 sha256 前后只读未变
+脱敏: 家目录以 ~ 代替，临时目录以 $TMP/... 代替；凭据值、E2B_API_KEY 不出现。
+模型调用: 4 轮（尝试 1 首轮+追问 2 轮；修复探针判定后重跑首轮+追问 2 轮）。本任务授权 ≤8 轮
+  （inproc dsh 2 + inproc codex-acp 2 + e2b 4）。
+附加核对: 数据根经 scripts/check-no-secrets.py 扫描（结果附后）；本证据文件经同一形状检测器扫描 0 命中。
+
+尝试 1 附录（实质判据全部通过，探针判定误读回收前的 session_ready 帧）
+--------------------------------------------------------------------
+尝试 1（$TMP/glink-acp13-e2b-dsh）的跨沙箱事实与尝试 2 同形：parent sandbox
+ij2htcukfiw7vcg09k920 / child sandbox idrmmqaev9ffm2l4cunkb（不同沙箱）、同一
+sessionId 0fe6b3a8-2e69-455e-819c-bb3f593f09c4、session/resume、代号 GOIBE-3457
+回环、两侧 recovered 根各有 8/8 个文件且 6 个内容一致、两个沙箱按 id 对账确认不存在、
+两次 report HTTP 200、cleanup.released=true、artifactFailures 为空。探针的 child_ok
+读取了首帧 session_ready 的 stateRootRecovered（回收前为 null），因此误报 FAIL；
+修复为读末帧后重跑得到下面的 PASS。
+
+原始输出（修复后，尝试 2）
+--------------------------
+ACP M8 真实续接冒烟（e2b / dsh）
+====================================================
+日期: 2026-09-25 18:47:13
+宿主命令: python -m pi_glink.app --port 50561（harness=acp, executor=e2b）
+agent 命令: dsh --profile acp
+模板: glink-acp-worker
+命令级 env 名: （无）
+凭据目标: .dsh/.credentials.yaml（只读复制进每 run HOME）
+数据根: $TMP/glink-acp13-e2b-dsh2
+任务超时: 300s
+连续性判据: 首轮约定随机代号（不写入首轮 report.md），追问要求复述并写入新 report.md
+
+宿主 PID: 34719（只按这个 PID 收尾）
+宿主健康检查: HTTP 200
+[首轮] POST /api/runs -> HTTP 201
+[首轮] runId: ce52770dde9c
+[首轮] 终态: finished duration=57.941s events=81 sessionId=cc97a2d8-bcc1-4311-9e56-5ddf08d653e9 error=None
+[首轮] GET /api/runs/ce52770dde9c/report -> HTTP 200（742 bytes）
+[追问] POST /api/runs -> HTTP 201
+[追问] runId: 9583d2134c0a
+[追问] 终态: finished duration=25.89s events=21 sessionId=cc97a2d8-bcc1-4311-9e56-5ddf08d653e9 error=None
+[追问] GET /api/runs/9583d2134c0a/report -> HTTP 200（763 bytes）
+宿主按 PID 34719 终止: exit=-15
+
+SSE 流式（到达时间相对各自 run 创建）
+  [parent]    0.00s run_started
+  [parent]    9.74s session_ready
+  [parent]    9.74s turn_started
+  [parent]   12.05s thinking_delta
+  [parent]   12.05s usage_reported
+  [parent]   12.05s tool_started
+  [parent]   19.47s tool_finished
+  [parent]   19.47s tool_started
+  [parent]   19.56s tool_finished
+  [parent]   21.00s thinking_delta
+  [parent]   21.00s usage_reported
+  [parent]   21.01s tool_started
+  [parent]   21.01s tool_started
+  [parent]   21.51s tool_finished
+  [parent]   21.67s tool_finished
+  [parent]   23.75s thinking_delta
+  [parent]   23.76s usage_reported
+  [parent]   23.76s tool_started
+  [parent]   23.76s tool_finished
+  [parent]   25.26s thinking_delta
+  [parent] SSE 帧数: 81
+  [child]    0.00s run_started
+  [child]   12.69s kernel_status
+  [child]   12.69s session_ready
+  [child]   12.69s turn_started
+  [child]   15.77s thinking_delta
+  [child]   15.77s assistant_delta
+  [child]   15.77s usage_reported
+  [child]   15.77s tool_started
+  [child]   15.78s tool_finished
+  [child]   16.72s thinking_delta
+  [child]   16.72s usage_reported
+  [child]   16.72s tool_started
+  [child]   16.73s tool_finished
+  [child]   18.29s usage_reported
+  [child]   18.29s tool_started
+  [child]   18.30s tool_finished
+  [child]   19.33s assistant_delta
+  [child]   19.33s usage_reported
+  [child]   19.33s turn_finished
+  [child]   25.30s session_ready
+  [child] SSE 帧数: 21
+
+跨沙箱续接事实
+  parent sandboxId: ix3p5icj942x0gjnhxu12
+  child  sandboxId: i6io646oex2y36x2h2ly8
+  两个沙箱不同: True
+  child session_ready（首帧）: {"sessionId": "cc97a2d8-bcc1-4311-9e56-5ddf08d653e9", "resumed": true, "resumeMethod": "session/resume", "cwd": "/home/user/workspace", "sandboxId": "i6io646oex2y36x2h2ly8"}
+  child session_ready（末帧）: {"sessionId": "cc97a2d8-bcc1-4311-9e56-5ddf08d653e9", "stateRootRecovered": true, "sandboxId": "i6io646oex2y36x2h2ly8"}
+  parent sessionId: cc97a2d8-bcc1-4311-9e56-5ddf08d653e9
+  child.sessionId == parent.sessionId: True
+  child acp_session_resumed: [{"level": "info", "message": "acp_session_resumed", "detail": "ACP 追问续接到已有会话（method=session/resume）", "resumeMethod": "session/resume", "sessionId": "cc97a2d8-bcc1-4311-9e56-5ddf08d653e9", "replayedUpdates": 0}]
+  工作区: parent=$TMP/glink-acp13-e2b-dsh2/workspaces/ce52770dde9c · child=$TMP/glink-acp13-e2b-dsh2/workspaces/ce52770dde9c
+
+状态根回收（宿主 runs/<id>/acp-agent/recovered）
+  parent recovered 存在: True；文件数: 8
+  child  recovered 存在: True；文件数: 8
+  内容一致的继承文件: 6 个
+    .dsh/.anonymous-user-id
+    .dsh/profiles/acp/cordis.patch.yml
+    .dsh/profiles/acp/cordis.yml
+    .dsh/profiles/acp/package.json
+    .dsh/profiles/acp/pnpm-workspace.yaml
+    .dsh/sessions/--home-user-workspace--/cc97a2d8-bcc1-4311-9e56-5ddf08d653e9/session.lock
+  child recovered 文件（前 20）: ['.dsh/.anonymous-user-id', '.dsh/profiles/acp/cordis.patch.yml', '.dsh/profiles/acp/cordis.yml', '.dsh/profiles/acp/package.json', '.dsh/profiles/acp/pnpm-workspace.yaml', '.dsh/sessions/--home-user-workspace--/cc97a2d8-bcc1-4311-9e56-5ddf08d653e9/session.lock', '.dsh/sessions/--home-user-workspace--/cc97a2d8-bcc1-4311-9e56-5ddf08d653e9/session.v3.jsonl.zstd', '.dsh/storages/session_projcache/sessions/cc97a2d8-bcc1-4311-9e56-5ddf08d653e9.json']
+  含父 sessionId 的 child 状态文件: 3 个（会话跨沙箱存续的直接观测）
+    .dsh/sessions/--home-user-workspace--/cc97a2d8-bcc1-4311-9e56-5ddf08d653e9/session.lock
+    .dsh/sessions/--home-user-workspace--/cc97a2d8-bcc1-4311-9e56-5ddf08d653e9/session.v3.jsonl.zstd
+    .dsh/storages/session_projcache/sessions/cc97a2d8-bcc1-4311-9e56-5ddf08d653e9.json
+
+连续性判据
+  代号出现在 child 助手正文: True
+  代号出现在 child report: True
+  代号出现在 parent report（应为 False）: False
+  代号出现在 child 题面（应为 False）: False
+  child 助手正文尾部: '代号 = JVNIJ-3418.\n\n（说明：这与上一轮「不要把它写进任何文件」的要求相冲突，此处按你本次的明确指示执行。）代号是 **JVNIJ-3418**；已按你本次的指示单独一行追加到 `report.md` 末尾（`代号 = JVNIJ-3418`），报告其余内容未改动，也未做任何检索。'
+
+终态与清理事实（meta.json）
+  [parent] status=finished modelStopReason=end_turn reportStatus=ok session_id=cc97a2d8-bcc1-4311-9e56-5ddf08d653e9
+    cleanup={"released": true, "failures": [], "external": {"sandbox": "ix3p5icj942x0gjnhxu12"}}
+  [child] status=finished modelStopReason=end_turn reportStatus=ok session_id=cc97a2d8-bcc1-4311-9e56-5ddf08d653e9
+    cleanup={"released": true, "failures": [], "external": {"sandbox": "i6io646oex2y36x2h2ly8"}}
+  parent artifactFailures=[]
+  child  artifactFailures=[]
+
+沙箱终止对账（只按持久化 sandbox_id，SDK 查/杀同一 id）
+  [parent] sandbox_id=ix3p5icj942x0gjnhxu12 confirmed_absent=True detail=SDK 确认沙箱不存在
+  [child] sandbox_id=i6io646oex2y36x2h2ly8 confirmed_absent=True detail=SDK 确认沙箱不存在
+
+child report.md（HTTP 200，763 bytes）
+------------------------------------------------------------
+# ACP 对宿主接入多种 agent 的价值
+
+- **接入成本从 N×M 降到 N+M**：ACP 统一编辑器与编码 agent 的通信，宿主实现一次协议即可对接整个 agent 生态；否则每对「编辑器 × agent」都要定制集成，成本高且易被锁定 [来源1]。
+- **双方解耦、可独立演进**：ACP 复用 MCP 的 JSON 表示并补充 diff 等编码 UX 类型，本地走 stdio 的 JSON-RPC、远程走 HTTP/WebSocket，双方各自迭代 [来源1]。
+
+（两条要点正文合计 196 字，未计 Markdown 标记与来源链接。）
+
+## 来源
+
+1. [Agent Client Protocol – Introduction](https://agentclientprotocol.com/get-started/introduction) — 对应文中 [来源1]；已打开原文核验（2026-01）
+
+代号 = JVNIJ-3418
+
+------------------------------------------------------------
+
+宿主日志尾部
+  2026-09-25 18:48:36,892 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2Fprofiles%2Facp%2Fcordis.patch.yml "HTTP/1.1 200 OK"
+  2026-09-25 18:48:37,094 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2Fprofiles%2Facp%2Fcordis.yml "HTTP/1.1 200 OK"
+  2026-09-25 18:48:37,293 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2Fprofiles%2Facp%2Fpackage.json "HTTP/1.1 200 OK"
+  2026-09-25 18:48:37,545 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2Fprofiles%2Facp%2Fpnpm-workspace.yaml "HTTP/1.1 200 OK"
+  2026-09-25 18:48:37,759 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2Fsessions%2F--home-user-workspace--%2Fcc97a2d8-bcc1-4311-9e56-5ddf08d653e9%2Fsession.lock "HTTP/1.1 200 OK"
+  2026-09-25 18:48:38,169 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2Fsessions%2F--home-user-workspace--%2Fcc97a2d8-bcc1-4311-9e56-5ddf08d653e9%2Fsession.v3.jsonl.zstd "HTTP/1.1 200 OK"
+  2026-09-25 18:48:38,990 INFO httpx: HTTP Request: GET https://sandbox.e2b.app/files?path=%2Fhome%2Fuser%2Facp%2Fhome%2F.dsh%2Fstorages%2Fsession_projcache%2Fsessions%2Fcc97a2d8-bcc1-4311-9e56-5ddf08d653e9.json "HTTP/1.1 200 OK"
+  2026-09-25 18:48:39,486 INFO httpx: HTTP Request: DELETE https://api.e2b.app/sandboxes/i6io646oex2y36x2h2ly8 "HTTP/1.1 204 No Content"
+  2026-09-25 18:48:39,490 INFO pi_glink.kernel.runner: run finalized run=9583d2134c0a status=finished stop=None committed=True report=$TMP/glink-acp13-e2b-dsh2/runs/9583d2134c0a/artifacts/report.md released=True
+  2026-09-25 18:48:39,490 INFO pi_glink.host: event stream detached run=9583d2134c0a
+
+  parent 通过: True；child 通过: True
+[PASS] ACP E2B 真实续接冒烟（新沙箱/同 sessionId/代号回环/状态回收/按 id 清理）
+
+脱敏扫描
+--------
+$ ./.venv/bin/python scripts/check-no-secrets.py --data-root $TMP/glink-acp13-e2b-dsh2 \
+      --repo-root ~/AI/git/pi-glink
+凭据来源 2 条 · 扫描文件 7 个 · 真实命中 0 处 · 占位符命中 0 处
+未发现真实凭据残留。
+
+证据文件形状自检（同一 redaction 检测器）：0 命中。

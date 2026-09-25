@@ -8,8 +8,9 @@
 |---|---|---|
 | `rpc_echo_agent.py` + `frame_integrity_probe.py` | 双向 stdio 帧完整性实测：`background=True, stdin=True` 的后台进程 + `send_stdin`，用仓库 `kernel/framing.py` 分帧；保序、字节一致、半帧/多帧、CRLF、U+2028/U+2029、64 KiB–1 MiB 大帧、`close_stdin` | `docs/evidence/acp-m3-e2b-framing.txt` |
 | `template_selfcheck.py` | `glink-acp-worker` dev 模板的真实沙箱自检（用户/家目录/工作目录、node 与各组件版本、每 run HOME 可写） | `docs/evidence/acp-m3-e2b-template.txt` |
-| `sandbox_handshake.py` | 生产装配路径（`build_config` → `prepare_acp_runtime` → `E2BAcpSandboxClient` → `build_adapter`）在沙箱内只做 `initialize` + `session/new`（不发 prompt、不消耗模型）；dsh / codex-acp 需凭据，claude-agent-acp（M6 起为后继包名）在全新 HOME 下无需凭据 | `docs/evidence/acp-m3-e2b-agent-check.txt`、`docs/evidence/acp-m4-claude-e2b-handshake.txt`、`docs/evidence/acp-m6-migration-e2b-handshake.txt` |
+| `sandbox_handshake.py` | 生产装配路径（`build_config` → `prepare_acp_runtime` → `E2BAcpSandboxClient` → `build_adapter`）在沙箱内只做 `initialize` + `session/new`（不发 prompt、不消耗模型）；dsh / codex-acp 需凭据，claude-agent-acp（M6 起为后继包名）在全新 HOME 下无需凭据。`--recover-state`（M8）在握手后直接实测状态根回收：真实 SDK 的递归 listing/entry path/size、有界读取与宿主镜像，只记录文件数/字节数/路径样本 | `docs/evidence/acp-m3-e2b-agent-check.txt`、`docs/evidence/acp-m4-claude-e2b-handshake.txt`、`docs/evidence/acp-m6-migration-e2b-handshake.txt`、`docs/evidence/acp-m8-resume-e2b-handshake.txt` |
 | `smoke_host.py` | 一次最小真实 run：起真实宿主进程（随机端口、临时数据根、有界超时）→ `POST /api/runs` → 同时订阅 SSE → 终态 → `/report` → `confirm_sandbox_absent` 按 id 对账 | `docs/evidence/acp-m3-e2b-smoke.txt` |
+| `resume_smoke.py`（M8） | 跨沙箱续接冒烟：同一 agent 数据根先跑「首轮」（约定随机代号、不写入 report.md），再以 `parentRunId` 跑「追问」（复述代号并追加写入 report.md）；判据含新沙箱（sandbox id 不同）、同 sessionId、`session/resume`、两侧 `acp-agent/recovered` 状态根与内容一致的继承文件、代号回环，以及只按宿主 PID + 持久化 sandbox id 清理 | `docs/evidence/acp-m8-resume-e2b-dsh.txt` |
 
 复现命令（在仓库根目录；`--env-file` 指向含 `E2B_API_KEY` 的冻结配置）：
 
@@ -25,8 +26,16 @@
 .venv/bin/python scripts/spikes/acp_e2b/sandbox_handshake.py --agent codex-acp --env-file .env
 .venv/bin/python scripts/spikes/acp_e2b/sandbox_handshake.py --agent claude-agent-acp --env-file .env
 
+# 3a) 状态根回收自检（M8；握手后直接回收，不发 prompt、不消耗模型）
+.venv/bin/python scripts/spikes/acp_e2b/sandbox_handshake.py --agent dsh --recover-state --env-file .env
+
 # 4) 最小真实 run（会消耗一次模型调用）
 .venv/bin/python scripts/spikes/acp_e2b/smoke_host.py --env-file .env
+
+# 5) 跨沙箱续接：首轮 + 追问（M8；会消耗两次模型调用、两个沙箱）
+.venv/bin/python scripts/spikes/acp_e2b/resume_smoke.py \
+  --credential ~/.dsh/.credentials.yaml=.dsh/.credentials.yaml \
+  --env-file .env --timeout 300
 ```
 
 模板构建（E2B CLI，非 SDK；`--cpu-count/--memory-mb` 按需）：

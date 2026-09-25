@@ -121,10 +121,26 @@ class CleanupReport:
 
 @dataclass(frozen=True, slots=True)
 class ArtifactRecovery:
-    """Files pulled into the host workspace, and those that were refused."""
+    """Files pulled into the host workspace, and those that were refused.
+
+    ``state_recovered`` is the face's own verdict on an *agent state root* it
+    had to fetch back before tearing the execution down (the E2B face: the
+    sandbox destroys the state with it). ``None`` means the face has no such
+    state to fetch — the in-process, Docker and pi faces keep it on the host.
+    The verdict is durable because the face publishes the recovered root only
+    when the whole bounded copy succeeded; a ``False`` (or a missing root)
+    keeps every follow-up refused.
+
+    ``secrets`` are credential-shaped values discovered in recovered material
+    (never the values themselves in any log): the runner adds them to the run's
+    redaction boundary so a value the host only learned from the recovered
+    state is masked exactly like an injected credential.
+    """
 
     files: tuple[Path, ...] = ()
     failures: tuple[str, ...] = ()
+    state_recovered: bool | None = None
+    secrets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

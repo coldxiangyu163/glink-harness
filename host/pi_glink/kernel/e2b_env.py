@@ -67,6 +67,7 @@ import codecs
 import hashlib
 import json
 import logging
+import os
 import queue
 import re
 import shlex
@@ -80,7 +81,15 @@ from typing import Any, Callable, Iterator, Mapping
 
 from ..artifacts import ArtifactError, ArtifactTree
 from ..config import ConfigError, HostConfig
-from .acp_env import AcpRuntime, build_acp_argv
+from .acp_env import (
+    ACP_RECOVERED_DIRNAME,
+    INHERIT_MAX_FILE_BYTES,
+    INHERIT_MAX_FILES,
+    INHERIT_MAX_TOTAL_BYTES,
+    AcpRuntime,
+    build_acp_argv,
+    credential_secrets_from_text,
+)
 from .agent_env import IMAGE_PACKAGE_GUARD, AgentRuntime
 from .framing import strip_trailing_cr
 
@@ -96,6 +105,10 @@ SANDBOX_SESSIONS = f"{SANDBOX_HOME}/sessions"
 #: uploads it here; the agent process gets ``HOME`` pointed at it, so ``~/.dsh``,
 #: ``~/.codex`` and every cache stay inside this run's sandbox.
 SANDBOX_ACP_HOME = f"{SANDBOX_HOME}/acp/home"
+#: How deep the sandbox's ACP state root is walked when it is recovered to the
+#: host. The measured state roots (dsh / codex / claude / opencode) are a handful
+#: of levels deep; a deeper tree is refused instead of walked without a bound.
+ACP_STATE_MAX_DEPTH = 12
 REPORT_FILENAME = "report.md"
 #: Image-local guard script (same bytes in both worker images, see
 #: :data:`agent_env.IMAGE_PACKAGE_GUARD`). The sandbox has no ``--entrypoint``
@@ -179,6 +192,30 @@ class SandboxRunResult:
     stderr_tail: str
     delivered_lines: int
     stream_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AcpStateRecovery:
+    """What one bounded recovery of a sandbox's ACP state root achieved.
+
+    ``ok`` is the whole-or-nothing verdict: a recovery that could not read or
+    mirror every file (a bound violation, an unrepresentable path, a sandbox
+    read error) is reported failed and leaves **no** recovered root behind — a
+    partial state root would present the next turn a conversation the agent
+    does not actually have. ``files``/``bytes`` are the mirror's facts for the
+    run record; ``secrets`` are the credential-shaped values discovered in the
+    recovered text, which join this run's redaction boundary (the state files
+    themselves are never rewritten — rewriting the agent's own session store
+    would corrupt the session a resume is meant to continue; see
+    :func:`~pi_glink.kernel.acp_env.inherit_acp_state`, which scans the same
+    root again when a follow-up inherits it).
+    """
+
+    ok: bool
+    files: tuple[str, ...] = ()
+    bytes: int = 0
+    secrets: tuple[str, ...] = ()
+    failures: tuple[str, ...] = ()
 
 
 class _RunCancelled(Exception):
@@ -822,7 +859,12 @@ class E2BAcpSandboxClient:
     (:func:`~pi_glink.kernel.acp_env.prepare_acp_runtime`): the credential files
     it holds are uploaded into the sandbox state root with 0600 applied there,
     so the M2/M3a boundary (per-run HOME, file-shaped credentials, no value in
-    argv or environment) holds on this face too.
+    argv or environment) holds on this face too. A follow-up's ``runtime`` HOME
+    additionally holds the parent run's state, inherited by the runner before
+    this client exists, so the same upload is what restores the session into
+    the new sandbox; and :meth:`recover_state` brings the sandbox's own state
+    root back to the host before :meth:`close` destroys it, which is what makes
+    that inheritance possible in the first place.
     """
 
     def __init__(
@@ -886,6 +928,12 @@ class E2BAcpSandboxClient:
         this face. The ``(relative, sha256)`` manifest makes delivery
         verifiable instead of assumed. A run with no credential files uploads
         nothing.
+
+        A follow-up's HOME is not just credentials: the runner inherited the
+        parent run's recovered state into it, so this upload is also the
+        "灌回" step — the new sandbox gets the state the resume needs, in the
+        same hardened order as the first turn. A failed upload fails the run
+        (the caller never starts the agent against a partial state root).
         """
         sandbox = self._require_sandbox()
         sandbox.files.make_dir(SANDBOX_ACP_HOME)
@@ -936,6 +984,27 @@ class E2BAcpSandboxClient:
         except Exception as exc:  # noqa: BLE001 - surfaced as a delivery failure
             raise SandboxError(f"{what}失败: {type(exc).__name__}: {exc}") from exc
 
+    def upload_continuation(self) -> None:
+        """Deliver the conversation's prior deliverable into the new sandbox.
+
+        The pi face transfers the sanitized session snapshot plus the prior
+        ``report.md`` (:meth:`E2BSandboxClient.upload_continuation`); the ACP
+        session itself travels through the inherited run HOME, and this is the
+        workspace half: a resumed agent remembers the conversation's workspace
+        (M7), so the deliverable it produced there is restored rather than left
+        as an empty directory the conversation never wrote. Only
+        ``report.md`` is transferred — the product contract's file — read
+        through :class:`~pi_glink.artifacts.ArtifactTree` and bounded; a run
+        with no prior report (or an unreadable one) simply uploads nothing.
+        """
+        sandbox = self._require_sandbox()
+        try:
+            with ArtifactTree(self.workspace) as tree:
+                report = tree.read(REPORT_FILENAME, max_bytes=UPLOAD_MAX_BYTES)
+        except ArtifactError:
+            return
+        sandbox.files.write(f"{SANDBOX_WORKSPACE}/{REPORT_FILENAME}", report)
+
     def command(self) -> str:
         """The sandbox command line: the frozen agent argv in the workspace.
 
@@ -976,6 +1045,137 @@ class E2BAcpSandboxClient:
     def recover_artifacts(self, destination: Path) -> tuple[list[Path], list[str]]:
         """Pull the sandbox workspace back before the sandbox is destroyed."""
         return _recover_workspace(self._require_sandbox(), destination)
+
+    def recover_state(self) -> AcpStateRecovery:
+        """Mirror the sandbox's ACP state root onto the host (bounded).
+
+        The sandbox destroys the agent's state (its sessions, credentials,
+        caches) with it, so the host takes its own copy **before** ``close()``
+        kills the sandbox: without it a follow-up would be admitted into a
+        sandbox that can never find the session it is told to resume. The copy
+        lands in a freshly staged directory under the run's ACP runtime dir and
+        is published by one ``rename`` to ``acp-agent/recovered``; the
+        admission gate reads the published directory's existence as the durable
+        "父状态根回收成功" fact, so nothing is ever inherited from a partial or
+        failed copy.
+
+        The bounds are the follow-up inheritance bounds (file count, one file,
+        total bytes) — the same limits M7 applies when the child inherits the
+        root — and a violation refuses the whole recovery instead of truncating
+        it. Entries are read through :func:`_read_file_bounded` (size metadata
+        or a streamed, aborted-early read), only regular files are mirrored
+        (symbolic links are skipped, never followed: the host must not import a
+        file from outside the state root), and every relative path is validated
+        before it is written through :class:`~pi_glink.artifacts.ArtifactTree`,
+        so the mirror can never land outside the run's own directory. The
+        recovered text is scanned for credential-shaped values, which are
+        returned for the run's redaction boundary; the files are not rewritten.
+        """
+        sandbox = self._require_sandbox()
+        max_files = INHERIT_MAX_FILES
+        try:
+            entries = sandbox.files.list(SANDBOX_ACP_HOME, depth=ACP_STATE_MAX_DEPTH)
+        except Exception as exc:  # noqa: BLE001 - a failed recovery refuses the follow-up
+            return AcpStateRecovery(
+                ok=False,
+                failures=(f"无法列出沙箱 ACP 状态根: {type(exc).__name__}: {exc}",),
+            )
+        collected: dict[str, bytes] = {}
+        total = 0
+        for entry in entries:
+            path = str(getattr(entry, "path", None) or "")
+            if path.rstrip("/") == SANDBOX_ACP_HOME:
+                # A recursive listing that includes the root itself describes
+                # nothing to mirror (robustness against SDK payload shapes).
+                continue
+            kind = _entry_kind(entry)
+            if kind == "dir":
+                continue
+            if kind != "file":
+                # Symlinks and non-regular entries are never followed or
+                # imported (the same rule ArtifactTree and the pi face apply).
+                continue
+            relative = _state_relative(path)
+            if relative is None:
+                return AcpStateRecovery(
+                    ok=False,
+                    failures=(f"沙箱状态根含无法映射的路径，已拒绝回收: {path[:200]!r}",),
+                )
+            if len(collected) >= max_files:
+                return AcpStateRecovery(
+                    ok=False,
+                    failures=(f"沙箱状态文件数超过上限 {max_files}",),
+                )
+            known = getattr(entry, "size", None)
+            data, failure = _read_file_bounded(
+                sandbox,
+                path,
+                INHERIT_MAX_FILE_BYTES,
+                known_size=known if isinstance(known, int) else None,
+            )
+            if data is None:
+                return AcpStateRecovery(
+                    ok=False,
+                    failures=(f"沙箱状态文件不可读取或超过上限: {relative}: {failure}",),
+                )
+            total += len(data)
+            if total > INHERIT_MAX_TOTAL_BYTES:
+                return AcpStateRecovery(
+                    ok=False,
+                    failures=(f"沙箱状态超过总量上限 {INHERIT_MAX_TOTAL_BYTES} 字节",),
+                )
+            collected[relative] = data
+        secrets: list[str] = []
+        for relative in collected:
+            data = collected[relative]
+            if b"\x00" not in data[:1024]:
+                secrets.extend(
+                    credential_secrets_from_text(data.decode("utf-8", errors="replace"))
+                )
+        return self._publish_recovered_state(collected, total, _stable(secrets))
+
+    def _publish_recovered_state(
+        self,
+        collected: Mapping[str, bytes],
+        total: int,
+        secrets: tuple[str, ...],
+    ) -> AcpStateRecovery:
+        """Write the staged mirror and publish it with one rename.
+
+        The staging directory is private to this run and this call; it is
+        created 0700 and every file lands through :class:`ArtifactTree` (0600,
+        parents 0700). Only a complete mirror is renamed into place, so a
+        crash or write failure leaves no recovered root and the follow-up
+        refusal holds.
+        """
+        staging = self.runtime.directory / f".{ACP_RECOVERED_DIRNAME}.staging"
+        published = self.runtime.directory / ACP_RECOVERED_DIRNAME
+        try:
+            if staging.exists():
+                shutil.rmtree(staging)
+            staging.mkdir(mode=0o700)
+            with ArtifactTree(staging) as tree:
+                for relative in sorted(collected):
+                    tree.replace(
+                        relative,
+                        collected[relative],
+                        max_bytes=INHERIT_MAX_FILE_BYTES,
+                        create_parents=True,
+                    )
+            if published.exists():
+                shutil.rmtree(published)
+            os.rename(staging, published)
+        except Exception as exc:  # noqa: BLE001 - a failed recovery refuses the follow-up
+            shutil.rmtree(staging, ignore_errors=True)
+            return AcpStateRecovery(
+                ok=False,
+                failures=(
+                    f"沙箱 ACP 状态根写入宿主失败: {type(exc).__name__}: {exc}",
+                ),
+            )
+        return AcpStateRecovery(
+            ok=True, files=tuple(sorted(collected)), bytes=total, secrets=secrets
+        )
 
     def close(self) -> list[str]:
         """Destroy the sandbox. Returns the failures instead of hiding them."""
@@ -1109,6 +1309,36 @@ def _recover_workspace(sandbox: Any, destination: Path) -> tuple[list[Path], lis
                 continue
             files.append(destination / name)
     return files, failures
+
+
+def _state_relative(path: str) -> str | None:
+    """One sandbox state entry's path relative to the sandbox state root.
+
+    Returns ``None`` for anything that cannot be mirrored faithfully (outside
+    the root, an empty or traversing component, a separator the host path
+    model would reinterpret): such an entry refuses the whole recovery rather
+    than being silently dropped from the mirror. Sandbox content is untrusted
+    input; the same path discipline is what keeps the mirror inside the run.
+    """
+    prefix = f"{SANDBOX_ACP_HOME}/"
+    if not path.startswith(prefix):
+        return None
+    relative = path[len(prefix) :]
+    if not relative or "\\" in relative or "\x00" in relative:
+        return None
+    parts = relative.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return None
+    return relative
+
+
+def _stable(values: list[str]) -> tuple[str, ...]:
+    """The distinct values, in first-seen order (redaction boundary input)."""
+    seen: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.append(value)
+    return tuple(seen)
 
 
 def _runtime_manifest(runtime_dir: Path) -> list[tuple[str, bool]]:

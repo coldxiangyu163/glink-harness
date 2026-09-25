@@ -1,0 +1,83 @@
+ACP M8 状态根回收真实沙箱自检（dsh；不发 prompt，不消耗模型）
+====================================================
+日期: 2026-09-25
+任务: GLINK-ACP-13（真实 SDK 下的回收形状：递归 listing、entry path/size、流式读取、宿主镜像）
+探针: scripts/spikes/acp_e2b/sandbox_handshake.py --recover-state（生产装配路径 + 真实沙箱）
+结果: recover_state() ok=true，9 个文件 / 4417 字节（含 dsh 会话文件与 storages 投影），
+  路径样本见输出；凭据源 sha256 前后一致；沙箱按 id 终止。
+模型调用: 0（initialize + session/new 后直接回收，不发 session/prompt）。
+脱敏: 家目录以 ~ 代替，临时目录以 $TMP/... 代替；凭据值不出现。
+
+原始输出
+--------
+{
+  "date": "2026-09-25 18:49:07",
+  "agent": "dsh",
+  "command": "dsh --profile acp",
+  "template": "glink-acp-worker",
+  "credential_source": "~/.dsh/.credentials.yaml",
+  "credential_dest": ".dsh/.credentials.yaml",
+  "credential_sha256_before": "16ae1904493e79651638c5b358baee4f1e12aa7bd41bfd99ca594b2e9cb74072",
+  "source_mtime": "2026-09-23 10:37:17",
+  "runtime_home": "$TMP/glink-acp-e2b-handshake-fumz5am9/acp-agent/home",
+  "credential_dests": [
+    ".dsh/.credentials.yaml"
+  ],
+  "secret_count": 5,
+  "sandbox_id": "i4k1dusggac9xsdrb9t3q",
+  "sandbox_command": "cd /home/user/workspace && exec dsh --profile acp",
+  "harden_command": "chmod 0700 /home/user/acp/home …",
+  "upload_manifest": [
+    {
+      "path": ".dsh/.credentials.yaml",
+      "sha256": "16ae1904493e79651638c5b358baee4f1e12aa7bd41bfd99ca594b2e9cb74072"
+    }
+  ],
+  "initializeOk": true,
+  "protocolVersion": 1,
+  "agentInfo": {
+    "name": "deepseek-harness-acp",
+    "version": "0.0.1"
+  },
+  "capabilities": [
+    "mcpCapabilities",
+    "promptCapabilities",
+    "sessionCapabilities"
+  ],
+  "authMethodIds": [],
+  "sessionId": "b37a2bea-182f-4d2c-958f-c822872d7513",
+  "cwd": "/home/user/workspace",
+  "configOptionIds": [
+    "model",
+    "reasoning_effort"
+  ],
+  "stateRecovery": {
+    "ok": true,
+    "fileCount": 9,
+    "bytes": 4417,
+    "paths": [
+      ".dsh/.anonymous-user-id",
+      ".dsh/.credentials.yaml",
+      ".dsh/profiles/acp/cordis.patch.yml",
+      ".dsh/profiles/acp/cordis.yml",
+      ".dsh/profiles/acp/package.json",
+      ".dsh/profiles/acp/pnpm-workspace.yaml",
+      ".dsh/sessions/--home-user-workspace--/b37a2bea-182f-4d2c-958f-c822872d7513/session.lock",
+      ".dsh/sessions/--home-user-workspace--/b37a2bea-182f-4d2c-958f-c822872d7513/session.v3.jsonl.zstd"
+    ],
+    "failures": [],
+    "secretCount": 5
+  },
+  "cleanup": {
+    "released": true,
+    "failures": [],
+    "external": {
+      "sandbox": "i4k1dusggac9xsdrb9t3q"
+    }
+  },
+  "credential_sha256_after": "16ae1904493e79651638c5b358baee4f1e12aa7bd41bfd99ca594b2e9cb74072",
+  "source_unchanged": true
+}
+[PASS] dsh 真实沙箱 ACP 握手（initialize + session/new）
+
+证据文件形状自检（同一 redaction 检测器）：0 命中。
