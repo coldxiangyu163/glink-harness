@@ -96,6 +96,30 @@ class AcpProjector:
             # terminal judgement is recorded.
             produced.extend(self.flush())
             return produced
+        if frame_type == "acp_session_resumed":
+            # The adapter reached an existing session instead of creating one
+            # (the follow-up path). Record the fact and, for the replaying
+            # method, how much of the parent's already-recorded history was
+            # dropped instead of projected a second time.
+            method = str(frame.get("method") or "")
+            replayed = frame.get("replayedUpdates")
+            detail = f"ACP 追问续接到已有会话（method={method or 'unknown'}）"
+            if isinstance(replayed, int) and replayed > 0:
+                detail += (
+                    f"；session/load 回放了 {replayed} 条历史更新，"
+                    "它们属于父 run 已记录的历史，不重复投影"
+                )
+            payload: dict[str, Any] = {
+                "level": "info",
+                "message": "acp_session_resumed",
+                "detail": detail,
+                "resumeMethod": method,
+            }
+            if isinstance(frame.get("sessionId"), str):
+                payload["sessionId"] = frame["sessionId"]
+            if isinstance(replayed, int):
+                payload["replayedUpdates"] = replayed
+            return [(events.KERNEL_STATUS, payload)]
         if frame_type == "acp_permission":
             produced.extend(self.flush())
             produced.append((events.KERNEL_STATUS, self._permission_notice(frame)))

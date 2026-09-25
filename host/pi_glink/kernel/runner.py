@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
+import stat
 import threading
 import time
 import uuid
@@ -54,9 +56,11 @@ from ..store import (
     RunRecord,
     RunStore,
 )
+from .acp_execution import acp_resume_method
 from .acp_env import (
     ACP_RUNTIME_DIRNAME,
     AcpRuntime,
+    AcpStateInheritError,
     build_acp_argv,
     build_acp_env,
     prepare_acp_runtime,
@@ -112,6 +116,11 @@ SWEEP_MAX_BYTES = 2 * 1024 * 1024
 #: Bound on how many files one sweep may visit (a runaway workspace must not
 #: turn run teardown into an unbounded walk).
 SWEEP_MAX_FILES = 2000
+#: Bound on how many committed frames of a parent's log the ACP admission gate
+#: scans for the recorded ``session_ready`` capability matrix. The frame is
+#: published right after a run opens, so the scan is independent of how long the
+#: parent's transcript grew afterwards.
+_ACP_CAPABILITY_SCAN_EVENTS = 50
 _USAGE_FIELDS = ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
 
 #: Run phases. ``open`` accepts frames and cancellation; the verdict commit
@@ -387,11 +396,16 @@ class RunManager:
         if prompt_names_unsupported_command(text, allowed_commands):
             raise UnsupportedCommand(allowed_commands)
         if self.config.harness == "acp" and parent_run_id is not None:
-            # M1 has no ACP continuation: ``session/resume`` is not implemented
-            # and an ACP run stores no host session file to seed from. An
-            # explicit refusal beats starting a fresh session and presenting it
-            # as the parent's next turn (plan §4.4).
-            raise FollowupUnavailable("session_unavailable")
+            # Original obligation (M1): ACP had no ``session/resume``, so every
+            # ACP follow-up was refused with ``session_unavailable``. New
+            # obligation (M7): the follow-up is admitted when the parent really
+            # can be continued — same harness, terminal, latest turn, a recorded
+            # ACP session id, and an agent capability matrix that declares a
+            # continuation channel — and refused otherwise. The failure stays
+            # fail-closed: the refusal happens before a credential is resolved or
+            # a run directory exists, and the child adapter re-checks the
+            # capability it negotiates itself before any resume request.
+            self._acp_resumable_parent(context, parent_run_id)
         credentials = self._credentials_for_context(context)
         if self.config.harness == "pi" and not credentials.model_api_key:
             # The ACP family does not use the host's model credential: the agent
@@ -416,6 +430,8 @@ class RunManager:
                 # concurrent follow-up of the same parent): a refusal here
                 # discards the seed, nothing has been written yet.
                 self._resumable_parent(context, parent_run_id)
+                if self.config.harness == "acp":
+                    self._acp_resumable_parent(context, parent_run_id)
             # The store allocates the id and creates the run directory
             # exclusively (a generated collision is retried there): a new run can
             # never adopt or overwrite an existing record.
@@ -551,6 +567,88 @@ class RunManager:
             raise FollowupUnavailable("stale_run")
         return parent
 
+    def _acp_resumable_parent(
+        self, context: TenantContext | None, parent_run_id: str
+    ) -> RunRecord:
+        """The ACP parent this follow-up may resume, or the refusal it has earned.
+
+        On top of the shared parent gate (:meth:`_resumable_parent`: owner,
+        terminal, latest turn), an ACP continuation needs three more facts, all
+        of which are read from the host's own record of the parent rather than
+        from the caller:
+
+        * the parent ran the **same harness** — proven by the ``harness: "acp"``
+          marker its ``session_ready`` frame carries, not by the current
+          configuration alone (a host switched from ``pi`` to ``acp`` must not
+          present a pi run as resumable);
+        * the parent recorded a **session id** (an ACP run without one has
+          nothing to resume);
+        * the capability matrix recorded in that same frame declares a
+          continuation channel (:func:`~pi_glink.kernel.acp_execution.
+          acp_resume_method`). No capability means the follow-up is refused
+          here, before a child run exists — it is never downgraded to a new
+          session.
+
+        The E2B face is refused for now: an ACP sandbox's agent state lives
+        inside the sandbox and is destroyed with it (only the workspace is
+        recovered), so the host has no state root to inherit and a started
+        sandbox could never resume. Recovering the sandbox state root is the
+        recorded follow-up (integration notes, M7); until then this is a
+        fail-closed refusal rather than a guaranteed resume failure.
+
+        The inheritance source is checked to exist as a directory so the common
+        failure is an admission refusal; the copy itself happens off the
+        admission lock in :meth:`_prepare_runtime` and fails the run closed if
+        it cannot complete.
+        """
+        parent = self._resumable_parent(context, parent_run_id)
+        if self.config.executor == "e2b":
+            # Owner gate first (above), so a foreign parent is still invisible.
+            raise FollowupUnavailable("session_unavailable")
+        capabilities = self._recorded_acp_capabilities(parent)
+        if capabilities is None:
+            raise FollowupUnavailable("session_unavailable")
+        if not parent.session_id:
+            raise FollowupUnavailable("session_unavailable")
+        if acp_resume_method(capabilities) is None:
+            raise FollowupUnavailable("session_unavailable")
+        state_home = self._acp_state_home(parent.run_id)
+        try:
+            info = os.stat(state_home, follow_symlinks=False)
+        except OSError as exc:
+            raise FollowupUnavailable("session_unavailable") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise FollowupUnavailable("session_unavailable")
+        return parent
+
+    def _recorded_acp_capabilities(
+        self, parent: RunRecord
+    ) -> Mapping[str, Any] | None:
+        """The capability matrix a parent ACP run recorded, or ``None``.
+
+        The parent's ``session_ready`` frame is the only capability source that
+        exists before the child's agent process starts; ``session_ready`` is
+        committed right after the run opens, so the scan is bounded and does not
+        grow with the parent's transcript. A parent with no such frame is not an
+        ACP run (or predates it), which is exactly the ``session_unavailable``
+        refusal the ACP gate owes it.
+        """
+        for index, event in enumerate(self.store.iter_events(parent.run_id)):
+            if index >= _ACP_CAPABILITY_SCAN_EVENTS:
+                break
+            if event.get("type") != events.SESSION_READY:
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping) or payload.get("harness") != "acp":
+                continue
+            capabilities = payload.get("agentCapabilities")
+            return dict(capabilities) if isinstance(capabilities, Mapping) else {}
+        return None
+
+    def _acp_state_home(self, run_id: str) -> Path:
+        """The ACP agent state root of one run (never a caller-supplied path)."""
+        return self.store.run_dir(run_id) / ACP_RUNTIME_DIRNAME / "home"
+
     def _resume_seed(
         self,
         context: TenantContext | None,
@@ -566,8 +664,16 @@ class RunManager:
         admission lock before the run is created, so the seed handed to the
         kernel comes from a parent that was authorized when it was read *and*
         was still resumable when the child was admitted.
+
+        The pi family seeds the child's session directory with a sanitized copy
+        of the parent's session file. The ACP family has no host session file:
+        its continuation lives in the parent's agent state root, which
+        :meth:`_prepare_runtime` inherits after admission (the gate already ran
+        in :meth:`_acp_resumable_parent`).
         """
         if parent_run_id is None:
+            return None
+        if self.config.harness == "acp":
             return None
         parent = self._resumable_parent(context, parent_run_id)
         # The recorded path is not a capability. It must be a direct file in
@@ -1440,23 +1546,47 @@ class RunManager:
         run_id = execution.record.run_id
         run_dir = self.store.run_dir(run_id)
         if self.config.harness == "acp":
-            runtime = prepare_acp_runtime(
-                self.config, runtime_dir=run_dir / ACP_RUNTIME_DIRNAME
-            )
+            # A follow-up inherits the authorized parent's agent state root into
+            # this run's own HOME. The parent gate ran at admission; this second
+            # authorization keeps a parent that disappeared (or became
+            # unreadable to this tenant) between admission and here from being
+            # used as a copy source. The credential destinations are re-rendered
+            # fresh and excluded from the copy (see :func:`prepare_acp_runtime`).
+            inherit_from: Path | None = None
+            if execution.parent_run_id is not None:
+                parent = self._authorized_parent(
+                    execution.context, execution.parent_run_id
+                )
+                if parent is None:
+                    raise FollowupUnavailable("session_unavailable")
+                inherit_from = self._acp_state_home(parent.run_id)
+            try:
+                runtime = prepare_acp_runtime(
+                    self.config,
+                    runtime_dir=run_dir / ACP_RUNTIME_DIRNAME,
+                    inherit_from=inherit_from,
+                )
+            except AcpStateInheritError as exc:
+                # The state could not be inherited safely; the run stops here,
+                # before any agent process exists, instead of resuming from a
+                # partial copy or from nothing.
+                raise FollowupUnavailable(
+                    f"session_unavailable: 继承父 run 的 ACP 状态失败（{exc}）"
+                ) from exc
             execution.runtime = runtime
             if execution.session_seed is not None:
-                # Not reachable through admission (ACP follow-ups are refused
-                # there); the guard keeps a seeded session from ever being
-                # presented to an ACP agent as a continuation it did not resume.
+                # The pi session seed has no ACP meaning; reaching it would mean
+                # a pi-shaped continuation was routed to the ACP adapter.
                 raise FollowupUnavailable("session_unavailable")
             if execution.redactor is None:
                 execution.redactor = self._redactor_for(
                     execution.credentials or RunCredentials.from_host(self.config)
                 )
-            # Credential material copied into this run's HOME joins this run's
-            # redaction boundary (and only this run's): a value the agent echoes
-            # into a stream, tool result or report is masked like every other
-            # secret the host knows. The values themselves never reach a log.
+            # Credential material copied into this run's HOME — and any
+            # credential-shaped value found in the inherited parent state — joins
+            # this run's redaction boundary (and only this run's): a value the
+            # agent echoes into a stream, tool result or report is masked like
+            # every other secret the host knows. The values never reach a log.
             for value in runtime.secrets:
                 execution.redactor.add(value)
             execution.projector = AcpProjector(execution.redactor)
@@ -1490,7 +1620,7 @@ class RunManager:
     # -- adapters -------------------------------------------------------------
 
     def _build_adapter(
-        self, execution: _Execution, runtime: AgentRuntime
+        self, execution: _Execution, runtime: AgentRuntime | AcpRuntime
     ) -> ExecutionAdapter:
         run_id = execution.record.run_id
         parent = (
@@ -1518,7 +1648,15 @@ class RunManager:
             workspace=execution.workspace,
             timeout_seconds=self.config.task_timeout_seconds,
             extra_argv=tuple(self._extra_argv(run_id)),
-            resume_session="continued.jsonl" if parent else None,
+            # The continuation value is harness-shaped: pi resumes from the
+            # sanitized session file copied into the run's session directory,
+            # while the ACP family resumes the **session id** the parent
+            # recorded, against the state root inherited in _prepare_runtime.
+            resume_session=(
+                parent.session_id
+                if parent and self.config.harness == "acp"
+                else ("continued.jsonl" if parent else None)
+            ),
             expected_session_id=parent.session_id if parent else None,
         )
         return build_adapter(
