@@ -453,23 +453,26 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 
 | 路径 | 属于 | 说明 |
 |---|---|---|
-| `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files`；组成根 `app`（服务器与 `create_server`） |
+| `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `redaction`（出站脱敏）/ `accounts`（站内账号）/ `auth`（身份断言与会话）/ `dotenv`（.env 解析）/ `blueprints`（蓝图目录推导与解析渲染）；组成根 `app`（服务器与 `create_server`） |
 | `host/pi_glink/web_*.py` | 宿主 HTTP 层 | `web_routes`（路由与 run/health/报告 API）/ `web_sse`（事件流与连接额度）/ `web_security`（身份、会话与请求防护）/ `web_http`（请求体、响应、静态资源、脱敏访问日志）；一个 `HostRequestHandler` 由它们组合而成 |
 | `host/pi_glink/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
-| `host/pi_glink/kernel/` | 接入层 | `rpc` / `framing` / `projection` / `agent_env` / `execution` / `docker_env` / `e2b_env` / `runner` |
+| `host/pi_glink/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env`；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面与编排：`execution` / `docker_env` / `e2b_env` / `runner` |
 | `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
 | `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`（最小工作约定）、`prompts/deepresearch.md`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
 | `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |
-| `docker/` | 执行面 | `Dockerfile.worker`（容器）、`e2b/Dockerfile.e2b`（模板） |
-| `scripts/` | 运维 | 启动、测试、真实 run 冒烟、E2B 模板构建 |
+| `docker/` | 执行面 | `Dockerfile.worker`（pi 容器）、`Dockerfile.acp-worker`（ACP 容器）、`e2b/Dockerfile.e2b`（pi 模板）、`e2b/Dockerfile.acp-e2b`（ACP dev 模板） |
+| `blueprints/` | 宿主会话模板 | harness 无关的蓝图定义（frontmatter 阶段/产出契约/检查点），格式契约见 `docs/blueprint-templates.md` |
+| `scripts/` | 运维 | 启动、测试、真实 run 冒烟、E2B 模板构建；`spikes/`（ACP 各面的 live 探针） |
 | `docs/` | 文档与证据 | 架构、边界、集成笔记、`evidence/` |
 | `tests/` | 回归 | `test_*.py`（宿主/内核）、`web/*.test.mjs`（前端模型）、`browser/`（真实浏览器） |
-| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/<id>/{meta.json,events.jsonl,pi-agent/,artifacts/}`、`sessions/<id>/`、`workspaces/<id>/`；目录由宿主以 0700 创建，已存在的符号链接或组/其他人可写目录拒绝启动（不自动 chmod） |
+| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/<id>/{meta.json,events.jsonl,pi-agent/ 或 acp-agent/,artifacts/}`（按本 run 的 harness 渲染）、`sessions/<id>/`、`workspaces/<id>/`；目录由宿主以 0700 创建，已存在的符号链接或组/其他人可写目录拒绝启动（不自动 chmod） |
 
 运行期配置目录 `runs/<id>/pi-agent/` 是 pi 的 `PI_CODING_AGENT_DIR`：宿主在其中渲染
 `models.json` 与 `web-search.json`，复制 `agent/` 的可版本化配置，pi 自己往里写 `auth.json` /
 `models-store.json`。仓库里的 `agent/` 只是模板，永远不作为运行目录使用；`pi-agent/` 不共享，
-所以并发 run 不会互写凭据或扩展。
+所以并发 run 不会互写凭据或扩展。ACP 族的对应物是 `runs/<id>/acp-agent/home`（子进程的
+`HOME`）：凭据只读复制注入且值并入该 run 脱敏边界；e2b 面在沙箱销毁前有界回收为
+`acp-agent/recovered`，追问时灌回新沙箱（详见 [ACP 集成笔记](acp-integration-notes.md)）。
 
 宿主 HTTP 层的职责边界：路由只决定请求含义（`web_routes`），身份与请求防护集中在
 `web_security`，事件流与连接额度在 `web_sse`，字节读写与静态资源在 `web_http`；`app.py` 只做
