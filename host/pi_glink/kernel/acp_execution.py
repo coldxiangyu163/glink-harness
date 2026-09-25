@@ -207,6 +207,12 @@ class AcpExecutionAdapter(ExecutionAdapter):
         #: published stays unknown and the allowlist keeps refusing it.
         self._tool_kinds: dict[str, str] = {}
         self._outcome = ExecutionOutcome()
+        #: The cause of a pending ``kernel_exit`` report: the agent's stream
+        #: ended before it answered ``session/prompt``. The exit status is
+        #: deliberately not part of it -- the stream ending and the process
+        #: exiting are two events, and a status exists only once the child has
+        #: been reaped. :meth:`close` completes the report from that status.
+        self._kernel_exit_cause: str | None = None
         self._session_id: str | None = None
         self._protocol_version: int | None = None
         self._agent_info: dict[str, Any] = {}
@@ -423,12 +429,14 @@ class AcpExecutionAdapter(ExecutionAdapter):
                 self._outcome.cancelled = True
                 self._outcome.stop_reason = "abort"
             else:
-                exit_code = client.exit_code
-                suffix = f"（exit code {exit_code}）" if exit_code is not None else ""
-                self._fail(
-                    "kernel_exit",
-                    f"ACP agent 进程在应答 session/prompt 前退出/失联{suffix}: {exc}",
-                )
+                # The stream ended before the answer. Whether the agent itself
+                # exited, and with what status, is a fact about the reaped
+                # process: the client can observe the stream's end (EOF) while
+                # the child is not yet reapable, so no status is sampled here.
+                # close() reaps the child before the verdict is decided and
+                # completes the report from that status.
+                self._kernel_exit_cause = str(exc)
+                self._fail("kernel_exit", self._kernel_exit_message(None))
         except Exception as exc:  # noqa: BLE001 - reported in the outcome
             self._fail("execution_error", f"{type(exc).__name__}: {exc}")
         else:
@@ -469,6 +477,28 @@ class AcpExecutionAdapter(ExecutionAdapter):
             return
         self._outcome.stop_reason = stop_reason
         self._outcome.error = error
+
+    def _kernel_exit_message(self, exit_code: int | None) -> str:
+        """The ``kernel_exit`` report, with the agent's status once it is known."""
+        suffix = f"（exit code {exit_code}）" if exit_code is not None else ""
+        cause = self._kernel_exit_cause or ""
+        return f"ACP agent 进程在应答 session/prompt 前退出/失联{suffix}: {cause}"
+
+    def _complete_kernel_exit(
+        self, client: AcpRpcClient, exit_code: int | None
+    ) -> None:
+        """Attach the agent's own status to a pending ``kernel_exit`` report.
+
+        The stream ending is not the process exiting. ``close()`` has just
+        reaped the child, so its exit status is available now; it is attributed
+        to the agent only when the teardown did not have to stop it -- a status
+        produced by terminate/kill is the host's doing, not the agent's own.
+        """
+        if self._kernel_exit_cause is None or exit_code is None:
+            return
+        if client.stopped_process:
+            return
+        self._outcome.error = self._kernel_exit_message(exit_code)
 
     def wait(self, *, cancel: Callable[[], bool], deadline: float) -> ExecutionOutcome:
         while True:
@@ -533,10 +563,14 @@ class AcpExecutionAdapter(ExecutionAdapter):
         if client is not None:
             try:
                 exit_code = client.close()
-                if exit_code is not None:
-                    self._outcome.exit_code = exit_code
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 failures.append(f"关闭 ACP agent 进程失败: {type(exc).__name__}: {exc}")
+            else:
+                if exit_code is not None:
+                    self._outcome.exit_code = exit_code
+                # The client has reaped the child: a pending stream-loss report
+                # gets its exit status here, where that status really exists.
+                self._complete_kernel_exit(client, exit_code)
         if self._container_name and self._container_stop is not None:
             # Closing stdin ends the agent; with ``--rm`` the container is then
             # removed by the daemon. The force-remove is the belt-and-braces

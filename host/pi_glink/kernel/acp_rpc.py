@@ -138,6 +138,10 @@ class AcpRpcClient:
         self._reader: threading.Thread | None = None
         self._stderr_reader: threading.Thread | None = None
         self._closed = threading.Event()
+        #: Whether :meth:`close` had to stop the agent itself (terminate/kill)
+        #: instead of observing its own exit. A status this teardown caused says
+        #: nothing about the agent's own result.
+        self._stopped_process = False
         self._id_counter = 0
         self.notification_count = 0
         self.invalid_frame_count = 0
@@ -183,7 +187,12 @@ class AcpRpcClient:
         ``poll()`` first, so an exited child is reaped here: the reader thread
         can observe the stdout EOF a moment before anything else calls
         ``wait()``, and a run that must report ``kernel_exit`` needs the real
-        code rather than ``None``.
+        code rather than ``None``. A caller must not read this sample at the
+        stream's end and call it the death's status: the child can close its
+        stdout (the reader sees EOF) before it is reapable, so the sample can
+        predate the exit. The status a report carries comes from reaping the
+        child -- :meth:`close` does that and :attr:`stopped_process` says
+        whether the status is the agent's own.
         """
         if self._process is None:
             return None
@@ -194,8 +203,23 @@ class AcpRpcClient:
     def running(self) -> bool:
         return self._process is not None and self._process.poll() is None
 
+    @property
+    def stopped_process(self) -> bool:
+        """Whether :meth:`close` had to terminate/kill the agent.
+
+        A child that exits by itself after stdin closed keeps its own status;
+        once this client terminates or kills it, the status that comes back is
+        this teardown's doing and must not stand in for the agent's own.
+        """
+        return self._stopped_process
+
     def close(self, *, timeout: float = 5.0) -> int | None:
-        """Stop the agent: close stdin, then terminate if it does not exit."""
+        """Stop the agent: close stdin, then terminate if it does not exit.
+
+        The returned status is the child's own when it exited by itself; after
+        a terminate/kill it is this teardown's doing, which
+        :attr:`stopped_process` records so the caller can tell the two apart.
+        """
         process = self._process
         if process is None:
             return None
@@ -208,6 +232,7 @@ class AcpRpcClient:
             return process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             logger.warning("ACP agent did not exit after stdin closed; terminating")
+            self._stopped_process = True
             process.terminate()
             try:
                 return process.wait(timeout=timeout)
