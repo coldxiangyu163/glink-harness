@@ -1,0 +1,191 @@
+ACP M5 opencode 一次 inproc 最小真实冒烟证据
+============================================================
+日期: 2026-09-25
+宿主: macOS (arm64) / Python 3.12.10 / Node v24.16.0 / host pi-glink 0.1.0
+agent: npx -y opencode-ai@1.18.32 acp（钉版入口，不全局安装；运行期 HOME = run 的
+  acp-agent/home，其中注入只读复制的 ~/.local/share/opencode/auth.json）
+装配: harness=acp + executor=inproc；宿主 HTTP API + SSE；临时数据根 $TMP/glink-acp06/smoke-data；
+  随机端口；300s 有界超时；PI_GLINK_ACP_SESSION_CONFIG=model=openai/gpt-6-astra-fast；
+  PI_GLINK_ACP_PERMISSION_ALLOW=allow_once,read,search,fetch,edit（运行时 0 条权限请求，
+  白名单未被引用）
+探针: scripts/spikes/acp_inproc/smoke_host.py
+授权: 本任务 inproc 真实冒烟授权 1 次，本文件即那一次。
+脱敏: 家目录以 ~ 代替，临时目录以 $TMP/... 代替；凭据值不出现。
+附加核对: 数据根用 scripts/check-no-secrets.py 扫描（结果附后）；真实
+  ~/.local/share/opencode/auth.json 的 sha256 在全部 inproc 实测前后一致。
+
+原始输出
+--------
+ACP M4 最小真实冒烟（inproc）
+============================================
+日期: 2026-09-25 12:34:51
+宿主命令: python -m pi_glink.app --port 55169（harness=acp, executor=inproc）
+agent 命令: npx -y opencode-ai@1.18.32 acp
+命令级 env 名: npm_config_cache
+权限白名单: allow_once,read,search,fetch,edit
+会话配置: model=openai/gpt-6-astra-fast
+数据根: $TMP/glink-acp06/smoke-data
+任务超时: 300s
+
+宿主 PID: 19057（只按这个 PID 收尾）
+宿主健康检查: HTTP 200
+POST /api/runs -> HTTP 201
+runId: 92d236b58833
+终态: finished duration=19.847s events=53
+GET /api/runs/92d236b58833/report -> HTTP 200（336 bytes）
+宿主按 PID 19057 终止: exit=-15
+
+run 期间采样的宿主后代进程: 2 个（只按 PID 记录）
+  19059 [exited] npm exec opencode-ai@1.18.32 acp    
+  19197 [exited] opencode acp
+
+SSE 流式（到达时间相对 run 创建）
+     0.14s run_started
+     3.11s kernel_status
+     3.11s kernel_status
+     3.12s session_ready
+     3.12s turn_started
+     7.67s tool_started
+     7.98s tool_updated
+     9.70s tool_finished
+    11.60s tool_started
+    11.91s tool_updated
+    13.42s tool_finished
+    14.94s tool_started
+    17.31s tool_updated
+    17.31s tool_finished
+    18.92s assistant_delta
+    18.92s assistant_delta
+    18.92s assistant_delta
+    18.95s assistant_delta
+    18.95s assistant_delta
+    18.95s assistant_delta
+    18.99s assistant_delta
+    18.99s assistant_delta
+    19.01s assistant_delta
+    19.03s assistant_delta
+    19.12s assistant_delta
+    19.12s assistant_delta
+    19.12s assistant_delta
+    19.12s assistant_delta
+    19.12s assistant_delta
+    19.12s assistant_delta
+    19.13s assistant_delta
+    19.15s assistant_delta
+    19.17s assistant_delta
+    19.18s assistant_delta
+    19.19s assistant_delta
+    19.20s assistant_delta
+    19.23s assistant_delta
+    19.26s assistant_delta
+    19.28s assistant_delta
+    19.30s assistant_delta
+  SSE 帧数: 53
+
+事件类型统计（events.jsonl）
+  assistant_delta 36 · kernel_status 2 · run_finished 1 · run_started 1 · session_ready 1 · tool_finished 3 · tool_started 3 · tool_updated 3 · turn_finished 1 · turn_started 1 · usage_reported 1
+
+权限决定（kernel_status）
+  （本次 run 没有权限请求）
+
+事件时间线（seq/相对秒/type/摘要）
+     1   0.00s run_started        
+     2   3.06s kernel_status      acp_update_not_projected
+     3   3.07s kernel_status      acp_available_commands
+     4   3.07s session_ready      
+     5   3.07s turn_started       
+     6   7.62s tool_started       webfetch
+     7   7.94s tool_updated       webfetch
+     8   9.65s tool_finished      webfetch
+     9  11.55s tool_started       webfetch
+    10  11.87s tool_updated       webfetch
+    11  13.37s tool_finished      https://agentclientprotocol.com/ (text/markdown; charset=utf-8)
+    12  14.89s tool_started       apply_patch
+    13  17.26s tool_updated       apply_patch
+    14  17.26s tool_finished      Success. Updated the following files:
+A $TMP/glink-acp06/smoke-data/workspaces/92d2
+    15  18.87s assistant_delta    
+    16  18.87s assistant_delta    
+    17  18.87s assistant_delta    
+    18  18.90s assistant_delta    
+    19  18.90s assistant_delta    
+    20  18.90s assistant_delta    
+    21  18.94s assistant_delta    
+    22  18.94s assistant_delta    
+    23  18.96s assistant_delta    
+    24  18.98s assistant_delta    
+    25  19.07s assistant_delta    
+    26  19.07s assistant_delta    
+    27  19.07s assistant_delta    
+    28  19.07s assistant_delta    
+    29  19.07s assistant_delta    
+    30  19.07s assistant_delta    
+    31  19.08s assistant_delta    
+    32  19.10s assistant_delta    
+    33  19.12s assistant_delta    
+    34  19.14s assistant_delta    
+    35  19.14s assistant_delta    
+    36  19.16s assistant_delta    
+    37  19.18s assistant_delta    
+    38  19.21s assistant_delta    
+    39  19.23s assistant_delta    
+    40  19.25s assistant_delta    
+    41  19.25s assistant_delta    
+    42  19.28s assistant_delta    
+    43  19.28s assistant_delta    
+    44  19.30s assistant_delta    
+    45  19.32s assistant_delta    
+    46  19.32s assistant_delta    
+    47  19.34s assistant_delta    
+    48  19.36s assistant_delta    
+    49  19.38s assistant_delta    
+    50  19.39s assistant_delta    
+    51  19.80s usage_reported     
+    52  19.80s turn_finished      
+    53  19.85s run_finished       finished
+
+终态与清理事实（meta.json）
+  status=finished modelStopReason=end_turn reportStatus=ok
+  container_name=None sandbox_id=None
+  cleanup={"released": true, "failures": [], "external": {}}
+  report_path=$TMP/glink-acp06/smoke-data/runs/92d236b58833/artifacts/report.md
+
+report.md（HTTP 200，336 bytes）
+------------------------------------------------------------
+- 降低接入成本：ACP 统一客户端与代理通信；宿主可复用协议层接入多个兼容 harness，减少逐一开发专用集成。[1]
+- 降低绑定：宿主界面与代理实现解耦，便于按任务切换兼容 harness，让两侧独立演进。[1]
+
+来源：[1] [ACP 官方介绍](https://agentclientprotocol.com/)
+
+------------------------------------------------------------
+
+宿主日志尾部
+  pi-glink 宿主已启动 / host listening: http://127.0.0.1:55169/
+  执行面 executor: inproc
+  内核 pi: ~/.nvm/versions/node/v24.16.0/bin/pi
+  模型 model: 未配置 / unset (缺少密钥 / no key)
+  2026-09-25 12:34:51,298 INFO pi_glink.kernel.acp_rpc: starting ACP agent: npx -y opencode-ai@1.18.32 acp
+  2026-09-25 12:34:51,388 INFO pi_glink.host: event stream attached run=92d236b58833 after=0 live=True
+  2026-09-25 12:35:11,142 INFO pi_glink.kernel.runner: run finalized run=92d236b58833 status=finished stop=None committed=True report=$TMP/glink-acp06/smoke-data/runs/92d236b58833/artifacts/report.md released=True
+  2026-09-25 12:35:11,142 INFO pi_glink.host: event stream detached run=92d236b58833
+
+[PASS] 冒烟（流式/终态/report.md/清理只操作已知 PID）
+
+附加核对（运行后）
+--------
+1) 数据根脱敏扫描（scripts/check-no-secrets.py，退出码 0）：
+   凭据来源 0 条 · 扫描文件 4 个 · 真实命中 0 处 · 占位符命中 0 处
+   未发现真实凭据残留。
+
+2) 真实凭据源只读：
+   ~/.local/share/opencode/auth.json sha256=0898364a705bd2bb…（与 inproc 握手证据一致），
+   mtime=2026-09-08 17:37:11（本次实测未变）。
+
+3) run HOME 凭据副本的刷新（opencode 真实行为，源不受影响）：
+   源 4285 字节 → run 副本 4300 字节；openai 的 access/refresh 均被刷新，
+   expires 2026-09-18T17:37:11 → 2026-10-05T12:34:55，codex 未变（本次未用）。
+   docker/e2b 面是只读挂载 / 沙箱内 0600 副本，刷新写回能否成功未实测。
+
+4) 清理只操作已知身份：宿主进程由脚本持有的 PID terminate()（exit -15）；运行期采样的
+   2 个后代（npm exec opencode-ai@1.18.32 acp → opencode acp）结束后均已退出；
+   未执行 pkill -f、未做名字或命令行通配删除。

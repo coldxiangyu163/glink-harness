@@ -18,6 +18,8 @@
 | `e2b 握手实测` | M3b 用生产装配路径在两个 agent 上的真实沙箱 `initialize`/`session/new`（`docs/evidence/acp-m3-e2b-agent-check.txt`）；M4 的同路径 claude-code-acp 沙箱握手见 `docs/evidence/acp-m4-claude-e2b-handshake.txt` |
 | `e2b 实测` | M3b 经宿主 HTTP API 的一次最小真实 run（`docs/evidence/acp-m3-e2b-smoke.txt`）：SSE 流式、终态、report 回收、沙箱按 id 终止 |
 | `claude 实测` | M4 的真实 claude-code-acp 事实（`docs/evidence/acp-m4-claude-handshake.txt`、`acp-m4-claude-smoke.txt`）：钉版入口、能力矩阵、每 run HOME/凭据落点、源码级权限 kind 观测、一次真实模型的 inproc 最小 run |
+| `opencode 实测` | M5 的真实 opencode 事实（`docs/evidence/acp-m5-opencode-handshake.txt`、`acp-m5-opencode-smoke.txt`、`acp-m5-opencode-docker-handshake.txt`、`acp-m5-opencode-e2b-handshake.txt`）：钉版入口、能力矩阵、每 run HOME/凭据落点（inproc/docker/e2b）、一次真实模型的 inproc 最小 run 与 0 条权限请求 |
+| `opencode 源码` | 只读参考 opencode 1.18.32 的上游源码（`anomalyco/opencode` v1.18.32 的 `packages/opencode/src/acp/{permission,event,tool}.ts` 等）；不作为运行时事实，用于解释真实观测 |
 | `镜像自检` | `pi-glink-acp-worker` 镜像内各组件的版本输出（构建期日志与本机 `docker run --rm` 复验，M4 起含 claude 双包；证据同 `docker 实测` 与 `docs/evidence/acp-m4-claude-docker-handshake.txt`） |
 | `npm` | npm registry 元数据（`npm view`） |
 | `宿主代码` | 本仓库实现（`host/pi_glink/kernel/`、`config.py`） |
@@ -35,6 +37,10 @@ initialize + session/new（不消耗模型）并经宿主 HTTP API 各跑一次�
 **M4 完成（GLINK-ACP-05，2026-09-25）**：claude-code-acp（`@zed-industries/claude-code-acp`
 0.16.2）接入：inproc 握手与一次最小真实 run 完成；每 run 凭据形态、权限白名单、镜像与 dev
 模板重建（含 claude 双包钉版）均已实测，见 §7。ACP 续接仍属后续里程碑。
+**M5 完成（GLINK-ACP-06，2026-09-25）**：opencode（`opencode-ai` 1.18.32，入口
+`opencode acp`）接入：inproc 握手、每 run `auth.json` 注入（OAuth access/refresh 并入
+redactor）、状态目录落点、权限形态与一次最小真实 run 均已实测；镜像与 dev 模板加
+opencode 钉版层并完成容器/沙箱握手，见 §8。
 
 ## 1. 协议事实（v1）
 
@@ -164,6 +170,8 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
   仍视为未分类，配了 tool kind 的白名单继续拒绝。事件流里 `toolKindSource` 标明 kind 来自
   `request` 还是 `tool_call`。（`claude 实测`/`合成实测`）
 * dsh 侧的权限请求只给 `allow-once`/`reject-once` 两个一次性选项（`dsh 源码`，待实测确认）。
+* opencode 的请求选项固定为 `once`/`always`/`reject`，且 `toolCall` 自带 `kind`
+  （`opencode 源码`）；M5 的真实 run 未触发请求，原因与触发面记在 §8.4。
 
 ### 1.8 取消
 
@@ -335,6 +343,8 @@ support），不依赖可选能力位、不依赖任何 agent 私有扩展；围
   用时按最小集合启用，并须回写本节。**M4 满足了启用条件**：claude-code-acp 的安全写入
   （Write/Edit）与 WebFetch 会逐次询问，研究 run 无法在 fail-closed 下产出 report.md；
   M4 定义的最小集合与真实 run 证据见 §7.4（dsh/codex-acp 的默认策略不变，仍不需要白名单）。
+  **M5 反向确认无需扩展**：opencode 的真实 run 在 `webfetch`/`apply_patch` 上 0 条权限请求
+  （白名单参数未被引用），继续沿用 fail-closed 默认，见 §8.4。
 * 依据：dsh 的权限请求只给 `allow-once`/`reject-once` 且 `toolCall` 不含 `kind`（`dsh 源码`/
   `合成实测`），tool-kind 白名单对 dsh 不可用；codex-acp 的 `mode` 会话选项是比逐次放行更
   窄、更可审计的政策面。（`宿主代码`）
@@ -376,7 +386,7 @@ ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现
   `@agentclientprotocol/codex-acp`：旧包 `@zed-industries/codex-acp`（0.16.0，M2 实测）
   已被 npm 标记 deprecated（“replaced by @agentclientprotocol/codex-acp”，`npm`），
   后继包 1.13.1 用仓库 M1 客户端实测 `initialize` 协商回 `protocolVersion=1`
-  并声明 `sessionCapabilities`（`docker 实测`）；本次只验证握手，真实模型 run 仍列在 §9。
+  并声明 `sessionCapabilities`（`docker 实测`）；本次只验证握手，真实模型 run 仍列在 §10。
 * 镜像默认命令即自检：`dsh --version && codex-acp --version`；构建期还用 ARG 精确比对
   两个 `--version` 输出（不一致即构建失败），因此“镜像里装的是声明版本”是可复核事实
   （`镜像自检`/`宿主代码`）。实测：`pi-glink-acp-worker:latest`（sha256:4268dca9d9ed…，
@@ -457,11 +467,11 @@ ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现
 ### 5.5 与 M2 的差异与风险
 
 * **codex-acp 包替换**：0.16.0（旧包）→ 1.13.1（后继包）。M3a 只验证了容器内
-  initialize/session/new；M3b 在 e2b 沙箱内也只验证握手；后继包的真实模型 run 仍待授权（§9）。
+  initialize/session/new；M3b 在 e2b 沙箱内也只验证握手；后继包的真实模型 run 仍待授权（§10）。
 * **只读范围**：只读的是凭据文件（嵌套 `:ro` 挂载），HOME 本身可写——agent 必须能写
   sessions/cache；不是整个 HOME 只读（`宿主代码`/`docker 实测`）。
 * **容器 root 与宿主挂载**：容器内是 root，但 macOS/Colima 下 bind mount 的属主仍是宿主
-  用户；Linux 宿主上 root 写 bind mount 的 uid 归属与文件属主变化**待实测**（§9）。
+  用户；Linux 宿主上 root 写 bind mount 的 uid 归属与文件属主变化**待实测**（§10）。
 * **共享路径约束**：Colima 只共享 home 树，数据根必须在共享路径内（见 §5.4）；
   不同 Docker 后端（Docker Desktop/Linux 原生）的共享范围与“非共享路径静默空挂载”行为
   待逐环境实测。
@@ -610,7 +620,7 @@ pi 面模板 `pi-glink-worker` 也未动（`e2b 模板实测`）。
 * **模板独立性**：`glink-acp-worker` 是 dev 模板，未发布/未移动任何 tag；升级同样需要
   重新构建与沙箱自检（§6.2）。
 * **仍未实测**：`@agentclientprotocol/codex-acp@1.13.1` 在 e2b 面的真实模型 run、
-  e2b 面的真实 `session/cancel` 响应时延（§9）。
+  e2b 面的真实 `session/cancel` 响应时延（§10）。
 
 ## 7. M4 实测（2026-09-25，claude-code-acp 接入）
 
@@ -634,22 +644,26 @@ inproc 面的钉版调用是 `npx -y @zed-industries/claude-code-acp@0.16.2`（�
 
 ### 7.2 能力矩阵（initialize / session/new 响应原文）
 
-| 字段 | dsh 0.1.5-rc.3 | codex-acp 0.16.0 / 1.13.1 | claude-code-acp 0.16.2 |
-|---|---|---|---|
-| `protocolVersion` | 1 | 1 | 1 |
-| `agentInfo` | `{"name":"deepseek-harness-acp","version":"0.0.1"}` | `{"name":"@agentclientprotocol/codex-acp","version":"1.13.1"}` | `{"name":"@zed-industries/claude-code-acp","title":"Claude Code","version":"0.16.2"}` |
-| `loadSession` | 未声明 | `true` | `true` |
-| `sessionCapabilities` | `close`/`list`/`resume` | `list`/`resume`/`close` | `fork`/`list`/`resume`（无 `close`） |
-| `promptCapabilities` | image=false, audio=false, embeddedContext=false | image=true, embeddedContext=true | image=true, embeddedContext=true |
-| `mcpCapabilities` | `{http: true}` | `{http, sse, acp 各布尔}` | `{http: true, sse: true}` |
-| `authMethods` | `[]` | api-key / chat-gpt（env_var） | `[claude-login]`（描述为“Run `claude /login` in the terminal”） |
-| `session/new` 返回 | `sessionId` + `configOptions`（model、reasoning_effort） | `sessionId` + `modes` + `configOptions`（5 项） | `sessionId` + `models`（default/opus/opus[1m]/haiku）+ `modes`（default/acceptEdits/plan/dontAsk/bypassPermissions）；**`configOptions` 为空数组** |
-| 会话配置面 | `session/set_config_option` 可用 | `session/set_config_option` 可用 | 无 `configOptions`：`PI_GLINK_ACP_SESSION_CONFIG` 对它不适用（配了会失败闭环，缺省不配即是无操作）（`claude 实测`） |
+| 字段 | dsh 0.1.5-rc.3 | codex-acp 0.16.0 / 1.13.1 | claude-code-acp 0.16.2 | opencode 1.18.32 |
+|---|---|---|---|---|
+| `protocolVersion` | 1 | 1 | 1 | 1 |
+| `agentInfo` | `{"name":"deepseek-harness-acp","version":"0.0.1"}` | `{"name":"@agentclientprotocol/codex-acp","version":"1.13.1"}` | `{"name":"@zed-industries/claude-code-acp","title":"Claude Code","version":"0.16.2"}` | `{"name":"OpenCode","version":"1.18.32"}`（`opencode 实测`） |
+| `loadSession` | 未声明 | `true` | `true` | `true`（`opencode 实测`） |
+| `sessionCapabilities` | `close`/`list`/`resume` | `list`/`resume`/`close` | `fork`/`list`/`resume`（无 `close`） | `close`/`fork`/`list`/`resume`，值均为空对象 `{}`（`opencode 实测`） |
+| `promptCapabilities` | image=false, audio=false, embeddedContext=false | image=true, embeddedContext=true | image=true, embeddedContext=true | image=true, embeddedContext=true（未声明 audio）（`opencode 实测`） |
+| `mcpCapabilities` | `{http: true}` | `{http, sse, acp 各布尔}` | `{http: true, sse: true}` | `{http: true, sse: true}`（无 `acp` 键）（`opencode 实测`） |
+| `authMethods` | `[]` | api-key / chat-gpt（env_var） | `[claude-login]`（描述为“Run `claude /login` in the terminal”） | `[opencode-login]`（描述为“Run `opencode auth login` in the terminal”）（`opencode 实测`） |
+| `session/new` 返回 | `sessionId` + `configOptions`（model、reasoning_effort） | `sessionId` + `modes` + `configOptions`（5 项） | `sessionId` + `models`（default/opus/opus[1m]/haiku）+ `modes`（default/acceptEdits/plan/dontAsk/bypassPermissions）；**`configOptions` 为空数组** | `sessionId` + `modes`（空对象）+ `configOptions`（`model`、`mode`；选中具体模型后联出 `effort`）（`opencode 实测`） |
+| 会话配置面 | `session/set_config_option` 可用 | `session/set_config_option` 可用 | 无 `configOptions`：`PI_GLINK_ACP_SESSION_CONFIG` 对它不适用（配了会失败闭环，缺省不配即是无操作）（`claude 实测`） | `session/set_config_option` 可用；实测 `model=openai/gpt-5.6-sol-fast` 生效，`model=…` 后 `configOptions` 多出 `effort`（`opencode 实测`） |
 
 补充实测：
 
-* `session/new` 后立即广播 `available_commands_update`（本次 47 条）；宿主对 ACP 族仍拒绝一切
-  `/` 开头 prompt，agent 声明命令不改变准入门禁（`claude 实测`；§2 词表不变）。
+* `session/new` 后立即广播 `available_commands_update`（claude 本次 47 条；opencode 3 条：
+  customize-opencode、init、review）；宿主对 ACP 族仍拒绝一切 `/` 开头 prompt，agent 声明命令
+  不改变准入门禁（`claude 实测`/`opencode 实测`；§2 词表不变）。
+* opencode 的真实模式选择不在 `modes`（空对象）而在 `configOptions.mode`（build/plan，
+  默认 `build`）——同一份 `session_ready` 记录里两者都落地，所以“模式读哪一处”不靠猜
+  （`opencode 实测`）。
 * 宿主客户端声明仍是全空（无 `fs/*`、无 `terminal/*`、无 `auth.terminal`），agent 在自己的
   文件系统上工作；`clientInfo` 从 M4 起带 `version`（见 §7.7）（`claude 实测`/`宿主代码`）。
 
@@ -778,11 +792,193 @@ API key，否则属预期阻塞。
 * **重复的 `tool_call` 通知**：claude-code-acp 对同一个 `toolCallId` 会先后发两条
   `tool_call`（先程序名、后完整标题），产品面因此出现成对的 `tool_started`；这是适配器
   行为，不是宿主丢帧或重复执行，本次如实记录，未改投影语义（`claude 实测`/`宿主代码`）。
-* **`session/cancel`、续接、docker/e2b 真实模型 run**：仍未实测，见 §9。
+* **`session/cancel`、续接、docker/e2b 真实模型 run**：仍未实测，见 §10。
 * **Keychain 形态因机而异**：本机条目为空壳，其他机器若真用订阅登录，keychain 读路径同样
   “按用户不按 HOME”，但 inproc 之外仍不可用；升级/换机时应重跑 §7.3 的检查（`claude 实测`）。
 
-## 8. M1 合成验证覆盖
+## 8. M5 实测（2026-09-25，opencode 接入）
+
+本节每条都标来源。证据文件：`docs/evidence/acp-m5-opencode-handshake.txt`（inproc 握手与
+凭据/状态目录形态，不消耗模型）、`acp-m5-opencode-smoke.txt`（inproc 一次最小真实 run）、
+`acp-m5-opencode-docker-handshake.txt`（镜像重建、容器内握手与凭据只读挂载）、
+`acp-m5-opencode-docker-smoke.txt`（docker 面一次最小真实 run）、
+`acp-m5-opencode-e2b-handshake.txt`（dev 模板重建与沙箱握手）。协议侧零新增：opencode
+走的是与前三个 agent 同一份 `AcpRpcClient`、投影与生命周期判定。
+
+### 8.1 版本与入口
+
+| 组件 | 钉版与入口 | 实测事实 |
+|---|---|---|
+| opencode | `opencode-ai@1.18.32`（npm `latest`），入口 `opencode acp` | 本机 npm 全局装的是同族的 1.18.18；两者的 `initialize` 能力矩阵一致，只有 `configOptions.model` 的候选列表随版本/凭据变化。inproc 探针用 `npx -y opencode-ai@1.18.32 acp`（不全局安装）；镜像与 dev 模板用同一 ARG 安装（`npm`/`opencode 实测`） |
+| 包形态 | wrapper + 平台可选包，`bin.opencode` 指向 `bin/opencode.exe` | `postinstall.mjs` 从平台包复制二进制并自验；镜像/模板显式再跑一次（npm 生命周期脚本不保证执行），构建期与 ARG 精确比对（`npm`/`镜像自检`） |
+
+### 8.2 握手与事件变体
+
+* inproc 握手（生产装配路径，不发 prompt）：`protocolVersion=1`、
+  `agentInfo={"name":"OpenCode","version":"1.18.32"}`，能力矩阵见 §7.2；`cwd` 是 run
+  工作区；初始 `configOptions` 是 `model`（默认 `opencode/big-pickle`，OpenCode Zen）+ `mode`
+  （build/plan）；`authMethods` 只有 `opencode-login`（`opencode 实测`）。
+* **无凭据也能握手**：`session/new` 不需要先登录（与 codex-acp 不同）；注入 `auth.json` 后
+  `model` 选项里出现 OpenAI 系模型，这是凭据生效的直接观测点（`opencode 实测`）。
+* 一次真实 run 观测到的 `session/update` 变体：`agent_message_chunk`、`tool_call`、
+  `tool_call_update`、`config_option_update`、`available_commands_update`、`usage_update`
+  （本次未出现计划/思考块）。其中 **`config_option_update` 是 §4.1 未定义的变体**：宿主按
+  「不猜语义」原则记一条 `kernel_status`（`acp_update_not_projected`，info），不伪造产品
+  事件；本次它出现在 `session_ready` 之前（宿主应用 `model=…` 的联动），产品词表不变
+  （`opencode 实测`）。
+* `available_commands_update` 本次 3 条（customize-opencode、init、review），走 §2 的
+  warning 提示；`/` 开头 prompt 的准入门禁不因 agent 声明命令而放宽（`opencode 实测`）。
+* 工具调用形状：`tool_call` 先到（`title` 为 webfetch 的 URL、`kind` 显式给出），随后
+  `tool_call_update` 推进 status；`apply_patch` 成功写 `report.md` 后以 completed 收口
+  （`opencode 实测`/`宿主代码`）。
+
+### 8.3 凭据与状态目录（inproc 面实测）
+
+* **注入**：`PI_GLINK_ACP_CREDENTIAL_FILES=~/.local/share/opencode/auth.json=.local/share/opencode/auth.json`
+  ——源只读（探针前后 sha256 一致）、目标文件 0600、父目录 0700（`opencode 实测`）。
+* **redactor**：opencode 的 OAuth 字段名是 `access`/`refresh`（不带 `token` 后缀），通用规则
+  抓不到；M5 按**精确字段名**扩充（`openai.access` 命中、`openai.accessMode` 不命中），本次
+  4 条值并入该 run 的 redactor（openai/codex 各一对 access/refresh）。`type`/`expires`/
+  `accountId` 不并入（账号标识不是凭据）（`宿主代码`/`合成实测`/`opencode 实测`）。
+* **每 run HOME 落点**（inproc 实测，全部在 run 目录内、随 run 销毁）：
+  `.local/share/opencode/auth.json`（0600，注入副本）、`.local/share/opencode/{log/opencode.log,
+  opencode.db, opencode.db-shm, opencode.db-wal, repos/}`、`.local/state/opencode/locks/<hash>.lock/`、
+  `.config/opencode/{.gitignore, opencode.jsonc}`（自建空配置，50 字节）、`.cache/opencode/bin`
+  （`opencode 实测`）。
+* **真实全局配置不进入 run**：`~/.config/opencode/opencode.json`（操作员自定义 provider 模型
+  与插件列表）在 run HOME 里不存在，run 内也没有读它——用只放 `auth.json` 的假 HOME 直跑
+  `opencode models openai`，模型列表与真实 run 一致；`gpt-6-astra` 系列是 1.18.32 的内置模型，
+  不是配置泄漏（`opencode 实测`）。
+* **run HOME 的配置通道可用**（实测登记，本任务未据此预置渲染器）：把一份只定义
+  `zzz-marker-6` 的 `opencode.json` 经 CREDENTIAL_FILES 放进 `HOME/.config/opencode/`，该模型
+  随即出现在 `configOptions.model` 里（`opencode 实测`）。
+* **凭据刷新实测（inproc）**：真实 run 结束后 run HOME 的 `auth.json` 副本与源不同
+  （4300 vs 4285 字节）：openai 的 `access`/`refresh` 都被刷新、`expires` 从 2026-09-18
+  更新到 2026-10-05；`codex` 未变（本次未用）；**源文件 sha256 前后一致**。即刷新写回只落
+  在 run 的副本上，不碰操作员文件（`opencode 实测`）。
+* 环境隔离沿用既有清单：`PASSTHROUGH_ENV` 只透传 `XDG_CONFIG_HOME`/`XDG_CACHE_HOME`（本机
+  未设置），`XDG_DATA_HOME` 不在清单——所以 `~/.local/share`、`~/.config`、`~/.cache` 必然
+  落在 run HOME，真实操作员目录不被 opencode 读写（`宿主代码`/`opencode 实测`）。
+
+### 8.4 权限（决策：不需要白名单，fail-closed 默认不变）
+
+* **实测**：一次真实 run 的 53 条事件里 `acp_permission_*` 0 条；两次 `webfetch` 与一次
+  `apply_patch`（写 `report.md`）都直接执行，opencode 没有发 `session/request_permission`。
+  该 run 虽然按 M4 最小集合传了 `PI_GLINK_ACP_PERMISSION_ALLOW=allow_once,read,search,fetch,edit`，
+  但**白名单从未被引用**（没有请求就没有决策）：run 的成功不依赖它（`opencode 实测`）。
+  这与 claude-code-acp（§7.4 逐次询问）形成对照，与 dsh/codex-acp 同类。
+* **源码形态**（只读参考上溯版本）：请求选项固定为 `once`(allow_once)/`always`(allow_always)/
+  `reject`(reject_once)；请求的 `toolCall` 由 `pendingToolCall` 生成、**带 `kind`**
+  （webfetch→fetch、edit/write/apply_patch→edit、read→read、grep/glob→search、bash/shell→execute、
+  task→think、其余 other），客户端未声明 `requestPermission` 时 opencode 自行按 reject 处理
+  （fail-closed）。因此若将来出现请求，宿主的 tool-kind 白名单会以 `toolKindSource=request`
+  分类，不需要 M4 那种按 `toolCallId` 回查通知（`opencode 源码`/`宿主代码`）。
+* **决策**：**不为 opencode 启用白名单**；`PI_GLINK_ACP_PERMISSION_ALLOW` 默认空集不变，M4 的
+  最小集合仍然只属于 claude-code-acp 的运行配置。哪些工具会触发 prompt（源码里的 `bash`、
+  外部目录路径等）本轮未在真实 run 观测到，记入 §10（`opencode 实测`/`opencode 源码`）。
+
+### 8.5 一次 inproc 最小真实冒烟
+
+`harness=acp + executor=inproc`、临时数据根、随机端口、300s 有界超时、明确要求写 `report.md`
+的短题；宿主 HTTP API 创建 run，SSE 与终态从 HTTP 面核对（`opencode 实测`，证据
+`acp-m5-opencode-smoke.txt`；授权为 inproc 1 次，本文件即那一次）：
+
+* 终态 `finished`、`modelStopReason=end_turn`、`reportStatus=ok`，时长 19.8s、53 条事件；
+  `GET /api/runs/<id>/report` 200（336 bytes），报告为 2 条要点 + 1 条已核验来源；
+  `turn_finished` 先于 `run_finished`。
+* 流式：SSE 收到全部 53 帧（`run_started` → `kernel_status`（`config_option_update`）→
+  `kernel_status`（available commands）→ `session_ready` → `turn_started` → 两个 `webfetch`、
+  一个 `apply_patch` 的 `tool_started`/`tool_updated`/`tool_finished` → 36 条 `assistant_delta`
+  → `usage_reported` → `turn_finished` → `run_finished`）。
+* usage：`used=6145`、`size=1050000`、`cost={amount:0,currency:USD}`、`basis=acp_usage_update`
+  （替换语义，终态采用最后一个快照）。
+* 权限：0 条 `acp_permission_*`（见 §8.4）。
+* 清理：宿主进程按脚本持有的 PID `terminate()`（exit -15）；运行期采样到 2 个后代
+  （`npm exec opencode-ai@1.18.32 acp` → `opencode acp`），结束后都已退出；
+  `cleanup={"released":true,...}`；容器/沙箱身份均为 None；未用 `pkill -f` 或名字通配。
+* 脱敏：真实 `~/.local/share/opencode/auth.json` sha256 前后一致；证据文件与检查脚本对数据根
+  0 命中（见证据文件尾部的扫描记录）。
+
+### 8.6 镜像与 dev 模板（本地重建 + 无模型握手自检）
+
+* `docker/Dockerfile.acp-worker` 新增 opencode 层：`ARG OPENCODE_AI_VERSION` 与既有四项同一次
+  `npm install -g`，安装后显式再跑包内 `postinstall.mjs`（npm 11 的 install-scripts 策略会跳过
+  它，构建日志里点名的就有 `opencode-ai (postinstall: node ./postinstall.mjs)`），并保留五组件的
+  构建期版本比对；默认 CMD/`acp-self-check` 增至五个组件（`opencode --version`）。
+* **本地重建实测**（Docker 29.2.1 / Colima）：镜像 `pi-glink-acp-worker:latest` =
+  `sha256:fbf2707319e664ab91e8ecf5c23a2bfa9f42890da4acbba7dc53ef736fcb40e3`（linux/arm64，
+  `docker inspect` 527357716 字节），构建期自检输出五组件版本且 `grep -qx "${OPENCODE_AI_VERSION}"`
+  通过。本机到官方 deb/npm 源很慢（apt 阶段 8 分钟、npm 约 60 KB/s），按 Dockerfile 已声明的
+  覆盖参数改用 `mirrors.aliyun.com` + `registry.npmmirror.com` 重建（组件版本不变）；第一次
+  官方源构建在 npm 阶段中止、未产出镜像（`docker 实测`/`镜像自检`）。
+* **容器内握手**（生产装配路径，不发 prompt）：`opencode acp` 在容器里完成 initialize +
+  session/new，`cwd=/workspace`、`agentInfo={"name":"OpenCode","version":"1.18.32"}`、
+  `PI_GLINK_ACP_SESSION_CONFIG=model=openai/gpt-5.6-sol-fast` 生效（`configOptions` 联动出
+  `effort`）；容器按持久化名字对账无残留（`docker 实测`）。
+* **凭据只读契约**（同一 plan 的挂载参数）：容器内 `HOME/.local/share/opencode/auth.json`
+  0600、4285 字节、sha256 与宿主副本一致；追加写失败（`Read-only file system`，exit 2）、
+  删除失败（`Device or resource busy`，exit 1），而 HOME 其它位置可写（exit 0）——与 M3a/M4
+  的嵌套只读挂载语义一致（`docker 实测`）。
+* **e2b dev 模板**：`docker/e2b/Dockerfile.acp-e2b` 同步同一钉版与同一套自检，用 E2B CLI 重建
+  `glink-acp-worker`（同一 Template ID `oen0rq47o2sizakry5v3`，新 Build ID
+  `ef0637fd-9b6d-47f4-bef0-de94bdb3ff23`，构建 2m15s）；构建期与 finalize 的 start command
+  都打印五组件版本（opencode `1.18.32`），npm 同样跳过它的 postinstall、由 Dockerfile 显式
+  补跑。真实沙箱内 opencode 完成 initialize + session/new（`cwd=/home/user/workspace`、
+  `authMethods=[opencode-login]`、`configOptions` = model/mode），每 run HOME 的 auth.json
+  上传后 sha256 与源一致、沙箱按 id 终止无残留；生产模板 `glink-frontier-e2b` 与 pi 模板
+  `pi-glink-worker` 未被触碰（`e2b 模板实测`/`e2b 握手实测`）。
+
+### 8.7 docker 面一次最小真实冒烟
+
+`harness=acp + executor=docker`、临时数据根（$HOME 下，Colima 共享树）、随机端口 60831、
+300s 有界超时、同一短题；授权为 docker 面最多 1 次，本小节即那一次（`opencode 实测`，证据
+`acp-m5-opencode-docker-smoke.txt`）：
+
+* 终态 `finished`、`modelStopReason=end_turn`、`reportStatus=ok`，26.2s、53 条事件；`/report`
+  200（362 bytes）；事件构成与 inproc 同形（`config_option_update` 仍只记 `kernel_status`，
+  0 条权限请求）。
+* 容器 argv 由宿主日志留证（`--rm -i`、五项资源限制、`/workspace` 与 `/home/acp` 挂载、凭据
+  `:ro` 嵌套挂载、image 后接 `opencode acp`）。
+* 凭据用的是 inproc 冒烟刷新后的副本（token 有效期到 2026-10-05）：容器内是只读挂载，
+  刷新写回在该面不可写；run 前后宿主副本与 run HOME 内副本 sha256 一致
+  （`93d21eac7c800383…`，4300 字节），只读契约在真实 run 中成立（`opencode 实测`）。
+* run HOME 落点（宿主侧可见）：`.config/opencode/node_modules/**`（opencode 在容器内为
+  provider 装的依赖）、`.local/share/opencode/{auth.json, log, opencode.db*}`、
+  `.local/state/opencode/locks/**`；workspace 里是 `report.md`；都随 run 销毁（`opencode 实测`）。
+* 清理：宿主 PID `terminate()`（exit -15）；`cleanup.released=true`、
+  `external.container=pi-glink-960dd5f9958e`；`docker ps -a` 无 `pi-glink-*` 残留；未用
+  `pkill -f`/通配；数据根经 `scripts/check-no-secrets.py` 扫描 0 命中（`opencode 实测`）。
+
+### 8.8 宿主侧实现变更（M5）
+
+* `kernel/acp_env.py`：`credential_secrets_from_text` 增加 OAuth 精确字段规则
+  （`_OAUTH_SECRET_FIELDS`），JSON 路径提示改为点分（既有的子串规则不受影响）；新回归
+  `tests/test_kernel_acp_env.py` 钉住 opencode `auth.json` 的 4 条值与 `accessMode` 负例。
+* live 探针参数化：inproc `handshake.py` 增 `--session-config`、`--watch`（子进程采样关键字，
+  opencode 用 `opencode`）；inproc `smoke_host.py` 与 docker `handshake.py` 增
+  `--session-config`，docker 探针另增 `--credential`（验证每 run HOME 的凭据与容器内嵌套只读
+  挂载）。
+* 钉版边界回归扩展到 `OPENCODE_AI_VERSION`（docker 与 e2b 两个 Dockerfile 都必须等于本节
+  记录的实测版本），既有四项钉版断言不变。
+
+### 8.9 与既有面的差异与风险
+
+* **access token 的有效期与刷新**：本机 `auth.json` 的 openai access token 在实测时已过期
+  （expires 早于实测日期），真实 run 靠 refresh token 刷新并把新值写回 **run HOME 的副本**
+  ——inproc 面已实测发生（§8.3：副本被重写、源不变）。容器的只读挂载与 e2b 沙箱副本都
+  不允许写回：docker 面的真实 run 因此用了 inproc 刷新后的副本（有效到 2026-10-05）并成功
+  （§8.7）；e2b 面的真实 run 同理需宿主提供有效凭据，否则属预期阻塞（`opencode 实测`）。
+* **刷新后的新令牌不在 redactor 快照里**：redactor 在 run 创建时取凭据值，而刷新发生在 run
+  期间；新令牌若被 agent 回显不会被本 run 的 redactor 命中（旧值仍会被命中）。这是“值并入
+  redactor”按 run 边界生效的直接推论，如实记录（`宿主代码`/`opencode 实测`）。
+* **会话选项的实时变化不投影**：`config_option_update` 只记一条 `kernel_status`（§8.2）；
+  产品侧看到的仍是 `session_ready` 时的快照（`宿主代码`/`opencode 实测`）。
+* **权限请求的触发面未闭环**：本轮真实 run 没有触发任何请求，源码里的 `bash`/外部目录路径
+  等触发点未在真实 run 观测（§10）。
+* **能力位形态差异**：opencode 的 `sessionCapabilities` 值全是空对象、`modes` 也是空对象，
+  宿主只按存在性/整体形状记录，不解析内部字段（`opencode 实测`）。
+
+## 9. M1 合成验证覆盖
 
 `tests/test_kernel_acp.py`（客户端/投影）与 `tests/test_kernel_acp_runner.py`（run 生命周期），
 fixture 为 `tests/fixtures/fake_acp.py`（真实子进程、真实 stdio）：
@@ -813,7 +1009,13 @@ initialize/session/new/prompt、投影帧、产物回收与沙箱销毁）、run
 `sandbox_id` 持久化、上传失败仍保留身份、云端失败不上报身份）、模板 ARG 钉版与 dev 模板
 独立性。真实沙箱行为不在这个文件里，见 §6 与证据文件。
 
-## 9. 剩余待实测项（§4–§7 已覆盖的不再列）
+M5 新增/更新（`合成实测`）：`tests/test_kernel_acp_env.py` 增三项 opencode 凭据回归
+（JSON 的 `access`/`refresh` 命中且 `accountId`/`accessMode` 不命中、YAML 标量行同规则）；
+`tests/test_kernel_acp_docker.py` 与 `tests/test_kernel_acp_e2b.py` 的钉版边界各扩展
+`OPENCODE_AI_VERSION`（Dockerfile ARG 必须等于本笔记记录的实测版本）与五组件自检断言，
+既有四项钉版、`acp-self-check`/CMD 与 dev 模板独立性断言不变。
+
+## 10. 剩余待实测项（§4–§8 已覆盖的不再列）
 
 | 待测事实 | 为什么重要 | 验证方式 |
 |---|---|---|
@@ -823,6 +1025,9 @@ initialize/session/new/prompt、投影帧、产物回收与沙箱销毁）、run
 | `@zed-industries/claude-code-acp` 后继包 `@agentclientprotocol/claude-agent-acp` 的迁移评估 | 钉版 0.16.2 已被 npm 标记 deprecated（与 M3a 的 codex-acp 包替换同类问题） | 后继包版本核对 + 能力矩阵/握手/冒烟对照 |
 | `@anthropic-ai/claude-agent-sdk` 自带 cli.js（2.1.44）是否会在真实请求上应用 settings 的 env | 本机实测它的 `auth status` 不认 settings env（2.1.281 认）；M4 因此用 `CLAUDE_CODE_EXECUTABLE` 走了本机 CLI | 无模型：换用 2.1.44 直接发一次请求/检查请求头；或升级适配器版本后重测 |
 | claude-code-acp 的 `usage_update`（本次 141 条事件里 0 条）与重复 `tool_call` 通知（同一 `toolCallId` 两条） | 前者影响用量呈现，后者影响工具卡片时序；两者都是适配器行为，宿主如实记录 | 升级适配器版本后对照事件流；必要时与上游反馈 |
+| opencode 的权限请求触发面（`bash`、外部目录路径等） | M5 真实 run 的 `webfetch`/`apply_patch` 未发请求，白名单未被引用（§8.4）；触发点来自上游源码而非实测 | 授权后一次会用到 shell/外部路径的真实 run，对照 `toolKindSource=request` 与决定记录 |
+| opencode 的真实模型 run（e2b 面，含只读凭据下的刷新写回） | M5 已验证 docker 面（用 inproc 刷新后的副本，只读挂载成立）；e2b 面的真实 run 与容器/沙箱内能否在只读凭据下刷新 token 未实测 | 提供有效凭据后按 §8.7 同形冒烟（需新授权） |
+| opencode 的 `session/cancel` 真实响应时延与终态 | M5 的 run 正常结束，未触发取消路径 | 真实 run + 计时 |
 | `@agentclientprotocol/codex-acp@1.13.1` 的真实模型 run | M3a 只验证了容器内握手；M3b 只验证了 e2b 沙箱内握手与 dsh 的真实 run | 同 M2 冒烟（需新授权） |
 | e2b 面的真实 `session/cancel` 响应时延与沙箱终止 | M3b 的 run 正常结束，未触发取消路径 | 真实 run + 计时 + `sandbox_id` 对账 |
 | Linux 宿主上容器 root 写 bind mount 的 uid/属主行为 | macOS/Colima 下属主不变；Linux 原生 Docker 未测 | Linux 宿主上的 docker smoke + 文件属主核对 |
