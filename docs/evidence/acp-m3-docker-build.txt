@@ -1,0 +1,55 @@
+ACP M3a 镜像证据：pi-glink-acp-worker:latest
+============================================
+日期: 2026-09-25
+宿主: macOS (arm64) / Colima 0.10.1 / Docker client+server 29.2.1
+仓库: worktree acp-docker-face-20260925（基线 6df68ae，本任务分支 acp-docker-face-20260925）
+Dockerfile: docker/Dockerfile.acp-worker（本任务新增；构建日志 /tmp/glink-acp03/logs/build.log）
+
+镜像
+----
+名称/标签   pi-glink-acp-worker:latest
+Image ID    sha256:4268dca9d9ed652ccbe956aa78fe5ef25dd31a041c2fae4836e0892f112558c6（docker 短 ID 4268dca9d9ed）
+架构/系统   linux/arm64
+体积        1.37 GB（docker images）
+创建时间    2026-09-25T09:49:52+08:00（image inspect .Created）
+基础镜像    node:24.21.0-bookworm-slim（与 docker/Dockerfile.worker 同一精确 tag；镜像内 node -v = v24.21.0）
+钉版 ARG    DSH_VERSION=0.1.5-rc.3（与 M2 实测一致）
+            CODEX_ACP_VERSION=1.13.1（后继包 @agentclientprotocol/codex-acp；
+            旧包 @zed-industries/codex-acp 已被 npm 标记 deprecated，
+            替换决定与验证见 docs/acp-integration-notes.md §5.1）
+
+构建命令（退出码 0；本机网络下基础源覆盖为可选项，仓库默认仍用官方源）
+  docker build -t pi-glink-acp-worker:latest -f docker/Dockerfile.acp-worker \
+    --build-arg DEBIAN_MIRROR=mirrors.aliyun.com \
+    --build-arg NPM_REGISTRY=https://registry.npmmirror.com .
+  宿主构建总耗时约 2 分钟（apt+安装层 50.8s，镜像导出层 29.0s）
+
+构建日志关键行（原文摘录；完整日志在本任务临时目录，不提交）
+  #5 [2/3] RUN ... && npm install -g --no-fund --no-audit \
+       "@deepseek-ai/dsh@0.1.5-rc.3" "@agentclientprotocol/codex-acp@1.13.1" \
+       && dsh --version > /tmp/dsh-version && codex-acp --version > /tmp/codex-acp-version \
+       && grep -qx "0.1.5-rc.3" /tmp/dsh-version \
+       && grep -qx "@agentclientprotocol/codex-acp 1.13.1" /tmp/codex-acp-version ...
+  #5 49.91 added 540 packages in 38s
+  #5 49.92 npm warn install-scripts Run `npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs` ...
+  #5 DONE 50.8s
+  #7 DONE 29.0s（exporting to image）
+
+镜像内自检（构建期已按 ARG 精确比对，构建成功即代表两项都匹配）
+  $ docker run --rm pi-glink-acp-worker:latest
+    0.1.5-rc.3
+    @agentclientprotocol/codex-acp 1.13.1
+    退出码 0
+  $ docker run --rm --entrypoint node pi-glink-acp-worker:latest -v
+    v24.21.0
+    退出码 0
+
+边界与已知观察
+- 镜像不含 pi：ACP 面的镜像（LOCAL_WEB_ACP_WORKER_IMAGE，默认
+  pi-glink-acp-worker:latest）与 pi 面的镜像（LOCAL_WEB_WORKER_IMAGE）分离，两个值都在
+  配置期冻结，运行期不再读环境。
+- npm 11 默认不执行依赖的 install scripts，日志出现 install-scripts 警告（列出的
+  dsh-subprocess-local/koffi/node-pty 等未执行）。本次 ACP stdio 握手与真实 run 均不依赖
+  这些脚本；若将来某个 agent 需要原生脚本，必须在 ARG 层显式 --allow-scripts 并重建镜像
+  （已记入集成笔记 §5.1 的风险段）。
+- 镜像只在本地构建，未推送、未全局安装（push/发布未授权）。

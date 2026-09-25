@@ -1,0 +1,146 @@
+ACP M3a Docker 真实冒烟证据
+============================
+日期: 2026-09-25
+宿主: macOS (arm64) / Python 3.12.10 / Colima 0.10.1 / Docker 29.2.1
+执行面: harness=acp + executor=docker（LOCAL_WEB_EXECUTOR=docker）
+镜像: pi-glink-acp-worker:latest（sha256:4268dca9d9ed…）
+Agent: @deepseek-ai/dsh@0.1.5-rc.3（容器内 `dsh --profile acp`）
+凭据: PI_GLINK_ACP_CREDENTIAL_FILES=~/.dsh/.credentials.yaml=.dsh/.credentials.yaml
+      （只读复制进每 run HOME，再在容器内以 :ro 嵌套挂载）
+会话配置: <默认>；权限: <fail-closed 默认，未启用白名单>
+数据根: 临时目录（$HOME 下；Colima 只共享 home 树，见 agent-check 证据第 3 点）
+端口: 由宿主分配（run1 56613 / run2 56758）
+任务超时: LOCAL_WEB_TASK_TIMEOUT_SECONDS=300
+
+授权与次数说明
+--------------
+本任务获授权“一次最小真实研究 run”。实际发出 2 次短 run：
+  run1 的题面只要求“200 字、2 条要点”的对话式回答，模型据此判断不需要 report.md
+  （reportStatus=missing，stopReason=no_report）——功能链路（流式/终态/容器清理）正常，
+  但未覆盖验收要求的 report.md 回收；因此用显式要求写 report.md 的题面补跑 run2。
+两次 run 都是短题、有界超时、单容器，均记录在案；除此之外没有其它真实模型调用。
+
+run1（无 report 的对照 run；runId 059cd22c3f70）
+------------------------------------------------
+命令: bash /tmp/glink-acp03/smoke.sh <out> "<对话式短题>" 300
+POST /api/runs -> 201；final status: finished；duration 14.182s；events 16
+stopReason=no_report；reportStatus=missing；hasReport=false
+usage={"totalTokens": 9704, "contextSize": 1000000, "basis": "acp_usage_update"}
+sessionId=4140afb6-b0be-4b88-92c8-cf1bdc3b4e40
+cleanup={"released": true, "failures": [], "external": {"container": "pi-glink-059cd22c3f70"}}
+GET /report -> HTTP/1.1 404 Not Found
+宿主日志: run finalized run=059cd22c3f70 status=finished stop=no_report committed=True
+          report=<none> released=True
+
+run2（验收 run：写 report.md；runId cb35f10889f8）
+----------------------------------------------
+命令: bash /tmp/glink-acp03/smoke.sh <out> \
+  "请先在工作区写出 report.md：用不超过 400 字、2 条要点说明容器隔离对 AI 编程 agent
+   运行安全的价值，并附 1 条可核验来源链接（可用 web_search）；随后用一句话总结。" 300
+POST /api/runs -> 201
+GET report -> HTTP/1.1 200 OK（Content-Type text/markdown; charset=utf-8，1025 bytes）
+容器残留检查（只按本 run 的精确名字，不做通配删除）:
+  docker ps -a --filter name=pi-glink-cb35f10889f8 -> 空
+  docker ps -a --filter name=pi-glink- -> 空（本次任务全部容器均已回收）
+
+宿主实际启动的容器 argv（host.log 原文；无凭据值）:
+  docker run --rm -i --name pi-glink-cb35f10889f8 --label pi-glink.run=cb35f10889f8
+    --cpus 2 --memory 2g --pids-limit 512 --cap-drop ALL --security-opt no-new-privileges
+    -v <data>/workspaces/cb35f10889f8:/workspace -w /workspace
+    -v <data>/runs/cb35f10889f8/acp-agent/home:/home/acp -e HOME=/home/acp
+    -v <data>/runs/cb35f10889f8/acp-agent/home/.dsh/.credentials.yaml:/home/acp/.dsh/.credentials.yaml:ro
+    pi-glink-acp-worker:latest dsh --profile acp
+
+run 结果（API run view）
+  runId          cb35f10889f8
+  status         finished
+  stopReason     null
+  modelStopReason end_turn
+  error          null
+  duration       20.863 s
+  events         28
+  sessionId      f95c4d21-9fdc-4041-b9e9-6c784e9a912e
+  hasReport      true
+  usage          {"totalTokens": 25784, "contextSize": 1000000, "basis": "acp_usage_update"}
+  redacted       false
+
+资源与清理事实（meta.json）
+  report_status  ok
+  report_path    <data>/runs/cb35f10889f8/artifacts/report.md
+  container_name pi-glink-cb35f10889f8
+  cleanup        {"released": true, "failures": [], "external": {"container": "pi-glink-cb35f10889f8"}}
+  宿主日志: run finalized run=cb35f10889f8 status=finished stop=None committed=True
+            report=<data>/…/artifacts/report.md released=True
+
+事件类型统计（events.jsonl）
+  run_started 1 · session_ready 1 · turn_started 1 · thinking_delta 5 · usage_reported 5 ·
+  tool_started 6 · tool_finished 6 · assistant_delta 1 · turn_finished 1 · run_finished 1
+
+事件时间线（seq/相对秒/type/摘要）
+    1   0.00s run_started
+    2   1.50s session_ready      agent=deepseek-harness-acp cwd=/workspace
+    3   1.50s turn_started
+    4   2.50s thinking_delta     The task: write report.md, under 400 characters …
+    5   2.50s usage_reported     used=7782 basis=acp_usage_update
+    6   2.50s tool_started       web_search
+    7   8.65s tool_finished      web_search isError=False
+    8   9.55s thinking_delta     Let me open a couple sources to verify …
+    9   9.55s usage_reported     used=8385
+   10   9.55s tool_started       web_fetch
+   11   9.55s tool_started       web_fetch
+   12  11.14s tool_finished      web_fetch isError=False
+   13  11.14s tool_finished      web_fetch isError=False
+   14  12.49s thinking_delta     The fetches returned mostly nav …
+   15  12.49s usage_reported     used=10710
+   16  12.50s tool_started       web_fetch
+   17  12.50s tool_started       web_fetch
+   18  13.68s tool_finished      web_fetch isError=False
+   19  13.68s tool_finished      web_fetch isError=False
+   20  19.15s thinking_delta     I have two solid, verified sources …
+   21  19.15s usage_reported     used=25671
+   22  19.15s tool_started       write
+   23  19.16s tool_finished      write isError=False
+   24  20.60s thinking_delta     Now the one-sentence summary in reply.
+   25  20.60s assistant_delta    已完成，`report.md` 已写入工作区：…
+   26  20.60s usage_reported     used=25784
+   27  20.60s turn_finished
+   28  20.86s run_finished        status=finished stopReason=null reportStatus=ok
+
+终态帧要点
+  {"status": "finished", "stopReason": null, "modelStopReason": "end_turn", "error": null,
+   "reportStatus": "ok", "redacted": false, "durationSeconds": 20.863}
+  —— turn_finished(27) 先于 run_finished(28)，与产品流式语义一致。
+
+report.md（经宿主 /api/runs/<id>/report 200 回收，1025 bytes，原文）
+------------------------------------------------------------------
+# 容器隔离对 AI 编程 agent 运行安全的价值
+
+- **限制爆炸半径**：把 agent 生成的代码与第三方组件放进加固容器/沙箱运行，并限制文件系统、资源与生命周期，模型即便被提示注入或产生越权行为，也只能在这个短生命周期的受限环境里活动，无法直接触碰宿主文件、凭据与后端系统。[来源 1]
+- **文件系统与网络两道边界缺一不可**：只做文件系统隔离时，被攻陷的 agent 仍可能外传 SSH 密钥等敏感文件；只做网络隔离时，它可能先篡改系统资源以换取网络出口。两层同时生效，才能既保留较高自主性，又降低数据外泄与植入持久化后门的风险。[来源 2]
+
+## 来源
+
+1. [Runtime Isolation and Sandboxing — Microsoft Learn](https://learn.microsoft.com/en-us/security/zero-trust/catalog-ai-defense-capabilities/runtime-isolation-sandboxing)
+2. [Configure the sandboxed Bash tool — Claude Code Docs](https://code.claude.com/docs/en/sandboxing)
+
+工作区与运行目录
+----------------
+- <data>/workspaces/cb35f10889f8/report.md（agent 在容器 /workspace 写入 → 宿主挂载可见，1025 bytes）
+- <data>/runs/cb35f10889f8/artifacts/report.md（宿主校验+脱敏后发布的产物，API 下载源）
+- <data>/runs/cb35f10889f8/acp-agent/home/.dsh/…（dsh 的 sessions/storages/profiles 全部落在本
+  run 的 HOME 内：会话状态 per-run 隔离，随 run 销毁；没有写操作员 ~/.dsh）
+- 凭据副本与源文件 sha256 一致（16ae1904…），源文件 mtime 2026-09-23（早于本次 run，未被修改）
+
+脱敏检查（scripts/check-no-secrets.py，退出码 0）
+  run1 数据根: 凭据来源 0 条 · 扫描文件 2 个 · 真实命中 0 处 · 占位符命中 0 处
+  run2 数据根: 凭据来源 0 条 · 扫描文件 4 个 · 真实命中 0 处 · 占位符命中 0 处
+  握手目录  : 凭据来源 0 条 · 扫描文件 0 个 · 真实命中 0 处 · 占位符命中 0 处
+
+宿主与容器清理（只操作已知身份）
+--------------------------------
+- 宿主 PID 由 `$!` 记录（run1 53872 / run2 59187），结束时只对该 PID 发 `kill -TERM`；
+  原始退出状态 143（run1/run2 相同）。
+- 未使用 `pkill -f`，未使用任何 docker 名字通配删除；容器回收由 `--rm` + 适配器的
+  `docker rm -f <精确容器名>` 完成（按名 force-remove 返回 “No such container”，视为已回收）。
+- 临时数据根、握手目录（含凭据副本）与宿主日志在取证后删除；构建的镜像保留在本机
+  （供验收复验；未推送）。

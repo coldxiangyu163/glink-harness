@@ -1,0 +1,43 @@
+ACP M3a 容器内握手与挂载契约证据
+==================================
+日期: 2026-09-25
+宿主: macOS (arm64) / Colima 0.10.1 / Docker 29.2.1
+镜像: pi-glink-acp-worker:latest（sha256:4268dca9d9ed…，见 acp-m3-docker-build.txt）
+探针: 复用生产代码路径（prepare_acp_runtime + docker_env.build_acp_plan + AcpRpcClient），
+      只做 initialize + session/new，不发 session/prompt —— 不消耗模型。
+      （探针脚本在任务临时目录 /tmp/glink-acp03，未提交；原始 JSON 如下。）
+
+探针原始输出（JSON）
+--------------------
+{"handshakes":[{"label":"codex-acp","command":"codex-acp","container":"pi-glink-handshake-codex-acp","protocolVersion":1,"agentInfo":{"name":"@agentclientprotocol/codex-acp","title":"Codex","version":"1.13.1"},"agentCapabilities":["_meta","auth","loadSession","mcpCapabilities","promptCapabilities","providers","sessionCapabilities"],"authMethodIds":["api-key","chat-gpt"],"sessionId":"01a0d645-9fb5-7de3-b49b-027c0cc064d8","configOptionIds":["mode","collaboration_mode","model","reasoning_effort","fast-mode"],"initializeOk":true,"agentExitCode":0,"sourceUnchanged":true,"containerAfterClose":"","stopExit":0,"stopStderrTail":"Error response from daemon: No such container: pi-glink-handshake-codex-acp"},{"label":"dsh","command":"dsh --profile acp","container":"pi-glink-handshake-dsh","protocolVersion":1,"agentInfo":{"name":"deepseek-harness-acp","version":"0.0.1"},"agentCapabilities":["mcpCapabilities","promptCapabilities","sessionCapabilities"],"authMethodIds":[],"sessionId":"bcbe776e-7de4-4680-8a32-cae3c74eec42","configOptionIds":["model","reasoning_effort"],"initializeOk":true,"agentExitCode":0,"sourceUnchanged":true,"containerAfterClose":"","stopExit":0,"stopStderrTail":"Error response from daemon: No such container: pi-glink-handshake-dsh"}],"mountContract":[{"label":"codex-acp","exit":0,"stdout":"tamper_exit=2\nhome_write_exit=0\nmarker=readable","stderrTail":"sh: 1: cannot create /home/acp/.codex/auth.json: Read-only file system","copiedUnchanged":true,"containerAfter":""}]}
+
+逐项结论
+--------
+1) 容器内 ACP 握手（两个 agent 都成功；协议版本协商回 1）
+   - codex-acp（@agentclientprotocol/codex-acp 1.13.1，后继包）：initialize OK，
+     agentInfo.name/version 来自容器内二进制；session/new 返回 sessionId 与 5 个
+     configOptions（mode/collaboration_mode/model/reasoning_effort/fast-mode）；
+     authMethods = api-key / chat-gpt。凭据就在被挂载的每 run HOME 里（~/.codex/auth.json），
+     因此 session/new 不再报 “Authentication required”。
+   - dsh（0.1.5-rc.3，--profile acp）：initialize OK，session/new 返回 sessionId 与
+     2 个 configOptions（model/reasoning_effort）；凭据来自 ~/.dsh/.credentials.yaml。
+   - 两个 agent 在 client.close() 后退出码 0；随后按容器名 force-remove 返回
+     “No such container”（--rm 已回收），`docker ps -a --filter name=<name>` 为空。
+   - 两个凭据源文件 sha256 前后一致（sourceUnchanged=true）。
+
+2) 挂载契约（用同一 plan 的挂载 + 容器内 shell 验证）
+   - 容器内 `echo tamper >> /home/acp/.codex/auth.json` → tamper_exit=2，
+     stderr “Read-only file system”：凭据文件是嵌套只读挂载，容器改不动。
+   - 容器内 `touch /home/acp/writable-check` → home_write_exit=0：HOME 本身可写，
+     agent 的 sessions/cache 能落盘。
+   - 容器内可读凭据（marker=readable）；宿主上被复制的凭据文件 sha256 前后一致
+     （copiedUnchanged=true），容器结束后无同名容器残留。
+
+3) 环境约束（本机实测，写入集成笔记 §5.2）
+   - Colima 只把 home 树（/Users/...）共享给 VM。数据根放在 /tmp 时，绑定的文件/目录会被
+     静默创建成空目录（探针第一次运行即复现：session/new 因缺少凭据返回
+     “Authentication required”/“Internal error”，容器内路径是目录）。
+   - 因此本机 Docker 面（pi 面与 ACP 面同规则）的数据根/工作区必须在守护进程可共享的路径
+     下；本次冒烟把临时数据根放在 $HOME 下并显式记录该约束。
+
+（证据中不含任何凭据值；smoke/握手目录随后删除。）

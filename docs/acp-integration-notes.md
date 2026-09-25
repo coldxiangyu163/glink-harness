@@ -357,7 +357,12 @@ ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现
   并声明 `sessionCapabilities`（`docker 实测`）；本次只验证握手，真实模型 run 仍列在 §7。
 * 镜像默认命令即自检：`dsh --version && codex-acp --version`；构建期还用 ARG 精确比对
   两个 `--version` 输出（不一致即构建失败），因此“镜像里装的是声明版本”是可复核事实
-  （`镜像自检`/`宿主代码`）。
+  （`镜像自检`/`宿主代码`）。实测：`pi-glink-acp-worker:latest`（sha256:4268dca9d9ed…，
+  linux/arm64，1.37 GB）默认 CMD 输出 `0.1.5-rc.3` 与
+  `@agentclientprotocol/codex-acp 1.13.1`，镜像内 `node -v` = v24.21.0（`docker 实测`）。
+  构建日志出现 npm 11 的 install-scripts 警告（dsh-subprocess-local/koffi/node-pty 等
+  未执行）；本次 ACP stdio 链路与真实 run 不依赖它们，但若未来某个 agent 需要原生脚本，
+  必须在 ARG 层显式 `--allow-scripts` 并重建（`docker 实测`/`npm`）。
 * 命名与冻结：`LOCAL_WEB_ACP_WORKER_IMAGE`（默认 `pi-glink-acp-worker:latest`）与 pi 面的
   `LOCAL_WEB_WORKER_IMAGE`分开；值在配置期冻结，运行期不再读环境（`宿主代码`/`合成实测`）。
   升级路径：改 ARG → 重建 → 边界测试（ARG 必须重新等于 §5.1 记录值）→ 重建后的容器内
@@ -392,6 +397,49 @@ ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现
   `--user`。限制是**契约**而非实测 enforcement——默认测试集不连 Docker daemon，宿主不会
   声称 daemon 实际执行了哪个值。
 
+### 5.4 实测结论（2026-09-25）
+
+证据文件：`docs/evidence/acp-m3-docker-build.txt`（镜像）、`acp-m3-docker-agent-check.txt`
+（容器内握手与挂载契约）、`acp-m3-docker-smoke.txt`（最小真实 run）。本节每条都标来源。
+
+* **容器内握手**：用生产路径（`prepare_acp_runtime` + `build_acp_plan` + `AcpRpcClient`）
+  在容器里跑 initialize/session/new（不发 prompt，不耗模型）：codex-acp 1.13.1 与
+  dsh 0.1.5-rc.3 都协商回 `protocolVersion=1` 并拿到 `sessionId` 与
+  configOptions（codex-acp：mode/collaboration_mode/model/reasoning_effort/fast-mode；
+  dsh：model/reasoning_effort）。无凭据时 codex-acp 会报
+  `-32000 Authentication required`，挂载生效后握手成功——与 M2 的凭据注入观测点一致
+  （`docker 实测`）。
+* **挂载契约**：同一 plan 的挂载下，容器内写 `/home/acp/.codex/auth.json` 得
+  “Read-only file system”（tamper_exit=2），写 HOME 其它位置成功（home_write_exit=0），
+  宿主上的凭据副本 sha256 不变；client.close 后按名 force-remove 报 “No such container”，
+  `docker ps -a` 无同名残留（`docker 实测`）。
+* **一次最小真实 run（dsh）**：宿主 HTTP API 创建 run（临时数据根、随机端口、300s 有界
+  超时），终态 `finished`、`modelStopReason=end_turn`、`reportStatus=ok`，
+  `/api/runs/<id>/report` 200（1025 bytes），`turn_finished` 先于 `run_finished`；
+  28 条事件含 thinking/tool（web_search/web_fetch/write）/usage（替换口径，
+  `basis=acp_usage_update`）与 session_ready（`cwd=/workspace`）；清理
+  `released=true`、容器名持久化且 `docker ps -a` 无残留；宿主只按 `$!` 记录的 PID 发
+  `kill -TERM`（退出状态 143），未用 `pkill -f`、未做名字通配删除（`docker 实测`）。
+* **冒烟次数说明**：授权为“一次最小真实 run”；第一次题面是对话式短问，模型未写
+  report.md（`stopReason=no_report`，链路正常），于是用显式要求写 report.md 的短题补跑
+  一次，两次都记录在证据文件里（`docker 实测`）。
+* **环境约束（Colima/本机）**：Colima 只把 home 树共享给 VM；数据根/工作区放在 `/tmp`
+  时，绑定的文件与目录会被静默创建成空目录（首次探针即复现：容器内凭据变成目录，
+  `session/new` 因缺少凭据失败）。本机验证因此全部放在 `$HOME` 下的临时目录；该约束对
+  pi docker 面同样适用（它一直靠默认数据根 `~/.pi-glink` 在 home 下而没暴露）。
+  约束本身不是代码行为，但会把“静默空挂载”变成运行期失败，因此写在这里（`docker 实测`）。
+
+### 5.5 与 M2 的差异与风险
+
+* **codex-acp 包替换**：0.16.0（旧包）→ 1.13.1（后继包）。M3a 只验证了容器内
+  initialize/session/new；后继包的真实模型 run 仍待授权（§7）。
+* **只读范围**：只读的是凭据文件（嵌套 `:ro` 挂载），HOME 本身可写——agent 必须能写
+  sessions/cache；不是整个 HOME 只读（`宿主代码`/`docker 实测`）。
+* **容器 root 与宿主挂载**：容器内是 root，但 macOS/Colima 下 bind mount 的属主仍是宿主
+  用户；Linux 宿主上 root 写 bind mount 的 uid 归属与文件属主变化**待实测**（§7）。
+* **共享路径约束**：Colima 只共享 home 树，数据根必须在共享路径内（见 §5.4）；
+  不同 Docker 后端（Docker Desktop/Linux 原生）的共享范围与“非共享路径静默空挂载”行为
+  待逐环境实测。
 ## 6. M1 合成验证覆盖
 
 `tests/test_kernel_acp.py`（客户端/投影）与 `tests/test_kernel_acp_runner.py`（run 生命周期），
@@ -424,4 +472,6 @@ M3a 新增 `tests/test_kernel_acp_docker.py`（无 daemon）：ACP docker plan �
 | claude-code-acp 能力矩阵与凭据（`ANTHROPIC_API_KEY` env） | M4 接入 | 同 M2 握手 + 冒烟 |
 | e2b 面的 ACP stdio 桥接与帧完整性（M3b） | 传输面扩展；M3 的 e2b 部分 | 逐面 smoke（`stdin=True` + `send_stdin`） |
 | `@agentclientprotocol/codex-acp@1.13.1` 的真实模型 run | M3a 只验证了容器内握手与 dsh 的真实 run | 同 M2 冒烟（需新授权） |
+| Linux 宿主上容器 root 写 bind mount 的 uid/属主行为 | macOS/Colima 下属主不变；Linux 原生 Docker 未测 | Linux 宿主上的 docker smoke + 文件属主核对 |
+| 不同 Docker 后端（Docker Desktop 虚拟化 / Linux 原生）的共享路径与空挂载行为 | Colima 只共享 home 树；非共享路径会静默空挂载 | 逐环境 smoke + 挂载内容核对 |
 | 各适配器版本升级冒烟步骤与 license 记录 | 方案 §5/§7 纪律 | 集成笔记逐项补齐 |
