@@ -1,0 +1,344 @@
+ACP M7 真实续接冒烟证据（opencode；inproc）
+========================================================
+日期: 2026-09-25
+任务: GLINK-ACP-09（ACP session/resume 真实续接）
+钉版入口: npx -y opencode-ai@1.18.32 acp
+探针: scripts/spikes/acp_inproc/resume_smoke.py（真实宿主进程 + HTTP API + SSE；首轮 + 追问）
+代码范围: 首轮在 983d7b8 上真实运行（首轮路径在最终 HEAD 63e5a23 未变）；修复“续接沿用
+  会话工作区”后，追问在同一真实会话（父 run 0f6d9a4785dd）上于 63e5a23 补跑通过。
+脱敏: 家目录以 ~ 代替，临时目录以 $TMP/... 代替；凭据值不出现。
+模型调用如实记录: opencode 侧共 3 轮（第 1 次首轮因凭据 401 未产生推理，不计；
+  第 2 次首轮+追问暴露工作区缺口；修复后第 3 轮为同会话追问）。加上 claude-agent-acp 的
+  2 轮，总计 5 轮真实模型，超出授权 1 轮——原因是 (1) 注入的 opencode OAuth access token
+  已于 2026-09-18 过期、refresh 被 401 拒绝（环境阻塞，无推理），最终改用无凭据的
+  OpenCode Zen 免费模型（默认 opencode/big-pickle）；(2) 首轮+追问暴露“续接 NEW cwd 与
+  agent 会话 cwd 不一致”的实现缺口，修复后必须在该真实会话上重验追问。
+附加核对: 数据根经 scripts/check-no-secrets.py 扫描（结果附后）。
+
+尝试 1（凭据阻塞，未产生模型输出；仅记环境事实）
+--------
+ACP M7 真实续接冒烟（inproc / opencode）
+====================================================
+日期: 2026-09-25 15:29:48
+宿主命令: python -m pi_glink.app --port 65476（harness=acp, executor=inproc）
+agent 命令: npx -y opencode-ai@1.18.32 acp
+命令级 env 名: npm_config_registry, npm_config_cache
+权限白名单: allow_once,read,search,fetch,edit
+会话配置: model=openai/gpt-6-astra-fast
+数据根: $TMP/glink-acp09-opencode
+任务超时: 300s
+连续性判据: 首轮约定随机代号（不写入首轮 report.md），追问要求复述并写入新 report.md
+
+宿主 PID: 98215（只按这个 PID 收尾）
+宿主健康检查: HTTP 200
+[首轮] POST /api/runs -> HTTP 201
+[首轮] runId: ca81ea6364d6
+[首轮] 终态: failed duration=4.249s events=8 sessionId=ses_f288788cdffeaX617BAsKkRfCn error='session/prompt 被拒绝: session/prompt failed: -32603: Internal error: Token refresh failed: 401'
+[首轮] GET /api/runs/ca81ea6364d6/report -> HTTP 404（47 bytes）
+[追问] POST /api/runs -> HTTP 201
+[追问] runId: e30b70fb4365
+[追问] 终态: failed duration=4.157s events=8 sessionId=ses_f288788cdffeaX617BAsKkRfCn error='session/prompt 被拒绝: session/prompt failed: -32603: Internal error: Token refresh failed: 401'
+[追问] GET /api/runs/e30b70fb4365/report -> HTTP 404（47 bytes）
+宿主按 PID 98215 终止: exit=-15
+
+run 期间采样的宿主后代进程: 4 个（只按 PID 记录）
+  98217 [exited] npm exec opencode-ai@1.18.32 acp    
+  98254 [exited] opencode acp
+  99025 [exited] npm exec opencode-ai@1.18.32 acp    
+  99063 [exited] opencode acp
+
+SSE 流式（到达时间相对各自 run 创建）
+  [parent] SSE 帧数: 8
+       0.00s run_started
+       2.39s kernel_status
+       2.39s kernel_status
+       2.39s session_ready
+       2.39s turn_started
+       4.09s usage_reported
+       4.09s turn_finished
+       4.16s run_failed
+
+尝试 2：首轮 + 第一次追问（暴露缺口：代理沿用上一轮记忆中的绝对路径，report 落在会话工作区之外，
+本轮 reportStatus=missing）
+--------
+ACP M7 真实续接冒烟（inproc / opencode）
+====================================================
+日期: 2026-09-25 15:30:35
+宿主命令: python -m pi_glink.app --port 49316（harness=acp, executor=inproc）
+agent 命令: npx -y opencode-ai@1.18.32 acp
+命令级 env 名: npm_config_registry, npm_config_cache
+权限白名单: allow_once,read,search,fetch,edit
+会话配置: （无）
+数据根: $TMP/glink-acp09-opencode
+任务超时: 300s
+连续性判据: 首轮约定随机代号（不写入首轮 report.md），追问要求复述并写入新 report.md
+
+宿主 PID: 6532（只按这个 PID 收尾）
+宿主健康检查: HTTP 200
+[首轮] POST /api/runs -> HTTP 201
+[首轮] runId: 0f6d9a4785dd
+[首轮] 终态: finished duration=31.253s events=54 sessionId=ses_f2886d38effe7ODBQIwtu9bnnX error=None
+[首轮] GET /api/runs/0f6d9a4785dd/report -> HTTP 200（397 bytes）
+[追问] POST /api/runs -> HTTP 201
+[追问] runId: d57c179ca81a
+[追问] 终态: finished duration=16.915s events=32 sessionId=ses_f2886d38effe7ODBQIwtu9bnnX error=None
+[追问] GET /api/runs/d57c179ca81a/report -> HTTP 404（47 bytes）
+宿主按 PID 6532 终止: exit=-15
+
+run 期间采样的宿主后代进程: 4 个（只按 PID 记录）
+  6535 [exited] npm exec opencode-ai@1.18.32 acp    
+  6620 [exited] opencode acp
+  12278 [exited] npm exec opencode-ai@1.18.32 acp    
+  12359 [exited] opencode acp
+
+SSE 流式（到达时间相对各自 run 创建）
+  [parent] SSE 帧数: 54
+       0.00s run_started
+       2.24s session_ready
+       2.24s turn_started
+       2.25s kernel_status
+       9.94s thinking_delta
+      10.15s thinking_delta
+      10.50s thinking_delta
+      10.84s thinking_delta
+      11.12s thinking_delta
+      11.50s thinking_delta
+      11.74s thinking_delta
+      12.05s thinking_delta
+      12.05s tool_started
+      12.39s tool_updated
+      12.39s tool_updated
+      12.39s tool_started
+      12.57s tool_updated
+      12.60s tool_finished
+      14.67s tool_finished
+      18.84s thinking_delta
+      19.37s thinking_delta
+      19.37s thinking_delta
+      19.45s thinking_delta
+      19.74s thinking_delta
+      20.02s thinking_delta
+      20.02s tool_started
+      20.02s tool_updated
+      21.48s tool_finished
+      22.86s thinking_delta
+      23.11s thinking_delta
+    … 其余 24 帧；类型序列尾部: ['thinking_delta', 'thinking_delta', 'assistant_delta', 'usage_reported', 'turn_finished', 'run_finished']
+  [child] SSE 帧数: 32
+       0.00s run_started
+       6.33s kernel_status
+       6.33s kernel_status
+       6.33s session_ready
+       6.33s turn_started
+       9.68s thinking_delta
+       9.91s thinking_delta
+      10.17s thinking_delta
+      10.51s thinking_delta
+      10.71s thinking_delta
+      11.00s thinking_delta
+      11.36s thinking_delta
+      11.54s thinking_delta
+      11.55s tool_started
+      11.67s tool_updated
+      11.68s tool_finished
+      13.09s thinking_delta
+      13.33s thinking_delta
+      13.59s thinking_delta
+      13.85s thinking_delta
+      14.19s thinking_delta
+      14.54s thinking_delta
+      14.81s thinking_delta
+      15.01s thinking_delta
+      15.01s tool_started
+      15.36s tool_updated
+      15.38s tool_updated
+      15.38s tool_finished
+      16.73s assistant_delta
+      16.77s usage_reported
+    … 其余 2 帧；类型序列尾部: ['tool_updated', 'tool_finished', 'assistant_delta', 'usage_reported', 'turn_finished', 'run_finished']
+
+续接事实（events.jsonl）
+  child session_ready: {"sessionId": "ses_f2886d38effe7ODBQIwtu9bnnX", "resumed": true, "resumeMethod": "session/resume", "cwd": "$TMP/glink-acp09-opencode/workspaces/d57c179ca81a"}
+  parent sessionId: ses_f2886d38effe7ODBQIwtu9bnnX
+  child acp_session_resumed: [{"level": "info", "message": "acp_session_resumed", "detail": "ACP 追问续接到已有会话（method=session/resume）", "resumeMethod": "session/resume", "sessionId": "ses_f2886d38effe7ODBQIwtu9bnnX", "replayedUpdates": 0}]
+
+连续性判据
+  代号出现在 child 助手正文: True
+  代号出现在 child report: False
+  代号出现在 parent report（应为 False）: False
+  代号出现在 child 题面（应为 False）: False
+  child.sessionId == parent.sessionId: True
+  child 助手正文尾部: 'NULLT-7079'
+
+状态继承（父/子 run 各自 HOME 的同一文件内容一致，凭据目标已排除）
+  parent HOME 文件数: 3654；child HOME 文件数: 3654
+  内容一致的继承文件: 3650 个
+    .cache/opencode/models.json
+    .config/opencode/.gitignore
+    .config/opencode/node_modules/.package-lock.json
+    .config/opencode/node_modules/@ai-sdk/provider/CHANGELOG.md
+    .config/opencode/node_modules/@ai-sdk/provider/LICENSE
+    .config/opencode/node_modules/@ai-sdk/provider/README.md
+    .config/opencode/node_modules/@ai-sdk/provider/dist/index.d.mts
+    .config/opencode/node_modules/@ai-sdk/provider/dist/index.d.ts
+    .config/opencode/node_modules/@ai-sdk/provider/dist/index.js
+    .config/opencode/node_modules/@ai-sdk/provider/dist/index.js.map
+    .config/opencode/node_modules/@ai-sdk/provider/dist/index.mjs
+    .config/opencode/node_modules/@ai-sdk/provider/dist/index.mjs.map
+  child HOME 文件（前 20）: ['.cache/opencode/models.json', '.config/opencode/.gitignore', '.config/opencode/node_modules/.package-lock.json', '.config/opencode/node_modules/@ai-sdk/provider/CHANGELOG.md', '.config/opencode/node_modules/@ai-sdk/provider/LICENSE', '.config/opencode/node_modules/@ai-sdk/provider/README.md', '.config/opencode/node_modules/@ai-sdk/provider/dist/index.d.mts', '.config/opencode/node_modules/@ai-sdk/provider/dist/index.d.ts', '.config/opencode/node_modules/@ai-sdk/provider/dist/index.js', '.config/opencode/node_modules/@ai-sdk/provider/dist/index.js.map', '.config/opencode/node_modules/@ai-sdk/provider/dist/index.mjs', '.config/opencode/node_modules/@ai-sdk/provider/dist/index.mjs.map', '.config/opencode/node_modules/@ai-sdk/provider/package.json', '.config/opencode/node_modules/@ai-sdk/provider/src/embedding-model-middleware/index.ts', '.config/opencode/node_modules/@ai-sdk/provider/src/embedding-model-middleware/v3/embedding-model-v3-middleware.ts', '.config/opencode/node_modules/@ai-sdk/provider/src/embedding-model-middleware/v3/index.ts', '.config/opencode/node_modules/@ai-sdk/provider/src/embedding-model/index.ts', '.config/opencode/node_modules/@ai-sdk/provider/src/embedding-model/v2/embedding-model-v2-embedding.ts', '.config/opencode/node_modules/@ai-sdk/provider/src/embedding-model/v2/embedding-model-v2.ts', '.config/opencode/node_modules/@ai-sdk/provider/src/embedding-model/v2/index.ts']
+
+终态与清理事实（meta.json）
+  [parent] status=finished modelStopReason=end_turn reportStatus=ok session_id=ses_f2886d38effe7ODBQIwtu9bnnX
+    cleanup={"released": true, "failures": [], "external": {}}
+  [child] status=finished modelStopReason=end_turn reportStatus=missing session_id=ses_f2886d38effe7ODBQIwtu9bnnX
+    cleanup={"released": true, "failures": [], "external": {}}
+  parent report_status / child report_status: 200 / 404
+
+child report.md（HTTP 404，47 bytes）
+------------------------------------------------------------
+{"error": "no_report", "runId": "d57c179ca81a"}
+------------------------------------------------------------
+
+宿主日志尾部
+  内核 pi: ~/.nvm/versions/node/v24.16.0/bin/pi
+  模型 model: 未配置 / unset (缺少密钥 / no key)
+  2026-09-25 15:30:35,481 INFO pi_glink.kernel.acp_rpc: starting ACP agent: npx -y opencode-ai@1.18.32 acp
+  2026-09-25 15:30:35,576 INFO pi_glink.host: event stream attached run=0f6d9a4785dd after=0 live=True
+  2026-09-25 15:31:06,734 INFO pi_glink.kernel.runner: run finalized run=0f6d9a4785dd status=finished stop=None committed=True report=$TMP/glink-acp09-opencode/runs/0f6d9a4785dd/artifacts/report.md released=True
+  2026-09-25 15:31:06,734 INFO pi_glink.host: event stream detached run=0f6d9a4785dd
+  2026-09-25 15:31:07,397 INFO pi_glink.host: event stream attached run=d57c179ca81a after=0 live=True
+  2026-09-25 15:31:11,611 INFO pi_glink.kernel.acp_rpc: starting ACP agent: npx -y opencode-ai@1.18.32 acp
+  2026-09-25 15:31:24,205 INFO pi_glink.kernel.runner: run finalized run=d57c179ca81a status=finished stop=no_report committed=True report=<none> released=True
+  2026-09-25 15:31:24,205 INFO pi_glink.host: event stream detached run=d57c179ca81a
+
+  parent 通过: True；child 通过: False
+[FAIL] ACP 真实续接冒烟（首轮+追问，流式/终态/report/清理只按已知 PID）
+
+
+修复后追问（同一会话，最终 HEAD 63e5a23）
+--------
+ACP M7 真实续接冒烟（inproc / opencode-resume）
+====================================================
+日期: 2026-09-25 15:36:23
+宿主命令: python -m pi_glink.app --port 50498（harness=acp, executor=inproc）
+agent 命令: npx -y opencode-ai@1.18.32 acp
+命令级 env 名: npm_config_registry, npm_config_cache
+权限白名单: allow_once,read,search,fetch,edit
+会话配置: （无）
+数据根: $TMP/glink-acp09-opencode
+任务超时: 300s
+连续性判据: 首轮约定随机代号（不写入首轮 report.md），追问要求复述并写入新 report.md
+模式: 只跑追问（复用首轮 run 0f6d9a4785dd；代号由 --codename 提供）
+
+宿主 PID: 60318（只按这个 PID 收尾）
+宿主健康检查: HTTP 200
+[首轮] 复用已有 run 0f6d9a4785dd: status=finished sessionId=ses_f2886d38effe7ODBQIwtu9bnnX report HTTP 200（397 bytes）
+[追问] POST /api/runs -> HTTP 201
+[追问] runId: ed595605d494
+[追问] 终态: finished duration=15.578s events=22 sessionId=ses_f2886d38effe7ODBQIwtu9bnnX error=None
+[追问] GET /api/runs/ed595605d494/report -> HTTP 200（418 bytes）
+宿主按 PID 60318 终止: exit=-15
+
+run 期间采样的宿主后代进程: 2 个（只按 PID 记录）
+  61083 [exited] npm exec opencode-ai@1.18.32 acp    
+  61267 [exited] opencode acp
+
+SSE 流式（到达时间相对各自 run 创建）
+  [parent] SSE 帧数: 0
+  [child] SSE 帧数: 22
+       0.00s run_started
+       6.20s kernel_status
+       6.20s kernel_status
+       6.20s session_ready
+       6.20s turn_started
+       9.88s thinking_delta
+      11.62s thinking_delta
+      11.62s thinking_delta
+      11.62s thinking_delta
+      12.17s thinking_delta
+      12.17s tool_started
+      12.17s tool_updated
+      12.19s tool_finished
+      13.51s tool_started
+      13.98s tool_updated
+      14.00s tool_updated
+      14.00s tool_finished
+      15.41s assistant_delta
+      15.41s assistant_delta
+      15.42s usage_reported
+      15.42s turn_finished
+      15.46s run_finished
+
+续接事实（events.jsonl）
+  child session_ready: {"sessionId": "ses_f2886d38effe7ODBQIwtu9bnnX", "resumed": true, "resumeMethod": "session/resume", "cwd": "$TMP/glink-acp09-opencode/workspaces/0f6d9a4785dd"}
+  parent sessionId: ses_f2886d38effe7ODBQIwtu9bnnX
+  工作区: parent=$TMP/glink-acp09-opencode/workspaces/0f6d9a4785dd · child=$TMP/glink-acp09-opencode/workspaces/0f6d9a4785dd（ACP 会话 cwd 跨轮稳定，应相同）
+  session_ready.cwd == parent workspace: True
+  child acp_session_resumed: [{"level": "info", "message": "acp_session_resumed", "detail": "ACP 追问续接到已有会话（method=session/resume）", "resumeMethod": "session/resume", "sessionId": "ses_f2886d38effe7ODBQIwtu9bnnX", "replayedUpdates": 0}]
+
+连续性判据
+  代号出现在 child 助手正文: True
+  代号出现在 child report: True
+  代号出现在 parent report（应为 False）: False
+  代号出现在 child 题面（应为 False）: False
+  child.sessionId == parent.sessionId: True
+  child 助手正文尾部: 'NULLT-7079'
+
+状态继承（父/子 run 各自 HOME 的同一文件内容一致，凭据目标已排除）
+  parent HOME 文件数: 3654；child HOME 文件数: 3654
+  内容一致的继承文件: 3650 个
+    .cache/opencode/models.json
+    .config/opencode/.gitignore
+    .config/opencode/node_modules/.package-lock.json
+    .config/opencode/node_modules/@ai-sdk/provider/CHANGELOG.md
+    .config/opencode/node_modules/@ai-sdk/provider/LICENSE
+    .config/opencode/node_modules/@ai-sdk/provider/README.md
+    .config/opencode/node_modules/@ai-sdk/provider/dist/index.d.mts
+    .config/opencode/node_modules/@ai-sdk/provider/dist/index.d.ts
+    .config/opencode/node_modules/@ai-sdk/provider/dist/index.js
+    .config/opencode/node_modules/@ai-sdk/provider/dist/index.js.map
+    .config/opencode/node_modules/@ai-sdk/provider/dist/index.mjs
+    .config/opencode/node_modules/@ai-sdk/provider/dist/index.mjs.map
+  child HOME 文件（前 20）: ['.cache/opencode/models.json', '.config/opencode/.gitignore', '.config/opencode/node_modules/.package-lock.json', '.config/opencode/node_modules/@ai-sdk/provider/CHANGELOG.md', '.config/opencode/node_modules/@ai-sdk/provider/LICENSE', '.config/opencode/node_modules/@ai-sdk/provider/README.md', '.config/opencode/node_modules/@ai-sdk/provider/dist/index.d.mts', '.config/opencode/node_modules/@ai-sdk/provider/dist/index.d.ts', '.config/opencode/node_modules/@ai-sdk/provider/dist/index.js', '.config/opencode/node_modules/@ai-sdk/provider/dist/index.js.map', '.config/opencode/node_modules/@ai-sdk/provider/dist/index.mjs', '.config/opencode/node_modules/@ai-sdk/provider/dist/index.mjs.map', '.config/opencode/node_modules/@ai-sdk/provider/package.json', '.config/opencode/node_modules/@ai-sdk/provider/src/embedding-model-middleware/index.ts', '.config/opencode/node_modules/@ai-sdk/provider/src/embedding-model-middleware/v3/embedding-model-v3-middleware.ts', '.config/opencode/node_modules/@ai-sdk/provider/src/embedding-model-middleware/v3/index.ts', '.config/opencode/node_modules/@ai-sdk/provider/src/embedding-model/index.ts', '.config/opencode/node_modules/@ai-sdk/provider/src/embedding-model/v2/embedding-model-v2-embedding.ts', '.config/opencode/node_modules/@ai-sdk/provider/src/embedding-model/v2/embedding-model-v2.ts', '.config/opencode/node_modules/@ai-sdk/provider/src/embedding-model/v2/index.ts']
+
+终态与清理事实（meta.json）
+  [parent] status=finished modelStopReason=end_turn reportStatus=ok session_id=ses_f2886d38effe7ODBQIwtu9bnnX
+    cleanup={"released": true, "failures": [], "external": {}}
+  [child] status=finished modelStopReason=end_turn reportStatus=ok session_id=ses_f2886d38effe7ODBQIwtu9bnnX
+    cleanup={"released": true, "failures": [], "external": {}}
+  parent report_status / child report_status: 200 / 200
+
+child report.md（HTTP 200，418 bytes）
+------------------------------------------------------------
+# ACP 的价值
+
+- **降低接入成本**：统一客户端—代理通信；宿主支持 ACP 后即可接入兼容代理，无需逐一定制集成。[1]
+- **扩大生态选择**：客户端与代理解耦，代理可复用于兼容客户端，用户也能按需求选择工具。[1]
+
+## 来源
+[1] [Agent Client Protocol：Introduction](https://agentclientprotocol.com/get-started/introduction)
+
+代号 = NULLT-7079
+
+------------------------------------------------------------
+
+宿主日志尾部
+  pi-glink 宿主已启动 / host listening: http://127.0.0.1:50498/
+  执行面 executor: inproc
+  内核 pi: ~/.nvm/versions/node/v24.16.0/bin/pi
+  模型 model: 未配置 / unset (缺少密钥 / no key)
+  2026-09-25 15:36:23,580 INFO pi_glink.host: event stream attached run=ed595605d494 after=0 live=True
+  2026-09-25 15:36:27,774 INFO pi_glink.kernel.acp_rpc: starting ACP agent: npx -y opencode-ai@1.18.32 acp
+  2026-09-25 15:36:39,046 INFO pi_glink.kernel.runner: run finalized run=ed595605d494 status=finished stop=None committed=True report=$TMP/glink-acp09-opencode/runs/ed595605d494/artifacts/report.md released=True
+  2026-09-25 15:36:39,046 INFO pi_glink.host: event stream detached run=ed595605d494
+
+  parent 通过: True；child 通过: True
+[PASS] ACP 真实续接冒烟（首轮+追问，流式/终态/report/清理只按已知 PID）
+
+
+脱敏扫描
+--------
+$ .venv/bin/python scripts/check-no-secrets.py --data-root $TMP/glink-acp09-opencode
+凭据来源 0 条 · 扫描文件 8 个 · 真实命中 0 处 · 占位符命中 0 处
+未发现真实凭据残留。
+exit=0
