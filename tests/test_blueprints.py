@@ -318,6 +318,13 @@ def test_malformed_documents_are_refused(document: str, reason: str) -> None:
     assert excinfo.value.reason == reason
 
 
+def test_a_name_that_is_not_a_slug_is_refused() -> None:
+    """The name becomes the rendered frame's attribute; it must be a slug."""
+    with pytest.raises(BlueprintError) as excinfo:
+        parse_blueprint(synthetic_document("x"), expected_name="Bad Name")
+    assert excinfo.value.reason == "invalid_name"
+
+
 def test_oversized_and_non_utf8_files_are_refused(tmp_path: Path) -> None:
     directory = tmp_path / "blueprints"
     directory.mkdir()

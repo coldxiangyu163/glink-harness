@@ -22,13 +22,10 @@ stage metadata (see :mod:`pi_glink.kernel.runner`).
 
 from __future__ import annotations
 
-import logging
 import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-
-logger = logging.getLogger("pi_glink.blueprints")
 
 #: The one frontmatter format this host accepts. A file must declare it, so an
 #: unrelated Markdown file that happens to sit in the directory is not treated
@@ -156,6 +153,11 @@ def parse_blueprint(text: str, *, expected_name: str) -> Blueprint:
     file it came from can never disagree.
     """
     frontmatter, body = _split_document(text)
+    if not isinstance(expected_name, str) or not NAME_PATTERN.fullmatch(expected_name):
+        # Defense in depth: the production path derives the name from the
+        # directory, but a directly parsed name must still be a usable slug —
+        # it becomes the ``name`` attribute of the rendered frame.
+        raise BlueprintError("invalid_name")
     try:
         data = tomllib.loads(frontmatter)
     except tomllib.TOMLDecodeError as exc:
