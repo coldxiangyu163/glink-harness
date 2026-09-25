@@ -517,8 +517,9 @@ pi 面模板 `pi-glink-worker` 也未动（`e2b 模板实测`）。
   参数，不进环境）；销毁前把沙箱工作区拉回宿主工作区，`sandbox_id` 在沙箱创建后**立即**
   持久化（上传失败也保留身份，供台账对账）（`宿主代码`/`合成实测`/`e2b 实测`）。
 * **每 run HOME 与凭据**：复用 `prepare_acp_runtime` 渲染的 `runs/<id>/acp-agent/home`
-  （凭据源只读复制、0600），再上传到沙箱状态根 `/home/user/acp/home` 并在沙箱内
-  `chmod 0700 <root>` + `chmod 0600 <每个文件>`；agent 命令的 `HOME` 指向该根，
+  （凭据源只读复制、0600），再上传到沙箱状态根 `/home/user/acp/home`：先把状态根
+  `chmod 0700` 再上传（不让文件落在可遍历目录里），上传后把创建的目录 `chmod 0700`、
+  每个文件 `chmod 0600`；agent 命令的 `HOME` 指向该根，
   `PI_GLINK_ACP_ENV` 作为显式进程环境通道（值不进命令行），凭据值并入该 run 的 redactor
   （`宿主代码`/`合成实测`/`e2b 实测`）。
 * **stdio 桥接**：`SandboxCommandProcess` 把 `CommandHandle` 适配成 `subprocess` 形状
@@ -558,7 +559,10 @@ pi 面模板 `pi-glink-worker` 也未动（`e2b 模板实测`）。
 ### 6.5 一次真实冒烟（dsh，经宿主 HTTP API）
 
 `harness=acp + executor=e2b`、临时数据根、随机端口 55500、300s 有界超时、明确要求写
-`report.md` 的短题（`scripts/spikes/acp_e2b/smoke_host.py`，`e2b 实测`）：
+`report.md` 的短题（`scripts/spikes/acp_e2b/smoke_host.py`，`e2b 实测`）。该 run 在实现
+提交 `235b86a` 的代码上产生；此后只调整了凭据上传前的状态根 `chmod` 顺序（§6.3/§6.6），
+不影响本小节断言的事实（流式/终态/report 回收/沙箱按 id 对账）；最终代码的沙箱内凭据路径
+由 §6.4 的握手重新实测（`e2b 握手实测`）：
 
 * 终态 `finished`、`modelStopReason=end_turn`、`reportStatus=ok`，时长 29.6s、28 条事件；
   `GET /api/runs/<id>/report` 200（994 bytes），报告内容为 dsh 写的两点结论 + 1 条已核验
@@ -579,8 +583,10 @@ pi 面模板 `pi-glink-worker` 也未动（`e2b 模板实测`）。
 ### 6.6 与 M2/M3a 的差异与风险
 
 * **承载面差异只在传输**：e2b 面没有容器挂载，所以每 run HOME 靠“上传 + 沙箱内 chmod”，
-  凭据副本在上传后仍留在宿主 run 目录（0600，随 run 目录生命周期），不是只读挂载；沙箱内
-  无法验证“凭据文件不可改写”的容器级只读语义（`宿主代码`/`e2b 实测`）。
+  凭据副本在上传后仍留在宿主 run 目录（0600，随 run 目录生命周期），不是只读挂载；
+  `files.write` 没有 mode 参数，0600 由紧随其后的 `chmod` 施加（已先把状态根 0700，且沙箱
+  本身是单 run 单用户），因此没有容器面的嵌套只读挂载这一层——沙箱内无法验证“凭据文件不可
+  改写/删除”的容器级只读语义（`宿主代码`/`e2b 实测`）。
 * **资源上限**：E2B SDK 这条路径只暴露 lifetime（与 pi e2b 面相同），没有 cpus/memory
   参数；宿主只声明它真的要求过的边界（`宿主代码`）。
 * **模板独立性**：`glink-acp-worker` 是 dev 模板，未发布/未移动任何 tag；升级同样需要

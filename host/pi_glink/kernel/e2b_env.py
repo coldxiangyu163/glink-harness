@@ -877,14 +877,19 @@ class E2BAcpSandboxClient:
     def upload_home(self) -> None:
         """Deliver the run's rendered ACP HOME (credential files) to the sandbox.
 
-        The tree keeps its relative paths under :data:`SANDBOX_ACP_HOME`; the
-        boundary is then re-applied *inside* the sandbox — state root 0700 and
-        every uploaded file 0600 — because the upload API carries no mode. The
-        ``(relative, sha256)`` manifest makes delivery verifiable instead of
-        assumed. A run with no credential files uploads nothing.
+        The tree keeps its relative paths under :data:`SANDBOX_ACP_HOME`. The
+        boundary is applied in the order the transport allows: the state root is
+        made 0700 *before* any file is written (so nothing lands in a
+        traversable directory), and after the upload every created directory is
+        0700 and every file 0600 — the upload API carries no mode, so this is
+        the closest faithful application of the M2/M3a per-run HOME boundary on
+        this face. The ``(relative, sha256)`` manifest makes delivery
+        verifiable instead of assumed. A run with no credential files uploads
+        nothing.
         """
         sandbox = self._require_sandbox()
         sandbox.files.make_dir(SANDBOX_ACP_HOME)
+        self._chmod(0o700, [SANDBOX_ACP_HOME], "先收紧状态根权限")
         manifest = _runtime_manifest(self.runtime.home)
         if not manifest:
             return
@@ -908,23 +913,28 @@ class E2BAcpSandboxClient:
         self._harden_uploaded(manifest)
 
     def _harden_uploaded(self, manifest: list[tuple[str, bool]]) -> None:
-        """Re-apply the per-run boundary in the sandbox: 0700 root, 0600 files.
+        """Re-apply the per-run boundary in the sandbox: 0700 dirs, 0600 files.
 
         ``chmod`` is one sandbox command over the paths this run just uploaded
         (never a wildcard, never another run's tree); the credential set is a
         handful of files, so there is no argv-length concern.
         """
-        sandbox = self._require_sandbox()
         directories = [
             f"{SANDBOX_ACP_HOME}/{relative}" for relative, is_dir in manifest if is_dir
         ]
-        command = shlex.join(["chmod", "0700", SANDBOX_ACP_HOME, *directories, *self.uploaded])
+        self._chmod(0o700, [SANDBOX_ACP_HOME, *directories], "收紧沙箱状态根权限")
+        self._chmod(0o600, list(self.uploaded), "收紧沙箱凭据文件权限")
+
+    def _chmod(self, mode: int, paths: list[str], what: str) -> None:
+        """Run one ``chmod`` inside the sandbox over exactly ``paths``."""
+        if not paths:
+            return
+        sandbox = self._require_sandbox()
+        command = shlex.join(["chmod", f"{mode:04o}", *paths])
         try:
             sandbox.commands.run(command, timeout=60)
         except Exception as exc:  # noqa: BLE001 - surfaced as a delivery failure
-            raise SandboxError(
-                f"ACP 凭据权限加固失败: {type(exc).__name__}: {exc}"
-            ) from exc
+            raise SandboxError(f"{what}失败: {type(exc).__name__}: {exc}") from exc
 
     def command(self) -> str:
         """The sandbox command line: the frozen agent argv in the workspace.

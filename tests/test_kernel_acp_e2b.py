@@ -202,6 +202,7 @@ class FakeCommands:
             self._sandbox.agent_cwd = kwargs.get("cwd")
             return self._spawn_agent(cmd, kwargs)
         self._sandbox.harden_command = cmd
+        self._sandbox.harden_commands.append(cmd)
         # chmod and friends: the fake has no permissions to change.
         return _Result(0)
 
@@ -255,6 +256,7 @@ class FakeSandbox:
         self.command = ""
         self.command_kwargs: dict[str, Any] = {}
         self.harden_command = ""
+        self.harden_commands: list[str] = []
         self.agent_envs: dict[str, str] = {}
         self.agent_cwd: str | None = None
         self.agent_argv: list[str] = []
@@ -403,13 +405,18 @@ def test_credentials_are_uploaded_into_the_run_home_and_hardened(tmp_path: Path)
     target = f"{SANDBOX_ACP_HOME}/.dsh/.credentials.yaml"
     assert sandbox.written[target] == source.read_bytes()
     assert (f".dsh/.credentials.yaml",) == tuple(rel for rel, _digest in client.upload_manifest)
-    # The boundary is re-applied inside the sandbox: 0700 root, 0600 files, and
-    # only this run's paths appear in the command.
-    assert sandbox.harden_command.startswith("chmod 0700 /home/user/acp/home")
-    assert target in sandbox.harden_command
-    assert "chmod 0600" not in sandbox.harden_command  # one mode list, no wildcard
-    assert shlex.split(sandbox.harden_command)[1:4] == ["0700", SANDBOX_ACP_HOME, f"{SANDBOX_ACP_HOME}/.dsh"]
-    assert "sk-opaque-credential-1234567890" not in sandbox.harden_command
+    # The boundary is re-applied inside the sandbox: the state root is 0700
+    # *before* the upload (nothing lands in a traversable directory), then the
+    # directories 0700 and the files 0600 — and only this run's paths appear.
+    assert sandbox.harden_commands[0] == f"chmod 0700 {SANDBOX_ACP_HOME}"
+    assert sandbox.harden_commands[-1].startswith("chmod 0600 ")
+    assert target in sandbox.harden_commands[-1]
+    assert shlex.split(sandbox.harden_commands[1])[1:4] == [
+        "0700",
+        SANDBOX_ACP_HOME,
+        f"{SANDBOX_ACP_HOME}/.dsh",
+    ]
+    assert "sk-opaque-credential-1234567890" not in " ".join(sandbox.harden_commands)
     # The value stays in the file; the manifest makes delivery verifiable.
     assert client.upload_manifest[0][1]
     client.close()
