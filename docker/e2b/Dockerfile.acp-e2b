@@ -1,0 +1,79 @@
+# pi-glink ACP 沙箱模板（E2B）：沙箱内自包含 ACP agent 运行时。
+#
+# 设计边界（对应 GLINK-ACP-04 / M3b 的验收契约）：
+#   * 与 docker/Dockerfile.acp-worker 同一批钉版（Node tag、dsh、codex-acp），
+#     差异只在承载方式：Docker 面把容器 stdio 交给 ACP 客户端，E2B 面用
+#     `commands.run(background=True, stdin=True)` + `send_stdin` 承载同一份
+#     stdio；帧完整性已先在真实沙箱实测（docs/evidence/acp-m3-e2b-framing.txt）。
+#   * 这是**独立 dev 模板**（默认名 glink-acp-worker）：不移动任何已有模板的
+#     tag，尤其不触碰生产模板 glink-frontier-e2b 与 pi 面模板 pi-glink-worker。
+#   * 镜像内自检：构建期校验两个 agent 的 --version（含与 ARG 的精确比对），
+#     默认 CMD 也能直接复验。
+#
+# 构建必须用 E2B CLI（历史事故：Python SDK 的 Template().from_dockerfile() 会
+# 丢多行 ENV，装出来的镜像残缺）：
+#   E2B_API_KEY=… npx -y @e2b/cli template create glink-acp-worker \
+#     --dockerfile docker/e2b/Dockerfile.acp-e2b --cpu-count 2 --memory-mb 4096
+#
+# 网络受限环境可覆盖基础源，仓库默认仍用官方源：
+#   … npx -y @e2b/cli template create glink-acp-worker --cpu-count 2 --memory-mb 4096 \
+#     --dockerfile docker/e2b/Dockerfile.acp-e2b   # 镜像内 ARG 见下
+#
+# Node 固定在官方镜像的精确版本 tag（与 docker/Dockerfile.worker、
+# docker/Dockerfile.acp-worker 同一 tag）：容器内 `node -v` 实测 v24.21.0。
+FROM node:24.21.0-bookworm-slim
+
+# @deepseek-ai/dsh：M2 实测版本（docs/acp-integration-notes.md §4.1）。
+ARG DSH_VERSION=0.1.5-rc.3
+# codex-acp：旧包 @zed-industries/codex-acp 已被 npm 标记 deprecated，
+# M3a 起改用后继包并钉版（容器内握手证据见 docs/evidence/acp-m3-docker-agent-check.txt）。
+ARG CODEX_ACP_VERSION=1.13.1
+ARG DEBIAN_MIRROR=deb.debian.org
+ARG NPM_REGISTRY=https://registry.npmjs.org
+
+RUN if [ "${DEBIAN_MIRROR}" != "deb.debian.org" ]; then \
+      sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+       bash ca-certificates curl git procps ripgrep \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm config set registry "${NPM_REGISTRY}" \
+    && npm install -g --no-fund --no-audit \
+         "@deepseek-ai/dsh@${DSH_VERSION}" \
+         "@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}" \
+    && dsh --version > /tmp/dsh-version \
+    && codex-acp --version > /tmp/codex-acp-version \
+    && grep -qx "${DSH_VERSION}" /tmp/dsh-version \
+    && grep -qx "@agentclientprotocol/codex-acp ${CODEX_ACP_VERSION}" /tmp/codex-acp-version \
+    && rm -f /tmp/dsh-version /tmp/codex-acp-version \
+    && npm cache clean --force
+
+# 模板自检脚本：构建期（E2B finalize 的 start command）与运行期都用它复验两个
+# agent 可执行。两个坑都踩过，写在这里：
+#   * 不能把自检写成 CMD ["sh", "-c", "dsh --version && …"]——E2B 构建流程会把
+#     CMD 数组用空格拼成一行再交给 shell（日志里是
+#     `sh -c dsh --version && codex-acp --version`），`sh -c dsh --version` 实际
+#     是“启动 dsh、把 --version 当 $0”，于是报 `--profile <name> is required`；
+#   * 也不能在 RUN 里用 `printf '%s\n' …` 之类的转义——E2B 构建解析会把 Dockerfile
+#     文本里的 `\n` 吃成 `n`（实测构建日志与产物都如此），脚本会变成没有换行的
+#     一行，execve 报 “cannot execute: required file not found”。
+# 所以：CMD 指向镜像内脚本，脚本用逐行 echo 生成（不出现转义符）。
+RUN { \
+      echo '#!/bin/sh'; \
+      echo 'set -eu'; \
+      echo 'dsh --version'; \
+      echo 'codex-acp --version'; \
+    } > /usr/local/bin/acp-self-check \
+    && chmod 0755 /usr/local/bin/acp-self-check
+
+# E2B 沙箱的家目录：每 run 的 ACP agent 状态根落在 /home/user/acp/home
+# （宿主显式传入 HOME），工作区落在 /home/user/workspace；两者都由宿主在启动
+# 命令前创建。这里预建并保持可写，避免模板与宿主对路径的假设漂移。
+ENV HOME=/home/user \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+RUN mkdir -p /home/user/acp /home/user/workspace
+
+WORKDIR /home/user/workspace
+# 默认命令 = 模板内自检（见上面的 acp-self-check 说明）。
+CMD ["acp-self-check"]

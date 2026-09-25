@@ -31,6 +31,16 @@ sandbox command runs the image's package guard before pi, because pi silently
 ignores a missing local package and a research run without web_search must fail
 loudly instead.
 
+**The ACP face shares the sandbox (M3b).** The same ``Sandbox.create``
+lifecycle, credential upload and artifact recovery carry the ACP family: the
+agent runs as a *background* command with ``stdin=True`` and the host frames the
+CommandHandle's stdout with the shared LF-only splitter, so the ACP client,
+projection and verdict table are the same code as the in-process and Docker
+faces. ``SandboxCommandProcess`` adapts that handle to the ``subprocess.Popen``
+shape ``AcpRpcClient`` is written against; the measured framing facts
+(ordering, byte fidelity, ≥64 KiB frames, ``close_stdin``) are in
+``docs/evidence/acp-m3-e2b-framing.txt``.
+
 **Live event stream (corrected by GLINK-E2B-LIVE-01).** The SDK's streaming
 interface for a background command is the ``CommandHandle`` returned by
 ``commands.run(background=True, …)``: iterating it yields ``(stdout, stderr,
@@ -57,8 +67,12 @@ import codecs
 import hashlib
 import json
 import logging
+import queue
 import re
+import shlex
 import shutil
+import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +80,7 @@ from typing import Any, Callable, Iterator, Mapping
 
 from ..artifacts import ArtifactError, ArtifactTree
 from ..config import ConfigError, HostConfig
+from .acp_env import AcpRuntime, build_acp_argv
 from .agent_env import IMAGE_PACKAGE_GUARD, AgentRuntime
 from .framing import strip_trailing_cr
 
@@ -76,6 +91,11 @@ SANDBOX_HOME = "/home/user"
 SANDBOX_CONFIG = f"{SANDBOX_HOME}/config"
 SANDBOX_WORKSPACE = f"{SANDBOX_HOME}/workspace"
 SANDBOX_SESSIONS = f"{SANDBOX_HOME}/sessions"
+#: The ACP family's per-run state root inside the sandbox. The host renders the
+#: run's own HOME (``runs/<id>/acp-agent/home``: credentials injected 0600) and
+#: uploads it here; the agent process gets ``HOME`` pointed at it, so ``~/.dsh``,
+#: ``~/.codex`` and every cache stay inside this run's sandbox.
+SANDBOX_ACP_HOME = f"{SANDBOX_HOME}/acp/home"
 REPORT_FILENAME = "report.md"
 #: Image-local guard script (same bytes in both worker images, see
 #: :data:`agent_env.IMAGE_PACKAGE_GUARD`). The sandbox has no ``--entrypoint``
@@ -208,40 +228,15 @@ class E2BSandboxClient:
     def start(self, *, timeout_seconds: int | None = None) -> None:
         if self.sandbox is not None:
             raise SandboxError("sandbox already started")
-        template = self.config.e2b_template
-        if not template:
-            raise ConfigError("LOCAL_WEB_E2B_TEMPLATE 未配置")
-        if not self.config.has_e2b_key:
-            raise ConfigError("E2B_API_KEY 未配置")
-        factory = self._sandbox_factory or _default_sandbox_factory()
-        # ``Sandbox.create`` takes the credential through ``**opts`` (ApiParams),
-        # so an operator who only filled ``.env`` still authenticates: the host
-        # passes the key it read at startup instead of relying on the SDK having
-        # inherited E2B_API_KEY from the launching shell.
-        # ``timeout_seconds`` is the adapter's bound (task timeout + teardown
-        # headroom); the frozen configuration may set a tighter ceiling.  E2B
-        # does not expose CPU/memory controls through this SDK path, so the host
-        # can only bound lifetime — it never claims a resource limit the cloud
-        # provider was not asked to enforce.
-        adapter_bound = int(timeout_seconds or 0)
-        ceiling = int(
-            self.config.e2b_sandbox_timeout_seconds
-            or (self.config.task_timeout_seconds + 300)
+        sandbox, self.sandbox_timeout = _create_sandbox(
+            self.config,
+            template=self.config.e2b_template,
+            timeout_seconds=timeout_seconds,
+            sandbox_factory=self._sandbox_factory,
+            envs=self._model_envs(),
         )
-        timeout = min(adapter_bound, ceiling) if adapter_bound > 0 else ceiling
-        self.sandbox_timeout = int(timeout)
-        create_kwargs: dict[str, Any] = {
-            "template": template,
-            "timeout": timeout,
-            "envs": self._model_envs(),
-        }
-        if self.config.e2b_api_key:
-            create_kwargs["api_key"] = self.config.e2b_api_key
-        try:
-            self.sandbox = factory(**create_kwargs)
-        except Exception as exc:  # noqa: BLE001 - surfaced to the run record
-            raise SandboxError(f"sandbox 创建失败: {type(exc).__name__}: {exc}") from exc
-        self.sandbox_id = str(getattr(self.sandbox, "sandbox_id", ""))
+        self.sandbox = sandbox
+        self.sandbox_id = str(getattr(sandbox, "sandbox_id", ""))
 
     def upload_config(self) -> None:
         """Upload the run's rendered configuration directory (see module docstring).
@@ -548,62 +543,7 @@ class E2BSandboxClient:
         anything unreadable (a directory), oversized, or named with a path
         separator is recorded as a failure instead of being guessed at.
         """
-        sandbox = self._require_sandbox()
-        destination.mkdir(parents=True, exist_ok=True)
-        try:
-            entries = sandbox.files.list(SANDBOX_WORKSPACE)
-        except Exception as exc:  # noqa: BLE001 - surfaced to the caller
-            return [], [f"无法列出沙箱工作区: {type(exc).__name__}: {exc}"]
-        try:
-            tree = ArtifactTree(destination)
-        except ArtifactError as exc:
-            return [], [f"宿主工作区不可用: {exc}"]
-        files: list[Path] = []
-        failures: list[str] = []
-        with tree:
-            for entry in entries:
-                name = str(getattr(entry, "name", None) or "")
-                path = str(getattr(entry, "path", None) or f"{SANDBOX_WORKSPACE}/{name}")
-                if not name:
-                    continue
-                # Path semantics are checked before the hidden-file skip: a name
-                # that tries to escape ("../x") starts with a dot and must be
-                # reported, not silently ignored.
-                if "/" in name or "\\" in name or name in {".", ".."}:
-                    failures.append(f"跳过非法产物名: {name!r}")
-                    continue
-                kind = _entry_kind(entry)
-                if kind == "dir":
-                    # Directories are not deliverables; only regular entries are
-                    # recovered (and an unreadable regular entry is reported).
-                    continue
-                if kind == "symlink":
-                    # The host never follows links — the same rule ArtifactTree
-                    # enforces on every read and write. A linked artifact is
-                    # skipped rather than resolved and is not a run failure.
-                    continue
-                if name.startswith("."):
-                    continue
-                # Bound the read with the listing's own metadata before loading
-                # the entry; an entry whose size the SDK does not report falls
-                # back to a streamed, bounded read.
-                known = getattr(entry, "size", None)
-                data, failure = _read_file_bounded(
-                    sandbox,
-                    path,
-                    ARTIFACT_MAX_BYTES,
-                    known_size=known if isinstance(known, int) else None,
-                )
-                if data is None:
-                    failures.append(f"产物不可读取或超过上限: {name}: {failure}")
-                    continue
-                try:
-                    tree.replace(name, data, max_bytes=ARTIFACT_MAX_BYTES)
-                except (ArtifactError, OSError) as exc:
-                    failures.append(f"产物写入失败: {name}: {exc}")
-                    continue
-                files.append(destination / name)
-        return files, failures
+        return _recover_workspace(self._require_sandbox(), destination)
 
     def close(self) -> list[str]:
         """Destroy the sandbox. Returns the failures instead of hiding them."""
@@ -701,6 +641,474 @@ class E2BSandboxClient:
             + f"rc=$?; printf '%s' \"$rc\" > {_EXIT_FILE}; exit \"$rc\"; }}"
         )
         return " && ".join(parts)
+
+
+class SandboxCommandProcess:
+    """A ``subprocess.Popen``-shaped facade over one sandbox background command.
+
+    The ACP client is written against ``subprocess``: a stdin it writes frames
+    to, a stdout it reads bytes from, a stderr it iterates, and
+    ``poll``/``wait``/``terminate``/``kill``. On this face the agent is an E2B
+    background command started with ``stdin=True``, so this adapter maps those
+    calls onto ``send_stdin`` / ``close_stdin`` / the ``CommandHandle`` stream /
+    ``kill``. Only the carrier changes: the protocol, projection and lifecycle
+    code is the same one the in-process and Docker faces use.
+
+    The facts this adapter relies on were measured in a real sandbox *before* it
+    was written (``docs/evidence/acp-m3-e2b-framing.txt``): ``send_stdin``
+    writes arrive in call order and byte-exact; stdout chunks are **not**
+    frame-aligned, so the client keeps using the shared LF-only framer;
+    ``close_stdin`` signals EOF and the command then exits with a real code.
+    """
+
+    def __init__(self, handle: Any, *, sandbox_id: str = "") -> None:
+        self._handle = handle
+        self._stdout: queue.Queue[bytes | None] = queue.Queue()
+        self._stderr: queue.Queue[bytes | None] = queue.Queue()
+        self._exited = threading.Event()
+        self._exit_code: int | None = None
+        self._stream_error: str | None = None
+        self.sandbox_id = sandbox_id
+        self.pid = int(getattr(handle, "pid", 0) or 0)
+        self.stdin = _HandleStdin(handle)
+        self.stdout = _QueueReader(self._stdout)
+        self.stderr = _QueueLines(self._stderr)
+        self._reader = threading.Thread(target=self._pump, name="e2b-stdout", daemon=True)
+        self._reader.start()
+
+    @property
+    def stream_error(self) -> str | None:
+        return self._stream_error
+
+    def _pump(self) -> None:
+        try:
+            for stdout, stderr, _pty in self._handle:
+                if stdout:
+                    self._stdout.put(str(stdout).encode("utf-8"))
+                if stderr:
+                    self._stderr.put(str(stderr).encode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 - reported through the exit code
+            self._stream_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            self._exit_code = self._resolve_exit_code()
+            self._stdout.put(None)
+            self._stderr.put(None)
+            self._exited.set()
+
+    def _resolve_exit_code(self) -> int | None:
+        """The command's own exit code, or ``None`` when the stream was lost.
+
+        The SDK's ``wait()`` answers from the end event the iterator already
+        consumed; a non-zero exit arrives as ``CommandExitException``, whose
+        ``exit_code`` is the command's result rather than a stream failure.
+        """
+        try:
+            result = self._handle.wait()
+        except Exception as exc:  # noqa: BLE001 - an exit code is still a result
+            code = getattr(exc, "exit_code", None)
+            if isinstance(code, int) and not isinstance(code, bool):
+                return code
+            if self._stream_error is None:
+                self._stream_error = f"{type(exc).__name__}: {exc}"
+            return None
+        code = getattr(result, "exit_code", None)
+        if isinstance(code, int) and not isinstance(code, bool):
+            return code
+        return None
+
+    # -- the subprocess.Popen surface the ACP client uses ---------------------
+
+    def poll(self) -> int | None:
+        if not self._exited.is_set():
+            return None
+        # A command that ended without a usable exit code is no longer running;
+        # ``-1`` keeps ``poll() is not None`` meaning "gone" — the only thing the
+        # client reads it for — without inventing a real status.
+        return self._exit_code if self._exit_code is not None else -1
+
+    def wait(self, timeout: float | None = None) -> int:
+        if not self._exited.wait(timeout):
+            raise subprocess.TimeoutExpired("e2b sandbox command", timeout)
+        if self._exit_code is None:
+            raise OSError(
+                "sandbox command ended without an exit code"
+                + (f": {self._stream_error}" if self._stream_error else "")
+            )
+        return self._exit_code
+
+    def terminate(self) -> None:
+        self.kill()
+
+    def kill(self) -> None:
+        try:
+            self._handle.kill()
+        except Exception:  # noqa: BLE001 - the sandbox is torn down anyway
+            logger.debug("sandbox command kill failed", exc_info=True)
+
+
+class _HandleStdin:
+    """``process.stdin``: one ACP frame per acknowledged ``send_stdin`` RPC."""
+
+    def __init__(self, handle: Any) -> None:
+        self._handle = handle
+        self._closed = False
+
+    def write(self, data: bytes) -> int:
+        payload = bytes(data)
+        if self._closed:
+            raise BrokenPipeError("sandbox stdin is closed")
+        if payload:
+            try:
+                self._handle.send_stdin(payload)
+            except Exception as exc:  # noqa: BLE001 - mapped to the pipe's failure mode
+                raise BrokenPipeError(
+                    f"sandbox stdin write failed: {type(exc).__name__}: {exc}"
+                ) from exc
+        return len(payload)
+
+    def flush(self) -> None:
+        """Nothing is buffered: every ``send_stdin`` call is an acknowledged RPC."""
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._handle.close_stdin(request_timeout=30)
+        except Exception:  # noqa: BLE001 - an older envd; kill() still ends it
+            logger.debug("sandbox close_stdin unsupported or failed", exc_info=True)
+
+
+class _QueueReader:
+    """A blocking byte reader over the stdout chunks the pump thread receives."""
+
+    def __init__(self, chunks: "queue.Queue[bytes | None]") -> None:
+        self._chunks = chunks
+
+    def read(self, _size: int = -1) -> bytes:
+        chunk = self._chunks.get()
+        if chunk is None:
+            self._chunks.put(None)  # keep EOF sticky for a later read
+            return b""
+        return chunk
+
+
+class _QueueLines:
+    """``process.stderr``: iterate byte lines until the stream ends."""
+
+    def __init__(self, chunks: "queue.Queue[bytes | None]") -> None:
+        self._chunks = chunks
+
+    def __iter__(self) -> Iterator[bytes]:
+        while True:
+            chunk = self._chunks.get()
+            if chunk is None:
+                return
+            yield from chunk.splitlines(keepends=True)
+
+
+class E2BAcpSandboxClient:
+    """Own one E2B sandbox for one ACP run.
+
+    The lifecycle is the pi face's (create with the frozen credential and a
+    bounded lifetime, destroy by ``kill()``, recover the workspace before the
+    sandbox dies) and the artifact/identity contract is the same. The difference
+    is the transport: the ACP agent runs as a background command with
+    ``stdin=True`` and :meth:`spawn` wraps its handle for the shared ACP client
+    (:class:`SandboxCommandProcess`), exactly like the Docker face hands
+    ``docker run -i``'s stdio to the same client.
+
+    ``runtime`` is the run's host-rendered ACP state root
+    (:func:`~pi_glink.kernel.acp_env.prepare_acp_runtime`): the credential files
+    it holds are uploaded into the sandbox state root with 0600 applied there,
+    so the M2/M3a boundary (per-run HOME, file-shaped credentials, no value in
+    argv or environment) holds on this face too.
+    """
+
+    def __init__(
+        self,
+        config: HostConfig,
+        runtime: AcpRuntime,
+        *,
+        run_id: str,
+        workspace: Path,
+        sandbox_factory: Callable[..., Any] | None = None,
+        template: str = "",
+    ) -> None:
+        self.config = config
+        self.runtime = runtime
+        self.run_id = run_id
+        self.workspace = Path(workspace)
+        self._sandbox_factory = sandbox_factory
+        self._template = template or config.acp_e2b_template
+        self.sandbox: Any | None = None
+        self.sandbox_id: str = ""
+        #: Lifetime the sandbox was created with; the agent command must be
+        #: allowed to run at least that long (see ``_command_timeout``).
+        self.sandbox_timeout: int = 0
+        #: Sandbox paths the credential upload wrote.
+        self.uploaded: list[str] = []
+        #: ``(relative path, sha256)`` for everything delivered to the sandbox.
+        self.upload_manifest: list[tuple[str, str]] = []
+
+    @property
+    def argv(self) -> list[str]:
+        return build_acp_argv(self.config)
+
+    @property
+    def template(self) -> str:
+        """The frozen E2B template this run's sandbox is created from."""
+        return self._template
+
+    # -- lifecycle ------------------------------------------------------------
+
+    def start(self, *, timeout_seconds: int | None = None) -> None:
+        if self.sandbox is not None:
+            raise SandboxError("sandbox already started")
+        sandbox, self.sandbox_timeout = _create_sandbox(
+            self.config,
+            template=self._template,
+            timeout_seconds=timeout_seconds,
+            sandbox_factory=self._sandbox_factory,
+        )
+        self.sandbox = sandbox
+        self.sandbox_id = str(getattr(sandbox, "sandbox_id", ""))
+
+    def upload_home(self) -> None:
+        """Deliver the run's rendered ACP HOME (credential files) to the sandbox.
+
+        The tree keeps its relative paths under :data:`SANDBOX_ACP_HOME`. The
+        boundary is applied in the order the transport allows: the state root is
+        made 0700 *before* any file is written (so nothing lands in a
+        traversable directory), and after the upload every created directory is
+        0700 and every file 0600 — the upload API carries no mode, so this is
+        the closest faithful application of the M2/M3a per-run HOME boundary on
+        this face. The ``(relative, sha256)`` manifest makes delivery
+        verifiable instead of assumed. A run with no credential files uploads
+        nothing.
+        """
+        sandbox = self._require_sandbox()
+        sandbox.files.make_dir(SANDBOX_ACP_HOME)
+        self._chmod(0o700, [SANDBOX_ACP_HOME], "先收紧状态根权限")
+        manifest = _runtime_manifest(self.runtime.home)
+        if not manifest:
+            return
+        try:
+            tree = ArtifactTree(self.runtime.home)
+        except ArtifactError as exc:
+            raise SandboxError(f"ACP 凭据交付失败: {exc}") from exc
+        with tree:
+            for relative, is_dir in manifest:
+                sandbox_path = f"{SANDBOX_ACP_HOME}/{relative}"
+                if is_dir:
+                    sandbox.files.make_dir(sandbox_path)
+                    continue
+                try:
+                    data = tree.read(relative, max_bytes=UPLOAD_MAX_BYTES)
+                except ArtifactError as exc:
+                    raise SandboxError(f"ACP 凭据交付失败: {relative}: {exc}") from exc
+                sandbox.files.write(sandbox_path, data)
+                self.uploaded.append(sandbox_path)
+                self.upload_manifest.append((relative, hashlib.sha256(data).hexdigest()))
+        self._harden_uploaded(manifest)
+
+    def _harden_uploaded(self, manifest: list[tuple[str, bool]]) -> None:
+        """Re-apply the per-run boundary in the sandbox: 0700 dirs, 0600 files.
+
+        ``chmod`` is one sandbox command over the paths this run just uploaded
+        (never a wildcard, never another run's tree); the credential set is a
+        handful of files, so there is no argv-length concern.
+        """
+        directories = [
+            f"{SANDBOX_ACP_HOME}/{relative}" for relative, is_dir in manifest if is_dir
+        ]
+        self._chmod(0o700, [SANDBOX_ACP_HOME, *directories], "收紧沙箱状态根权限")
+        self._chmod(0o600, list(self.uploaded), "收紧沙箱凭据文件权限")
+
+    def _chmod(self, mode: int, paths: list[str], what: str) -> None:
+        """Run one ``chmod`` inside the sandbox over exactly ``paths``."""
+        if not paths:
+            return
+        sandbox = self._require_sandbox()
+        command = shlex.join(["chmod", f"{mode:04o}", *paths])
+        try:
+            sandbox.commands.run(command, timeout=60)
+        except Exception as exc:  # noqa: BLE001 - surfaced as a delivery failure
+            raise SandboxError(f"{what}失败: {type(exc).__name__}: {exc}") from exc
+
+    def command(self) -> str:
+        """The sandbox command line: the frozen agent argv in the workspace.
+
+        ``exec`` replaces the login shell so the agent owns stdin directly, and
+        :func:`shlex.join` quotes every argument (the argv is frozen
+        configuration, but a path with a space must not become two words).
+        """
+        return f"cd {shlex.quote(SANDBOX_WORKSPACE)} && exec {shlex.join(self.argv)}"
+
+    def command_env(self) -> dict[str, str]:
+        """The agent command's environment: per-run HOME plus ``PI_GLINK_ACP_ENV``.
+
+        ``HOME`` is the sandbox state root :meth:`upload_home` filled (the
+        counterpart of the Docker face's ``HOME=/home/acp``); the configured
+        entries are this face's explicit process-environment channel, and the
+        credential material itself stays in files. ``HOME`` can never be
+        overridden by ``PI_GLINK_ACP_ENV``: the configuration refuses that name,
+        and this dict is built with it first.
+        """
+        env = {"HOME": SANDBOX_ACP_HOME}
+        for name, value in self.config.acp_env:
+            env[name] = value
+        return env
+
+    def spawn(self) -> SandboxCommandProcess:
+        """Start the agent as a background command and wrap it for the client."""
+        sandbox = self._require_sandbox()
+        handle = sandbox.commands.run(
+            self.command(),
+            background=True,
+            stdin=True,
+            envs=self.command_env(),
+            cwd=SANDBOX_WORKSPACE,
+            timeout=self._command_timeout(),
+        )
+        return SandboxCommandProcess(handle, sandbox_id=self.sandbox_id)
+
+    def recover_artifacts(self, destination: Path) -> tuple[list[Path], list[str]]:
+        """Pull the sandbox workspace back before the sandbox is destroyed."""
+        return _recover_workspace(self._require_sandbox(), destination)
+
+    def close(self) -> list[str]:
+        """Destroy the sandbox. Returns the failures instead of hiding them."""
+        sandbox = self.sandbox
+        self.sandbox = None
+        if sandbox is None:
+            return []
+        try:
+            sandbox.kill()
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            return [f"sandbox kill failed: {type(exc).__name__}: {exc}"]
+        return []
+
+    def _command_timeout(self) -> int:
+        """How long the agent command may run, in seconds (same rule as pi)."""
+        if self.sandbox_timeout > 0:
+            return self.sandbox_timeout
+        return int(self.config.task_timeout_seconds) + 300
+
+    def _require_sandbox(self) -> Any:
+        if self.sandbox is None:
+            raise SandboxError("sandbox 未启动")
+        return self.sandbox
+
+
+def _create_sandbox(
+    config: HostConfig,
+    *,
+    template: str,
+    timeout_seconds: int | None,
+    sandbox_factory: Callable[..., Any] | None,
+    envs: Mapping[str, str] | None = None,
+) -> tuple[Any, int]:
+    """Create one sandbox from the frozen configuration; returns ``(sandbox, lifetime)``.
+
+    Shared by the pi and ACP faces so both create the same kind of resource with
+    the same credential flow. ``Sandbox.create`` takes the credential through
+    ``**opts`` (ApiParams), so an operator who only filled ``.env`` still
+    authenticates: the host passes the key it read at startup instead of
+    relying on the SDK having inherited ``E2B_API_KEY`` from the launching
+    shell. ``timeout_seconds`` is the adapter's bound (task timeout + teardown
+    headroom); the frozen configuration may set a tighter ceiling. E2B does not
+    expose CPU/memory controls through this SDK path, so the host can only bound
+    lifetime — it never claims a resource limit the cloud provider was not asked
+    to enforce.
+    """
+    if not template:
+        raise ConfigError("E2B 沙箱模板未配置")
+    if not config.has_e2b_key:
+        raise ConfigError("E2B_API_KEY 未配置")
+    factory = sandbox_factory or _default_sandbox_factory()
+    adapter_bound = int(timeout_seconds or 0)
+    ceiling = int(
+        config.e2b_sandbox_timeout_seconds or (config.task_timeout_seconds + 300)
+    )
+    timeout = min(adapter_bound, ceiling) if adapter_bound > 0 else ceiling
+    create_kwargs: dict[str, Any] = {
+        "template": template,
+        "timeout": timeout,
+        "envs": dict(envs or {}),
+    }
+    if config.e2b_api_key:
+        create_kwargs["api_key"] = config.e2b_api_key
+    try:
+        return factory(**create_kwargs), int(timeout)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the run record
+        raise SandboxError(f"sandbox 创建失败: {type(exc).__name__}: {exc}") from exc
+
+
+def _recover_workspace(sandbox: Any, destination: Path) -> tuple[list[Path], list[str]]:
+    """Copy the sandbox workspace's direct file children into ``destination``.
+
+    Only direct children with simple names are recovered, each one bounded;
+    anything unreadable (a directory), oversized, or named with a path
+    separator is recorded as a failure instead of being guessed at. Shared by
+    the pi and ACP faces (both write their deliverable into the same sandbox
+    workspace).
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        entries = sandbox.files.list(SANDBOX_WORKSPACE)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the caller
+        return [], [f"无法列出沙箱工作区: {type(exc).__name__}: {exc}"]
+    try:
+        tree = ArtifactTree(destination)
+    except ArtifactError as exc:
+        return [], [f"宿主工作区不可用: {exc}"]
+    files: list[Path] = []
+    failures: list[str] = []
+    with tree:
+        for entry in entries:
+            name = str(getattr(entry, "name", None) or "")
+            path = str(getattr(entry, "path", None) or f"{SANDBOX_WORKSPACE}/{name}")
+            if not name:
+                continue
+            # Path semantics are checked before the hidden-file skip: a name
+            # that tries to escape ("../x") starts with a dot and must be
+            # reported, not silently ignored.
+            if "/" in name or "\\" in name or name in {".", ".."}:
+                failures.append(f"跳过非法产物名: {name!r}")
+                continue
+            kind = _entry_kind(entry)
+            if kind == "dir":
+                # Directories are not deliverables; only regular entries are
+                # recovered (and an unreadable regular entry is reported).
+                continue
+            if kind == "symlink":
+                # The host never follows links — the same rule ArtifactTree
+                # enforces on every read and write. A linked artifact is
+                # skipped rather than resolved and is not a run failure.
+                continue
+            if name.startswith("."):
+                continue
+            # Bound the read with the listing's own metadata before loading
+            # the entry; an entry whose size the SDK does not report falls
+            # back to a streamed, bounded read.
+            known = getattr(entry, "size", None)
+            data, failure = _read_file_bounded(
+                sandbox,
+                path,
+                ARTIFACT_MAX_BYTES,
+                known_size=known if isinstance(known, int) else None,
+            )
+            if data is None:
+                failures.append(f"产物不可读取或超过上限: {name}: {failure}")
+                continue
+            try:
+                tree.replace(name, data, max_bytes=ARTIFACT_MAX_BYTES)
+            except (ArtifactError, OSError) as exc:
+                failures.append(f"产物写入失败: {name}: {exc}")
+                continue
+            files.append(destination / name)
+    return files, failures
 
 
 def _runtime_manifest(runtime_dir: Path) -> list[tuple[str, bool]]:

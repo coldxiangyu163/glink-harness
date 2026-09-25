@@ -16,7 +16,7 @@ and the ACP agent's own configuration) and its official extension points.
 from __future__ import annotations
 
 from .acp_env import AcpRuntime, prepare_acp_runtime
-from .acp_execution import AcpExecutionAdapter
+from .acp_execution import AcpExecutionAdapter, AcpSandboxExecutionAdapter
 from .acp_projection import ACP_STOP_REASONS, AcpProjector
 from .acp_rpc import (
     AcpClosed,
@@ -33,6 +33,7 @@ from .agent_env import (
     prepare_agent_dir,
     template_manifest,
 )
+from .e2b_env import E2BAcpSandboxClient, SANDBOX_ACP_HOME
 from .execution import (
     ArtifactRecovery,
     CleanupReport,
@@ -63,10 +64,12 @@ __all__ = [
     "AcpRequestError",
     "AcpRpcClient",
     "AcpRuntime",
+    "AcpSandboxExecutionAdapter",
     "AcpTimeout",
     "AgentRuntime",
     "ArtifactRecovery",
     "CleanupReport",
+    "E2BAcpSandboxClient",
     "ExecutionAdapter",
     "ExecutionOutcome",
     "ExecutionSpec",
@@ -79,6 +82,7 @@ __all__ = [
     "RpcResponse",
     "RunBusy",
     "RunManager",
+    "SANDBOX_ACP_HOME",
     "SessionInfo",
     "build_adapter",
     "build_pi_argv",

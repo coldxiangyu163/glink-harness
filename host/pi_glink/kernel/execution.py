@@ -60,7 +60,12 @@ from ..config import ConfigError, HostConfig
 from .acp_rpc import AcpRpcClient
 from .agent_env import AgentRuntime
 from .docker_env import CONTAINER_WORKSPACE
-from .e2b_env import E2BSandboxClient, SandboxError, parse_json_stream_line
+from .e2b_env import (
+    E2BAcpSandboxClient,
+    E2BSandboxClient,
+    SandboxError,
+    parse_json_stream_line,
+)
 from .rpc import PiRpcClient, PiRpcError
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only, avoids an import cycle
@@ -584,6 +589,7 @@ def build_adapter(
     | None = None,
     acp_docker_plan: Callable[[ExecutionSpec], tuple[list[str], Mapping[str, str], str]]
     | None = None,
+    acp_e2b_plan: Callable[[ExecutionSpec], "E2BAcpSandboxClient"] | None = None,
     acp_client_factory: Callable[..., AcpRpcClient] | None = None,
 ) -> ExecutionAdapter:
     """Compose the adapter for one run's frozen harness and execution face.
@@ -597,21 +603,26 @@ def build_adapter(
 
     The ACP family shares one adapter across faces: ``inproc`` spawns the agent
     directly; ``docker`` spawns ``docker run -i`` and hands the container's
-    stdio to the same :class:`AcpRpcClient`, so there is no second protocol
-    implementation. E2B is the later M3b milestone and is refused here as well
-    as in the configuration.
+    stdio to the same :class:`AcpRpcClient`; ``e2b`` creates the run's sandbox
+    and hands a sandbox background command's handle to the same client through
+    :class:`~pi_glink.kernel.e2b_env.SandboxCommandProcess`. There is no second
+    protocol implementation on any face.
     """
     if harness == "acp":
         # Imported here, not at module import: the ACP adapter depends on the
         # contract defined in this module.
-        from .acp_execution import AcpExecutionAdapter
+        from .acp_execution import AcpExecutionAdapter, AcpSandboxExecutionAdapter
 
         if executor == "e2b":
-            # M3b implements the ACP family on the sandbox face; only the
-            # configuration normally refuses this, so this is the backstop for
-            # a directly constructed HostConfig.
-            raise ConfigError(
-                "PI_GLINK_HARNESS=acp 暂不支持 e2b 执行面（M3b）；可用 inproc / docker"
+            if acp_e2b_plan is None:
+                raise ConfigError("ACP e2b 适配器需要 acp_e2b_plan")
+            sandbox = acp_e2b_plan(spec)
+            return AcpSandboxExecutionAdapter(
+                spec,
+                sandbox=sandbox,
+                client_factory=acp_client_factory or AcpRpcClient,
+                on_frame=on_frame,
+                on_identity=on_identity,
             )
         if executor == "docker":
             if acp_docker_plan is None:

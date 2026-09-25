@@ -798,7 +798,36 @@ def test_acp_adapter_is_composed_through_the_same_contract(tmp_path: Path) -> No
     assert isinstance(docker_adapter, AcpExecutionAdapter)
     assert docker_adapter.identity() == {"container": "pi-glink-contract"}
 
-    # M3b（e2b）仍被拒绝，且不静默降级。
+    # M3b：e2b 面已实现，装配层不再拒绝；沙箱客户端/桥接与终态走
+    # tests/test_kernel_acp_e2b.py（fake SDK），这里只确认接缝不再失败。
+    # 原义务（M1–M3a）：build_adapter(harness="acp", executor="e2b") 必须报
+    # ConfigError（不静默降级）；新义务：接受，但缺少 acp_e2b_plan 时显式失败。
+    from pi_glink.kernel.acp_execution import AcpSandboxExecutionAdapter
+
+    class _FakeSandboxClient:
+        sandbox_id = ""
+        argv: list[str] = []
+        template = "glink-acp-worker"
+
+        def start(self, **_kwargs) -> None:
+            pass
+
+        def spawn(self):  # pragma: no cover - 本用例不启动 agent
+            raise AssertionError("spawn 不应在本用例中被调用")
+
+    e2b_adapter = build_adapter(
+        spec,
+        harness="acp",
+        executor="e2b",
+        client_factory=PiRpcClient,
+        on_frame=lambda _frame: None,
+        rpc_plan=lambda _spec: ([], {}, None),
+        docker_plan=lambda _spec: ([], {}, "container"),
+        docker_stop=lambda _name: [],
+        acp_plan=lambda _spec: ([], {}, None),
+        acp_e2b_plan=lambda _spec: _FakeSandboxClient(),
+    )
+    assert isinstance(e2b_adapter, AcpSandboxExecutionAdapter)
     with pytest.raises(ConfigError):
         build_adapter(
             spec,

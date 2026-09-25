@@ -1,0 +1,43 @@
+ACP M3b：E2B dev 模板构建与真实沙箱自检证据
+===========================================
+模板名: glink-acp-worker（独立 dev 模板；不移动任何已有 tag）
+Template ID: oen0rq47o2sizakry5v3
+Build ID: 3a75d2b3-57aa-4876-b2fd-fee5276155b5
+Dockerfile: docker/e2b/Dockerfile.acp-e2b
+钉版 ARG: DSH_VERSION=0.1.5-rc.3 / CODEX_ACP_VERSION=1.13.1（与 M3a 镜像同版本）
+Node: node:24.21.0-bookworm-slim（与 docker/Dockerfile.worker、docker/Dockerfile.acp-worker 同一 tag）
+
+构建命令（E2B CLI，按纪律不使用 Python SDK 的 Template().from_dockerfile）:
+  E2B_API_KEY=… npx -y @e2b/cli template create glink-acp-worker \
+    --dockerfile Dockerfile --cpu-count 2 --memory-mb 4096
+构建退出码: 0（原始日志 /tmp/e2b-acp-build/build3.log；构建耗时 36s）
+
+构建期事实（日志节选）:
+  10:25:09 INFO  Template created with ID: oen0rq47o2sizakry5v3, Build ID: 3a75d2b3-57aa-4876-b2fd-fee5276155b5
+  10:25:21 INFO  Running start command: acp-self-check
+  10:25:25 INFO  [start] [stdout]: 0.1.5-rc.3
+  10:25:25 INFO  [start] [stdout]: @agentclientprotocol/codex-acp 1.13.1
+  10:25:41 INFO  Template is ready
+  10:25:45 INFO  Build finished, took 36s
+
+两次失败与原因（都不是网络问题，已写进 Dockerfile 注释）:
+  1) CMD ["sh","-c","dsh --version && codex-acp --version"]：E2B 构建把 CMD 数组用空格拼成
+     一行再交给 shell（日志 "Running start command: sh -c dsh --version && codex-acp --version"），
+     `sh -c dsh --version` 把 --version 当 $0，dsh 报 "--profile <name> is required"，构建失败。
+     修复：CMD 指向镜像内脚本 acp-self-check。
+  2) RUN printf '%s\n' …：E2B 构建解析把 Dockerfile 文本里的 \n 吃成 n（日志里的 RUN 命令即为
+     `printf '%sn' …`），脚本没有换行，execve 报 "cannot execute: required file not found"。
+     修复：改为逐行 echo 生成脚本，不出现转义符。
+
+真实沙箱自检（脚本 scripts/spikes/acp_e2b/template_selfcheck.py，只按 id 终止）:
+{
+  "date": "2026-09-25 10:26:21",
+  "template": "glink-acp-worker",
+  "sandbox_id": "ivg20clz6qqmy4jd94ykb",
+  "envd_version": "0.9.0",
+  "exit_code": 0,
+  "stdout": "id=user uid=1001 gid=1001\nhome=/home/user pwd=/home/user/workspace\nnode=v24.21.0\ndsh=0.1.5-rc.3\ncodex_acp=@agentclientprotocol/codex-acp 1.13.1\nacp_dir_writable=yes\nworkspace_writable=yes\nself_check=0.1.5-rc.3;@agentclientprotocol/codex-acp 1.13.1;\nper_run_home_mkdir=ok\nper_run_home_write=ok\nprobe_read=credential-probe\n",
+  "stderr": "",
+  "killed": true
+}
+[PASS] 模板自检

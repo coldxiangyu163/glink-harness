@@ -2,9 +2,11 @@
 
 The ACP family shares this adapter across transmission faces: ``inproc`` (the
 agent process shares the host machine), ``docker`` (the agent runs in a
-container, ``AcpRpcClient`` speaking to ``docker run -i``'s stdio) and, later,
-E2B (M3b). Only the process launch, the agent-visible workspace and the
-teardown differ; the protocol work — and therefore this module — is the same.
+container, ``AcpRpcClient`` speaking to ``docker run -i``'s stdio) and ``e2b``
+(the agent runs as a sandbox background command driven by ``send_stdin``, wired
+through :class:`AcpSandboxExecutionAdapter` below). Only the process launch, the
+agent-visible workspace and the teardown differ; the protocol work — and
+therefore this module — is the same.
 
 ``start()``
     Spawn the agent, ``initialize`` (protocol version + capability negotiation)
@@ -65,6 +67,7 @@ from .acp_rpc import (
     AcpRequestError,
     AcpRpcClient,
 )
+from .e2b_env import SANDBOX_WORKSPACE, E2BAcpSandboxClient
 from .execution import (
     ArtifactRecovery,
     CleanupReport,
@@ -154,12 +157,18 @@ class AcpExecutionAdapter(ExecutionAdapter):
         session_cwd: str | None = None,
         container_name: str | None = None,
         container_stop: Callable[[str], list[str]] | None = None,
+        spawn_factory: Callable[[], Any] | None = None,
     ) -> None:
         super().__init__(spec, on_frame=on_frame)
         self._argv = list(argv)
         self._env = dict(env)
         self._cwd = cwd
         self._client_factory = client_factory
+        #: How the client starts the agent: ``None`` spawns the argv on this
+        #: host; the sandbox face injects a factory for a sandbox background
+        #: command. Only the carrier differs — the protocol work below is the
+        #: same code for every face.
+        self._spawn_factory = spawn_factory
         #: The ``cwd`` handed to ``session/new``: the workspace as the *agent*
         #: sees it. In-process that is the host workspace; in a container it is
         #: the mount point (:data:`~pi_glink.kernel.docker_env.CONTAINER_WORKSPACE`),
@@ -197,13 +206,15 @@ class AcpExecutionAdapter(ExecutionAdapter):
             raise AcpError(
                 "ACP 适配器尚不支持续接（session/resume 未实现）；拒绝以新会话冒充追问"
             )
-        client = self._client_factory(
-            self._argv,
-            cwd=self._cwd,
-            env=self._env,
-            on_notification=self._on_notification,
-            on_request=self._on_request,
-        )
+        client_kwargs: dict[str, Any] = {
+            "cwd": self._cwd,
+            "env": self._env,
+            "on_notification": self._on_notification,
+            "on_request": self._on_request,
+        }
+        if self._spawn_factory is not None:
+            client_kwargs["spawn"] = self._spawn_factory
+        client = self._client_factory(self._argv, **client_kwargs)
         self._client = client
         try:
             client.start()
@@ -621,6 +632,99 @@ class AcpExecutionAdapter(ExecutionAdapter):
                 ):
                     return option
         return None
+
+
+class AcpSandboxExecutionAdapter(AcpExecutionAdapter):
+    """The ACP family inside an E2B sandbox (M3b).
+
+    Composition, not a second protocol implementation: the sandbox's background
+    command is wrapped as a ``subprocess``-shaped process
+    (:class:`~pi_glink.kernel.e2b_env.SandboxCommandProcess`) and handed to the
+    *same* :class:`AcpRpcClient` the in-process and Docker faces use, so
+    ``initialize``/``session/new``/``session/prompt`` handling, permission
+    answers, turn boundaries and the verdict inputs are the same code.
+
+    Face-specific work only:
+
+    * the sandbox is created first — its identity is persisted immediately, like
+      the pi face — and the run's rendered ACP ``HOME`` (credentials, 0600
+      inside the sandbox) is uploaded before the agent starts;
+    * the agent-visible workspace is the sandbox path, so ``session/new``'s
+      ``cwd`` is that path and never a host path the sandbox cannot see;
+    * the workspace is recovered from the sandbox before it is destroyed (the pi
+      face's rule), and ``close()`` kills the sandbox after the client stopped
+      the agent.
+    """
+
+    kind = "acp-e2b"
+
+    def __init__(
+        self,
+        spec: ExecutionSpec,
+        *,
+        sandbox: E2BAcpSandboxClient,
+        client_factory: Callable[..., AcpRpcClient] = AcpRpcClient,
+        on_frame: FrameCallback,
+        on_identity: Callable[[Mapping[str, str]], None] | None = None,
+    ) -> None:
+        super().__init__(
+            spec,
+            argv=sandbox.argv,
+            # The agent's environment is per command (per-run HOME plus the
+            # configured entries); the client's ``env`` is only used when it
+            # spawns a host process, which this face never does.
+            env={},
+            cwd=None,
+            client_factory=client_factory,
+            on_frame=on_frame,
+            session_cwd=SANDBOX_WORKSPACE,
+            spawn_factory=sandbox.spawn,
+        )
+        self._sandbox = sandbox
+        self._on_identity = on_identity
+
+    def start(self) -> None:
+        self._sandbox.start(timeout_seconds=self.spec.timeout_seconds + 300)
+        # The sandbox exists from here on: hand its identity to the host before
+        # any step that can fail, so a partial start still leaves a named
+        # leftover the operator and the online sweep can act on.
+        if self._sandbox.sandbox_id and self._on_identity is not None:
+            self._on_identity({"sandbox": self._sandbox.sandbox_id})
+        self._sandbox.upload_home()
+        super().start()
+
+    def session_info(self) -> SessionInfo | None:
+        session = super().session_info()
+        if session is None:
+            return None
+        payload = dict(session.payload)
+        # Same facts the pi E2B face records: which sandbox carried the run and
+        # which template it came from.
+        payload["sandboxId"] = self._sandbox.sandbox_id
+        payload["template"] = self._sandbox.template
+        return SessionInfo(
+            payload=payload, session_id=session.session_id, session_file=None
+        )
+
+    def recover_artifacts(self, destination: Path) -> ArtifactRecovery:
+        files, failures = self._sandbox.recover_artifacts(destination)
+        return ArtifactRecovery(files=tuple(files), failures=tuple(failures))
+
+    def close(self) -> CleanupReport:
+        # Client first (stop the agent), then the sandbox. The base report
+        # carries the client/container failures; this face adds the sandbox
+        # destruction. Either failure is reported, never swallowed.
+        report = super().close()
+        failures = list(report.failures)
+        failures.extend(self._sandbox.close())
+        return CleanupReport(
+            released=not failures,
+            failures=tuple(failures),
+            external=dict(self.identity()),
+        )
+
+    def identity(self) -> Mapping[str, str]:
+        return {"sandbox": self._sandbox.sandbox_id} if self._sandbox.sandbox_id else {}
 
 
 def _clip(text: str, limit: int) -> str:

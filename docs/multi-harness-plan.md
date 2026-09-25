@@ -14,8 +14,14 @@ system prompt 送达通道与每 run 凭据注入已实现。逐条实测事实�
 凭据挂载、cpus/memory/pids 限制与降权与 pi 面对齐，容器名/停止/对账复用既有的
 `docker_env` 约定，并经宿主 HTTP API 跑过一次容器内最小真实 run；实测与镜像钉版见
 [ACP 集成笔记](acp-integration-notes.md) §5，证据在 `docs/evidence/acp-m3-docker-*.txt`。
-宿主默认 harness 仍是 `pi`，ACP 族只在显式配置下启用，执行面限 inproc 与 docker；
-claude-code-acp、ACP 续接与 e2b 面（M3b）仍属后续里程碑。本文是该方向的事实源：实现与
+**M3b（GLINK-ACP-04）已完成**：ACP 族的 E2B 执行面可用——先在真实沙箱完成双向 stdio
+帧完整性实测（保序/字节一致/LF 分帧/64 KiB–1 MiB 大帧/`close_stdin`，正面），再用独立
+dev 模板 `glink-acp-worker`（E2B CLI 构建、ARG 钉版同 M3a）跑通两个 agent 的沙箱内握手与
+dsh 的一次最小真实 run（SSE 流式、终态、`report.md` 回收、`sandbox_id` 对账无残留）；
+实测与模板事实见 [ACP 集成笔记](acp-integration-notes.md) §6，证据在
+`docs/evidence/acp-m3-e2b-*.txt`。
+宿主默认 harness 仍是 `pi`，ACP 族只在显式配置下启用，执行面已覆盖 inproc / docker / e2b；
+claude-code-acp 与 ACP 续接仍属后续里程碑。本文是该方向的事实源：实现与
 本文出现偏差时回写本文，而不是让代码与文档各自漂移。
 
 ## 1. 决定与定位
@@ -125,7 +131,9 @@ ACP prompt 是结构化 ContentBlock，不存在 pi 那样的「`/` 前缀先派
 尊重每 run `HOME`，真实用户目录未被修改。逐 agent 落点与证据见
 [ACP 集成笔记](acp-integration-notes.md) §4.4。Docker 面沿用同一“只读复制进 run HOME”，
 再在容器内对每个凭据文件加嵌套只读挂载（HOME 本身可写，agent 要写会话/缓存）；
-`PI_GLINK_ACP_ENV` 在 docker 面按名字传给容器，值不进 argv（见集成笔记 §5.2）。
+`PI_GLINK_ACP_ENV` 在 docker 面按名字传给容器，值不进 argv（见集成笔记 §5.2）。E2B 面
+没有宿主挂载，改为把同一份 run HOME 上传进沙箱状态根并在沙箱内重新施加 0700/0600，
+`HOME` 指向该根、`PI_GLINK_ACP_ENV` 作为命令环境通道（值不进命令行；见集成笔记 §6.3）。
 system prompt 的通道也已在 M2 定下：
 作为 `session/prompt` 的首个围栏文本块送达（ACP v1 无 system role；见集成笔记 §4.3）。
 
@@ -149,7 +157,7 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 | M1（GLINK-ACP-01） | ACP 族 inproc 骨架：ACP stdio JSON-RPC 客户端（复用 LF 分帧）、projector、harness 注册与配置级选择（默认仍为 pi，不动 API/前端）、run 全生命周期接入（受理/流式/取消/终态/产物回收）、fail-closed 权限应答、合成 fake ACP server 测试 | `bash scripts/check.sh` 全绿；合成测试覆盖 §4.1 映射、取消、stopReason 判定、权限拒绝、门禁；现有 pi 三面测试零回归 | 已完成（合成验证；实现口径与待实测项见 [ACP 集成笔记](acp-integration-notes.md)） |
 | M2（GLINK-ACP-02） | 真实冒烟：`dsh --profile acp` 与 `codex-acp` 各跑一次真实研究 run（inproc）；system prompt 送达通道；per-agent 凭据注入（每 run HOME/env、0600、并入 redactor）；能力矩阵、usage 口径与权限决策回写 | 真实 run 报告产物 + 集成笔记；`bash scripts/check.sh` 全绿 | **已完成**（2026-09-25）：两侧握手与最小真实 run 均成功，fail-closed 默认无需白名单；实测细节见 [ACP 集成笔记](acp-integration-notes.md) §4，证据 `docs/evidence/acp-m2-*.txt` |
 | M3a（GLINK-ACP-03） | Docker 执行面：`docker/Dockerfile.acp-worker`（自包含、ARG 钉版、镜像内自检）；`docker run -i` 双向 stdio 桥接复用 M1 客户端；每 run HOME 与只读凭据挂载；容器名/停止/对账复用 `docker_env` 约定；资源限制与降权与 pi 面对齐；解除 `harness=acp + executor=docker` 的启动拒绝 | `bash scripts/check.sh` 全绿；合成 plan/钉版边界回归；镜像自检 + 一次容器内最小真实 run（流式/终态/report.md/无容器残留） | **已完成**（2026-09-25）：docker 面可用，pi docker 面零回归；实测与钉版见 [ACP 集成笔记](acp-integration-notes.md) §5，证据 `docs/evidence/acp-m3-docker-*.txt` |
-| M3b | e2b 执行面：双向 stdio（`stdin=True` + `send_stdin`，SDK 2.x 已具备）帧完整性实测先行；模板钉版；`harness=acp + executor=e2b` 的启动拒绝随之解除 | e2b smoke | 未开始（M3a 继续拒绝该组合） |
+| M3b | e2b 执行面：双向 stdio（`stdin=True` + `send_stdin`，SDK 2.x 已具备）帧完整性实测先行；模板钉版；`harness=acp + executor=e2b` 的启动拒绝随之解除 | e2b smoke | **已完成**（2026-09-25）：帧完整性正面、dev 模板 `glink-acp-worker` 构建+自检、两 agent 沙箱内握手、dsh 最小真实 run（report.md 与沙箱按 id 无残留）；实测见 [ACP 集成笔记](acp-integration-notes.md) §6，证据 `docs/evidence/acp-m3-e2b-*.txt` |
 | M4 | claude-code-acp 接入；能力矩阵补齐；如需，前端 harness 标识与按 run 选择 harness 的 API | 按当时验收 | 未开始 |
 
 每个里程碑独立验收、独立提交边界；里程碑之间允许因实测结论回写本文。
@@ -159,7 +167,7 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 * **配置开关**：`PI_GLINK_HARNESS=pi|acp`（默认 `pi`）+ `PI_GLINK_ACP_COMMAND`；只在配置层，
   无 API/前端参数，`public_view()` 不暴露 harness。M1 落地时 ACP 只接 `inproc`；M3a 起
   `docker` 组合可用（镜像走独立的 `LOCAL_WEB_ACP_WORKER_IMAGE`，见 §5），`e2b` 组合继续在
-  启动即拒绝（M3b）。
+  启动即拒绝（M3b）；M3b 起三个执行面（inproc / docker / e2b）都可用。
 * **续接（§4.4）**：M1 不实现 ACP 的 `session/resume`；ACP run 不落会话文件，追问在准入层以
   `session_unavailable` 拒绝，适配器也不会以新会话冒充追问。
 * **用量（§4.1）**：`usage_update` 保留 ACP 的「上下文窗口占用 + 累计成本」视角，投影为
@@ -185,3 +193,7 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 * **权限无人应答**：fail-closed 默认；任何放行白名单需逐 harness 论证并记录。
 * **升级路径**：每个外部适配器/harness 的版本固定点与升级冒烟步骤，写进对应集成笔记，
   参照 [pi 边界](pi-boundary.md) §3 的三处固定模式。
+* **E2B 传输与模板**：沙箱 stdio 是 `send_stdin` + `CommandHandle` 流（主机不可见容器级
+  只读挂载），且 E2B 构建解析会改写 Dockerfile 文本（CMD 拼接、`\n` 转义）——模板必须
+  CLI 构建 + 真实沙箱自检，帧完整性已有真实沙箱实测（集成笔记 §6.1/§6.2）。E2B 这条 SDK
+  路径只暴露 lifetime，没有 cpus/memory 参数，宿主只声明它真的要求过的边界。

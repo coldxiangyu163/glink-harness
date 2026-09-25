@@ -339,12 +339,17 @@ def test_the_package_pin_boundary_detects_drift() -> None:
 # -- runner wiring ------------------------------------------------------------
 
 
-def test_e2b_remains_refused_for_the_acp_family(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError) as excinfo:
-        make_config(tmp_path, LOCAL_WEB_EXECUTOR="e2b")
-    assert "M3b" in str(excinfo.value)
+def test_e2b_is_no_longer_refused_for_the_acp_family(tmp_path: Path) -> None:
+    """原义务（M3a）：acp+e2b 在配置层与装配层都拒绝，直到 M3b 实测完成。
 
-    config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
+    新义务（M3b）：E2B 面已实现，配置接受该组合，装配层返回沙箱适配器。
+    这里只钉“不再拒绝且交给沙箱面”的接缝；E2B 沙箱客户端、凭据交付、桥接
+    与终态走 ``tests/test_kernel_acp_e2b.py`` 的 fake SDK 回归。
+    """
+    config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="e2b")
+    assert config.harness == "acp" and config.executor == "e2b"
+    assert config.acp_e2b_template == "glink-acp-worker"
+
     runtime = make_runtime(config, tmp_path)
     spec = ExecutionSpec(
         config=config,
@@ -355,7 +360,20 @@ def test_e2b_remains_refused_for_the_acp_family(tmp_path: Path) -> None:
         workspace=tmp_path,
         timeout_seconds=5,
     )
-    with pytest.raises(ConfigError):
+
+    class _FakeSandbox:
+        sandbox_id = "fake-sandbox-id"
+        argv = ["fake-acp"]
+        template = "glink-acp-worker"
+
+        def start(self, **_kwargs) -> None:
+            pass
+
+        def spawn(self):  # pragma: no cover - 装配契约只检查可调用
+            raise AssertionError("spawn 不应在本用例中被调用")
+
+    with pytest.raises(ConfigError, match="acp_e2b_plan"):
+        # 没有沙箱 plan 的装配必须显式失败，不能静默回退到 on-prem 面。
         build_adapter(
             spec,
             harness="acp",
@@ -367,6 +385,23 @@ def test_e2b_remains_refused_for_the_acp_family(tmp_path: Path) -> None:
             docker_stop=lambda _name: [],
             acp_plan=lambda _spec: ([], {}, None),
         )
+
+    from pi_glink.kernel.acp_execution import AcpSandboxExecutionAdapter
+
+    adapter = build_adapter(
+        spec,
+        harness="acp",
+        executor="e2b",
+        client_factory=PiRpcClient,
+        on_frame=lambda _frame: None,
+        rpc_plan=lambda _spec: ([], {}, None),
+        docker_plan=lambda _spec: ([], {}, "container"),
+        docker_stop=lambda _name: [],
+        acp_plan=lambda _spec: ([], {}, None),
+        acp_e2b_plan=lambda _spec: _FakeSandbox(),
+    )
+    assert isinstance(adapter, AcpSandboxExecutionAdapter)
+    assert adapter.identity() == {"sandbox": "fake-sandbox-id"}
 
 
 def test_a_missing_daemon_fails_closed_and_keeps_the_persisted_identity(

@@ -13,6 +13,10 @@
 | `dsh 实测` | dsh 0.1.5-rc.3 的真实 initialize/session/new 与真实运行（证据 `docs/evidence/acp-m2-handshake.txt`、`acp-m2-smoke-dsh.txt`） |
 | `codex-acp 实测` | codex-acp 0.16.0 的真实 initialize/session/new 与真实运行（证据 `docs/evidence/acp-m2-handshake.txt`、`acp-m2-smoke-codex-acp.txt`） |
 | `docker 实测` | M3a 的真实容器证据（`docs/evidence/acp-m3-docker-*.txt`）：镜像构建与容器内自检、容器内 ACP 握手、经宿主 HTTP API 的一次最小真实 run |
+| `e2b 帧实测` | M3b 帧完整性探针的真实沙箱输出（`docs/evidence/acp-m3-e2b-framing.txt`，base 模板，e2b SDK 2.51.0）：保序、字节一致、LF 分帧、大帧与 `close_stdin` |
+| `e2b 模板实测` | M3b 的 dev 模板 CLI 构建与真实沙箱自检（`docs/evidence/acp-m3-e2b-template.txt`）：`glink-acp-worker`、构建日志、两次失败与修复 |
+| `e2b 握手实测` | M3b 用生产装配路径在两个 agent 上的真实沙箱 `initialize`/`session/new`（`docs/evidence/acp-m3-e2b-agent-check.txt`） |
+| `e2b 实测` | M3b 经宿主 HTTP API 的一次最小真实 run（`docs/evidence/acp-m3-e2b-smoke.txt`）：SSE 流式、终态、report 回收、沙箱按 id 终止 |
 | `镜像自检` | `pi-glink-acp-worker` 镜像内两个 agent 的 `--version` 输出（构建期日志与本机 `docker run --rm` 复验，证据同 `docker 实测`） |
 | `npm` | npm registry 元数据（`npm view`） |
 | `宿主代码` | 本仓库实现（`host/pi_glink/kernel/`、`config.py`） |
@@ -22,8 +26,11 @@
 `@deepseek-ai/dsh@0.1.5-rc.3` 与 `@zed-industries/codex-acp@0.16.0` 均完成真实
 initialize + session/new（不消耗模型）并经宿主 HTTP API 各跑一次最小真实研究 run。
 **M3a 完成（GLINK-ACP-03）**：ACP 族的 Docker 执行面可用（容器 stdio 桥接同一 M1 客户端、
-每 run HOME 与只读凭据挂载、资源限制与 pi 面对齐），镜像与实测见 §5；E2B 面、
-`claude-code-acp` 与 ACP 续接仍属后续里程碑。
+每 run HOME 与只读凭据挂载、资源限制与 pi 面对齐），镜像与实测见 §5。
+**M3b 完成（GLINK-ACP-04）**：ACP 族的 E2B 执行面可用——先在真实沙箱完成双向 stdio
+帧完整性实测（§6.1），再用独立 dev 模板 `glink-acp-worker` 跑通握手（§6.4）与一次最小
+真实 run（§6.5）；沙箱后台命令的 stdio 交给同一 M1 客户端，每 run HOME/凭据、产物回收与
+`sandbox_id` 对账沿用 pi 面约定。`claude-code-acp` 与 ACP 续接仍属后续里程碑。
 
 ## 1. 协议事实（v1）
 
@@ -185,8 +192,9 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
    `PI_GLINK_ACP_COMMAND`（ACP agent 命令行，`shlex.split` 后直接 exec，不经 shell）。
    没有 API/前端参数，`public_view()` 不含 harness，现有部署零变化。（与方案 §5/§6 一致）
 2. **执行面**：M1 只接 `inproc`；M3a 起 `PI_GLINK_HARNESS=acp` 同时支持
-   `LOCAL_WEB_EXECUTOR=inproc|docker`（Docker 面见 §5），与 `e2b` 的组合继续在启动即拒绝
-   （M3b 做沙箱 stdio 与状态目录回收）。
+   `LOCAL_WEB_EXECUTOR=inproc|docker`，M3b 起再加上 `e2b`（§6；沙箱后台命令的
+   `stdin=True` + `send_stdin` 承载同一份 stdio）。三个执行面共用同一个 ACP 适配器与
+   `AcpRpcClient`，不为 e2b 另写协议代码。
 3. **续接未实现**：M1 不实现 `session/resume`（能力位 `sessionCapabilities.resume`）。
    ACP run 不落会话文件，追问在**准入层**以 `session_unavailable` 拒绝；适配器另外对
    任何 `resume_session` 输入直接报错，绝不以新会话冒充追问。（方案 §4.4 的「能力缺失
@@ -354,7 +362,7 @@ ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现
   `@agentclientprotocol/codex-acp`：旧包 `@zed-industries/codex-acp`（0.16.0，M2 实测）
   已被 npm 标记 deprecated（“replaced by @agentclientprotocol/codex-acp”，`npm`），
   后继包 1.13.1 用仓库 M1 客户端实测 `initialize` 协商回 `protocolVersion=1`
-  并声明 `sessionCapabilities`（`docker 实测`）；本次只验证握手，真实模型 run 仍列在 §7。
+  并声明 `sessionCapabilities`（`docker 实测`）；本次只验证握手，真实模型 run 仍列在 §8。
 * 镜像默认命令即自检：`dsh --version && codex-acp --version`；构建期还用 ARG 精确比对
   两个 `--version` 输出（不一致即构建失败），因此“镜像里装的是声明版本”是可复核事实
   （`镜像自检`/`宿主代码`）。实测：`pi-glink-acp-worker:latest`（sha256:4268dca9d9ed…，
@@ -432,15 +440,161 @@ ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现
 ### 5.5 与 M2 的差异与风险
 
 * **codex-acp 包替换**：0.16.0（旧包）→ 1.13.1（后继包）。M3a 只验证了容器内
-  initialize/session/new；后继包的真实模型 run 仍待授权（§7）。
+  initialize/session/new；M3b 在 e2b 沙箱内也只验证握手；后继包的真实模型 run 仍待授权（§8）。
 * **只读范围**：只读的是凭据文件（嵌套 `:ro` 挂载），HOME 本身可写——agent 必须能写
   sessions/cache；不是整个 HOME 只读（`宿主代码`/`docker 实测`）。
 * **容器 root 与宿主挂载**：容器内是 root，但 macOS/Colima 下 bind mount 的属主仍是宿主
-  用户；Linux 宿主上 root 写 bind mount 的 uid 归属与文件属主变化**待实测**（§7）。
+  用户；Linux 宿主上 root 写 bind mount 的 uid 归属与文件属主变化**待实测**（§8）。
 * **共享路径约束**：Colima 只共享 home 树，数据根必须在共享路径内（见 §5.4）；
   不同 Docker 后端（Docker Desktop/Linux 原生）的共享范围与“非共享路径静默空挂载”行为
   待逐环境实测。
-## 6. M1 合成验证覆盖
+## 6. M3b 实测（2026-09-25，E2B 执行面）
+
+M3b 把 ACP 族从 inproc/Docker 扩到 E2B 云沙箱。协议侧零新增：沙箱后台命令的 stdio 交给
+同一个 M1 `AcpRpcClient`，投影、权限应答、回合边界与终态判定继续是同一份实现。本节每条
+都标来源；证据文件：`docs/evidence/acp-m3-e2b-framing.txt`（帧完整性）、
+`acp-m3-e2b-template.txt`（模板）、`acp-m3-e2b-agent-check.txt`（沙箱内握手）、
+`acp-m3-e2b-smoke.txt`（一次真实 run）。
+
+### 6.1 帧完整性（先行实测，结论正面）
+
+E2B SDK 不给双向管道，只有 `commands.run(background=True, stdin=True)` 的
+`CommandHandle`：宿主用 `send_stdin` 写、迭代 handle 读 stdout 分块。M3b 的第一步就是用
+仓库 LF-only 分帧（`kernel/framing.py`）验证这个通道能不能承载 ACP 的 JSON-RPC；探针
+（`scripts/spikes/acp_e2b/frame_integrity_probe.py` + 沙箱端回显 agent）在真实
+`base` 沙箱测了 20 项，全部通过（`e2b 帧实测`）：
+
+* **保序**：64 条逐条写入与 128 条突发写入（不等回包）都按调用顺序得到回包，agent 侧
+  记录序号 `n` 连续、`id`/内容/原始字节哈希逐条一致。
+* **字节一致**：每条记录的 `raw_sha256`（不含结尾 LF）与宿主发送的字节相等；`send_stdin`
+  接受 `str` 与 `bytes`，没有截断或改写。
+* **LF 分帧**：半帧 + 半帧（中间有 0.3s 间隔）合成为一条记录；一次写入两帧被拆成两条；
+  agent 单次 `os.write` 连发三帧也被拆成三条；CRLF 写入者的尾部 CR 单独剥离；共享语料
+  `tests/fixtures/lf-framing.json`（U+2028/U+2029 为内容）双向逐帧一致。
+* **大帧**：64 KiB / 256 KiB / 1 MiB 单条记录双向通过（host→agent 记录 65598 / 262207 /
+  1048640 字节，回包哈希与正文长度全等；agent→host 记录 65835 / 262444 / 1048877 字节）。
+* **EOF**：`close_stdin()` 可用，agent 读到 EOF 后正常退出（exit 0）。
+* **分块不按帧对齐**：两百多条小帧的测试里 stdout 共 293 个 chunk，max_chunk 32768，
+  有 84 个 chunk 停在帧中间、2 个 chunk 含多帧——所以承载方**必须**保留 LF 分帧器，
+  不能假设一块等于一帧。
+
+结论正面，M3b 按计划实现（brief 的“结论负面就停止”未触发）。沙箱只按 `sandbox_id`
+终止，无模式匹配清理（`e2b 帧实测`）。
+
+### 6.2 dev 模板与钉版（E2B CLI 构建）
+
+新增 `docker/e2b/Dockerfile.acp-e2b`，构建**独立 dev 模板** `glink-acp-worker`；生产模板
+`glink-frontier-e2b` 与其任何 tag 均未被读取写入（只有 `template list` 的只读列出），
+pi 面模板 `pi-glink-worker` 也未动（`e2b 模板实测`）。
+
+* 钉版与 M3a 镜像一致：`@deepseek-ai/dsh@0.1.5-rc.3`、
+  `@agentclientprotocol/codex-acp@1.13.1`，`FROM node:24.21.0-bookworm-slim`；构建期用
+  ARG 精确比对两个 `--version`，默认 CMD 也是同一个自检（`e2b 模板实测`）。
+* 构建必须用 E2B CLI（历史事故：Python SDK 的 `Template().from_dockerfile()` 会丢多行
+  ENV）：`E2B_API_KEY=… npx -y @e2b/cli template create glink-acp-worker --dockerfile …
+  --cpu-count 2 --memory-mb 4096`。实测 Template ID `oen0rq47o2sizakry5v3`，
+  Build ID `3a75d2b3-57aa-4876-b2fd-fee5276155b5`，构建 36s（`e2b 模板实测`）。
+* 两个真实构建坑（均写进 Dockerfile 注释与证据）：① E2B 构建会把 CMD 数组用空格拼成
+  一行再交给 shell（日志 `Running start command: sh -c dsh --version && codex-acp
+  --version`），`sh -c dsh --version` 实际是“启动 dsh、把 --version 当 $0”，报
+  `--profile <name> is required`；修复：CMD 指向镜像内自检脚本 `acp-self-check`。
+  ② E2B 构建解析会把 Dockerfile 文本里的 `\n` 吃成 `n`（日志里的 RUN 命令即为
+  `printf '%sn' …`），生成的脚本没有换行、execve 报 “cannot execute: required file
+  not found”；修复：改用逐行 `echo` 生成脚本。
+* 构建后真实沙箱自检（`scripts/spikes/acp_e2b/template_selfcheck.py`）：沙箱默认用户
+  `user`（uid 1001）、`HOME=/home/user`、工作目录 `/home/user/workspace`，`node` v24.21.0，
+  `dsh --version` = 0.1.5-rc.3，`codex-acp --version` = `@agentclientprotocol/codex-acp
+  1.13.1`；`/home/user/acp` 与 `/home/user/workspace` 可写，每 run 状态根
+  `/home/user/acp/home` 可创建可写；envd 0.9.0（`e2b 模板实测`）。
+* 升级路径：改 ARG → CLI 重建 → 边界测试（ARG 必须重新等于本节记录值）→ 沙箱自检 →
+  最小 run。模板名/ID/build ID 是本节的事实源，`tests/test_kernel_acp_e2b.py` 卡住 ARG
+  与本节记录的版本相等。
+
+### 6.3 执行面实现与合成回归
+
+* **沙箱生命周期沿用 pi 面**：`E2BAcpSandboxClient` 与 pi 的 `E2BSandboxClient` 共用
+  `_create_sandbox` / `_recover_workspace` 与同一份冻结配置（`E2B_API_KEY` 走 `Sandbox.create`
+  参数，不进环境）；销毁前把沙箱工作区拉回宿主工作区，`sandbox_id` 在沙箱创建后**立即**
+  持久化（上传失败也保留身份，供台账对账）（`宿主代码`/`合成实测`/`e2b 实测`）。
+* **每 run HOME 与凭据**：复用 `prepare_acp_runtime` 渲染的 `runs/<id>/acp-agent/home`
+  （凭据源只读复制、0600），再上传到沙箱状态根 `/home/user/acp/home`：先把状态根
+  `chmod 0700` 再上传（不让文件落在可遍历目录里），上传后把创建的目录 `chmod 0700`、
+  每个文件 `chmod 0600`；agent 命令的 `HOME` 指向该根，
+  `PI_GLINK_ACP_ENV` 作为显式进程环境通道（值不进命令行），凭据值并入该 run 的 redactor
+  （`宿主代码`/`合成实测`/`e2b 实测`）。
+* **stdio 桥接**：`SandboxCommandProcess` 把 `CommandHandle` 适配成 `subprocess` 形状
+  （`send_stdin`/`close_stdin`/分块读/`poll`/`wait`/`kill`），`AcpRpcClient` 新增可注入的
+  `spawn`，e2b 面把 `E2BAcpSandboxClient.spawn` 交给它——同一份客户端、同一份 LF 分帧，
+  没有第二套协议实现（`宿主代码`/`合成实测`）。
+* **装配**：`build_adapter(harness="acp", executor="e2b")` → `AcpSandboxExecutionAdapter`
+  （`runner._acp_e2b_plan` 提供沙箱客户端）；`session/new` 的 `cwd` 是沙箱路径
+  `/home/user/workspace`（宿主路径在沙箱内不存在），`session_ready` 额外带 `sandboxId` 与
+  `template`（`宿主代码`/`合成实测`/`e2b 实测`）。
+* **配置**：解除 acp+e2b 的启动拒绝；新增冻结旋钮 `LOCAL_WEB_E2B_ACP_TEMPLATE`
+  （默认 `glink-acp-worker`），与 pi 面的 `LOCAL_WEB_E2B_TEMPLATE` 分开；`public_view()`
+  仍不暴露 harness/模板（`宿主代码`/`合成实测`）。
+* **合成回归**（`合成实测`）：新增 `tests/test_kernel_acp_e2b.py` 15 项——fake SDK
+  组合（模板/key/超时/上传清单/0600 加固/命令与 env/生命周期）、用真实子进程 fake ACP
+  agent 走完整桥接的端到端适配器与 run 生命周期（终态、report 回收、身份持久化、上传失败
+  仍保留身份、云端失败不上报身份）、模板 ARG 钉版边界。既有断言按新义务更新并在注释里
+  写明原义务/新义务（配置与装配层的 e2b 拒绝改为接受）。
+
+### 6.4 真实沙箱握手（两个 agent，不消耗模型）
+
+用生产装配路径（`build_config` → `prepare_acp_runtime` → `E2BAcpSandboxClient` →
+`build_adapter`）在 `glink-acp-worker` 沙箱内只做 `initialize` + `session/new`
+（`scripts/spikes/acp_e2b/sandbox_handshake.py`，不发 `session/prompt`）：
+
+* dsh 0.1.5-rc.3：`protocolVersion=1`，`agentInfo={"name":"deepseek-harness-acp",
+  "version":"0.0.1"}`，`sessionCapabilities` 等能力位，`configOptions` = model /
+  reasoning_effort，`authMethods=[]`，`cwd=/home/user/workspace`（`e2b 握手实测`）。
+* codex-acp 1.13.1：`protocolVersion=1`，`agentInfo={"name":"@agentclientprotocol/codex-acp",
+  "version":"1.13.1"}`，`authMethods` = api-key / chat-gpt，`configOptions` 5 个
+  （mode / collaboration_mode / model / reasoning_effort / fast-mode），
+  `cwd=/home/user/workspace`（`e2b 握手实测`）。
+* 两侧凭据源文件 sha256 前后一致、源 mtime 早于本次运行；沙箱按 id 终止、无残留
+  （`e2b 握手实测`）。与 M2/M3a 观测一致：无凭据时 codex-acp 的 `session/new` 会以
+  Authentication required 拒绝（M3a 观测点，本次注入后握手成功）。
+
+### 6.5 一次真实冒烟（dsh，经宿主 HTTP API）
+
+`harness=acp + executor=e2b`、临时数据根、随机端口 55500、300s 有界超时、明确要求写
+`report.md` 的短题（`scripts/spikes/acp_e2b/smoke_host.py`，`e2b 实测`）。该 run 在实现
+提交 `235b86a` 的代码上产生；此后只调整了凭据上传前的状态根 `chmod` 顺序（§6.3/§6.6），
+不影响本小节断言的事实（流式/终态/report 回收/沙箱按 id 对账）；最终代码的沙箱内凭据路径
+由 §6.4 的握手重新实测（`e2b 握手实测`）：
+
+* 终态 `finished`、`modelStopReason=end_turn`、`reportStatus=ok`，时长 29.6s、28 条事件；
+  `GET /api/runs/<id>/report` 200（994 bytes），报告内容为 dsh 写的两点结论 + 1 条已核验
+  来源；`turn_finished` 先于 `run_finished`。
+* 流式：SSE 在 run 期间收到全部 28 帧（`run_started` → `session_ready`（8.1s，cwd 为沙箱
+  路径）→ `turn_started` → thinking/usage/tool（web_search + 3 次 web_fetch）→
+  `assistant_delta` → `turn_finished` → `run_finished`），与 `events.jsonl` 时间线一致。
+* 沙箱：`sandbox_id=i9865hh296nza5lt7az2l` 持久化；`cleanup={"released":true,
+  "external":{"sandbox":"i9865hh296nza5lt7az2l"}}`；宿主日志有 `DELETE /v2/sandboxes/<id>
+  → 204`，随后 `confirm_sandbox_absent(id)` 返回“SDK 确认沙箱不存在”。
+* 清理只操作已知身份：宿主进程由脚本持有的 PID `terminate()`（exit -15），沙箱按 id；
+  未用 `pkill -f`、无名字通配；临时数据根（含每 run HOME 的凭据副本）取证后删除。
+* 脱敏：`scripts/check-no-secrets.py` 对该数据根退出码 0（扫描文件 4 个、真实命中 0 处）；
+  证据文件本身密钥形状 0 命中（`e2b 实测`）。
+* 次数说明：本任务授权“一次最小真实冒烟 run”，本文件即那一次；运行前的管道演练使用不
+  存在的模板（不消耗模型、不创建沙箱），不计入通过项（`e2b 实测`）。
+
+### 6.6 与 M2/M3a 的差异与风险
+
+* **承载面差异只在传输**：e2b 面没有容器挂载，所以每 run HOME 靠“上传 + 沙箱内 chmod”，
+  凭据副本在上传后仍留在宿主 run 目录（0600，随 run 目录生命周期），不是只读挂载；
+  `files.write` 没有 mode 参数，0600 由紧随其后的 `chmod` 施加（已先把状态根 0700，且沙箱
+  本身是单 run 单用户），因此没有容器面的嵌套只读挂载这一层——沙箱内无法验证“凭据文件不可
+  改写/删除”的容器级只读语义（`宿主代码`/`e2b 实测`）。
+* **资源上限**：E2B SDK 这条路径只暴露 lifetime（与 pi e2b 面相同），没有 cpus/memory
+  参数；宿主只声明它真的要求过的边界（`宿主代码`）。
+* **模板独立性**：`glink-acp-worker` 是 dev 模板，未发布/未移动任何 tag；升级同样需要
+  重新构建与沙箱自检（§6.2）。
+* **仍未实测**：`@agentclientprotocol/codex-acp@1.13.1` 在 e2b 面的真实模型 run、
+  e2b 面的真实 `session/cancel` 响应时延（§8）。
+
+## 7. M1 合成验证覆盖
 
 `tests/test_kernel_acp.py`（客户端/投影）与 `tests/test_kernel_acp_runner.py`（run 生命周期），
 fixture 为 `tests/fixtures/fake_acp.py`（真实子进程、真实 stdio）：
@@ -460,18 +614,26 @@ fixture 为 `tests/fixtures/fake_acp.py`（真实子进程、真实 stdio）：
 M3a 新增 `tests/test_kernel_acp_docker.py`（无 daemon）：ACP docker plan 组合（`docker run -i`、
 `/workspace` 与 `HOME=/home/acp` 挂载、凭据嵌套只读挂载、资源限制与 pi 面逐项相等、
 `PI_GLINK_ACP_ENV` 按名字传且值不进 argv）、ACP worker 镜像的钉版边界
-（Dockerfile ARG == 本笔记记录的实测版本，浮动/缺失声明直接失败）、e2b 仍被拒、
-容器身份在启动前持久化与按名对账。真实容器行为不在这个文件里，见 §5 与证据文件。
+（Dockerfile ARG == 本笔记记录的实测版本，浮动/缺失声明直接失败）、acp+e2b 在装配层交给沙箱
+面（M3b 起）、容器身份在启动前持久化与按名对账。真实容器行为不在这个文件里，见 §5 与证据文件。
 
-## 7. 剩余待实测项（§4/§5 已覆盖的不再列）
+M3b 新增 `tests/test_kernel_acp_e2b.py`（无云调用）：ACP e2b 组合（冻结 ACP 模板与
+`E2B_API_KEY` 到达 `Sandbox.create`、每 run HOME 上传清单与沙箱内 0700/0600 加固命令、
+命令即冻结 argv 在沙箱工作区、`background=True`+`stdin=True`+超时等于沙箱寿命）、把
+`CommandHandle` 适配成 subprocess 形状的桥接（真实子进程 fake ACP agent 走完
+initialize/session/new/prompt、投影帧、产物回收与沙箱销毁）、run 生命周期（终态、report、
+`sandbox_id` 持久化、上传失败仍保留身份、云端失败不上报身份）、模板 ARG 钉版与 dev 模板
+独立性。真实沙箱行为不在这个文件里，见 §6 与证据文件。
+
+## 8. 剩余待实测项（§4/§5/§6 已覆盖的不再列）
 
 | 待测事实 | 为什么重要 | 验证方式 |
 |---|---|---|
 | `session/resume` / `session/load` 真实续接（含 dsh 的持久会话语义） | M1 起追问仍显式拒绝；M2 只确认能力位存在 | 授权后的真实续接 run + 终态/状态目录核对 |
-| `session/cancel` 真实响应时延与终态（含工具收敛） | 取消体验；M2 两次 run 未触发取消；M3a docker 面同样未触发 | 真实 run + 计时 |
+| `session/cancel` 真实响应时延与终态（含工具收敛） | 取消体验；M2 两次 run 未触发取消；M3a docker 面、M3b e2b 面同样未触发 | 真实 run + 计时 |
 | claude-code-acp 能力矩阵与凭据（`ANTHROPIC_API_KEY` env） | M4 接入 | 同 M2 握手 + 冒烟 |
-| e2b 面的 ACP stdio 桥接与帧完整性（M3b） | 传输面扩展；M3 的 e2b 部分 | 逐面 smoke（`stdin=True` + `send_stdin`） |
-| `@agentclientprotocol/codex-acp@1.13.1` 的真实模型 run | M3a 只验证了容器内握手与 dsh 的真实 run | 同 M2 冒烟（需新授权） |
+| `@agentclientprotocol/codex-acp@1.13.1` 的真实模型 run | M3a 只验证了容器内握手；M3b 只验证了 e2b 沙箱内握手与 dsh 的真实 run | 同 M2 冒烟（需新授权） |
+| e2b 面的真实 `session/cancel` 响应时延与沙箱终止 | M3b 的 run 正常结束，未触发取消路径 | 真实 run + 计时 + `sandbox_id` 对账 |
 | Linux 宿主上容器 root 写 bind mount 的 uid/属主行为 | macOS/Colima 下属主不变；Linux 原生 Docker 未测 | Linux 宿主上的 docker smoke + 文件属主核对 |
 | 不同 Docker 后端（Docker Desktop 虚拟化 / Linux 原生）的共享路径与空挂载行为 | Colima 只共享 home 树；非共享路径会静默空挂载 | 逐环境 smoke + 挂载内容核对 |
 | 各适配器版本升级冒烟步骤与 license 记录 | 方案 §5/§7 纪律 | 集成笔记逐项补齐 |

@@ -49,19 +49,13 @@ def test_the_harness_is_not_part_of_the_browser_visible_configuration() -> None:
     [
         ({"PI_GLINK_HARNESS": "claude"}, "PI_GLINK_HARNESS must be one of"),
         ({"PI_GLINK_HARNESS": "acp"}, "PI_GLINK_ACP_COMMAND"),
-        (
-            {
-                "PI_GLINK_HARNESS": "acp",
-                "PI_GLINK_ACP_COMMAND": "dsh acp",
-                "LOCAL_WEB_EXECUTOR": "e2b",
-            },
-            "M3b",
-        ),
     ],
 )
 def test_an_unusable_harness_configuration_is_refused_at_startup(
     values: Mapping[str, str], fragment: str
 ) -> None:
+    # 原义务（M1–M3a）：acp+e2b 也在启动即拒绝（M3b 前）。
+    # 新义务（M3b）：e2b 面已实现，配置不再拒绝；改用下面的阳性用例钉住。
     with pytest.raises(ConfigError) as excinfo:
         config(values)
     assert fragment in str(excinfo.value)
@@ -70,8 +64,9 @@ def test_an_unusable_harness_configuration_is_refused_at_startup(
 def test_the_acp_docker_combination_is_accepted_since_m3a() -> None:
     """原义务（M1）：ACP 只允许 inproc，docker/e2b 在启动即拒绝。
 
-    新义务（M3a）：docker 面已实现，配置不再拒绝；e2b 仍由 M3b 拒绝（见上一
-    个参数化用例）。这是行为决定变更，实现/测试/文档同步修改。
+    新义务（M3a/M3b）：docker 与 e2b 面都已实现，配置不再拒绝其中任何一个
+    （e2b 的阳性用例见 :func:`test_the_acp_e2b_combination_is_accepted_since_m3b`）。
+    这是行为决定变更，实现/测试/文档同步修改。
     """
     acp = config(
         {
@@ -87,20 +82,54 @@ def test_the_acp_docker_combination_is_accepted_since_m3a() -> None:
     assert "acpWorkerImage" not in acp.public_view()
 
 
+def test_the_acp_e2b_combination_is_accepted_since_m3b() -> None:
+    """原义务（M1–M3a）：acp + e2b 在启动即拒绝（E2B 帧/模板未实测）。
+
+    新义务（M3b）：帧完整性先实测通过（docs/evidence/acp-m3-e2b-framing.txt），
+    独立 dev 模板 glink-acp-worker 构建并自检，配置接受该组合；ACP 的 E2B 模板
+    与 pi 模板是两个冻结旋钮，浏览器可见配置仍不暴露 harness/模板。
+    """
+    acp = config(
+        {
+            "PI_GLINK_HARNESS": "acp",
+            "PI_GLINK_ACP_COMMAND": "dsh --profile acp",
+            "LOCAL_WEB_EXECUTOR": "e2b",
+        }
+    )
+    assert acp.harness == "acp" and acp.executor == "e2b"
+    assert acp.acp_e2b_template == "glink-acp-worker"
+    # 与 pi 面模板分开：pi 模板里没有 ACP agent。
+    assert acp.e2b_template == "pi-glink-worker"
+    assert acp.e2b_template != acp.acp_e2b_template
+    view = acp.public_view()
+    assert "acpE2bTemplate" not in view and "harness" not in view
+
+    override = config(
+        {
+            "PI_GLINK_HARNESS": "acp",
+            "PI_GLINK_ACP_COMMAND": "dsh --profile acp",
+            "LOCAL_WEB_EXECUTOR": "e2b",
+            "LOCAL_WEB_E2B_ACP_TEMPLATE": "glink-acp-worker:candidate",
+        }
+    )
+    assert override.acp_e2b_template == "glink-acp-worker:candidate"
+
+
 def test_the_harness_invariants_are_rechecked_after_construction() -> None:
     """A directly built/overridden config still passes the same gate."""
     base = config({})
     with pytest.raises(ConfigError):
         validate_host_config(dataclasses.replace(base, harness="acp", acp_command=""))
     with pytest.raises(ConfigError):
-        validate_host_config(
-            dataclasses.replace(base, harness="acp", acp_command="dsh acp", executor="e2b")
-        )
-    with pytest.raises(ConfigError):
         validate_host_config(dataclasses.replace(base, harness="nope"))
     # M3a：ACP + docker 现在是合法组合，直接构造的配置同样被接受。
     validate_host_config(
         dataclasses.replace(base, harness="acp", acp_command="dsh --profile acp", executor="docker")
+    )
+    # M3b：ACP + e2b 同样是合法组合（原义务：直接构造也要被拒绝；新义务：
+    # 接受，装配层由 tests/test_kernel_acp_e2b.py 钉住）。
+    validate_host_config(
+        dataclasses.replace(base, harness="acp", acp_command="dsh --profile acp", executor="e2b")
     )
     # The valid pi default is accepted unchanged.
     validate_host_config(base)

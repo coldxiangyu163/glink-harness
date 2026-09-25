@@ -68,6 +68,11 @@ _DEFAULT_ASSERTION_SKEW_SECONDS = 30
 #: 默认使用本仓库自己的云沙箱模板（含 Node + pi）；FrontierAgent 的
 #: glink-frontier-e2b 是另一个产品的模板，只沿用它的变量语义，不复用它的模板。
 _DEFAULT_E2B_TEMPLATE = "pi-glink-worker"
+#: The ACP family's E2B template (``LOCAL_WEB_E2B_ACP_TEMPLATE``). The pi template
+#: carries pi, not the ACP agents, so the ACP sandbox face gets its own dev
+#: template (``docker/e2b/Dockerfile.acp-e2b``), built and self-checked in a real
+#: sandbox before it was wired (see ``docs/acp-integration-notes.md`` M3b).
+_DEFAULT_ACP_E2B_TEMPLATE = "glink-acp-worker"
 #: Frozen default for the disposable worker image (shared with ``docker_env``).
 DEFAULT_WORKER_IMAGE = "pi-glink-worker:latest"
 #: Frozen default for the ACP worker image (``docker/Dockerfile.acp-worker``):
@@ -146,6 +151,12 @@ class HostConfig:
     #: two images carry different agents. Only consulted when ``harness`` is
     #: ``acp`` and ``executor`` is ``docker``.
     acp_worker_image: str = DEFAULT_ACP_WORKER_IMAGE
+    #: Frozen E2B template for the ACP sandbox face (``LOCAL_WEB_E2B_ACP_TEMPLATE``),
+    #: separate from :attr:`e2b_template` for the same reason
+    #: :attr:`acp_worker_image` is separate from :attr:`worker_image`: the two
+    #: templates carry different harnesses. Only consulted when ``harness`` is
+    #: ``acp`` and ``executor`` is ``e2b``.
+    acp_e2b_template: str = _DEFAULT_ACP_E2B_TEMPLATE
     log_level: str = "INFO"
     task_timeout_seconds: int = 1800
     web_search_key: str = field(repr=False, default="")
@@ -322,14 +333,6 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         raise ConfigError(
             "PI_GLINK_HARNESS=acp 需要 PI_GLINK_ACP_COMMAND（ACP agent 的命令行）"
         )
-    if harness == "acp" and executor == "e2b":
-        # M3a implements the ACP family on the in-process and Docker faces. The
-        # E2B transmission work is its own milestone (M3b); silently running pi
-        # instead would misrepresent the run.
-        raise ConfigError(
-            "PI_GLINK_HARNESS=acp 暂不支持 LOCAL_WEB_EXECUTOR=e2b（M3b）；"
-            "可用 inproc / docker"
-        )
     if tenancy_mode not in TENANCY_MODES:
         raise ConfigError(
             f"PI_GLINK_TENANCY must be one of {', '.join(TENANCY_MODES)}; got {tenancy_mode!r}"
@@ -430,6 +433,9 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         worker_image=_text(values, "LOCAL_WEB_WORKER_IMAGE", DEFAULT_WORKER_IMAGE),
         acp_worker_image=_text(
             values, "LOCAL_WEB_ACP_WORKER_IMAGE", DEFAULT_ACP_WORKER_IMAGE
+        ),
+        acp_e2b_template=_text(
+            values, "LOCAL_WEB_E2B_ACP_TEMPLATE", _DEFAULT_ACP_E2B_TEMPLATE
         ),
         log_level=_text(values, "LOCAL_WEB_LOG_LEVEL", "INFO").upper(),
         task_timeout_seconds=_positive_integer(
@@ -537,11 +543,6 @@ def validate_host_config(config: HostConfig) -> None:
         if not config.acp_command:
             raise ConfigError(
                 "PI_GLINK_HARNESS=acp 需要 PI_GLINK_ACP_COMMAND（ACP agent 的命令行）"
-            )
-        if config.executor == "e2b":
-            raise ConfigError(
-                "PI_GLINK_HARNESS=acp 暂不支持 LOCAL_WEB_EXECUTOR=e2b（M3b）；"
-                "可用 inproc / docker"
             )
     if config.tenancy_mode not in TENANCY_MODES:
         raise ConfigError(

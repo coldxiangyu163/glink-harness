@@ -1,0 +1,58 @@
+E2B 双向 stdio 帧完整性实测（GLINK-ACP-04 / M3b）
+日期: 2026-09-25 10:11:49
+模板: base（从不触碰 glink-frontier-e2b 及其任何 tag）
+仓库分帧模块: host/pi_glink/kernel/framing.py（LF-only）
+e2b SDK: 2.51.0
+
+sandbox_id: ijcm0betlrzqnu20c9tyt
+沙箱环境: ['Python 3.11.6', 'x86_64', 'user', 'HOME=/home/user']
+后台进程 pid: 2005（stdin=True）
+
+[PASS] 基础往返：send_stdin 接受 str，字节原样（raw_sha256 与 pad 一致） :: n=1 raw_len=233
+[PASS] 基础往返：send_stdin 接受 bytes，哈希一致
+[PASS] 顺序：64 条逐条往返按序（id/pad/哈希全等）
+[PASS] 突发：128 条突发写入按序返回（id/pad/哈希全等） :: replies=128 n[:3]=[67, 68, 69] n[-1]=194
+[PASS] 分片写入：半帧 + 半帧（中间有间隔）→ 恰好一条记录 :: n=195
+[PASS] 单次写入两帧：宿主分帧得到两条独立记录 :: replies=2
+[PASS] agent 单次 write 连发三帧：宿主分帧成三条记录且顺序正确 :: replies=3
+[PASS] CRLF 记录：宿主剥离尾部 CR，agent 收到的原始字节含 CR
+[PASS] 共享语料 lf-framing.json 双向逐帧一致（CRLF/LF 混合，U+2028/U+2029 为内容） :: frames=5 replies=5 separators_seen=True
+[PASS] 大帧 host→agent 65536 字节（65598 字节记录） :: n=205 elapsed=0.78s
+[PASS] 大帧 host→agent 262144 字节（262207 字节记录） :: n=206 elapsed=1.51s
+[PASS] 大帧 host→agent 1048576 字节（1048640 字节记录） :: n=207 elapsed=4.22s
+[PASS] 大帧 agent→host 65536 字节（记录 65835 字节） :: body_len=65536 elapsed=0.30s
+[PASS] 大帧 agent→host 262144 字节（记录 262444 字节） :: body_len=262144 elapsed=0.71s
+[PASS] 大帧 agent→host 1048576 字节（记录 1048877 字节） :: body_len=1048576 elapsed=1.76s
+[PASS] stdout 无非法记录（每条完整记录都是合法 JSON） :: non_json=0
+[PASS] 流读取无异常
+[PASS] close_stdin 可用（能对后台进程发出 EOF）
+[PASS] stdin EOF 后进程正常退出（exit_code=0） :: exit=0 stderr_tail=''
+[PASS] 读取线程在 EOF 后结束（无悬空流）
+
+分块统计: chunks=293 bytes=2802328 max_chunk=32768 glued_chunks=2 mid_frame_chunks=84 non_json=0 stream_error=none
+
+按 sandbox_id=ijcm0betlrzqnu20c9tyt 终止: True
+
+结果汇总
+  PASS 基础往返：send_stdin 接受 str，字节原样（raw_sha256 与 pad 一致） :: n=1 raw_len=233
+  PASS 基础往返：send_stdin 接受 bytes，哈希一致
+  PASS 顺序：64 条逐条往返按序（id/pad/哈希全等）
+  PASS 突发：128 条突发写入按序返回（id/pad/哈希全等） :: replies=128 n[:3]=[67, 68, 69] n[-1]=194
+  PASS 分片写入：半帧 + 半帧（中间有间隔）→ 恰好一条记录 :: n=195
+  PASS 单次写入两帧：宿主分帧得到两条独立记录 :: replies=2
+  PASS agent 单次 write 连发三帧：宿主分帧成三条记录且顺序正确 :: replies=3
+  PASS CRLF 记录：宿主剥离尾部 CR，agent 收到的原始字节含 CR
+  PASS 共享语料 lf-framing.json 双向逐帧一致（CRLF/LF 混合，U+2028/U+2029 为内容） :: frames=5 replies=5 separators_seen=True
+  PASS 大帧 host→agent 65536 字节（65598 字节记录） :: n=205 elapsed=0.78s
+  PASS 大帧 host→agent 262144 字节（262207 字节记录） :: n=206 elapsed=1.51s
+  PASS 大帧 host→agent 1048576 字节（1048640 字节记录） :: n=207 elapsed=4.22s
+  PASS 大帧 agent→host 65536 字节（记录 65835 字节） :: body_len=65536 elapsed=0.30s
+  PASS 大帧 agent→host 262144 字节（记录 262444 字节） :: body_len=262144 elapsed=0.71s
+  PASS 大帧 agent→host 1048576 字节（记录 1048877 字节） :: body_len=1048576 elapsed=1.76s
+  PASS stdout 无非法记录（每条完整记录都是合法 JSON） :: non_json=0
+  PASS 流读取无异常
+  PASS close_stdin 可用（能对后台进程发出 EOF）
+  PASS stdin EOF 后进程正常退出（exit_code=0） :: exit=0 stderr_tail=''
+  PASS 读取线程在 EOF 后结束（无悬空流）
+
+[PASS] 20/20 项通过
