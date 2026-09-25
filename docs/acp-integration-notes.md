@@ -474,7 +474,7 @@ E2B SDK 不给双向管道，只有 `commands.run(background=True, stdin=True)` 
 * **大帧**：64 KiB / 256 KiB / 1 MiB 单条记录双向通过（host→agent 记录 65598 / 262207 /
   1048640 字节，回包哈希与正文长度全等；agent→host 记录 65835 / 262444 / 1048877 字节）。
 * **EOF**：`close_stdin()` 可用，agent 读到 EOF 后正常退出（exit 0）。
-* **分块不按帧对齐**：65 万帧量级的小帧测试里 stdout 共 293 个 chunk，max_chunk 32768，
+* **分块不按帧对齐**：两百多条小帧的测试里 stdout 共 293 个 chunk，max_chunk 32768，
   有 84 个 chunk 停在帧中间、2 个 chunk 含多帧——所以承载方**必须**保留 LF 分帧器，
   不能假设一块等于一帧。
 
