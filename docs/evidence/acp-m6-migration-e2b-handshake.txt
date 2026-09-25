@@ -1,0 +1,128 @@
+ACP M6 迁移 E2B 面证据（dev 模板重建 + 沙箱自检/握手；不消耗模型调用）
+============================================================
+日期: 2026-09-25
+任务: GLINK-ACP-08（ACP 适配器后继包迁移）
+模板: docker/e2b/Dockerfile.acp-e2b（claude 层换后继包 @agentclientprotocol/
+  claude-agent-acp@0.81.2，自检改用 `claude-agent-acp --version`）
+脱敏: 家目录以 ~ 代替，临时目录以 $TMP/glink-acp-* 代替；E2B_API_KEY 只从
+  --env-file 读取，不进证据（本文件不含密钥或密钥形状）。
+
+一、dev 模板重建（E2B CLI；构建命令中的 E2B_API_KEY 由环境提供）
+------------------------------------
+$ E2B_API_KEY=… npx -y @e2b/cli template create glink-acp-worker \
+    --dockerfile docker/e2b/Dockerfile.acp-e2b --cpu-count 2 --memory-mb 4096
+exit=0
+
+关键日志（构建期与 finalize 的 start command 都跑了 acp-self-check）:
+Building sandbox template...
+0.0s  | 02:37:43 PM INFO  Requesting build for template: glink-acp-worker
+1.0s  | 02:37:44 PM INFO  Template created with ID: oen0rq47o2sizakry5v3, Build ID: b39f87fc-e829-4c67-8e9d-0bff53b8c8f5
+1.0s  | 02:37:44 PM INFO  All file uploads completed
+1.0s  | 02:37:44 PM INFO  Starting building...
+91.3s | 02:39:14 PM INFO  Running start command: acp-self-check
+91.7s | 02:39:15 PM INFO  [start] [stdout]: 0.1.5-rc.3
+92.1s | 02:39:15 PM INFO  [start] [stdout]: @agentclientprotocol/codex-acp 1.13.1
+92.1s | 02:39:15 PM INFO  [start] [stdout]: 2.1.282 (Claude Code)
+93.4s | 02:39:17 PM INFO  [start] [stdout]: 1.18.32
+93.8s | 02:39:17 PM INFO  [start] [stdout]: 0.81.2
+111.4s | 02:39:34 PM INFO  Template is ready
+113.6s | 02:39:37 PM INFO  [optimize] Optimizing template [232a927913c58b46cee8bf801dccecd7cfb4c5e49a84ce0acdb77a03de0ddbd3]
+114.8s | 02:39:38 PM INFO  Build finished, took 1m53s
+✅ Building sandbox template glink-acp-worker finished.
+
+二、真实沙箱自检（template_selfcheck.py）
+------------------------------------
+{
+  "date": "2026-09-25 14:39:50",
+  "template": "glink-acp-worker",
+  "sandbox_id": "iixx1upqcjwiy7uahddg1",
+  "envd_version": "0.9.0",
+  "exit_code": 0,
+  "stdout": "id=user uid=1001 gid=1001\nhome=/home/user pwd=/home/user/workspace\nnode=v24.21.0\ndsh=0.1.5-rc.3\ncodex_acp=@agentclientprotocol/codex-acp 1.13.1\nclaude_agent_acp=0.81.2\nacp_dir_writable=yes\nworkspace_writable=yes\nself_check=0.1.5-rc.3;@agentclientprotocol/codex-acp 1.13.1;2.1.282 (Claude Code);1.18.32;0.81.2;\nper_run_home_mkdir=ok\nper_run_home_write=ok\nprobe_read=credential-probe\n",
+  "stderr": "",
+  "killed": true
+}
+[PASS] 模板自检
+
+
+三、真实沙箱握手：claude-agent-acp（生产装配路径，不发 prompt）
+------------------------------------
+{
+  "date": "2026-09-25 14:40:04",
+  "agent": "claude-agent-acp",
+  "command": "claude-agent-acp",
+  "template": "glink-acp-worker",
+  "credential_source": null,
+  "credential_dest": null,
+  "credential_sha256_before": null,
+  "source_mtime": null,
+  "runtime_home": "$TMP/glink-acp-e2b-handshake-<id>/acp-agent/home",
+  "credential_dests": [],
+  "secret_count": 0,
+  "sandbox_id": "igtvfbok1oq0lrrdpm0r4",
+  "sandbox_command": "cd /home/user/workspace && exec claude-agent-acp",
+  "harden_command": "chmod 0700 /home/user/acp/home …",
+  "upload_manifest": [],
+  "initializeOk": true,
+  "protocolVersion": 1,
+  "agentInfo": {
+    "name": "@agentclientprotocol/claude-agent-acp",
+    "title": "Claude Agent",
+    "version": "0.81.2"
+  },
+  "capabilities": [
+    "_meta",
+    "auth",
+    "loadSession",
+    "mcpCapabilities",
+    "promptCapabilities",
+    "providers",
+    "sessionCapabilities"
+  ],
+  "authMethodIds": [],
+  "sessionId": "2260abb8-563e-4ccd-a613-1e57b4e66081",
+  "cwd": "/home/user/workspace",
+  "configOptionIds": [
+    "mode",
+    "model",
+    "effort",
+    "fast"
+  ],
+  "cleanup": {
+    "released": true,
+    "failures": [],
+    "external": {
+      "sandbox": "igtvfbok1oq0lrrdpm0r4"
+    }
+  },
+  "credential_sha256_after": null,
+  "source_unchanged": true
+}
+[PASS] claude-agent-acp 真实沙箱 ACP 握手（initialize + session/new）
+
+
+四、模板独立性核对（只读 template list）
+------------------------------------
+
+ACCESS    TEMPLATE ID            TEMPLATE NAME        VCPUS   RAM MIB   CREATED BY   CREATED AT   DISK SIZE MIB   ENVD VERSION
+Private   857igzykz3uf1v11comv   glink-frontier-e2b   2       4096                   9/11/2026    13184           0.9.0
+Private   ch3j65mpxfh5phnle4qf   pi-glink-worker      2       4096                   9/22/2026    12371           0.9.0
+Private   oen0rq47o2sizakry5v3   glink-acp-worker     2       4096                   9/25/2026    13484           0.9.0
+
+
+只重建了 dev 模板 glink-acp-worker（Template ID oen0rq47o2sizakry5v3，新
+Build ID b39f87fc-e829-4c67-8e9d-0bff53b8c8f5，1m53s）；生产模板
+glink-frontier-e2b 与 pi 面模板 pi-glink-worker 的创建时间不变，未被触碰。
+
+五、结论
+------------------------------------
+* 模板内五个组件版本正确；真实沙箱里 claude-agent-acp 完成 initialize +
+  session/new（cwd=/home/user/workspace，configOptions mode/model/effort/fast），
+  沙箱按 id 终止、无残留。
+
+
+脱敏核对（本文件）
+------------------------------------
+扫描: scripts/check-no-secrets.py 的同一函数集（SecretRedactor + find_credential_shapes，
+  --repo-root 指向含 .env 的冻结 checkout；已知凭据值 2 条），2026-09-25。
+结果: 真实命中 0 处 · 占位符命中 0 处（本文件不含凭据值与密钥形状）。

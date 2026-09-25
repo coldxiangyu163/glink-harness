@@ -1,8 +1,8 @@
 """Per-run configuration for an ACP agent process.
 
 The ACP family is one client protocol over several agents (dsh, codex-acp,
-claude-code-acp, …), so this module renders only what every one of them needs
-from the host:
+claude-agent-acp — M6 起 claude-code-acp 的后继包名，…), so this module renders
+only what every one of them needs from the host:
 
 * **An exclusive state root.** ``runs/<id>/acp-agent`` is created owner-only and
   exposed to the child as ``HOME``: the in-process ACP agent writes ``~/.claude``,

@@ -1,0 +1,307 @@
+ACP M6 迁移握手与凭据形态证据（inproc，不消耗模型调用）
+============================================================
+日期: 2026-09-25
+宿主: macOS (arm64) / Python 3.12.10 / Node v24.16.0 / host pi-glink 0.1.0
+任务: GLINK-ACP-08（ACP 适配器后继包迁移）
+钉版入口: npx -y @agentclientprotocol/claude-agent-acp@0.81.2（不全局安装；
+  后继包 bin = claude-agent-acp，自带 --version，替代旧包 @zed-industries/
+  claude-code-acp@0.16.2 的 claude-code-acp）
+探针: scripts/spikes/acp_inproc/handshake.py（生产装配路径 build_config →
+  prepare_acp_runtime → AcpExecutionAdapter；只做 initialize + session/new，
+  不发 prompt）
+脱敏: 家目录以 ~ 代替，临时目录以 $TMP/glink-acp-* 代替；凭据值不出现
+  （派生 settings 只打印 11 个键名与 sha256 前缀；派生源只读、前后 sha256 一致）。
+
+一、入口与版本（npm 元数据 / 实测）
+------------------------------------
+$ npm view @agentclientprotocol/claude-agent-acp@0.81.2 name version bin dependencies
+{"name":"@agentclientprotocol/claude-agent-acp","version":"0.81.2",
+ "bin":{"claude-agent-acp":"dist/index.js"},
+ "dependencies":{"zod":"4.6.5","@agentclientprotocol/sdk":"1.5.0",
+                 "@anthropic-ai/claude-agent-sdk":"0.3.280"}}
+$ npm view @zed-industries/claude-code-acp --json name version deprecated bin
+{"name":"@zed-industries/claude-code-acp","version":"0.16.2",
+ "deprecated":"This package has been renamed to @agentclientprotocol/claude-agent-acp. Please migrate to continue receiving updates.",
+ "bin":{"claude-code-acp":"dist/index.js"}}
+$ npm view @agentclientprotocol/codex-acp --json name version bin   # codex 收尾核对
+{"name":"@agentclientprotocol/codex-acp","version":"1.13.1",
+ "bin":{"codex-acp":"dist/index.js"}}   # latest = 1.13.1 = 仓库现行钉版
+
+
+二、入口命令实测（--version）
+------------------------------------
+$ npx -y @agentclientprotocol/claude-agent-acp@0.81.2 --version
+0.81.2
+exit=0
+
+$ node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude --version
+2.1.280 (Claude Code)
+
+（旧包 0.16.2 的 claude-code-acp 无 --version，M4 只能读安装包 package.json。）
+
+三、凭据 settings env 派生在新版是否成立（不消耗模型）
+------------------------------------
+派生方式与 M4 相同：只取 ~/.claude/settings.json 的 env 块写成运行期 settings
+（0600，经 PI_GLINK_ACP_CREDENTIAL_FILES 复制进每 run HOME 的
+.claude/settings.json）。实测派生块 11 个键（值不打印）:
+ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, ANTHROPIC_DEFAULT_FABLE_MODEL,
+ANTHROPIC_DEFAULT_HAIKU_MODEL, ANTHROPIC_DEFAULT_OPUS_MODEL,
+ANTHROPIC_DEFAULT_SONNET_MODEL, ANTHROPIC_MODEL,
+CLAUDE_CODE_AUTO_COMPACT_WINDOW, CLAUDE_CODE_EFFORT_LEVEL,
+CLAUDE_CODE_MAX_CONTEXT_TOKENS, CLAUDE_CODE_SUBAGENT_MODEL
+
+M6 的 SDK 0.3.280 不再带 vendor cli.js，改用平台原生 cli 二进制（2.1.280）；
+同一份派生 settings 放在 HOME 下的 auth 探针（旧 CLI 2.1.44 在同一探针报
+loggedIn=false，M4 §7.3/§10）:
+
+$ HOME=<derived settings> claude auth status --json   # bundled native cli 2.1.280
+{
+  "loggedIn": true,
+  "authMethod": "oauth_token",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "$TMP/m6-auth-<id>/derived/.claude/projects",
+  "configDirectory": "$TMP/m6-auth-<id>/derived/.claude"
+}
+
+$ HOME=<empty> claude auth status --json
+{
+  "loggedIn": false,
+  "authMethod": "none",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "$TMP/m6-auth-<id>/empty/.claude/projects",
+  "configDirectory": "$TMP/m6-auth-<id>/empty/.claude"
+}
+
+结论：原生 cli 2.1.280 认运行期 settings 的 env（派生 HOME 下 loggedIn=true，
+空 HOME 下 false），因此 **settings env 派生在新版成立**，且 inproc 冒烟不再
+需要 M4 的 CLAUDE_CODE_EXECUTABLE 绕行；该通道仍受支持（见六）。
+
+四、inproc 握手 A（默认通道：SDK 自带原生 cli；--derive-settings-from）
+------------------------------------
+ACP inproc 握手实测（不消耗模型调用）
+============================================
+日期: 2026-09-25 14:29:57
+宿主: darwin / Python 3.12.10 / host pi-glink 0.1.0
+agent 命令: npx -y @agentclientprotocol/claude-agent-acp@0.81.2
+命令级 env 名: npm_config_registry, npm_config_cache
+会话配置: （无）
+运行期 HOME: $TMP/glink-acp-inproc-handshake-<id>/data/acp-agent/home
+redactor 并入值: 1 条（不打印值）
+运行期 settings 派生自: ~/.claude/settings.json（源仅读；sha256=1c63541b737184c0…；只取 env 块）
+凭据: $TMP/glink-acp-inproc-handshake-<id>/run-settings/settings.json -> HOME/.claude/settings.json（源 sha256=243ae4e7ee68c07c…，mtime=2026-09-25 14:29:57）
+
+握手成功（3.6s）
+能力矩阵（initialize / session/new 响应原文）
+--------------------------------------------
+protocolVersion: 1
+agentInfo: {"name": "@agentclientprotocol/claude-agent-acp", "title": "Claude Agent", "version": "0.81.2"}
+agentCapabilities: {"_meta": {"claudeCode": {"promptQueueing": true}, "authStatus": {}}, "promptCapabilities": {"image": true, "embeddedContext": true}, "mcpCapabilities": {"http": true, "sse": true}, "auth": {"logout": {}}, "providers": {}, "loadSession": true, "sessionCapabilities": {"additionalDirectories": {}, "close": {}, "delete": {}, "fork": {}, "list": {}, "resume": {}, "subagents": {}}}
+authMethods: []
+sessionId: 27914806-7a83-4628-9d54-2e9c929c08b7
+cwd: $TMP/glink-acp-inproc-handshake-<id>/workspace
+modes: {"currentModeId": "default", "availableModes": [{"id": "default", "name": "Manual", "description": "Always ask before making changes", "_meta": {"kind": "standard"}}, {"id": "acceptEdits", "name": "Accept edits", "description": "Automatically accept all file edits", "_meta": {"kind": "standard"}}, {"id": "plan", "name": "Plan", "description": "Create a plan before making changes", "_meta": {"kind": "plan"}}, {"id": "auto", "name": "Auto", "description": "Claude handles permission decisions", "_meta": {"kind": "auto_review"}}, {"id": "bypassPermissions", "name": "Bypass permissions", "description": "Accepts all permissions", "_meta": {"kind": "full_access"}}]}
+configOptions: [{"id": "mode", "name": "Mode", "type": "select", "category": "mode", "currentValue": "default", "description": "Session permission mode", "options": [{"value": "default", "name": "Manual", "description": "Always ask before making changes", "_meta": {"kind": "standard"}}, {"value": "acceptEdits", "name": "Accept edits", "description": "Automatically accept all file edits", "_meta": {"kind": "standard"}}, {"value": "plan", "name": "Plan", "description": "Create a plan before making changes", "_meta": {"kind": "plan"}}, {"value": "auto", "name": "Auto", "description": "Claude handles permission decisions", "_meta": {"kind": "auto_review"}}, {"value": "bypassPermissions", "name": "Bypass permissions", "description": "Accepts all permissions", "_meta": {"kind": "full_access"}}]}, {"id": "model", "name": "Model", "type": "select", "category": "model", "currentValue": "default", "description": "AI model to use", "options": [{"value": "default", "name": "Default (recommended)", "description": "k3[1m]"}, {"value": "opus", "name": "k3[1m]", "description": "Custom Opus model (1M context)"}, {"value": "fable", "name": "k3[1m]", "description": "Custom Fable model"}, {"value": "sonnet", "name": "k3[1m]", "description": "Custom Sonnet model (1M context)"}, {"value": "haiku", "name": "k3[1m]", "description": "Custom Haiku model"}, {"value": "k3[1m]", "name": "k3[1m]", "description": "Custom model"}]}, {"id": "effort", "name": "Effort", "type": "select", "category": "thought_level", "currentValue": "default", "description": "Available effort levels for this model", "options": [{"value": "default", "name": "Default"}, {"value": "low", "name": "Low"}, {"value": "medium", "name": "Medium"}, {"value": "high", "name": "High"}, {"value": "xhigh", "name": "Xhigh"}, {"value": "max", "name": "Max"}]}]
+
+client.close(): released=True failures=[]
+
+agent 子进程命令行（采样，证明钉版入口）
+--------------------------------------------
+  采样关键字: claude
+  25778 94653 /bin/bash -c cd ~/.herdr/worktrees/pi-glink/acp-pkg-migration-20260925 && .venv/bin/python scripts/spikes/acp_inproc/handshake.py \\012  --command "npx -y @agentclientprotocol/claude-agent-acp@0.81.2" \\012  --npm-cache $TMP/glink-acp-npx-m6 \\012  --env "npm_config_regi
+  25779 25778 .venv/bin/python scripts/spikes/acp_inproc/handshake.py --command npx -y @agentclientprotocol/claude-agent-acp@0.81.2 --npm-cache $TMP/glink-acp-npx-m6 --env npm_config_registry=https://registry.npmmirror.com --derive-settings-from ~/.claude/settings.json --timeout 180
+  25818 25779 npm exec @agentclientprotocol/claude-agent-acp@0.81.2
+  25818 25779 npm exec @agentclientprotocol/claude-agent-acp@0.81.2
+  26029 25818 node $TMP/glink-acp-npx-m6/_npx/698eb38f5d7f5a61/node_modules/.bin/claude-agent-acp
+  26104 26029 $TMP/glink-acp-npx-m6/_npx/698eb38f5d7f5a61/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude auth status --json
+
+每 run HOME 落点（路径 + 权限位 + 大小；不含内容）
+--------------------------------------------
+  .claude 0o700
+  .claude/backups 0o755
+  .claude/backups/.claude.json.backup.1790317800592 0o600 84
+  .claude/sessions 0o700
+  .claude/settings.json 0o600 583
+  .claude.json 0o600 569
+
+凭据源只读核对
+--------------------------------------------
+  $TMP/glink-acp-inproc-handshake-<id>/run-settings/settings.json: sha256 unchanged
+  ~/.claude/settings.json（派生源）: sha256 unchanged
+
+临时目录: $TMP/glink-acp-inproc-handshake-<id>（按本脚本创建的路径清理；未做模式匹配删除）
+
+
+五、inproc 握手 B（PI_GLINK_ACP_SESSION_CONFIG=mode=plan）
+------------------------------------
+（M4 版 configOptions 为空、该旋钮对它不适用；M6 版 configOptions 含
+mode/model/effort，实测 mode=plan 生效。）
+ACP inproc 握手实测（不消耗模型调用）
+============================================
+日期: 2026-09-25 14:30:10
+宿主: darwin / Python 3.12.10 / host pi-glink 0.1.0
+agent 命令: npx -y @agentclientprotocol/claude-agent-acp@0.81.2
+命令级 env 名: npm_config_registry, npm_config_cache
+会话配置: mode=plan
+运行期 HOME: $TMP/glink-acp-inproc-handshake-<id>/data/acp-agent/home
+redactor 并入值: 1 条（不打印值）
+运行期 settings 派生自: ~/.claude/settings.json（源仅读；sha256=1c63541b737184c0…；只取 env 块）
+凭据: $TMP/glink-acp-inproc-handshake-<id>/run-settings/settings.json -> HOME/.claude/settings.json（源 sha256=243ae4e7ee68c07c…，mtime=2026-09-25 14:30:10）
+
+握手成功（2.8s）
+能力矩阵（initialize / session/new 响应原文）
+--------------------------------------------
+protocolVersion: 1
+agentInfo: {"name": "@agentclientprotocol/claude-agent-acp", "title": "Claude Agent", "version": "0.81.2"}
+agentCapabilities: {"_meta": {"claudeCode": {"promptQueueing": true}, "authStatus": {}}, "promptCapabilities": {"image": true, "embeddedContext": true}, "mcpCapabilities": {"http": true, "sse": true}, "auth": {"logout": {}}, "providers": {}, "loadSession": true, "sessionCapabilities": {"additionalDirectories": {}, "close": {}, "delete": {}, "fork": {}, "list": {}, "resume": {}, "subagents": {}}}
+authMethods: []
+sessionId: 87f40fe7-f407-4dfc-afc9-40e7c7cf2e49
+cwd: $TMP/glink-acp-inproc-handshake-<id>/workspace
+modes: {"currentModeId": "plan", "availableModes": [{"id": "default", "name": "Manual", "description": "Always ask before making changes", "_meta": {"kind": "standard"}}, {"id": "acceptEdits", "name": "Accept edits", "description": "Automatically accept all file edits", "_meta": {"kind": "standard"}}, {"id": "plan", "name": "Plan", "description": "Create a plan before making changes", "_meta": {"kind": "plan"}}, {"id": "auto", "name": "Auto", "description": "Claude handles permission decisions", "_meta": {"kind": "auto_review"}}, {"id": "bypassPermissions", "name": "Bypass permissions", "description": "Accepts all permissions", "_meta": {"kind": "full_access"}}]}
+configOptions: [{"id": "mode", "name": "Mode", "type": "select", "category": "mode", "currentValue": "plan", "description": "Session permission mode", "options": [{"value": "default", "name": "Manual", "description": "Always ask before making changes", "_meta": {"kind": "standard"}}, {"value": "acceptEdits", "name": "Accept edits", "description": "Automatically accept all file edits", "_meta": {"kind": "standard"}}, {"value": "plan", "name": "Plan", "description": "Create a plan before making changes", "_meta": {"kind": "plan"}}, {"value": "auto", "name": "Auto", "description": "Claude handles permission decisions", "_meta": {"kind": "auto_review"}}, {"value": "bypassPermissions", "name": "Bypass permissions", "description": "Accepts all permissions", "_meta": {"kind": "full_access"}}]}, {"id": "model", "name": "Model", "type": "select", "category": "model", "currentValue": "default", "description": "AI model to use", "options": [{"value": "default", "name": "Default (recommended)", "description": "k3[1m]"}, {"value": "opus", "name": "k3[1m]", "description": "Custom Opus model (1M context)"}, {"value": "fable", "name": "k3[1m]", "description": "Custom Fable model"}, {"value": "sonnet", "name": "k3[1m]", "description": "Custom Sonnet model (1M context)"}, {"value": "haiku", "name": "k3[1m]", "description": "Custom Haiku model"}, {"value": "k3[1m]", "name": "k3[1m]", "description": "Custom model"}]}, {"id": "effort", "name": "Effort", "type": "select", "category": "thought_level", "currentValue": "default", "description": "Available effort levels for this model", "options": [{"value": "default", "name": "Default"}, {"value": "low", "name": "Low"}, {"value": "medium", "name": "Medium"}, {"value": "high", "name": "High"}, {"value": "xhigh", "name": "Xhigh"}, {"value": "max", "name": "Max"}]}]
+available_commands: 45 条（宿主门禁拒绝 / 开头 prompt）
+
+client.close(): released=True failures=[]
+
+agent 子进程命令行（采样，证明钉版入口）
+--------------------------------------------
+  采样关键字: claude
+  28074 94653 /bin/bash -c cd ~/.herdr/worktrees/pi-glink/acp-pkg-migration-20260925 && .venv/bin/python scripts/spikes/acp_inproc/handshake.py \\012  --command "npx -y @agentclientprotocol/claude-agent-acp@0.81.2" \\012  --npm-cache $TMP/glink-acp-npx-m6 \\012  --env "npm_config_regi
+  28087 28074 .venv/bin/python scripts/spikes/acp_inproc/handshake.py --command npx -y @agentclientprotocol/claude-agent-acp@0.81.2 --npm-cache $TMP/glink-acp-npx-m6 --env npm_config_registry=https://registry.npmmirror.com --derive-settings-from ~/.claude/settings.json --session-confi
+  28127 28087 npm exec @agentclientprotocol/claude-agent-acp@0.81.2
+  28127 28087 npm exec @agentclientprotocol/claude-agent-acp@0.81.2
+  28334 28127 node $TMP/glink-acp-npx-m6/_npx/698eb38f5d7f5a61/node_modules/.bin/claude-agent-acp
+  28335 28334 $TMP/glink-acp-npx-m6/_npx/698eb38f5d7f5a61/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude auth status --json
+
+每 run HOME 落点（路径 + 权限位 + 大小；不含内容）
+--------------------------------------------
+  .claude 0o700
+  .claude/backups 0o755
+  .claude/backups/.claude.json.backup.1790317811454 0o600 84
+  .claude/sessions 0o700
+  .claude/settings.json 0o600 583
+  .claude.json 0o600 423
+  .claude.json.lock 0o755
+
+凭据源只读核对
+--------------------------------------------
+  $TMP/glink-acp-inproc-handshake-<id>/run-settings/settings.json: sha256 unchanged
+  ~/.claude/settings.json（派生源）: sha256 unchanged
+
+临时目录: $TMP/glink-acp-inproc-handshake-<id>（按本脚本创建的路径清理；未做模式匹配删除）
+
+
+六、inproc 握手 C（CLAUDE_CODE_EXECUTABLE=宿主 claude 2.1.281；M4 旧通道）
+------------------------------------
+（保留 M4 通道作为对照；进程采样确认适配器 `claudeCliPath()` 优先使用该变量。）
+ACP inproc 握手实测（不消耗模型调用）
+============================================
+日期: 2026-09-25 14:30:17
+宿主: darwin / Python 3.12.10 / host pi-glink 0.1.0
+agent 命令: npx -y @agentclientprotocol/claude-agent-acp@0.81.2
+命令级 env 名: npm_config_registry, CLAUDE_CODE_EXECUTABLE, npm_config_cache
+会话配置: （无）
+运行期 HOME: $TMP/glink-acp-inproc-handshake-<id>/data/acp-agent/home
+redactor 并入值: 1 条（不打印值）
+运行期 settings 派生自: ~/.claude/settings.json（源仅读；sha256=1c63541b737184c0…；只取 env 块）
+凭据: $TMP/glink-acp-inproc-handshake-<id>/run-settings/settings.json -> HOME/.claude/settings.json（源 sha256=243ae4e7ee68c07c…，mtime=2026-09-25 14:30:17）
+
+握手成功（1.6s）
+能力矩阵（initialize / session/new 响应原文）
+--------------------------------------------
+protocolVersion: 1
+agentInfo: {"name": "@agentclientprotocol/claude-agent-acp", "title": "Claude Agent", "version": "0.81.2"}
+agentCapabilities: {"_meta": {"claudeCode": {"promptQueueing": true}, "authStatus": {}}, "promptCapabilities": {"image": true, "embeddedContext": true}, "mcpCapabilities": {"http": true, "sse": true}, "auth": {"logout": {}}, "providers": {}, "loadSession": true, "sessionCapabilities": {"additionalDirectories": {}, "close": {}, "delete": {}, "fork": {}, "list": {}, "resume": {}, "subagents": {}}}
+authMethods: []
+sessionId: c73d18e9-7f26-4f66-88d1-78ece8e01069
+cwd: $TMP/glink-acp-inproc-handshake-<id>/workspace
+modes: {"currentModeId": "default", "availableModes": [{"id": "default", "name": "Manual", "description": "Always ask before making changes", "_meta": {"kind": "standard"}}, {"id": "acceptEdits", "name": "Accept edits", "description": "Automatically accept all file edits", "_meta": {"kind": "standard"}}, {"id": "plan", "name": "Plan", "description": "Create a plan before making changes", "_meta": {"kind": "plan"}}, {"id": "auto", "name": "Auto", "description": "Claude handles permission decisions", "_meta": {"kind": "auto_review"}}, {"id": "bypassPermissions", "name": "Bypass permissions", "description": "Accepts all permissions", "_meta": {"kind": "full_access"}}]}
+configOptions: [{"id": "mode", "name": "Mode", "type": "select", "category": "mode", "currentValue": "default", "description": "Session permission mode", "options": [{"value": "default", "name": "Manual", "description": "Always ask before making changes", "_meta": {"kind": "standard"}}, {"value": "acceptEdits", "name": "Accept edits", "description": "Automatically accept all file edits", "_meta": {"kind": "standard"}}, {"value": "plan", "name": "Plan", "description": "Create a plan before making changes", "_meta": {"kind": "plan"}}, {"value": "auto", "name": "Auto", "description": "Claude handles permission decisions", "_meta": {"kind": "auto_review"}}, {"value": "bypassPermissions", "name": "Bypass permissions", "description": "Accepts all permissions", "_meta": {"kind": "full_access"}}]}, {"id": "model", "name": "Model", "type": "select", "category": "model", "currentValue": "default", "description": "AI model to use", "options": [{"value": "default", "name": "Default (recommended)", "description": "k3[1m]"}, {"value": "opus", "name": "k3[1m]", "description": "Custom Opus model (1M context)"}, {"value": "fable", "name": "k3[1m]", "description": "Custom Fable model"}, {"value": "sonnet", "name": "k3[1m]", "description": "Custom Sonnet model (1M context)"}, {"value": "haiku", "name": "k3[1m]", "description": "Custom Haiku model"}, {"value": "k3[1m]", "name": "k3[1m]", "description": "Custom model"}]}, {"id": "effort", "name": "Effort", "type": "select", "category": "thought_level", "currentValue": "default", "description": "Available effort levels for this model", "options": [{"value": "default", "name": "Default"}, {"value": "low", "name": "Low"}, {"value": "medium", "name": "Medium"}, {"value": "high", "name": "High"}, {"value": "xhigh", "name": "Xhigh"}, {"value": "max", "name": "Max"}]}]
+
+client.close(): released=True failures=[]
+
+agent 子进程命令行（采样，证明钉版入口）
+--------------------------------------------
+  采样关键字: claude
+  29448 29447 .venv/bin/python scripts/spikes/acp_inproc/handshake.py --command npx -y @agentclientprotocol/claude-agent-acp@0.81.2 --npm-cache $TMP/glink-acp-npx-m6 --env npm_config_registry=https://registry.npmmirror.com --env CLAUDE_CODE_EXECUTABLE=~/.nvm/versions/node/v24.16.0/bin
+  29453 29448 npm exec @agentclientprotocol/claude-agent-acp@0.81.2
+  29453 29448 npm exec @agentclientprotocol/claude-agent-acp@0.81.2
+  29555 29453 node $TMP/glink-acp-npx-m6/_npx/698eb38f5d7f5a61/node_modules/.bin/claude-agent-acp
+  29557 29555 ~/.nvm/versions/node/v24.16.0/bin/claude auth status --json
+  29583 29555 ~/.nvm/versions/node/v24.16.0/bin/claude --output-format stream-json --verbose --input-format stream-json --permission-prompt-tool stdio --disallowedTools AskUserQuestion --tools default --setting-sources=user,project,local --permission-mode default --allow-dangerously-s
+
+每 run HOME 落点（路径 + 权限位 + 大小；不含内容）
+--------------------------------------------
+  .claude 0o700
+  .claude/backups 0o755
+  .claude/backups/.claude.json.backup.1790317819089 0o600 84
+  .claude/sessions 0o700
+  .claude/settings.json 0o600 583
+  .claude.json 0o600 423
+  .claude.json.lock 0o755
+
+凭据源只读核对
+--------------------------------------------
+  $TMP/glink-acp-inproc-handshake-<id>/run-settings/settings.json: sha256 unchanged
+  ~/.claude/settings.json（派生源）: sha256 unchanged
+
+临时目录: $TMP/glink-acp-inproc-handshake-<id>（按本脚本创建的路径清理；未做模式匹配删除）
+七、与 M4（claude-code-acp 0.16.2）记录的逐条差异
+------------------------------------
+1. 包/入口/版本: @zed-industries/claude-code-acp@0.16.2（bin claude-code-acp，
+   无 --version）→ @agentclientprotocol/claude-agent-acp@0.81.2（bin
+   claude-agent-acp，自带 --version）。
+2. 驱动 claude 的方式: SDK 0.2.44 自带 vendor cli.js（2.1.44）→ SDK 0.3.280
+   平台原生二进制（2.1.280）；CLAUDE_CODE_EXECUTABLE 仍优先
+   （claude-agent-acp dist/acp-agent.js 的 claudeCliPath()，M6 源码只读核对）。
+3. protocolVersion: 1 → 1（不变）。
+4. agentInfo: {"name":"@zed-industries/claude-code-acp","title":"Claude Code",
+   "version":"0.16.2"} → {"name":"@agentclientprotocol/claude-agent-acp",
+   "title":"Claude Agent","version":"0.81.2"}。
+5. sessionCapabilities: fork/list/resume → additionalDirectories/close/delete/
+   fork/list/resume/subagents（新增 close、delete、additionalDirectories、
+   subagents）。
+6. agentCapabilities 新增: _meta.claudeCode.promptQueueing=true、
+   _meta.authStatus={}、auth={logout:{}}、providers={}。
+7. authMethods: [claude-login]（"Run `claude /login` in the terminal"）→ []
+   （登录态改由 capabilities._meta.authStatus / auth 面表达）。
+8. promptCapabilities / mcpCapabilities: 与 M4 相同
+   （image=true/embeddedContext=true；http=true/sse=true）。
+9. session/new: M4 = sessionId + models + modes（default/acceptEdits/plan/
+   dontAsk/bypassPermissions）+ configOptions [] → M6 = sessionId + modes
+   （default/acceptEdits/plan/auto/bypassPermissions；dontAsk → auto）+
+   configOptions [mode, model, effort]（容器/沙箱里另有第 4 项 fast）；
+   M6 不再单列 models。
+10. PI_GLINK_ACP_SESSION_CONFIG: M4 不适用（无 configOptions，配了会失败闭环）
+    → M6 适用：mode=plan 生效（modes.currentModeId=plan 且 configOptions
+    mode.currentValue=plan）。
+11. 每 run HOME 落点（握手期观测）: M4 = .claude/{backups,debug,sessions,
+    projects} + .claude.json + Library/Caches；M6 = .claude/{backups,sessions}
+    + .claude.json（debug/projects 未在握手期创建，落点仍全在 run HOME 内）。
+12. available_commands: 47 条 → 45 条（宿主门禁仍拒绝 / 开头 prompt）。
+13. 权限请求的 tool kind: M4 请求不带 kind（宿主按同 toolCallId 的 tool_call
+    回查，toolKindSource=tool_call）→ M6 请求自带 kind
+    （冒烟实测 toolKindSource=request，见 acp-m6-migration-smoke.txt）。
+14. usage_update: M4 的 141 条事件里 0 条（终态 usage=null）→ M6 冒烟每次
+    run 7 条，终态落 totalTokens/contextSize/cost（basis=acp_usage_update）。
+15. 重复 tool_call 通知: M4 同一 toolCallId 两条 tool_call → M6 单条
+    （tool_started/tool_finished 各 2 条，无成对重复，见冒烟证据）。
+16. 容器（root）与 inproc 的会话选项差异（同一 0.81.2）: 容器内 modes/
+    configOptions 不含 bypassPermissions（root 下禁用），inproc 含；容器内
+    configOptions 另有 fast（inproc 无）——属环境差异，各面如实记录。
+
+八、结论
+------------------------------------
+* 后继包在 inproc 面完成 initialize + session/new；能力矩阵按上表逐条变化。
+* 凭据形态：settings env 派生在新版成立（原生 cli 认它），且不依赖
+  CLAUDE_CODE_EXECUTABLE；M4 通道仍可用。
+* 真实 settings.json 全程只读（两次派生源 sha256 前后一致）；整文件不复制，
+  hooks/plugins/statusLine 不进 run。
+
+
+脱敏核对（本文件）
+------------------------------------
+扫描: scripts/check-no-secrets.py 的同一函数集（SecretRedactor + find_credential_shapes，
+  --repo-root 指向含 .env 的冻结 checkout；已知凭据值 2 条），2026-09-25。
+结果: 真实命中 0 处 · 占位符命中 0 处（本文件不含凭据值与密钥形状）。
