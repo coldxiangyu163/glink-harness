@@ -20,6 +20,7 @@ from .artifacts import ArtifactError, ArtifactTree
 from .config import ConfigError
 from .kernel.runner import (
     REPORT_MAX_BYTES,
+    BlueprintUnavailable,
     FollowupUnavailable,
     ResourcesUnreleased,
     RunBusy,
@@ -82,6 +83,11 @@ def run_view(
         "eventCount": record.event_count if live_event_count is None else live_event_count,
         "usage": record.usage,
         "redacted": record.redacted,
+        # Session-template facts, recorded at admission. The host never advances
+        # a stage, so these are labels of what the run was admitted with, not a
+        # progression state.
+        "blueprint": record.blueprint,
+        "blueprintStages": [dict(stage) for stage in record.blueprint_stages],
     }
 
 
@@ -299,9 +305,17 @@ class RoutesMixin:
         if parent_run_id is not None and (not isinstance(parent_run_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", parent_run_id)):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request"}, head_only=False)
             return
+        blueprint = body.get("blueprint")
+        if blueprint is not None and not isinstance(blueprint, str):
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "invalid_request", "message": "blueprint must be a string"},
+                head_only=False,
+            )
+            return
         try:
             record = self.server.manager.start(
-                prompt, context, parent_run_id=parent_run_id
+                prompt, context, parent_run_id=parent_run_id, blueprint=blueprint
             )
         except UnsupportedCommand as exc:
             # ``/``-prefix input is how pi reaches extension commands, including
@@ -314,6 +328,27 @@ class RoutesMixin:
                     "error": "unsupported_command",
                     "allowed": list(exc.allowed),
                     "message": "prompt 以 / 开头但不是本工作台接受的模板命令",
+                },
+                head_only=False,
+            )
+            return
+        except BlueprintUnavailable as exc:
+            # The same fail-closed shape as the ``/`` gate: the answer names the
+            # derived blueprint stems (reviewed repository content) and never
+            # echoes the submitted value, so the endpoint reveals nothing about
+            # arbitrary input. Unknown and malformed are distinct codes; both
+            # are refused before any run directory or execution face exists, and
+            # the same rule serves every harness.
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "error": exc.code,
+                    "available": list(exc.available),
+                    "message": (
+                        "blueprint 不存在于 blueprints/ 目录"
+                        if exc.code == "unknown_blueprint"
+                        else "blueprint 文件不可用（格式校验失败）"
+                    ),
                 },
                 head_only=False,
             )

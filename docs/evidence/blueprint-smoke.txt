@@ -1,0 +1,258 @@
+GLINK-ACP-10 blueprint run 真实冒烟证据（pi 面 / inproc）
+========================================================
+日期: 2026-09-25
+任务: GLINK-ACP-10（blueprint 会话模板第一增量）
+代码范围: 基线 main 862605c；本次冒烟运行于 8ddfd0a（compose 序列 84915c3/9f6dfe1/cd3ec5f/8ddfd0a）
+生效范围: 冒烟之后的 afaeafc 只在解析入口加了一个 slug 防御（生产路径的名字来自
+  blueprint_names，已按同一 slug 模式过滤，该守卫对冒烟所走路径恒不触发），其余提交只改
+  测试与文档；最终 HEAD 的默认检查（bash scripts/check.sh，760 passed / 2 skipped）见交付报告。
+执行面: LOCAL_WEB_EXECUTOR=inproc；PI_GLINK_HARNESS=pi；pi 0.87.1
+模型: openai/gpt-6-sol（provider/model 取自操作员 .env；凭据值不读取打印、不写证据）
+探针: /tmp/blueprint_smoke.py（进程内起真实宿主，临时数据根 + 随机 loopback 端口；
+  POST /api/runs {blueprint:"deep-research"} → 轮询终态 → 下载 report.md；全文见文末）
+数据根: $TMP/pi-glink-blueprint-smoke.<随机>（运行结束已删除；inproc 面无外部资源）
+脱敏: 家目录以 ~ 代替；临时目录以 $TMP/... 代替；凭据值/密钥不出现。
+模型调用: 1 次真实 run（brief 授权 ≤1 次）。第一次尝试因操作员 .env 中
+  PI_GLINK_AUTH_MODE=accounts 与探针的 tenancy=local 覆盖冲突，在宿主启动前失败，
+  未产生任何模型调用；补上 PI_GLINK_AUTH_MODE=gateway 覆盖后为唯一一次真实 run。
+附加核对: 终态 payload 里 cleanup.released=true；事件类型全部属于 events.py 既有词表
+  （run_started/session_ready/run_stage/turn_started/thinking_delta/assistant_message/
+  tool_started/tool_updated/tool_finished/turn_finished/usage_reported/assistant_delta/
+  run_finished），没有任何 blueprint 专属事件类型。
+
+第一次尝试（宿主启动前失败，未产生模型调用）
+------------------------------
+=== command ===
+PYTHONPATH=<worktree>/host <worktree>/.venv/bin/python /tmp/blueprint_smoke.py
+=== started: 2026-09-25T08:10:22Z ===
+pi_glink.config.ConfigError: PI_GLINK_AUTH_MODE=accounts 需要 PI_GLINK_TENANCY=multitenant
+=== exit code: 1 ===
+=== finished: 2026-09-25T08:10:22Z ===
+（原因：探针的 tenancy=local 覆盖与 .env 的 accounts 模式冲突；补 gateway 覆盖后重跑，
+ 即下方唯一一次真实模型 run。）
+
+第二次运行原始输出（脚本打印，含退出码）
+------------------------------
+=== command ===
+PYTHONPATH=<worktree>/host <worktree>/.venv/bin/python /tmp/blueprint_smoke.py
+=== started: 2026-09-25T08:10:29Z ===
+[host] blueprint dir=~/.herdr/worktrees/pi-glink/blueprint-inc1-20260925/blueprints executor=inproc
+[create] status=201 runId=bd0ff397a08e blueprint=deep-research stages=['frame', 'evidence', 'coverage', 'verification']
+[terminal] {"status": "finished", "stopReason": null, "blueprint": "deep-research", "blueprintStages": [{"id": "frame", "title": "问题框架与来源计划", "goal": "把题目拆成可判定的问题清单，并为每个问题定下来源层次与检索方向：原始来源（法条与规范性文件原文、官方公报、一手数据、官方文档）优先，官方问答与机构口径其次，二手整理与转载只在前两层不可达时使用。", "deliverable": "问题清单（每项可判定、可逐项声明覆盖状态）与来源计划（每项写明首选来源类型与替代来源）；另列重要但可能未涉及的事项与要检查的边界。", "checkpoint": "每个问题都对应至少一类可核验的候选来源；来源计划写明一手来源与替代来源的边界，且没有把二手来源当默认取证对象。"}, {"id": "evidence", "title": "取证与引注", "goal": "按来源计划取证：关键事实、数字、条款逐条紧跟它自己的可核验链接，指向具体条文或段落，而不是笼统的站点首页。", "deliverable": "report.md 的取证正文与来源清单（编号 + 链接）；关键命题就近引注；断言强度与证据匹配。", "checkpoint": "每个关键命题都有专属来源，不同命题不共用一个笼统链接；二手来源逐处标注该限制；已核验事实、基于事实的推断、待验证假设三类内容分开写明。"}, {"id": "coverage", "title": "覆盖声明", "goal": "把题目拆出的问题清单逐项声明覆盖状态：覆盖 / 部分 / 未涉及，并写明每个「部分」或「未涉及」的原因与下一步。", "deliverable": "覆盖声明章节：「覆盖 / 部分 / 未涉及」逐项声明、原因（缺证据 / 超出范围 / 检索无果）与下一步建议；另列「重要但本报告未涉及」的事项，以及确认没有遗漏时检查过哪些边界。", "checkpoint": "声称「覆盖」的子问题都有对应正文与来源；每个「部分」或「未涉及」都写了原因，而不是留空。"}, {"id": "verification", "title": "自我核查与交付", "goal": "交付前完成一次独立核查：逐条把关键论断带回它的来源、实际打开关键 URL 重新核验、核对覆盖声明与正文一致；来源不支撑的论断降级、删除或补来源。", "deliverable": "report.md 末尾固定的「来源与核查」一节：全部来源清单（编号 + 链接）、核查状态 PASS / PASS WITH NOTES / BLOCKED、核查中发现并修正的问题、本次没有做的检查。", "checkpoint": "核查结论与正文一致；修改报告后用 `bash` 跑 `grep` / `diff` 复验旧表述消失、新表述存在；没有来源支撑的论断已经处理，没有留在正文里。"}], "eventCount": 188, "hasReport": true, "durationSeconds": 71.541, "modelStopReason": null, "error": null}
+[elapsed] 72.4s
+[events] count=188 types={"run_started": 1, "session_ready": 1, "run_stage": 2, "turn_started": 9, "thinking_delta": 94, "assistant_message": 9, "tool_started": 8, "tool_updated": 17, "tool_finished": 8, "turn_finished": 9, "usage_reported": 9, "assistant_delta": 20, "run_finished": 1}
+[terminal-payload] {"status": "finished", "reportStatus": "ok", "modelStopReason": "stop", "cleanup": {"released": true, "failures": [], "external": {}}}
+[report] status=200 bytes=1400
+[report-excerpt]
+# 1＋1 的结果
+
+**一句话回答：1＋1 等于 2。** [OpenStax《Prealgebra 2e》第 1.2 节加法表，行 1、列 1][1]
+
+## 问题框架与来源计划
+
+- 可判定问题：在通常的整数加法中，1＋1 是否等于 2？首选教材原文的加法表，替代来源为公开数学定义或形式化证明；本次首选来源可访问，无须替代来源。
+- 边界：不讨论特殊记号体系或重新定义“＋”的情形。
+
+## 取证与引注
+
+已核验事实：[OpenStax 的一位数加法表中，行 1、列 1 的交点为 2][1]。据此，在通常整数加法语境下得出上述答案；没有额外的待验证假设。
+
+## 覆盖声明
+
+- **覆盖**：通常整数加法下 1＋1 的结果，见取证与引注。
+- **重要但本报告未涉及**：非标准运算定义；超出提问范围，如需讨论须先明确运算规则。已检查“通常加法”与“另行定义运算”的边界。
+
+## 来源与核查
+
+- [1] [OpenStax, *Prealgebra 2e*, §1.2 “Add Whole Numbers”, Table 1.1](https://openstax.org/books/prealgebra-2e/pages/1-2-add-whole-numbers#fs-id2300206)。
+- **状态：PASS**。重新打开该页核对表格行列与结果；核查了正文唯一的关键等式，未发现需修正的问题。未检查特殊运算定义或独立形式化证明。
+
+[1]: https://openstax.org/books/prealgebra-2e/pages/1-2-add-whole-numbers#fs-id2300206
+
+[verdict] PASS
+[cleanup] host stopped; temporary data root removed: $TMP/pi-glink-blueprint-smoke.<随机>
+=== exit code: 0 ===
+=== finished: 2026-09-25T08:11:44Z ===
+
+通过判据与结果
+------------------------------
+1. POST /api/runs 返回 201，响应 run.blueprint=deep-research，blueprintStages 为 4 个阶段
+   （frame/evidence/coverage/verification）且元数据与 blueprints/deep-research.md 一致。
+2. run 终态 finished（71.5s，188 事件），reportStatus=ok，cleanup.released=true，
+   GET /api/runs/<id>/report 返回 200（1400 bytes）。
+3. 报告正文按蓝图阶段组织（问题框架与来源计划 / 取证与引注 / 覆盖声明 / 来源与核查，
+   核查状态 PASS）——说明注入的蓝图文本确实到达真实模型并约束了产出；
+   用户 prompt 未出现在 system prompt 通道（合成回归另有逐字节断言）。
+4. 退出码 0；宿主已停止，临时数据根已删除。
+
+探针源码（/tmp/blueprint_smoke.py，运行时原样；不属于仓库文件）
+------------------------------
+#!/usr/bin/env python3
+"""GLINK-ACP-10 真实冒烟：blueprint run 端到端（inproc、pi 面）。
+
+在进程内起真实宿主（临时数据根、随机 loopback 端口），从产品 HTTP API 用
+内置 `deep-research` 蓝图创建一个 run，轮询终态并回收 report.md。模型凭据从
+操作员 `.env` 读取（与本次任务相关、不打印、不提交）；执行面为 inproc（不起
+Docker/E2B）；退出时只关闭本进程持有的宿主并删除临时数据根。
+
+用法：PYTHONPATH=<worktree>/host python3 /tmp/blueprint_smoke.py
+退出码：0 = run 终态为 finished、记录携带蓝图与阶段元数据、report.md 可下载。
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+REPO_ROOT = Path("~/.herdr/worktrees/pi-glink/blueprint-inc1-20260925")
+OPERATOR_ENV = Path("~/AI/git/pi-glink/.env")
+sys.path.insert(0, str(REPO_ROOT / "host"))
+
+from pi_glink.app import create_server  # noqa: E402
+from pi_glink.config import load_config  # noqa: E402
+
+PROMPT = "请用一句话回答：1+1 等于几？并按系统提示里的工作约定交付 report.md。"
+TIMEOUT_SECONDS = 600.0
+
+
+def main() -> int:
+    scratch = Path(tempfile.mkdtemp(prefix="pi-glink-blueprint-smoke."))
+    overrides = {
+        "LOCAL_WEB_HOST": "127.0.0.1",
+        "LOCAL_WEB_PORT": "0",
+        "LOCAL_WEB_EXECUTOR": "inproc",
+        "LOCAL_WEB_DATA_ROOT": str(scratch / "data"),
+        "LOCAL_WEB_TASK_TIMEOUT_SECONDS": str(int(TIMEOUT_SECONDS)),
+        "PI_GLINK_TENANCY": "local",
+        "PI_GLINK_AUTH_MODE": "gateway",
+        "PI_GLINK_MODEL_CREDENTIALS": "tenant",
+        "PI_GLINK_HARNESS": "pi",
+        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "agent"),
+        "PI_GLINK_BLUEPRINTS_DIR": str(REPO_ROOT / "blueprints"),
+        "PI_GLINK_WEB_SEARCH_CONFIG": str(scratch / "absent-web-search.json"),
+    }
+    config = load_config(env=overrides, repo_root=REPO_ROOT, env_file=OPERATOR_ENV)
+    server = create_server(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    base = f"http://127.0.0.1:{port}"
+    started = time.monotonic()
+
+    def api(path: str, *, method: str = "GET", body: dict | None = None):
+        payload = json.dumps(body).encode("utf-8") if body is not None else None
+        request = urllib.request.Request(f"{base}{path}", data=payload, method=method)
+        if payload is not None:
+            request.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, error.read()
+
+    try:
+        print(f"[host] blueprint dir={config.blueprints_dir} executor={config.executor}")
+        status, raw = api(
+            "/api/runs", method="POST", body={"prompt": PROMPT, "blueprint": "deep-research"}
+        )
+        if status != 201:
+            print(f"[fail] POST /api/runs status={status} body={raw[:400]!r}")
+            return 1
+        run = json.loads(raw)["run"]
+        run_id = run["runId"]
+        print(
+            f"[create] status=201 runId={run_id} blueprint={run['blueprint']} "
+            f"stages={[stage['id'] for stage in run['blueprintStages']]}"
+        )
+
+        deadline = time.monotonic() + TIMEOUT_SECONDS
+        final = run
+        while time.monotonic() < deadline:
+            _status, raw = api(f"/api/runs/{run_id}")
+            final = json.loads(raw)["run"]
+            if final["status"] != "running":
+                break
+            time.sleep(2.0)
+
+        elapsed = round(time.monotonic() - started, 1)
+        print(
+            "[terminal] "
+            + json.dumps(
+                {
+                    key: final.get(key)
+                    for key in (
+                        "status",
+                        "stopReason",
+                        "blueprint",
+                        "blueprintStages",
+                        "eventCount",
+                        "hasReport",
+                        "durationSeconds",
+                        "modelStopReason",
+                        "error",
+                    )
+                },
+                ensure_ascii=False,
+            )
+        )
+        print(f"[elapsed] {elapsed}s")
+
+        events_path = Path(final.get("_unused", "") or (scratch / "data" / "runs" / run_id / "events.jsonl"))
+        if events_path.is_file():
+            frames = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            types = {}
+            for frame in frames:
+                types[frame.get("type")] = types.get(frame.get("type"), 0) + 1
+            print(f"[events] count={len(frames)} types={json.dumps(types, ensure_ascii=False)}")
+            terminal = frames[-1].get("payload", {}) if frames else {}
+            print(
+                "[terminal-payload] "
+                + json.dumps(
+                    {
+                        key: terminal.get(key)
+                        for key in ("status", "reportStatus", "modelStopReason", "cleanup")
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        report_text = ""
+        if final.get("hasReport"):
+            status, raw = api(f"/api/runs/{run_id}/report")
+            report_text = raw.decode("utf-8", errors="replace")
+            print(f"[report] status={status} bytes={len(raw)}")
+            print("[report-excerpt]")
+            print(report_text[:1500])
+        else:
+            print("[report] missing")
+
+        ok = (
+            final.get("status") == "finished"
+            and final.get("blueprint") == "deep-research"
+            and len(final.get("blueprintStages") or []) == 4
+            and bool(final.get("hasReport"))
+            and "来源与核查" in report_text
+        )
+        print(f"[verdict] {'PASS' if ok else 'FAIL'}")
+        return 0 if ok else 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+        shutil.rmtree(scratch, ignore_errors=True)
+        print(f"[cleanup] host stopped; temporary data root removed: {scratch}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

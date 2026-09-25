@@ -54,7 +54,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Sequence
 
 from .events import TERMINAL_EVENT_TYPES
 
@@ -127,6 +127,28 @@ class RunRecord:
     #: imported into a tenant and never rewritten.
     tenant_id: str | None = None
     creator_user_id: str | None = None
+    #: Session blueprint this run was admitted with (the stem of
+    #: ``blueprints/<name>.md``), or ``None`` for a run admitted without one.
+    #: Recorded facts only: the host never advances a stage.
+    blueprint: str | None = None
+    #: The blueprint's stages as parsed at admission
+    #: (``id``/``title``/``goal``/``deliverable``/``checkpoint``). Empty for a run
+    #: without a blueprint and for records written before blueprints existed.
+    blueprint_stages: tuple[Mapping[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        """Canonicalize the stage list whatever representation reached us.
+
+        ``meta.json`` carries the stages as a JSON array, so a record read back
+        from disk holds a list; the in-memory record must still compare equal to
+        the one ``create`` returned. Coercing here keeps that true for every
+        construction path (admission, update, load).
+        """
+        object.__setattr__(
+            self,
+            "blueprint_stages",
+            tuple(dict(stage) for stage in (self.blueprint_stages or ())),
+        )
 
     @property
     def is_terminal(self) -> bool:
@@ -315,6 +337,8 @@ class RunStore:
         tenant_id: str | None = None,
         creator_user_id: str | None = None,
         parent_run_id: str | None = None,
+        blueprint: str | None = None,
+        blueprint_stages: Sequence[Mapping[str, Any]] = (),
     ) -> RunRecord:
         """Admit a run and write its assignment facts in one atomic meta write.
 
@@ -329,6 +353,9 @@ class RunStore:
         same replacement as the run id and created-at stamp, so no reader can
         observe an ownerless run that an authenticated request must hide. The
         optional ``parent_run_id`` records the follow-up chain in the same write.
+        ``blueprint`` / ``blueprint_stages`` record the session template the run
+        was admitted with: facts decided before admission, never progression
+        state.
         """
         identifier, directory = self._create_run_directory(run_id)
         if workspace is not None:
@@ -346,6 +373,8 @@ class RunStore:
             tenant_id=tenant_id,
             creator_user_id=creator_user_id,
             parent_run_id=parent_run_id,
+            blueprint=blueprint,
+            blueprint_stages=tuple(blueprint_stages),
         )
         return self._write(record)
 

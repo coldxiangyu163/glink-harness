@@ -43,6 +43,13 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .. import events
 from ..artifacts import ArtifactError, ArtifactMissing, ArtifactTree
+from ..blueprints import (
+    Blueprint,
+    BlueprintError,
+    blueprint_names,
+    load_blueprint,
+    render_blueprint,
+)
 from ..config import ConfigError, HostConfig
 from ..ownership import DataRootOwnership, OwnershipRequired
 from ..redaction import SecretRedactor, redactor_from_config
@@ -211,6 +218,23 @@ def prompt_names_unsupported_command(text: str, allowed: Sequence[str]) -> bool:
     return name not in allowed
 
 
+class BlueprintUnavailable(RuntimeError):
+    """The requested session blueprint cannot be used for this run.
+
+    ``code`` is ``unknown_blueprint`` (no such template in the blueprint
+    directory) or ``invalid_blueprint`` (present but not a usable document).
+    ``available`` is the derived name list, which the HTTP layer may report back
+    — it is reviewed repository content, not client input. The refused value
+    itself is never echoed, so the endpoint is not an oracle for arbitrary
+    strings.
+    """
+
+    def __init__(self, code: str, available: Sequence[str]) -> None:
+        self.code = code
+        self.available = tuple(sorted(available))
+        super().__init__("session blueprint is unavailable")
+
+
 class EventLogError(RuntimeError):
     """The durable event log could not be written; the frame must stay hidden."""
 
@@ -258,6 +282,11 @@ class _Execution:
     #: Snapshot of the sanitized previous session. Never share a mutable session file.
     session_seed: bytes | None = None
     parent_run_id: str | None = None
+    #: The parsed session blueprint this run was admitted with (``None`` for a
+    #: plain run) and its rendered system-prompt text. Both are decided at
+    #: admission; the host never advances a stage.
+    blueprint: Blueprint | None = None
+    blueprint_prompt: str = ""
     seeded_report_digest: str | None = None
     #: Guards the phase, the cancellation flag and every frame commit.
     lock: threading.RLock = field(default_factory=threading.RLock)
@@ -358,6 +387,7 @@ class RunManager:
         context: TenantContext | None = None,
         *,
         parent_run_id: str | None = None,
+        blueprint: str | None = None,
     ) -> RunRecord:
         """Admit a run and execute it in the background.
 
@@ -375,6 +405,14 @@ class RunManager:
         A prompt that opens with a ``/`` command other than the rendered prompt
         templates is refused with :class:`UnsupportedCommand` before anything is
         written or read (see :func:`prompt_names_unsupported_command`).
+
+        ``blueprint`` optionally names a session template from the configured
+        blueprint directory (an exact file stem). It is resolved and rendered
+        here, before any credential is resolved or a run directory exists; an
+        unknown or malformed template raises :class:`BlueprintUnavailable`. The
+        rule is harness-independent — the pi and ACP faces admit the same names.
+        A run without a blueprint is byte-for-byte the run it was before
+        blueprints existed.
 
         The follow-up's session snapshot (a bounded file read plus redaction)
         is taken before the admission lock is entered, so one tenant's
@@ -395,6 +433,15 @@ class RunManager:
         allowed_commands = self._allowed_prompt_commands()
         if prompt_names_unsupported_command(text, allowed_commands):
             raise UnsupportedCommand(allowed_commands)
+        # The session template is resolved and rendered before any credential is
+        # read, any parent is inspected or a run directory exists: an unknown or
+        # malformed blueprint refuses the whole admission, on every harness.
+        blueprint_template = (
+            self._resolve_blueprint(blueprint) if blueprint is not None else None
+        )
+        blueprint_prompt = (
+            render_blueprint(blueprint_template) if blueprint_template is not None else ""
+        )
         if self.config.harness == "acp" and parent_run_id is not None:
             # Original obligation (M1): ACP had no ``session/resume``, so every
             # ACP follow-up was refused with ``session_unavailable``. New
@@ -454,6 +501,14 @@ class RunManager:
                 tenant_id=context.tenant_id if context is not None else None,
                 creator_user_id=context.user_id if context is not None else None,
                 parent_run_id=parent_run_id,
+                blueprint=(
+                    blueprint_template.name if blueprint_template is not None else None
+                ),
+                blueprint_stages=(
+                    tuple(stage.as_record() for stage in blueprint_template.stages)
+                    if blueprint_template is not None
+                    else ()
+                ),
             )
             run_id = record.run_id
             workspace = Path(record.workspace)
@@ -466,6 +521,8 @@ class RunManager:
                 redactor=redactor,
                 session_seed=seed,
                 parent_run_id=parent_run_id,
+                blueprint=blueprint_template,
+                blueprint_prompt=blueprint_prompt,
             )
             self._executions[run_id] = execution
             # Register the run before the caller gets the id back: a browser
@@ -494,6 +551,29 @@ class RunManager:
         if self.config.harness == "acp":
             return ()
         return prompt_template_names(self.config.agent_config_dir)
+
+    def _resolve_blueprint(self, blueprint: str) -> Blueprint:
+        """Resolve one session template name against the configured directory.
+
+        The accepted set is derived from the directory on every admission (a
+        blueprint added or removed on disk is in force immediately), and the
+        name is matched exactly — a client cannot address a file outside it. A
+        malformed document is refused too: a partially rendered contract would
+        be worse than no contract. The refusal carries only the derived name
+        list, never the submitted value.
+        """
+        try:
+            return load_blueprint(self.config.blueprints_dir, blueprint)
+        except BlueprintError as exc:
+            available = blueprint_names(self.config.blueprints_dir)
+            code = "unknown_blueprint" if exc.reason == "unknown" else "invalid_blueprint"
+            # ``repr`` escapes control characters, so a hostile name cannot
+            # inject lines into the host log; the value is truncated, and the
+            # refusals the client sees carry none of it.
+            logger.warning(
+                "blueprint refused name=%r reason=%s", (blueprint or "")[:64], exc.reason
+            )
+            raise BlueprintUnavailable(code, available) from exc
 
     def _credentials_for_context(self, context: TenantContext | None) -> RunCredentials:
         """Select the credentials one run may render (caller holds no lock).
@@ -1666,10 +1746,10 @@ class RunManager:
             runtime=runtime,
             run_id=run_id,
             prompt=execution.kernel_prompt or execution.record.prompt,
-            system_prompt=self._research_prompt_text(),
+            system_prompt=self._system_prompt_text(execution),
             workspace=execution.workspace,
             timeout_seconds=self.config.task_timeout_seconds,
-            extra_argv=tuple(self._extra_argv(run_id)),
+            extra_argv=tuple(self._extra_argv(execution)),
             # The continuation value is harness-shaped: pi resumes from the
             # sanitized session file copied into the run's session directory,
             # while the ACP family resumes the **session id** the parent
@@ -1819,12 +1899,24 @@ class RunManager:
             return
         execution.record = self.store.update(execution.record.run_id, **changes)
 
-    def _extra_argv(self, run_id: str) -> list[str]:
-        extra = ["--name", f"pi-glink-{run_id}"]
-        text = self._research_prompt_text()
+    def _extra_argv(self, execution: _Execution) -> list[str]:
+        extra = ["--name", f"pi-glink-{execution.record.run_id}"]
+        text = self._system_prompt_text(execution)
         if text:
             extra.extend(["--append-system-prompt", text])
         return extra
+
+    def _system_prompt_text(self, execution: _Execution) -> str:
+        """The system prompt one run's kernel receives, on every face.
+
+        The working agreement (``agent/research-prompt.md``) plus, when the run
+        was admitted with one, the rendered session blueprint. pi gets the same
+        text through ``--append-system-prompt``; the ACP family gets it as the
+        leading text block of ``session/prompt``. The user's own prompt is a
+        different channel and is never part of this text.
+        """
+        parts = [self._research_prompt_text(), execution.blueprint_prompt]
+        return "\n\n".join(part for part in parts if part)
 
     def _research_prompt_text(self) -> str:
         path = self.config.agent_config_dir / RESEARCH_PROMPT_FILENAME
