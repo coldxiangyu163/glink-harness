@@ -1325,7 +1325,7 @@ initialize/session/new/prompt、投影帧、产物回收与沙箱销毁）、run
 M8 新增/更新（`合成实测`）：`tests/test_kernel_acp_e2b.py` 增 e2b 跨沙箱续接全链路（新沙箱、
 同 sessionId、代号回环、两侧 recovered 根与继承文件）、状态根回收上限三轴（单文件/文件数/总量）
 与回收失败拒绝、灌回失败 fail-closed（灌回阶段写入失败 → run 失败、沙箱销毁、agent 未启动）、
-灌回顺序（`chmod 0700` 先于上传、0600 加固覆盖继承文件）、准入矩阵（能力缺失/非最新轮次/回收缺失/
+灌回顺序（`chmod 0700` 先于上传、0600 加固覆盖继承文件）、准入矩阵（能力缺失/无 sessionId/非最新轮次/回收缺失/
 异租户）、继承值脱敏与沙箱路径安全；现有 pi 面与 inproc/docker ACP 断言不变。
 
 M5 新增/更新（`合成实测`）：`tests/test_kernel_acp_env.py` 增三项 opencode 凭据回归

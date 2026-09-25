@@ -1026,6 +1026,18 @@ def test_acp_e2b_followup_admission_matrix(tmp_path: Path) -> None:
     assert excinfo.value.code == "session_unavailable"
     assert len(store2.list(limit=None)) == before
 
+    # No recorded session id: refused even when the recovered root and the
+    # capability matrix look resumable. (Simulated by clearing the record, the
+    # same shape a pre-session-id ACP run would have.)
+    parent3 = manager.start("第一轮-无会话")
+    assert manager.wait(parent3.run_id, timeout=120) is not None
+    store.update(parent3.run_id, session_id=None)
+    sandboxes_before = len(sandboxes)
+    with pytest.raises(FollowupUnavailable) as excinfo:
+        manager.start("追问", parent_run_id=parent3.run_id)
+    assert excinfo.value.code == "session_unavailable"
+    assert len(sandboxes) == sandboxes_before, "拒绝发生在起新沙箱之前"
+
 
 def test_restoring_the_inherited_state_must_succeed_before_the_agent_starts(
     tmp_path: Path,
