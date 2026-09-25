@@ -46,11 +46,15 @@ from pi_glink.kernel.execution import ExecutionSpec, build_adapter
 from pi_glink.kernel.rpc import PiRpcClient
 from pi_glink.kernel.runner import FollowupUnavailable, RunManager
 from pi_glink.store import FAILED, FINISHED, RunStore
+from pi_glink.tenancy import TenantContext, TenantCredentialStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"
 DOCKERFILE = REPO_ROOT / "docker" / "e2b" / "Dockerfile.acp-e2b"
 NOTES = REPO_ROOT / "docs" / "acp-integration-notes.md"
+#: Multi-tenant fixture constants (same shape the inproc continuation tests use).
+AUDIENCE = "pi-glink-test"
+SECRET = b"0123456789abcdef0123456789abcdef"
 
 
 # -- fakes --------------------------------------------------------------------
@@ -1021,6 +1025,120 @@ def test_acp_e2b_followup_admission_matrix(tmp_path: Path) -> None:
         manager2.start("追问", parent_run_id=parent2.run_id)
     assert excinfo.value.code == "session_unavailable"
     assert len(store2.list(limit=None)) == before
+
+
+def test_restoring_the_inherited_state_must_succeed_before_the_agent_starts(
+    tmp_path: Path,
+) -> None:
+    """A failed restore into the new sandbox fails the run closed.
+
+    ``upload_home`` is the "灌回" step: the follow-up's HOME (inherited state +
+    fresh credentials) is written into the new sandbox before the agent starts.
+    A write failure must fail the run — never start the agent against a partial
+    state root — and the just-created sandbox must still be destroyed.
+    """
+    settings = {"FAKE_ACP_WRITE_REPORT": True}
+    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings))
+    sandboxes: list[FakeSandbox] = []
+
+    def factory(**_kwargs: Any) -> FakeSandbox:
+        sandbox = FakeSandbox(
+            tmp_path,
+            report=None,
+            sandbox_id=f"fake-sandbox-{len(sandboxes) + 1}",
+            # The *second* sandbox refuses writes: the first turn must finish
+            # normally, and the follow-up must fail while restoring.
+            write_failure="disk full" if sandboxes else None,
+        )
+        sandboxes.append(sandbox)
+        return sandbox
+
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store=store, sandbox_factory=factory)
+    parent = manager.start("第一轮")
+    parent_final = manager.wait(parent.run_id, timeout=120)
+    assert parent_final is not None and parent_final.status == FINISHED
+
+    child = manager.start("追问", parent_run_id=parent.run_id)
+    child_final = manager.wait(child.run_id, timeout=120)
+    assert child_final is not None and child_final.status == FAILED
+    assert child_final.error and "disk full" in child_final.error
+    assert child_final.session_id is None
+    assert len(sandboxes) == 2 and sandboxes[1].killed is True
+    assert sandboxes[1].agent_process is None, "灌回失败时不得启动 agent"
+    assert not any(
+        payload.get("sessionId") for payload in _payloads(store, child.run_id, "session_ready")
+    ), "灌回失败不得留下已建立的会话"
+
+
+def test_acp_followup_refuses_a_parent_owned_by_another_tenant_on_the_sandbox_face(
+    tmp_path: Path,
+) -> None:
+    """The owner gate runs before anything else on the e2b face too.
+
+    A parent owned by another tenant is invisible: no session, no state root,
+    no existence leak, and no second sandbox is created.
+    """
+    secret_file = tmp_path / "gateway.key"
+    secret_file.write_bytes(SECRET)
+    secret_file.chmod(0o600)
+    tenants_file = tmp_path / "tenants.json"
+    tenants_file.write_text(
+        json.dumps(
+            {
+                "tenants": {
+                    "tenant-alpha": {"modelApiKey": "sk-alpha-0000000000000000"},
+                    "tenant-beta": {"modelApiKey": "sk-beta-0000000000000000"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    tenants_file.chmod(0o600)
+    config = make_config(
+        tmp_path,
+        PI_GLINK_ACP_COMMAND=fake_agent_command(
+            tmp_path, {"FAKE_ACP_WRITE_REPORT": True}, name="tenant-settings.json"
+        ),
+        PI_GLINK_TENANCY="multitenant",
+        PI_GLINK_GATEWAY_SECRET_FILE=str(secret_file),
+        PI_GLINK_TENANT_CONFIG_FILE=str(tenants_file),
+        PI_GLINK_TENANCY_AUDIENCE=AUDIENCE,
+        LOCAL_WEB_TASK_TIMEOUT_SECONDS="60",
+    )
+    sandboxes: list[FakeSandbox] = []
+    store = RunStore(config.data_root / "runs")
+    credentials = TenantCredentialStore.from_file(tenants_file, repo_root=REPO_ROOT)
+    manager = RunManager(
+        config,
+        EventBus(),
+        store,
+        credential_store=credentials,
+        sandbox_factory=_sandbox_sequence(tmp_path, sandboxes, report=None),
+    )
+    alpha = TenantContext(
+        tenant_id="tenant-alpha",
+        user_id="user-a",
+        role="member",
+        audience=AUDIENCE,
+        expires_at=time.time() + 60,
+    )
+    beta = TenantContext(
+        tenant_id="tenant-beta",
+        user_id="user-b",
+        role="member",
+        audience=AUDIENCE,
+        expires_at=time.time() + 60,
+    )
+    parent = manager.start("第一轮", alpha)
+    assert manager.wait(parent.run_id, timeout=120) is not None
+
+    before = len(store.list(limit=None))
+    with pytest.raises(FollowupUnavailable) as excinfo:
+        manager.start("追问", beta, parent_run_id=parent.run_id)
+    assert excinfo.value.code == "unknown_run"
+    assert len(store.list(limit=None)) == before
+    assert len(sandboxes) == 1, "异租户拒绝发生在起新沙箱之前"
 
 
 def test_recovery_never_mirrors_a_path_outside_the_state_root() -> None:

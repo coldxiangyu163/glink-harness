@@ -1324,8 +1324,9 @@ initialize/session/new/prompt、投影帧、产物回收与沙箱销毁）、run
 
 M8 新增/更新（`合成实测`）：`tests/test_kernel_acp_e2b.py` 增 e2b 跨沙箱续接全链路（新沙箱、
 同 sessionId、代号回环、两侧 recovered 根与继承文件）、状态根回收上限三轴（单文件/文件数/总量）
-与回收失败拒绝、灌回顺序（`chmod 0700` 先于上传、0600 加固覆盖继承文件）、准入矩阵（能力缺失/
-非最新轮次/回收缺失）、继承值脱敏与沙箱路径安全；现有 pi 面与 inproc/docker ACP 断言不变。
+与回收失败拒绝、灌回失败 fail-closed（灌回阶段写入失败 → run 失败、沙箱销毁、agent 未启动）、
+灌回顺序（`chmod 0700` 先于上传、0600 加固覆盖继承文件）、准入矩阵（能力缺失/非最新轮次/回收缺失/
+异租户）、继承值脱敏与沙箱路径安全；现有 pi 面与 inproc/docker ACP 断言不变。
 
 M5 新增/更新（`合成实测`）：`tests/test_kernel_acp_env.py` 增三项 opencode 凭据回归
 （JSON 的 `access`/`refresh` 命中且 `accountId`/`accessMode` 不命中、YAML 标量行同规则）；
@@ -1549,7 +1550,8 @@ ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上
   sessionId；finalize 记录回收 verdict（第二条 `session_ready`）并把回收文本里的凭据形状值并入
   run redactor。
 * 合成回归：`tests/test_kernel_acp_e2b.py`（跨沙箱全链路、回收上限三轴、回收失败拒绝、灌回
-  顺序、准入矩阵、继承值脱敏、路径安全）；`bash scripts/check.sh` 全绿（Python 773 / Node 116）。
+  失败 fail-closed、灌回顺序、准入矩阵（含异租户）、继承值脱敏、路径安全）；`bash scripts/check.sh`
+  全绿（Python 775 / Node 116）。
 * live 探针：`scripts/spikes/acp_e2b/resume_smoke.py`（首轮+追问；判据含异沙箱/同 sessionId/
   代号回环/两侧回收/按 id 清理）；`sandbox_handshake.py --recover-state`（不发 prompt 的真实
   沙箱回收自检）。
