@@ -8,7 +8,7 @@
   "globalConcurrencyLimit": 4,
   "maxSubagentSpawnsPerSession": 8,
   "parallel": { "concurrency": 4 },
-  "artifactDir": "project",
+  "artifactDir": "session",
   "proactiveSkillSubagents": false,
   "control": { "enabled": false }
 }

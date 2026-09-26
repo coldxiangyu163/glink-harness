@@ -273,23 +273,53 @@ class E2BSandboxClient:
         sandbox.files.write(f"{SANDBOX_WORKSPACE}/{REPORT_FILENAME}", report)
 
     def recover_session(self) -> tuple[Path | None, str | None]:
-        """Recover a single session file before the sandbox is destroyed."""
+        """Recover the run's main session file before the sandbox is destroyed.
+
+        Subagent forks (pi-subagents ``createBranchedSession``) share this
+        directory with the main session: they are timestamped ``.jsonl`` files
+        with the same naming, told apart only by the header — a branched
+        header carries ``parentSession``, the main session's does not (a
+        continued session is opened in place and keeps its original header).
+        Subdirectories (``subagent-artifacts/``) never compete. The main
+        session must be *uniquely* determined; anything ambiguous refuses the
+        follow-up instead of guessing.
+        """
         sandbox = self._require_sandbox()
         try:
-            entries = sandbox.files.list(SANDBOX_SESSIONS)
-            names = [str(getattr(entry, "name", "")) for entry in entries]
-            if len(names) != 1 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\.jsonl", names[0]):
-                return None, "沙箱会话文件不可续接"
-            name = names[0]
-            data = sandbox.files.read(f"{SANDBOX_SESSIONS}/{name}")
-            content = data if isinstance(data, bytes) else str(data).encode("utf-8")
-            if not content or len(content) > ARTIFACT_MAX_BYTES:
-                return None, "沙箱会话文件不可续接"
+            main, _others, failure = _session_candidates(sandbox)
+            if failure is not None or main is None:
+                return None, f"沙箱会话文件不可续接: {failure or '主会话无法唯一确定'}"
+            data, read_failure = _read_file_bounded(
+                sandbox, f"{SANDBOX_SESSIONS}/{main}", ARTIFACT_MAX_BYTES
+            )
+            if read_failure is not None or not data:
+                return None, f"沙箱会话文件不可续接: {read_failure or '空文件'}"
             with ArtifactTree(self.runtime.session_dir) as tree:
-                tree.replace(name, content, max_bytes=ARTIFACT_MAX_BYTES)
-            return self.runtime.session_dir / name, None
+                tree.replace(main, data, max_bytes=ARTIFACT_MAX_BYTES)
+            return self.runtime.session_dir / main, None
         except Exception as exc:  # noqa: BLE001 - sandbox SDK failures must not hide the verdict
             return None, f"沙箱会话回收失败: {type(exc).__name__}"
+
+    def recover_subagent_files(
+        self, destination: Path
+    ) -> tuple[list[Path], list[str]]:
+        """Mirror subagent sessions and artifacts out of the dying sandbox.
+
+        Branched sessions land under ``sessions/`` and the ``subagent-artifacts``
+        subtree under ``artifacts/``; the main session is left to
+        :meth:`recover_session`. Best-effort per file: directories and links
+        are never followed, unreadable or oversized regular files are recorded
+        as failures (they are not load-bearing for the run's continuation), and
+        every write lands through the destination's directory handles.
+        """
+        sandbox = self._require_sandbox()
+        destination.mkdir(parents=True, exist_ok=True)
+        try:
+            tree = ArtifactTree(destination)
+        except ArtifactError as exc:
+            return [], [f"子代理产物落点不可用: {exc}"]
+        with tree:
+            return _mirror_subagent_data(sandbox, tree, destination)
 
     def run_prompt(
         self,
@@ -899,6 +929,186 @@ def _read_file_bounded(
     if len(data) > max_bytes:
         return None, f"文件超过上限（{len(data)} > {max_bytes} 字节）"
     return bytes(data), None
+
+
+#: A pi session header is one compact JSON line; this prefix is far more than
+#: it needs and far less than a session file, so sniffing never loads the body.
+_HEADER_SNIFF_BYTES = 16 * 1024
+
+
+def _session_header(sandbox: Any, path: str) -> tuple[Mapping[str, Any] | None, str | None]:
+    """The first-line header of a candidate session file, read bounded.
+
+    Returns ``(header, None)`` for a pi session file, ``(None, None)`` when the
+    first line is not a session header (the file simply does not compete for
+    the main-session slot), and ``(None, reason)`` when the file cannot even
+    be read — an unreadable candidate refuses the follow-up rather than being
+    silently ignored.
+    """
+    stream, failure = _stream_reader(sandbox, path)
+    if failure is not None:
+        return None, failure
+    prefix = b""
+    if stream is not None:
+        try:
+            for chunk in stream:
+                data = (
+                    bytes(chunk)
+                    if isinstance(chunk, (bytes, bytearray))
+                    else str(chunk).encode("utf-8")
+                )
+                prefix += data
+                if b"\n" in data or len(prefix) >= _HEADER_SNIFF_BYTES:
+                    break
+        except Exception as exc:  # noqa: BLE001 - surfaced as a failure reason
+            return None, f"{type(exc).__name__}: {exc}"
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 - cleanup must not mask the result
+                    pass
+    else:
+        data, read_failure = _read_file_bounded(sandbox, path, ARTIFACT_MAX_BYTES)
+        if read_failure is not None:
+            return None, read_failure
+        prefix = data or b""
+    line = prefix.split(b"\n", 1)[0]
+    try:
+        header = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(header, dict) or header.get("type") != "session":
+        return None, None
+    return header, None
+
+
+def _session_candidates(
+    sandbox: Any,
+) -> tuple[str | None, list[str], str | None]:
+    """``(main, others, failure)`` among the sandbox session dir's top level.
+
+    The main session is the only ``.jsonl`` whose header has no
+    ``parentSession``; branched (subagent fork) sessions carry one, and
+    subdirectories never compete. ``failure`` is set when a listed candidate
+    cannot even be read or two header-mains appear — the layout is then
+    unexplained and neither continuation nor recovery may guess.
+    """
+    entries = sandbox.files.list(SANDBOX_SESSIONS)
+    candidates: list[str] = []
+    for entry in entries:
+        if _entry_kind(entry) != "file":
+            continue
+        name = str(getattr(entry, "name", ""))
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\.jsonl", name):
+            candidates.append(name)
+    main: str | None = None
+    others: list[str] = []
+    for name in sorted(candidates):
+        header, failure = _session_header(sandbox, f"{SANDBOX_SESSIONS}/{name}")
+        if failure is not None:
+            return None, [], f"{name}: {failure}"
+        if header is None or header.get("parentSession"):
+            others.append(name)
+            continue
+        if main is not None:
+            return None, [], "multiple main-session candidates"
+        main = name
+    return main, others, None
+
+
+#: Bounds for the subagent mirror (branched sessions + ``subagent-artifacts``).
+#: The mirror is not load-bearing for the run's continuation, so these sit
+#: below the ACP state root's; per-file breaches are recorded, not hidden.
+SUBAGENT_RECOVER_MAX_DEPTH = 3
+SUBAGENT_RECOVER_MAX_FILES = 64
+SUBAGENT_RECOVER_MAX_FILE_BYTES = UPLOAD_MAX_BYTES
+SUBAGENT_RECOVER_MAX_TOTAL_BYTES = 32 * 1024 * 1024
+SUBAGENT_ARTIFACTS_DIRNAME = "subagent-artifacts"
+
+
+def _subtree_relative(root: str, path: str) -> str | None:
+    """``path`` relative to ``root``, or ``None`` when it escapes it."""
+    prefix = root.rstrip("/") + "/"
+    if not path.startswith(prefix):
+        return None
+    relative = path[len(prefix):]
+    parts = relative.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        return None
+    return relative
+
+
+def _mirror_subagent_data(
+    sandbox: Any, tree: ArtifactTree, destination: Path
+) -> tuple[list[Path], list[str]]:
+    """Copy every subagent file the sandbox holds into the host mirror."""
+    files: list[Path] = []
+    failures: list[str] = []
+    total = 0
+
+    def mirror(remote_path: str, relative: str, known_size: int | None = None) -> bool:
+        """Mirror one bounded file; ``False`` means a global cap tripped (stop)."""
+        nonlocal total
+        if len(files) >= SUBAGENT_RECOVER_MAX_FILES:
+            failures.append(f"子代理产物超过文件数上限（{SUBAGENT_RECOVER_MAX_FILES}）")
+            return False
+        data, failure = _read_file_bounded(
+            sandbox, remote_path, SUBAGENT_RECOVER_MAX_FILE_BYTES, known_size=known_size
+        )
+        if data is None:
+            failures.append(f"子代理产物不可回收: {relative}: {failure}")
+            return True
+        total += len(data)
+        if total > SUBAGENT_RECOVER_MAX_TOTAL_BYTES:
+            failures.append(f"子代理产物超过总量上限（{SUBAGENT_RECOVER_MAX_TOTAL_BYTES} 字节）")
+            return False
+        try:
+            tree.replace(
+                relative,
+                data,
+                max_bytes=SUBAGENT_RECOVER_MAX_FILE_BYTES,
+                create_parents=True,
+            )
+        except ArtifactError as exc:
+            failures.append(f"子代理产物落盘被拒: {relative}: {exc}")
+            return True
+        files.append(destination / relative)
+        return True
+
+    main, others, failure = _session_candidates(sandbox)
+    if failure is not None:
+        failures.append(f"子代理会话布局无法判定: {failure}")
+    else:
+        for name in others:
+            if not mirror(f"{SANDBOX_SESSIONS}/{name}", f"sessions/{name}"):
+                return files, failures
+
+    artifacts_root = f"{SANDBOX_SESSIONS}/{SUBAGENT_ARTIFACTS_DIRNAME}"
+    try:
+        entries = sandbox.files.list(artifacts_root, depth=SUBAGENT_RECOVER_MAX_DEPTH)
+    except Exception as exc:  # noqa: BLE001 - surfaced as a failure reason
+        failures.append(f"无法列出子代理产物目录: {type(exc).__name__}: {exc}")
+        return files, failures
+    for entry in entries:
+        if _entry_kind(entry) != "file":
+            # Directories shape the walk; links are never followed (the same
+            # rule the workspace recovery and ArtifactTree enforce).
+            continue
+        path = str(getattr(entry, "path", "") or "")
+        relative = _subtree_relative(artifacts_root, path)
+        if relative is None:
+            failures.append(f"子代理产物路径无法映射，已跳过: {path[:200]!r}")
+            continue
+        known = getattr(entry, "size", None)
+        if not mirror(
+            path,
+            f"artifacts/{relative}",
+            known_size=known if isinstance(known, int) else None,
+        ):
+            break
+    return files, failures
 
 
 def _default_kill(api_key: str) -> Callable[[str], Any]:

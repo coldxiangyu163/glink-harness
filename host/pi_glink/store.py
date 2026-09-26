@@ -71,6 +71,10 @@ TERMINAL_STATUSES = frozenset({FINISHED, FAILED, CANCELLED})
 REPORT_FILENAME = "report.md"
 #: Host-owned artifact directory inside the run directory.
 ARTIFACTS_DIRNAME = "artifacts"
+#: Host-owned mirror of a run's subagent sessions and artifacts (recovered
+#: out of the sandbox before it is destroyed; other faces keep theirs in the
+#: session directory). Recovered raw, then swept by the run's redactor.
+SUBAGENTS_DIRNAME = "subagents"
 
 _META_NAME = "meta.json"
 _EVENTS_NAME = "events.jsonl"

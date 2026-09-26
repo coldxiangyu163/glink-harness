@@ -40,6 +40,11 @@ The contract is:
     Session identity that only became knowable through that recovery and is
     worth (re)publishing — the sandbox faces learn such facts while pulling
     the workspace back; every other face answers ``None``.
+``recover_subagents(destination)``
+    Optional, faces with subagent side-products only (the pi sandbox face):
+    mirror branched sessions and subagent artifacts out of the dying sandbox
+    before ``close()``. Faces whose subagent files already live on the host
+    (in-process, Docker) do not implement it — there is nothing to pull back.
 ``close()``
     Release the process/container/sandbox and report whether that succeeded.
     A cleanup failure is reported, never silently swallowed, and never
@@ -628,6 +633,16 @@ class E2BSandboxExecutionAdapter(SealedOutcome, ExecutionAdapter):
         self._session_file = session_file
         if session_failure:
             failures.append(session_failure)
+        return ArtifactRecovery(files=tuple(files), failures=tuple(failures))
+
+    def recover_subagents(self, destination: Path) -> ArtifactRecovery:
+        """Mirror subagent sessions/artifacts while the sandbox still exists."""
+        client = self._client
+        if client is None:
+            if self._cancelled.is_set():
+                return ArtifactRecovery()
+            return ArtifactRecovery(failures=("sandbox 已关闭，子代理产物不可回收",))
+        files, failures = client.recover_subagent_files(destination)
         return ArtifactRecovery(files=tuple(files), failures=tuple(failures))
 
     def close(self) -> CleanupReport:

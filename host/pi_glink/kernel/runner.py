@@ -63,6 +63,7 @@ from ..store import (
     FINISHED,
     REPORT_FILENAME,
     RUNNING,
+    SUBAGENTS_DIRNAME,
     RunRecord,
     RunStore,
 )
@@ -1182,6 +1183,16 @@ class RunManager:
                     recovered_session = recovered()
                     if recovered_session is not None:
                         self._publish_session_ready(execution, recovered_session)
+                # Subagent side-products die with the sandbox: the face that
+                # has any (pi E2B) mirrors them under the run directory while
+                # the sandbox still exists; faces whose subagent files already
+                # live on the host do not implement the method.
+                recover_subagents = getattr(adapter, "recover_subagents", None)
+                if recover_subagents is not None:
+                    subagent_recovery = recover_subagents(
+                        self.store.run_dir(run_id) / SUBAGENTS_DIRNAME
+                    )
+                    execution.artifact_failures.extend(subagent_recovery.failures)
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 execution.artifact_failures.append(
                     f"产物回收失败: {type(exc).__name__}: {exc}"
@@ -1203,6 +1214,14 @@ class RunManager:
                 execution.redacted = True
         except Exception:  # noqa: BLE001 - sweep is defence in depth
             logger.exception("workspace credential sweep failed run=%s", run_id)
+        try:
+            subagents_dir = self.store.run_dir(run_id) / SUBAGENTS_DIRNAME
+            if subagents_dir.is_dir() and self._sanitize_workspace(
+                subagents_dir, self._run_redactor(execution)
+            ):
+                execution.redacted = True
+        except Exception:  # noqa: BLE001 - sweep is defence in depth
+            logger.exception("subagent artifact credential sweep failed run=%s", run_id)
         try:
             if self._sanitize_session(execution):
                 execution.redacted = True
@@ -1900,17 +1919,30 @@ class RunManager:
         The kernel owns that file, so redaction cannot happen on the way in; it
         happens here on the way out. The path is only trusted inside the run's
         own session directory — a kernel-reported path elsewhere on the host is
-        refused rather than rewritten.
+        refused rather than rewritten. Subagent forks and their artifacts share
+        the session directory on the faces where it lives on the host
+        (in-process, Docker), so the whole directory is swept with the same
+        boundary; the main session file is checked twice at worst (redaction
+        is idempotent).
         """
+        if execution.runtime is None:
+            return False
         record = self.store.get(execution.record.run_id)
         session_file = record.session_file if record is not None else None
-        if not session_file or execution.runtime is None:
-            return False
-        return self._sanitize_session_file(
-            session_file,
-            root=execution.runtime.session_dir,
-            redactor=self._run_redactor(execution),
-        )
+        changed = False
+        if session_file:
+            changed = self._sanitize_session_file(
+                session_file,
+                root=execution.runtime.session_dir,
+                redactor=self._run_redactor(execution),
+            )
+        if self._sanitize_workspace(
+            execution.runtime.session_dir,
+            self._run_redactor(execution),
+            max_bytes=REPORT_MAX_BYTES,
+        ):
+            changed = True
+        return changed
 
     def _sanitize_session_file(
         self,
@@ -1941,7 +1973,12 @@ class RunManager:
         return True
 
     def _sanitize_workspace(
-        self, workspace: Path, redactor: SecretRedactor | None = None
+        self,
+        workspace: Path,
+        redactor: SecretRedactor | None = None,
+        *,
+        max_files: int = SWEEP_MAX_FILES,
+        max_bytes: int = SWEEP_MAX_BYTES,
     ) -> bool:
         """Redact credentials in every text artifact the run left behind.
 
@@ -1952,7 +1989,9 @@ class RunManager:
         reading, and every rewrite is published inside the verified directory.
 
         ``redactor`` is the run's own boundary; the default is the host-level
-        one for callers that have no run.
+        one for callers that have no run. ``max_bytes`` is raised for the
+        session directory, whose files are legitimately larger than workspace
+        artifacts.
         """
         boundary = redactor or self.redactor
         try:
@@ -1961,9 +2000,9 @@ class RunManager:
             return False
         changed = False
         with tree:
-            for relative in tree.files(max_files=SWEEP_MAX_FILES):
+            for relative in tree.files(max_files=max_files):
                 try:
-                    raw = tree.read(relative, max_bytes=SWEEP_MAX_BYTES)
+                    raw = tree.read(relative, max_bytes=max_bytes)
                 except ArtifactError:
                     continue
                 if b"\x00" in raw[:1024]:  # binary-ish
@@ -1976,7 +2015,7 @@ class RunManager:
                 if redacted == text:
                     continue
                 try:
-                    tree.replace(relative, redacted.encode("utf-8"), max_bytes=SWEEP_MAX_BYTES)
+                    tree.replace(relative, redacted.encode("utf-8"), max_bytes=max_bytes)
                 except (ArtifactError, OSError) as exc:
                     logger.error("failed to redact artifact: %s (%s)", relative, exc)
                     continue

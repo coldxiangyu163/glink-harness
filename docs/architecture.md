@@ -282,7 +282,7 @@ data_root 若是符号链接、不是目录或带组/其他人写权限，宿主
 | 运行时来源 | 宿主安装的 Node v24.16.0 / pi | 镜像自包含（`pi-glink-worker:latest`，node v24.21.0 + pi 0.86.1 + `/opt/pi-packages` 预装 pi 包；镜像名在启动时冻结） | 模板自包含（`pi-glink-worker`，node v24.21.0 + pi 0.86.1 + `/opt/pi-packages` 预装 pi 包） |
 | 运行期配置 | `runs/<id>/pi-agent`（本 run 独占） | 同目录挂到 `/config` | 同一目录整棵上传到沙箱 `/home/user/config` |
 | 工作区 | `<data>/workspaces/<runId>` | 同左（挂到 `/workspace`） | 沙箱内 `/home/user/workspace`，结束后拉回宿主 |
-| 会话文件 | 会话根下的 `<id>/`（宿主可查） | 该目录挂到 `/sessions`；宿主按挂载映射回本 run 目录后脱敏 | 销毁前回收单个有界会话文件到本 run 目录，供下一轮使用；多文件或回收失败不可续接 |
+| 会话文件 | 会话根下的 `<id>/`（宿主可查） | 该目录挂到 `/sessions`；宿主按挂载映射回本 run 目录后脱敏 | 销毁前按会话头判别回收主会话到本 run 目录（分支会话头部带 `parentSession`，主会话不带），供下一轮使用；主会话无法唯一确定或回收失败不可续接 |
 | 模型凭据 | 本 run 的 `auth.json`（0600，不进进程环境） | 随 `/config` 挂载 | 随运行期配置上传（不进沙箱进程环境） |
 | 搜索凭据 | 本 run 的 `web-search.json`（600） | 随 `/config` 挂载 | 上传到沙箱 `/config`（随沙箱消失） |
 | 隔离强度 | 进程级 | 容器级 | 云端沙箱级 |
@@ -338,6 +338,8 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 仓库 `agent/` 模板目录（只读输入）和 `data_root` 本身。
 
 **多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
+
+**子代理副产物**：pi-subagents 的分支会话与主会话同名同目录（只能按会话头区分，见上表），产物目录由 `artifactDir: "session"` 落在会话目录的 `subagent-artifacts/`。E2B 面在沙箱销毁前把这些有界镜像到宿主拥有的 `runs/<id>/subagents/`（分支会话进 `sessions/`、产物进 `artifacts/`；深度/文件数/单文件/总量限幅，链接不跟随，失败记 `artifactFailures`），inproc/Docker 面的同类文件本就在宿主会话目录内、不另拷贝；两路的会话目录与镜像目录都在收尾时过 run 的脱敏边界（与 §6.1 会话文件同一条规则）。
 
 **事件时序**：E2B 的流式接口是 `commands.run(background=True, …)` 返回的 `CommandHandle`
 （`background=True` 的重载不消费 `run()` 自身的回调）。沙箱命令把 pi 的 stdout 同时 `tee` 到
@@ -420,7 +422,8 @@ Dockerfile 的边界约束，缺 `pi-subagents` 只会退化成“没有子代�
 | 事件投影 | 载荷里每个字符串递归脱敏；delta 走尾部暂存（§3.3） | `kernel/projection.py::project_event(frame, redactor)`、`redaction.py::StreamRedactor` |
 | 事件总线 / `events.jsonl` | 提交（先落盘）前再脱敏一次 | `kernel/runner.py::_emit` |
 | 报告文件 | 经工作区目录句柄读取、脱敏、在 run 目录句柄内原子写入 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `kernel/runner.py::_recover_report` |
-| 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源 | `kernel/runner.py::_sanitize_session_file`、`docker_env.host_session_path` |
+| 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源；子代理分支会话与 `subagent-artifacts/` 同目录被同一边界清扫 | `kernel/runner.py::_sanitize_session_file`、`docker_env.host_session_path` |
+| 子代理镜像 | E2B 面回收的 `runs/<id>/subagents/`（分支会话 + 产物）收尾时经目录句柄清扫，与 §5.2 同一条边界 | `kernel/runner.py::_sanitize_workspace`、`kernel/e2b_env.py::recover_subagent_files` |
 | 报告下载 | `report_path` 不是下载能力：只认两个固定位置——宿主产物 `runs/<id>/artifacts/report.md`，以及旧版本写下的本 run 工作区 `workspaces/<id>/report.md`（只读，从不改写历史）；其他路径一律视为无报告。服务前再脱敏，响应头 `X-Redacted` 标明是否发生；`hasReport` 用同一位置规则与同一拒绝条件计算 | `store.py::report_location`、`web_routes.py::_send_report`、`artifacts.py` |
 
 **产物路径安全**（`artifacts.py::ArtifactTree`）：宿主从不「先 realpath 校验、再按路径打开」。
@@ -471,7 +474,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `scripts/` | 运维 | 启动、测试、真实 run 冒烟、E2B 模板构建；`spikes/`（ACP 各面的 live 探针） |
 | `docs/` | 文档与证据 | 架构、边界、集成笔记、`evidence/` |
 | `tests/` | 回归 | `test_*.py`（宿主/内核）、`web/*.test.mjs`（前端模型）、`browser/`（真实浏览器） |
-| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/<id>/{meta.json,events.jsonl,pi-agent/ 或 acp-agent/,artifacts/}`（按本 run 的 harness 渲染）、`sessions/<id>/`、`workspaces/<id>/`；目录由宿主以 0700 创建，已存在的符号链接或组/其他人可写目录拒绝启动（不自动 chmod） |
+| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/<id>/{meta.json,events.jsonl,pi-agent/ 或 acp-agent/,artifacts/,subagents/}`（按本 run 的 harness 渲染；`subagents/` 为 E2B 面回收的子代理镜像）、`sessions/<id>/`、`workspaces/<id>/`；目录由宿主以 0700 创建，已存在的符号链接或组/其他人可写目录拒绝启动（不自动 chmod） |
 
 运行期配置目录 `runs/<id>/pi-agent/` 是 pi 的 `PI_CODING_AGENT_DIR`：宿主在其中渲染
 `models.json` 与 `web-search.json`，复制 `agent/` 的可版本化配置，pi 自己往里写 `auth.json` /

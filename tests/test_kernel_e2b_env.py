@@ -31,6 +31,7 @@ from pi_glink.kernel.e2b_env import (
     ARTIFACT_MAX_BYTES,
     EVENTS_MAX_BYTES,
     STDERR_MAX_BYTES,
+    SUBAGENT_RECOVER_MAX_FILE_BYTES,
     E2BSandboxClient,
     EventCatchUpFailed,
     SandboxError,
@@ -106,7 +107,7 @@ class FakeFiles:
         info.size = size
         return info
 
-    def list(self, path: str) -> list[Any]:
+    def list(self, path: str, depth: int = 1, **_kwargs: Any) -> list[Any]:
         readable = self._sandbox.readable
         sizes = self._sandbox.sizes
         types = self._sandbox.entry_types
@@ -128,7 +129,13 @@ class FakeFiles:
                 else:
                     self.size = len(content.encode("utf-8"))
 
-        names = self._sandbox.session_files if path == "/home/user/sessions" else self._sandbox.workspace_files
+        names = (
+            self._sandbox.artifact_files
+            if path == "/home/user/sessions/subagent-artifacts"
+            else self._sandbox.session_files
+            if path == "/home/user/sessions"
+            else self._sandbox.workspace_files
+        )
         return [Entry(name) for name in names]
 
 
@@ -183,6 +190,9 @@ class FakeSandbox:
         self.readable: dict[str, Any] = {}
         self.workspace_files = workspace_files
         self.session_files: tuple[str, ...] = ()
+        #: Relative names inside ``/home/user/sessions/subagent-artifacts``
+        #: (nested names contain ``/``); kinds via ``entry_types``.
+        self.artifact_files: tuple[str, ...] = ()
         self.command = ""
         self.command_envs: dict[str, str] = {}
         #: ``timeout`` the host passed to ``commands.run`` (``None`` when the
@@ -291,9 +301,14 @@ def test_sandbox_followup_uploads_and_recovers_a_private_session(tmp_path: Path)
     runtime = _prepare(config, tmp_path)
     sandbox = FakeSandbox()
     sandbox.session_files = ("continued.jsonl",)
-    sandbox.readable["/home/user/sessions/continued.jsonl"] = b'{"id":"same-session"}\n'
+    # The main session is identified by its header (a ``type: "session"`` line
+    # without ``parentSession``), matching what pi actually writes.
+    session_bytes = (
+        b'{"type":"session","version":3,"id":"same-session","timestamp":"t","cwd":"/home/user/workspace"}\n'
+    )
+    sandbox.readable["/home/user/sessions/continued.jsonl"] = session_bytes
     runtime.session_dir.mkdir(parents=True, exist_ok=True)
-    (runtime.session_dir / "continued.jsonl").write_bytes(b'{"id":"same-session"}\n')
+    (runtime.session_dir / "continued.jsonl").write_bytes(session_bytes)
     workspace = tmp_path / "ws"
     workspace.mkdir()
     (workspace / "report.md").write_text("# previous report", encoding="utf-8")
@@ -302,14 +317,16 @@ def test_sandbox_followup_uploads_and_recovers_a_private_session(tmp_path: Path)
     client.start()
     client.upload_config()
     client.upload_continuation("continued.jsonl", workspace)
-    assert sandbox.written["/home/user/sessions/continued.jsonl"] == '{"id":"same-session"}\n'
+    assert sandbox.written["/home/user/sessions/continued.jsonl"] == session_bytes.decode(
+        "utf-8"
+    )
     assert sandbox.written["/home/user/workspace/report.md"] == "# previous report"
     command = client._command("追问", "", resume_session="continued.jsonl")
     assert "--session /home/user/sessions/continued.jsonl" in command
     saved, error = client.recover_session()
     assert error is None
     assert saved == runtime.session_dir / "continued.jsonl"
-    assert saved.read_bytes() == b'{"id":"same-session"}\n'
+    assert saved.read_bytes() == session_bytes
 
 
 def test_sandbox_session_recovery_rejects_a_path_escape(tmp_path: Path) -> None:
@@ -323,6 +340,213 @@ def test_sandbox_session_recovery_rejects_a_path_escape(tmp_path: Path) -> None:
     path, error = client.recover_session()
     assert path is None and error
     assert not (tmp_path / "outside.jsonl").exists()
+
+
+def _session_bytes(session_id: str, *, parent: str | None = None) -> bytes:
+    """A pi session file's first line, as pi actually writes it."""
+    header: dict[str, Any] = {
+        "type": "session",
+        "version": 3,
+        "id": session_id,
+        "timestamp": "2026-09-24T10:00:00.000Z",
+        "cwd": "/home/user/workspace",
+    }
+    if parent is not None:
+        header["parentSession"] = parent
+    return (json.dumps(header) + "\n").encode("utf-8")
+
+
+def _recovery_client(config, runtime, sandbox, tmp_path):
+    client = E2BSandboxClient(
+        config, runtime, run_id="root", workspace=tmp_path / "ws",
+        sandbox_factory=lambda **_: sandbox,
+    )
+    client.start()
+    return client
+
+
+def test_recover_session_selects_the_main_session_among_subagent_branches(
+    tmp_path: Path,
+) -> None:
+    """A subagent fork shares the session dir; only its header tells it apart."""
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    main = _session_bytes("main-session")
+    sandbox.session_files = ("research.jsonl", "2026-09-24T10-05-00-000Z_branch.jsonl")
+    sandbox.readable["/home/user/sessions/research.jsonl"] = main
+    sandbox.readable["/home/user/sessions/2026-09-24T10-05-00-000Z_branch.jsonl"] = (
+        _session_bytes("branch-session", parent="/home/user/sessions/research.jsonl")
+    )
+    client = _recovery_client(config, runtime, sandbox, tmp_path)
+    saved, error = client.recover_session()
+    assert error is None
+    assert saved == runtime.session_dir / "research.jsonl"
+    assert saved.read_bytes() == main
+
+
+def test_recover_session_ignores_the_subagent_artifacts_subdirectory(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    main = _session_bytes("main-session")
+    sandbox.session_files = ("continued.jsonl", "subagent-artifacts")
+    sandbox.entry_types["/home/user/sessions/subagent-artifacts"] = "dir"
+    sandbox.readable["/home/user/sessions/continued.jsonl"] = main
+    client = _recovery_client(config, runtime, sandbox, tmp_path)
+    saved, error = client.recover_session()
+    assert error is None
+    assert saved == runtime.session_dir / "continued.jsonl"
+    assert saved.read_bytes() == main
+
+
+def test_recover_session_refuses_two_main_candidates(tmp_path: Path) -> None:
+    """Two header-mains cannot be told apart; never guess by name or recency."""
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    sandbox.session_files = ("a.jsonl", "b.jsonl")
+    sandbox.readable["/home/user/sessions/a.jsonl"] = _session_bytes("one")
+    sandbox.readable["/home/user/sessions/b.jsonl"] = _session_bytes("two")
+    client = _recovery_client(config, runtime, sandbox, tmp_path)
+    saved, error = client.recover_session()
+    assert saved is None and error
+
+
+def test_recover_session_refuses_when_only_branches_remain(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    sandbox.session_files = ("branch.jsonl",)
+    sandbox.readable["/home/user/sessions/branch.jsonl"] = _session_bytes(
+        "branch-session", parent="/home/user/sessions/gone.jsonl"
+    )
+    client = _recovery_client(config, runtime, sandbox, tmp_path)
+    saved, error = client.recover_session()
+    assert saved is None and error
+
+
+def test_recover_session_refuses_an_unreadable_candidate(tmp_path: Path) -> None:
+    """A listed file that cannot even be sniffed refuses the follow-up."""
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    sandbox.session_files = ("research.jsonl", "branch.jsonl")
+    sandbox.readable["/home/user/sessions/research.jsonl"] = _session_bytes("main")
+    # branch.jsonl is listed but not readable: no guessing past it.
+    client = _recovery_client(config, runtime, sandbox, tmp_path)
+    saved, error = client.recover_session()
+    assert saved is None and error
+    assert "branch.jsonl" in error
+
+
+# -- subagent mirror -----------------------------------------------------------
+
+
+def test_recover_subagent_files_mirrors_branches_and_artifacts(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    sandbox.session_files = ("research.jsonl", "branch.jsonl")
+    sandbox.readable["/home/user/sessions/research.jsonl"] = _session_bytes("main")
+    branch = _session_bytes("branch", parent="/home/user/sessions/research.jsonl")
+    sandbox.readable["/home/user/sessions/branch.jsonl"] = branch
+    sandbox.artifact_files = ("r1_researcher_0_output.md", "nested/r1_meta.json")
+    sandbox.readable["/home/user/sessions/subagent-artifacts/r1_researcher_0_output.md"] = (
+        b"# notes\n"
+    )
+    sandbox.readable["/home/user/sessions/subagent-artifacts/nested/r1_meta.json"] = b"{}\n"
+    client = _recovery_client(config, runtime, sandbox, tmp_path)
+    destination = tmp_path / "run" / "subagents"
+
+    files, failures = client.recover_subagent_files(destination)
+
+    assert failures == []
+    assert (destination / "sessions" / "branch.jsonl").read_bytes() == branch
+    assert (destination / "artifacts" / "r1_researcher_0_output.md").read_bytes() == b"# notes\n"
+    assert (destination / "artifacts" / "nested" / "r1_meta.json").read_bytes() == b"{}\n"
+    # The main session is left to recover_session, never duplicated here.
+    assert not (destination / "sessions" / "research.jsonl").exists()
+    assert len(files) == 3
+
+
+def test_recover_subagent_files_skips_links_and_records_failures(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    sandbox.session_files = ("research.jsonl",)
+    sandbox.readable["/home/user/sessions/research.jsonl"] = _session_bytes("main")
+    sandbox.artifact_files = ("linked.md", "unreadable.md")
+    sandbox.entry_types["/home/user/sessions/subagent-artifacts/linked.md"] = "symlink"
+    # unreadable.md is listed but has no content behind it.
+    client = _recovery_client(config, runtime, sandbox, tmp_path)
+    destination = tmp_path / "run" / "subagents"
+
+    files, failures = client.recover_subagent_files(destination)
+
+    assert files == []
+    # A link is skipped (never followed, not a failure); an unreadable regular
+    # file is reported.
+    assert not (destination / "artifacts" / "linked.md").exists()
+    assert len(failures) == 1 and "unreadable.md" in failures[0]
+
+
+def test_recover_subagent_files_enforces_the_single_file_cap(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    sandbox.session_files = ("research.jsonl",)
+    sandbox.readable["/home/user/sessions/research.jsonl"] = _session_bytes("main")
+    sandbox.artifact_files = ("huge.md",)
+    sandbox.readable["/home/user/sessions/subagent-artifacts/huge.md"] = b"x"
+    sandbox.sizes["/home/user/sessions/subagent-artifacts/huge.md"] = (
+        SUBAGENT_RECOVER_MAX_FILE_BYTES + 1
+    )
+    client = _recovery_client(config, runtime, sandbox, tmp_path)
+    destination = tmp_path / "run" / "subagents"
+
+    files, failures = client.recover_subagent_files(destination)
+
+    assert files == []
+    assert len(failures) == 1 and "huge.md" in failures[0]
+    assert not (destination / "artifacts" / "huge.md").exists()
+
+
+def test_e2b_run_mirrors_and_redacts_subagent_files(tmp_path: Path) -> None:
+    """Through the runner: the mirror lands in the run dir, swept by the redactor."""
+    secret = "sk-subagent-echo-000111222333"
+    config = make_config(tmp_path, OPENAI_API_KEY=secret)
+    branch = _session_bytes("branch", parent="/home/user/sessions/research.jsonl")
+    branch += f'{{"type":"message","text":"the key {secret} was here"}}\n'.encode("utf-8")
+    sandbox = FakeSandbox(events=[{"type": "session", "id": "s1"}, *_FAKE_EVENTS])
+    sandbox.session_files = ("research.jsonl", "branch.jsonl")
+    sandbox.readable["/home/user/sessions/research.jsonl"] = _session_bytes("main")
+    sandbox.readable["/home/user/sessions/branch.jsonl"] = branch
+    sandbox.artifact_files = ("r1_researcher_0_output.md",)
+    sandbox.readable["/home/user/sessions/subagent-artifacts/r1_researcher_0_output.md"] = (
+        f"notes mentioning {secret}\n".encode("utf-8")
+    )
+    manager, storage = _manager(config, sandbox, tmp_path)
+
+    record = manager.start("研究")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final.status == "finished"
+    subagents_dir = storage.run_dir(record.run_id) / "subagents"
+    mirrored_branch = (subagents_dir / "sessions" / "branch.jsonl").read_text("utf-8")
+    mirrored_notes = (subagents_dir / "artifacts" / "r1_researcher_0_output.md").read_text(
+        "utf-8"
+    )
+    assert secret not in mirrored_branch and "[REDACTED]" in mirrored_branch
+    assert secret not in mirrored_notes
+    terminal = _event_kinds(storage, record.run_id)[-1]
+    assert terminal == "run_finished"
+    last_frame = json.loads(
+        (storage.run_dir(record.run_id) / "events.jsonl").read_text("utf-8").strip().splitlines()[-1]
+    )
+    assert last_frame["payload"].get("artifactFailures", []) == []
 
 
 
@@ -422,12 +646,18 @@ def test_run_replays_frames_and_pulls_the_report(tmp_path: Path) -> None:
 
 def test_sandbox_followup_through_runner_keeps_session_and_run_boundaries(tmp_path: Path) -> None:
     config = make_config(tmp_path)
+    parent_session = (
+        b'{"type":"session","version":3,"id":"same-session","timestamp":"t1","cwd":"/home/user/workspace"}\n'
+    )
+    child_session = (
+        b'{"type":"session","version":3,"id":"same-session","timestamp":"t2","cwd":"/home/user/workspace"}\n'
+    )
     first = FakeSandbox(events=[{"type": "session", "id": "same-session"}, *_FAKE_EVENTS])
     first.session_files = ("research.jsonl",)
-    first.readable["/home/user/sessions/research.jsonl"] = b'{"id":"same-session","turn":1}\n'
+    first.readable["/home/user/sessions/research.jsonl"] = parent_session
     second = FakeSandbox(events=[{"type": "session", "id": "same-session"}, *_FAKE_EVENTS])
     second.session_files = ("continued.jsonl",)
-    second.readable["/home/user/sessions/continued.jsonl"] = b'{"id":"same-session","turn":2}\n'
+    second.readable["/home/user/sessions/continued.jsonl"] = child_session
     sandboxes = iter([first, second])
     storage = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store=storage, sandbox_factory=lambda **_: next(sandboxes))
@@ -445,7 +675,9 @@ def test_sandbox_followup_through_runner_keeps_session_and_run_boundaries(tmp_pa
     assert final.report_path is None, "an unchanged seeded report is not a new deliverable"
     assert final.session_id == original.session_id
     assert "--session /home/user/sessions/continued.jsonl" in second.command
-    assert second.written["/home/user/sessions/continued.jsonl"] == '{"id":"same-session","turn":1}\n'
+    assert second.written["/home/user/sessions/continued.jsonl"] == parent_session.decode(
+        "utf-8"
+    )
     assert second.written["/home/user/workspace/report.md"] == "# 报告\n\n来自沙箱。\n"
     assert Path(original.session_file).read_bytes() == first.readable["/home/user/sessions/research.jsonl"]
     assert Path(final.session_file).read_bytes() == second.readable["/home/user/sessions/continued.jsonl"]
@@ -1030,7 +1262,9 @@ def test_live_frames_reach_the_event_bus_before_the_sandbox_command_ends(
         gate_after=0,
     )
     sandbox.session_files = ("live.jsonl",)
-    sandbox.readable["/home/user/sessions/live.jsonl"] = b'{"id":"live-session"}\n'
+    sandbox.readable["/home/user/sessions/live.jsonl"] = (
+        b'{"type":"session","version":3,"id":"live-session","timestamp":"t","cwd":"/home/user/workspace"}\n'
+    )
     manager, storage = _manager(config, sandbox, tmp_path)
     record = manager.start("实时投递")
     try:

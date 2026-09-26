@@ -516,7 +516,10 @@ def test_shared_e2b_followup_keeps_the_session_and_resource_boundaries(tmp_path:
     first.readable["/home/user/workspace/report.md"] = "# 报告\n\n来自沙箱。\n"
     first.workspace_files = ("report.md",)
     first.session_files = ("research.jsonl",)
-    first.readable["/home/user/sessions/research.jsonl"] = b'{"id":"same-session","turn":1}\n'
+    parent_session = (
+        b'{"type":"session","version":3,"id":"same-session","timestamp":"t1","cwd":"/home/user/workspace"}\n'
+    )
+    first.readable["/home/user/sessions/research.jsonl"] = parent_session
 
     second = FakeSandbox()
     second.sandbox_id = "fake-sandbox-2"
@@ -524,7 +527,9 @@ def test_shared_e2b_followup_keeps_the_session_and_resource_boundaries(tmp_path:
         json.dumps(event) for event in [{"type": "session", "id": "same-session"}, *_E2B_EVENTS]
     )
     second.session_files = ("continued.jsonl",)
-    second.readable["/home/user/sessions/continued.jsonl"] = b'{"id":"same-session","turn":2}\n'
+    second.readable["/home/user/sessions/continued.jsonl"] = (
+        b'{"type":"session","version":3,"id":"same-session","timestamp":"t2","cwd":"/home/user/workspace"}\n'
+    )
 
     sandboxes = iter([first, second])
     storage = RunStore(config.data_root / "runs")
@@ -546,7 +551,9 @@ def test_shared_e2b_followup_keeps_the_session_and_resource_boundaries(tmp_path:
     assert final.session_id == original.session_id
     assert "--session /home/user/sessions/continued.jsonl" in second.command
     assert SHARED_KEY not in second.command
-    assert second.written["/home/user/sessions/continued.jsonl"] == '{"id":"same-session","turn":1}\n'
+    assert second.written["/home/user/sessions/continued.jsonl"] == parent_session.decode(
+        "utf-8"
+    )
     assert Path(final.session_file).read_bytes() == second.readable["/home/user/sessions/continued.jsonl"]
     assert first.killed is True and second.killed is True
 

@@ -38,7 +38,7 @@ pi 读取的是这份配置，而不是用户 `~/.pi/agent` 的个人配置，�
 | `prompts/deepresearch.md` | 显式 `/deepresearch <题目>` 严格模式：必须交付 `report.md`，并承载研究方法论——来源分层、一个命题对一个来源、三类内容区分、断言强度、覆盖声明、自我核查与「来源与核查」一节 |
 | `agents/researcher.md` | 取证子代理定义：自包含任务、一手来源优先、打开原文核对、产物落工作区约定文件名、只回报要点与来源；`tools` 白名单里没有委派工具，子代理不得再派 |
 | `extensions/subagent-foreground-guard.ts` | 本仓自有的前台守卫扩展：官方 `tool_call` 钩子把 pi-subagents 的 `async` 改写为 `false`，无法安全改写的后台/定时/控制/管理入口与工作区外路径直接阻止（fail-closed）；清单见 `docs/pi-integration-notes.md` §10.1 |
-| `extensions/subagent/config.json` | pi-subagents 自己读的 extension config（`<PI_CODING_AGENT_DIR>/extensions/subagent/config.json`）：`asyncByDefault`/`forceTopLevelAsync` false、`waitTool` 关、定时关、intercom 关、`maxSubagentDepth:1`、并发 4、单 run 派发 8、`artifactDir:"project"` |
+| `extensions/subagent/config.json` | pi-subagents 自己读的 extension config（`<PI_CODING_AGENT_DIR>/extensions/subagent/config.json`）：`asyncByDefault`/`forceTopLevelAsync` false、`waitTool` 关、定时关、intercom 关、`maxSubagentDepth:1`、并发 4、单 run 派发 8、`artifactDir:"session"`（产物落在会话目录的 `subagent-artifacts/`，随宿主回收与脱敏，不写工作区隐藏目录） |
 | `README.md` | 本文件 |
 
 ### 工作约定与 `/deepresearch` 的关系

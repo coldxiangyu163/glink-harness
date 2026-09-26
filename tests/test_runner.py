@@ -229,6 +229,55 @@ def test_docker_session_file_is_mapped_back_to_the_host_and_sanitized(
     assert final.redacted is True
 
 
+def test_subagent_files_in_the_session_dir_are_sanitized_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Branched sessions and subagent artifacts share the session directory on
+    the host-side faces; the closing sweep covers them, not just the main file."""
+    monkeypatch.setattr("pi_glink.kernel.runner.docker_available", lambda: True)
+
+    secret = "sk-subagent-0123456789abcdef"
+    config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker", OPENAI_API_KEY=secret)
+    written: dict[str, Path] = {}
+
+    def factory(argv, *, cwd=None, env=None, on_event=None):
+        merged = dict(env or {})
+        merged["FAKE_PI_WRITE_REPORT"] = "0"
+        merged["FAKE_PI_SESSION_FILE"] = "/sessions/fake-session.jsonl"
+        match = re.search(r"pi-glink-([0-9a-f]{12})", " ".join(argv))
+        assert match is not None, argv
+        session_dir = config.session_dir / match.group(1)
+        (session_dir / "subagent-artifacts").mkdir(parents=True, exist_ok=True)
+        (session_dir / "fake-session.jsonl").write_text(
+            f'{{"role":"tool","text":"OPENAI_API_KEY={secret}"}}\n', encoding="utf-8"
+        )
+        # A subagent fork's branched session and its notes echo the same value.
+        (session_dir / "branch.jsonl").write_text(
+            f'{{"role":"assistant","text":"using {secret}"}}\n', encoding="utf-8"
+        )
+        (session_dir / "subagent-artifacts" / "r1_output.md").write_text(
+            f"notes with {secret}\n", encoding="utf-8"
+        )
+        written["main"] = session_dir / "fake-session.jsonl"
+        written["branch"] = session_dir / "branch.jsonl"
+        written["notes"] = session_dir / "subagent-artifacts" / "r1_output.md"
+        return PiRpcClient(
+            [sys.executable, str(FAKE_PI)], cwd=cwd, env=merged, on_event=on_event
+        )
+
+    bus = EventBus()
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, bus, store, client_factory=factory)
+    record = manager.start("子代理会话目录清扫回归")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final.status == FINISHED
+    for key in ("main", "branch", "notes"):
+        text = written[key].read_text(encoding="utf-8")
+        assert secret not in text, f"{key} was not swept"
+        assert "[REDACTED]" in text
+
+
 # -- model result vs execution settle ------------------------------------------
 
 @pytest.mark.parametrize(
