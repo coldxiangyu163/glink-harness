@@ -44,7 +44,7 @@
 两个 harness 族 × 三种执行面共享同一套输入契约与同一套产品事件，因此浏览器、存储与报告下载
 路径完全一致；差异集中在 `kernel/` 内的适配器后面（pi 族：`rpc.py` / `projection.py` /
 `agent_env.py`；ACP 族：`acp_rpc.py` / `acp_projection.py` / `acp_env.py`；执行面传输：
-`execution.py` + `docker_env.py` / `e2b_env.py`），Run 管理不承担任何单面的收尾逻辑（§5.1）。
+`execution.py` + `docker_env.py` / `e2b_env.py` / `acp_e2b_env.py`），Run 管理不承担任何单面的收尾逻辑（§5.1）。
 ACP 族的协议事实、能力矩阵与冒烟证据见 [ACP 集成笔记](acp-integration-notes.md) 与
 [多 harness 方案](multi-harness-plan.md)。
 
@@ -255,6 +255,8 @@ Docker/E2B，也不删除任何资源。
 「已不存在」只认执行面的契约（inspect 的 no-such、SDK 的 `False` 返回或 `SandboxNotFoundException`
 类型）：探测失败、超时、鉴权错误或无法判定的返回一律保持持有。对账不在准入锁内执行，关闭宿主时
 停止该线程；`inproc` 宿主不启用它（不取得外部资源；遗留的外部身份仍走离线人工裁决）。
+台账、重启对账、人工裁决与在线扫描的实现归属 `kernel/resource_ledger.py`（`RunManager` 上的同名方法
+只是转发，探针组装——含 E2B 冻结凭据——也在该模块内完成）。
 
 **所有权、重启对账与关闭**：宿主先取得 `data_root/host.lock` 的独占 `flock`（进程存活期间
 持有、退出即释放；同进程二次获取也被拒），**再**对账和绑定端口。`data_root` 由宿主以 0700 创建，
@@ -292,7 +294,7 @@ data_root 若是符号链接、不是目录或带组/其他人写权限，宿主
 
 ```
 start() → session_info() → deliver_input() → wait(cancel, deadline)
-        → recover_artifacts(destination) → close() → CleanupReport
+        → recover_artifacts(destination) → recovered_session() → close() → CleanupReport
 ```
 
 * **冻结输入**：`ExecutionSpec` 携带 run id、prompt、system prompt、本 run 工作区与运行期配置、
@@ -300,7 +302,9 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 * **事件**：三个适配器都只把内核帧交给同一个 `on_frame` 回调（投影 + 持久化在宿主侧），
   因此浏览器看到同一套产品事件。
 * **最终 Outcome**：`ExecutionOutcome` 只携带执行层事实（是否落定、exit code、取消、超时、错误）；
-  最终终态由宿主结合模型结果与产物策略判定（§4）。
+  最终终态由宿主结合模型结果与产物策略判定（§4）。`ExecutionOutcome` 与 driver 线程适配器共用的
+  封存基类（outcome 锁、settle/seal 临界区协议）在 `kernel/outcome.py`；各面的 `wait` 循环与
+  错误文案仍属各自适配器（pi E2B 面取消后等驱动收尾，ACP 面即时判定且超时拆解是 `session/cancel`）。
 * **取消/截止时间**：取消是一个 flag（run 管理拥有），`cancel()` 只负责提前结束阻塞；超时由
   `wait(deadline)` 的适配器实现处理，返回 `timed_out` 而不是抛异常。
 * **产物回收与关闭**：`recover_artifacts` 先把该面的产物放到宿主工作区（inproc/Docker 本来就是
@@ -308,7 +312,9 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
   进程/容器/沙箱并报告 `CleanupReport(released, failures)`。清理失败会被记入 run 记录并继续占用容量（§4），不谎报已释放。
   回收只取**普通文件**：沙箱条目按 SDK 报告的 `EntryInfo.type`（真实 SDK 是 `FileType` 枚举）跳过目录与
   符号链接——不跟随链接，与 §6.1 的 ArtifactTree 同一条边界——它们不记为失败；超限或不可读的普通文件
-  才记为失败并写进终态 `artifactFailures`。
+  才记为失败并写进终态 `artifactFailures`。回收后由 `recovered_session()` 回答「回收过程才得知、值得
+  补发 `session_ready` 的会话事实」（pi 沙箱面随回收带回的会话文件、ACP 沙箱面的 state-root 回收结论）；
+  其余面在 run 开始前已知会话，恒返回 `None`。
 * **持久执行身份**：`identity()` 给出容器名或沙箱 id。身份在资源一存在时就写入 `meta.json`：
   Docker 面在 `docker run` 之前的容器名确定后写入，E2B 面在拿到 `sandbox_id` 后、上传配置/续接之前
   写入；创建后的失败清理不会抹掉已拿到的身份，终态 `cleanup.external` 也带上它。它是重启对账（§4）
@@ -456,7 +462,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `redaction`（出站脱敏）/ `accounts`（站内账号）/ `auth`（身份断言与会话）/ `dotenv`（.env 解析）/ `blueprints`（蓝图目录推导与解析渲染）；组成根 `app`（服务器与 `create_server`） |
 | `host/pi_glink/web_*.py` | 宿主 HTTP 层 | `web_routes`（路由与 run/health/报告 API）/ `web_sse`（事件流与连接额度）/ `web_security`（身份、会话与请求防护）/ `web_http`（请求体、响应、静态资源、脱敏访问日志）；一个 `HostRequestHandler` 由它们组合而成 |
 | `host/pi_glink/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
-| `host/pi_glink/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env`；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面与编排：`execution` / `docker_env` / `e2b_env` / `runner` |
+| `host/pi_glink/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env`；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面与编排：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）/ `runner` / `resource_ledger`（外部资源台账、重启对账、人工裁决与在线身份探测扫描） |
 | `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
 | `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`（最小工作约定）、`prompts/deepresearch.md`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
 | `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |

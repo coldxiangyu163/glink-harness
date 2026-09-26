@@ -194,7 +194,7 @@ def _tool_execution_start(
             {
                 "toolCallId": str(frame.get("toolCallId") or ""),
                 "toolName": str(frame.get("toolName") or ""),
-                "args": _project_args(frame.get("args")),
+                "args": project_args(frame.get("args")),
             },
         )
     ]
@@ -343,8 +343,12 @@ def _usage_from_message(message: Any) -> dict[str, Any] | None:
     return projected or None
 
 
-def _project_args(args: Any) -> dict[str, Any]:
+def project_args(args: Any) -> dict[str, Any]:
     """Keep tool arguments small, JSON-safe and type-stable.
+
+    Shared by both harness projections (the ACP family applies it to
+    ``tool_call``'s ``rawInput``); the payload contract below is the same for
+    every consumer.
 
     A tool that searches several queries (``queries``) or reads several pages
     (``urls``) passes an **array**; flattening it to one string here destroys

@@ -38,12 +38,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "host"))
 
+from pi_glink.kernel.acp_e2b_env import SANDBOX_ACP_HOME  # noqa: E402
+from pi_glink.kernel.acp_env import INHERIT_MAX_FILE_BYTES  # noqa: E402
 from pi_glink.kernel.acp_execution import acp_resume_method  # noqa: E402
-from pi_glink.kernel.e2b_env import (  # noqa: E402
-    INHERIT_MAX_FILE_BYTES,
-    SANDBOX_ACP_HOME,
-    confirm_sandbox_absent,
-)
+from pi_glink.kernel.e2b_env import confirm_sandbox_absent  # noqa: E402
 
 TERMINAL = {"finished", "failed", "cancelled"}
 

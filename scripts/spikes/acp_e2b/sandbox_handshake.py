@@ -32,7 +32,7 @@ sys.path.insert(0, str(REPO_ROOT / "host"))
 
 from pi_glink.config import build_config  # noqa: E402
 from pi_glink.kernel.acp_env import prepare_acp_runtime  # noqa: E402
-from pi_glink.kernel.e2b_env import E2BAcpSandboxClient  # noqa: E402
+from pi_glink.kernel.acp_e2b_env import E2BAcpSandboxClient  # noqa: E402
 from pi_glink.kernel.execution import ExecutionSpec, build_adapter  # noqa: E402
 from pi_glink.kernel.rpc import PiRpcClient  # noqa: E402
 

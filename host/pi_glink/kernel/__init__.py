@@ -15,6 +15,7 @@ and the ACP agent's own configuration) and its official extension points.
 
 from __future__ import annotations
 
+from .acp_e2b_env import E2BAcpSandboxClient, SANDBOX_ACP_HOME
 from .acp_env import AcpRuntime, prepare_acp_runtime
 from .acp_execution import AcpExecutionAdapter, AcpSandboxExecutionAdapter
 from .acp_projection import ACP_STOP_REASONS, AcpProjector
@@ -33,7 +34,6 @@ from .agent_env import (
     prepare_agent_dir,
     template_manifest,
 )
-from .e2b_env import E2BAcpSandboxClient, SANDBOX_ACP_HOME
 from .execution import (
     ArtifactRecovery,
     CleanupReport,

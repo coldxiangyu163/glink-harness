@@ -36,12 +36,12 @@ from pi_glink.config import ConfigError, build_config
 from pi_glink.events import EventBus
 from pi_glink.kernel.acp_env import prepare_acp_runtime
 from pi_glink.kernel.acp_execution import RESUME_METHOD, AcpSandboxExecutionAdapter
-from pi_glink.kernel.e2b_env import (
+from pi_glink.kernel.acp_e2b_env import (
     SANDBOX_ACP_HOME,
-    SANDBOX_WORKSPACE,
     E2BAcpSandboxClient,
     SandboxCommandProcess,
 )
+from pi_glink.kernel.e2b_env import SANDBOX_WORKSPACE
 from pi_glink.kernel.execution import ExecutionSpec, build_adapter
 from pi_glink.kernel.rpc import PiRpcClient
 from pi_glink.kernel.runner import FollowupUnavailable, RunManager
@@ -879,7 +879,7 @@ def test_state_recovery_bounds_refuse_the_whole_mirror(
         ("INHERIT_MAX_FILES", 1, {"a.bin": b"a", "b.bin": b"b"}),
         ("INHERIT_MAX_TOTAL_BYTES", 16, {"a.bin": b"a" * 40}),
     ):
-        monkeypatch.setattr(f"pi_glink.kernel.e2b_env.{constant}", value)
+        monkeypatch.setattr(f"pi_glink.kernel.acp_e2b_env.{constant}", value)
         sandboxes: list[FakeSandbox] = []
 
         class SeedingFactory:
@@ -1160,7 +1160,7 @@ def test_recovery_never_mirrors_a_path_outside_the_state_root() -> None:
     the sandbox state root refuses the whole recovery (``None``) instead of
     being re-interpreted by the host's path model.
     """
-    from pi_glink.kernel.e2b_env import _state_relative
+    from pi_glink.kernel.acp_e2b_env import _state_relative
 
     assert _state_relative(f"{SANDBOX_ACP_HOME}/.dsh/sessions/a.json") == ".dsh/sessions/a.json"
     for hostile in (

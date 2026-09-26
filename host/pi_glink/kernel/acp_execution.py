@@ -70,6 +70,7 @@ from ..config import (
     ACP_PERMISSION_OPTION_KINDS,
     ACP_PERMISSION_TOOL_KINDS,
 )
+from .acp_e2b_env import E2BAcpSandboxClient
 from .acp_rpc import (
     REQUEST_TIMEOUT_SECONDS,
     AcpClosed,
@@ -79,17 +80,17 @@ from .acp_rpc import (
     AcpRequestError,
     AcpRpcClient,
 )
-from .e2b_env import SANDBOX_WORKSPACE, E2BAcpSandboxClient
+from .e2b_env import SANDBOX_WORKSPACE
 from .execution import (
     ArtifactRecovery,
     CleanupReport,
     ExecutionAdapter,
-    ExecutionOutcome,
     ExecutionSpec,
     FrameCallback,
     SessionInfo,
-    _POLL_SECONDS,
+    publishable_recovered_session,
 )
+from .outcome import POLL_SECONDS, ExecutionOutcome, SealedOutcome
 
 logger = logging.getLogger("pi_glink.kernel.acp_execution")
 
@@ -192,7 +193,7 @@ def acp_resume_method(capabilities: Mapping[str, Any]) -> str | None:
     return None
 
 
-class AcpExecutionAdapter(ExecutionAdapter):
+class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
     """The ACP face: one agent process, one session, one prompt turn."""
 
     kind = "acp"
@@ -246,15 +247,9 @@ class AcpExecutionAdapter(ExecutionAdapter):
         #: rather than guessing from a human-readable title. A kind never
         #: published stays unknown and the allowlist keeps refusing it.
         self._tool_kinds: dict[str, str] = {}
-        self._outcome = ExecutionOutcome()
-        #: The outcome is shared: the driver thread reports the turn's end
-        #: into it while the run thread decides the verdict from it. ``wait``
-        #: freezes it in the same critical section that writes the final
-        #: decision, so every driver write lands either before that decision
-        #: (which overrides it) or after the freeze (which rejects it) -- the
-        #: late-write race can no longer rewrite a decided error text.
-        self._outcome_lock = threading.Lock()
-        self._outcome_sealed = False
+        # The outcome, its lock and the seal protocol come from SealedOutcome;
+        # the driver thread reports the turn's end into it while the run
+        # thread decides the verdict from it.
         #: The cause of a pending ``kernel_exit`` report: the agent's stream
         #: ended before it answered ``session/prompt``. The exit status is
         #: deliberately not part of it -- the stream ending and the process
@@ -606,13 +601,12 @@ class AcpExecutionAdapter(ExecutionAdapter):
 
     # -- the outcome's writers ------------------------------------------------
     #
-    # Every write below is guarded by ``_outcome_lock`` and refused once the
-    # outcome is sealed. Only ``wait`` seals it, and it does so in the same
-    # critical section that writes the decision, so a driver write either
-    # precedes that decision (and is overridden by it) or follows the seal
-    # (and is dropped). The one write the seal deliberately leaves open is
-    # ``close``'s exit-status completion, and that one is conditional on the
-    # sealed decision actually being the ``kernel_exit`` report.
+    # The lock, the seal flag and the settle/seal decisions are the shared
+    # :class:`SealedOutcome` protocol; the writers below stay here because
+    # their error text is this family's own. The one write the seal
+    # deliberately leaves open is ``close``'s exit-status completion, and that
+    # one is conditional on the sealed decision actually being the
+    # ``kernel_exit`` report.
 
     def _timed_out(self) -> bool:
         with self._outcome_lock:
@@ -669,28 +663,6 @@ class AcpExecutionAdapter(ExecutionAdapter):
             self._kernel_exit_cause = cause
             self._outcome.stop_reason = "kernel_exit"
             self._outcome.error = self._kernel_exit_message(None)
-
-    def _settle_cancelled(self) -> None:
-        """Decide cancellation and freeze the outcome in one critical section."""
-        with self._outcome_lock:
-            self._outcome.cancelled = True
-            self._outcome.stop_reason = "abort"
-            self._outcome_sealed = True
-
-    def _settle_timeout(self) -> None:
-        """Decide the deadline and freeze the outcome in one critical section."""
-        with self._outcome_lock:
-            self._outcome.timed_out = True
-            self._outcome.stop_reason = "timeout"
-            self._outcome.error = (
-                f"run did not settle within {self.spec.timeout_seconds}s"
-            )
-            self._outcome_sealed = True
-
-    def _seal_outcome(self) -> None:
-        """Freeze the driver-written decision before the verdict is read."""
-        with self._outcome_lock:
-            self._outcome_sealed = True
 
     def _kernel_exit_message(self, exit_code: int | None) -> str:
         """The ``kernel_exit`` report, with the agent's status once it is known."""
@@ -750,7 +722,7 @@ class AcpExecutionAdapter(ExecutionAdapter):
                 # does not set the host-cancellation flag.
                 self._request_cancel()
                 break
-            if self._done.wait(min(_POLL_SECONDS, remaining)):
+            if self._done.wait(min(POLL_SECONDS, remaining)):
                 self._seal_outcome()
                 break
         return self._outcome
@@ -988,7 +960,7 @@ class AcpSandboxExecutionAdapter(AcpExecutionAdapter):
 
     Composition, not a second protocol implementation: the sandbox's background
     command is wrapped as a ``subprocess``-shaped process
-    (:class:`~pi_glink.kernel.e2b_env.SandboxCommandProcess`) and handed to the
+    (:class:`~pi_glink.kernel.acp_e2b_env.SandboxCommandProcess`) and handed to the
     *same* :class:`AcpRpcClient` the in-process and Docker faces use, so
     ``initialize``/``session/new``/``session/prompt`` handling, permission
     answers, turn boundaries and the verdict inputs are the same code.
@@ -1070,6 +1042,12 @@ class AcpSandboxExecutionAdapter(AcpExecutionAdapter):
         return SessionInfo(
             payload=payload, session_id=session.session_id, session_file=None
         )
+
+    def recovered_session(self) -> SessionInfo | None:
+        # The state-root recovery verdict exists only once ``recover_artifacts``
+        # ran, so a publishable answer exists from then on (``session_file``
+        # stays None on this face).
+        return publishable_recovered_session(self.session_info())
 
     def recover_artifacts(self, destination: Path) -> ArtifactRecovery:
         files, failures = self._sandbox.recover_artifacts(destination)

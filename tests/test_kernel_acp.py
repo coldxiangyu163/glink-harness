@@ -38,7 +38,7 @@ from pi_glink.kernel.acp_rpc import (
     AcpRpcClient,
     AcpTimeout,
 )
-from pi_glink.kernel.projection import _project_args
+from pi_glink.kernel.projection import project_args
 from pi_glink.redaction import SecretRedactor
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -397,7 +397,7 @@ def test_tool_arguments_keep_the_shared_product_contract() -> None:
             "rawInput": raw_input,
         },
     )
-    assert produced[0][1]["args"] == _project_args(raw_input)
+    assert produced[0][1]["args"] == project_args(raw_input)
 
 
 def test_a_tool_call_without_a_programmatic_name_uses_the_title() -> None:

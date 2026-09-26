@@ -59,7 +59,7 @@ ACP_HOME_DIRNAME = "home"
 #: A state root recovered from an E2B sandbox, below
 #: :data:`ACP_RUNTIME_DIRNAME`. Only the E2B face writes it, and only after the
 #: whole bounded recovery succeeded (see
-#: :meth:`~pi_glink.kernel.e2b_env.E2BAcpSandboxClient.recover_state`): the
+#: :meth:`~pi_glink.kernel.acp_e2b_env.E2BAcpSandboxClient.recover_state`): the
 #: sandbox destroys the agent's own state with it, so the host needs its own
 #: copy before that happens — and the directory's existence is the durable
 #: "父状态根回收成功" fact the ACP admission gate reads. It is a separate root

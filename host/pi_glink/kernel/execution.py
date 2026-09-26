@@ -36,6 +36,10 @@ The contract is:
     Ensure the face's work products are on the host (a no-op for faces whose
     workspace already is the host workspace). Bounded, validated, and honest
     about files it skipped.
+``recovered_session()``
+    Session identity that only became knowable through that recovery and is
+    worth (re)publishing — the sandbox faces learn such facts while pulling
+    the workspace back; every other face answers ``None``.
 ``close()``
     Release the process/container/sandbox and report whether that succeeded.
     A cleanup failure is reported, never silently swallowed, and never
@@ -57,15 +61,16 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, TYPE_CHECKING
 
 from ..config import ConfigError, HostConfig
+from .acp_e2b_env import E2BAcpSandboxClient
 from .acp_rpc import AcpRpcClient
 from .agent_env import AgentRuntime
 from .docker_env import CONTAINER_WORKSPACE
 from .e2b_env import (
-    E2BAcpSandboxClient,
     E2BSandboxClient,
     SandboxError,
     parse_json_stream_line,
 )
+from .outcome import POLL_SECONDS, ExecutionOutcome, SealedOutcome
 from .rpc import PiRpcClient, PiRpcError
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only, avoids an import cycle
@@ -75,8 +80,6 @@ logger = logging.getLogger("pi_glink.kernel.execution")
 
 #: Deadline for pi to accept and answer a command frame.
 REQUEST_TIMEOUT_SECONDS = 60.0
-#: How often a wait loop re-checks cancellation and process liveness.
-_POLL_SECONDS = 0.25
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,18 +99,6 @@ class ExecutionSpec:
     extra_argv: tuple[str, ...] = ()
     resume_session: str | None = None
     expected_session_id: str | None = None
-
-
-@dataclass(slots=True)
-class ExecutionOutcome:
-    """Execution-level facts, before the model result and artifact policy."""
-
-    settled: bool = False
-    exit_code: int | None = None
-    cancelled: bool = False
-    timed_out: bool = False
-    error: str | None = None
-    stop_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +146,21 @@ class SessionInfo:
 FrameCallback = Callable[[Mapping[str, Any]], None]
 
 
+def publishable_recovered_session(session: SessionInfo | None) -> SessionInfo | None:
+    """The session a face may (re)publish after artifact recovery, or ``None``.
+
+    Recovery teaches the host something new only when the pi sandbox face's
+    session file travelled back with the workspace, or the ACP sandbox face
+    decided its state-root recovery verdict. Anything else was already known
+    (and published, when appropriate) before the turn started.
+    """
+    if session is None:
+        return None
+    if session.session_file or session.payload.get("stateRootRecovered") is not None:
+        return session
+    return None
+
+
 class ExecutionAdapter(ABC):
     """One execution face for one run."""
 
@@ -185,6 +191,15 @@ class ExecutionAdapter(ABC):
     def close(self) -> CleanupReport: ...
 
     def session_info(self) -> SessionInfo | None:  # pragma: no cover - optional
+        return None
+
+    def recovered_session(self) -> SessionInfo | None:
+        """Session facts learned through ``recover_artifacts`` worth publishing.
+
+        Only the sandbox faces learn session facts while pulling work products
+        back; every other face knows its session before the turn, so the base
+        answer is ``None``.
+        """
         return None
 
     def identity(self) -> Mapping[str, str]:
@@ -294,7 +309,7 @@ class RpcExecutionAdapter(ExecutionAdapter):
                 )
                 self._abort()
                 break
-            if self._settled.wait(min(_POLL_SECONDS, remaining)):
+            if self._settled.wait(min(POLL_SECONDS, remaining)):
                 outcome.settled = True
                 break
             if not client.running:
@@ -381,7 +396,7 @@ class RpcExecutionAdapter(ExecutionAdapter):
             )
 
 
-class E2BSandboxExecutionAdapter(ExecutionAdapter):
+class E2BSandboxExecutionAdapter(SealedOutcome, ExecutionAdapter):
     """pi inside an E2B sandbox, streaming its single-shot JSON event stream.
 
     The sandbox kernel runs ``pi --mode json`` once; its stdout is teed inside
@@ -406,16 +421,9 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
         self._sandbox_factory = sandbox_factory
         self._on_identity = on_identity
         self._client: E2BSandboxClient | None = None
-        self._outcome = ExecutionOutcome()
-        #: The outcome is shared: the driver thread reports the sandbox
-        #: command's result into it while the run thread decides the verdict
-        #: from it. ``wait`` freezes it in the same critical section that
-        #: writes each decision (and, on the settled path, as soon as the
-        #: driver is done), so every driver write lands either before that
-        #: decision or after the freeze -- a late ``kernel_exit`` report can
-        #: no longer rewrite a decided timeout error text.
-        self._outcome_lock = threading.Lock()
-        self._outcome_sealed = False
+        # The outcome, its lock and the seal protocol come from SealedOutcome;
+        # the driver thread reports the sandbox command's result into it while
+        # the run thread decides the verdict from it.
         self._done = threading.Event()
         self._cancelled = threading.Event()
         self._released = True
@@ -475,6 +483,11 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
             session_file=str(self._session_file) if self._session_file else None,
         )
 
+    def recovered_session(self) -> SessionInfo | None:
+        # This face discovers its session file only when the recovery pulls it
+        # back from the sandbox, so a publishable answer exists from then on.
+        return publishable_recovered_session(self.session_info())
+
     def deliver_input(self) -> None:
         if self._client is None:
             raise PiRpcError("sandbox 未启动")
@@ -530,13 +543,10 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
 
     # -- the outcome's writers ------------------------------------------------
     #
-    # Every write below is guarded by ``_outcome_lock`` and refused once the
-    # outcome is sealed. ``wait`` seals it in the same critical section that
-    # writes the decision (and, on the settled path, as soon as the driver is
-    # done), so a driver write either precedes that decision (and is
-    # overridden by it) or follows the seal (and is dropped). Unlike the ACP
-    # face there is no controlled late write here: ``close`` does not complete
-    # this outcome.
+    # The lock, the seal flag and the settle/seal decisions are the shared
+    # :class:`SealedOutcome` protocol; the two writers below stay here because
+    # their error text is this face's own. Unlike the ACP face there is no
+    # controlled late write here: ``close`` does not complete this outcome.
 
     def _record_result(self, *, exit_code: int, stderr_tail: str) -> None:
         """Record the sandbox command's result unless the verdict is decided."""
@@ -570,39 +580,12 @@ class E2BSandboxExecutionAdapter(ExecutionAdapter):
             self._outcome.stop_reason = "execution_error"
             self._outcome.error = message
 
-    def _settle_timeout(self) -> None:
-        """Decide the deadline and freeze the outcome in one critical section."""
-        with self._outcome_lock:
-            self._outcome.timed_out = True
-            self._outcome.stop_reason = "timeout"
-            self._outcome.error = (
-                f"run did not settle within {self.spec.timeout_seconds}s"
-            )
-            self._outcome_sealed = True
-
-    def _settle_cancelled(self) -> None:
-        """Decide cancellation and freeze the outcome in one critical section.
-
-        An accepted cancellation stays the verdict even when the deadline (or
-        a settled turn) was decided first, exactly as before the freeze: the
-        flag is written and the outcome resealed rather than refused.
-        """
-        with self._outcome_lock:
-            self._outcome.cancelled = True
-            self._outcome.stop_reason = "abort"
-            self._outcome_sealed = True
-
-    def _seal_outcome(self) -> None:
-        """Freeze the driver-written decision before the verdict is read."""
-        with self._outcome_lock:
-            self._outcome_sealed = True
-
     def wait(self, *, cancel: Callable[[], bool], deadline: float) -> ExecutionOutcome:
         while True:
             if cancel() and not self._done.is_set():
                 self.cancel()
             remaining = deadline - time.monotonic()
-            if self._done.wait(min(_POLL_SECONDS, max(remaining, 0.0))):
+            if self._done.wait(min(POLL_SECONDS, max(remaining, 0.0))):
                 # The driver's report is complete the moment ``_done`` is set
                 # (its outcome writes precede the ``finally``): seal it before
                 # the verdict reads it.
@@ -694,7 +677,7 @@ def build_adapter(
     directly; ``docker`` spawns ``docker run -i`` and hands the container's
     stdio to the same :class:`AcpRpcClient`; ``e2b`` creates the run's sandbox
     and hands a sandbox background command's handle to the same client through
-    :class:`~pi_glink.kernel.e2b_env.SandboxCommandProcess`. There is no second
+    :class:`~pi_glink.kernel.acp_e2b_env.SandboxCommandProcess`. There is no second
     protocol implementation on any face.
     """
     if harness == "acp":

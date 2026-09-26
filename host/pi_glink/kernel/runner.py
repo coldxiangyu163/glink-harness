@@ -25,6 +25,10 @@ is executing in this process and no run holds unconfirmed resources.
 Restart reconciliation rewrites runs left ``running`` only after the host proved
 exclusive ownership of the data root (:mod:`pi_glink.ownership`); a committed
 terminal frame whose settled copy is missing is settled, never overwritten.
+Restart reconciliation, operator adjudication and the online identity-probe
+sweep are implemented by the resource-ledger collaborator
+(:mod:`pi_glink.kernel.resource_ledger`); the manager keeps thin forwards under
+its existing names.
 """
 
 from __future__ import annotations
@@ -51,7 +55,7 @@ from ..blueprints import (
     render_blueprint,
 )
 from ..config import ConfigError, HostConfig
-from ..ownership import DataRootOwnership, OwnershipRequired
+from ..ownership import DataRootOwnership
 from ..redaction import SecretRedactor, redactor_from_config
 from ..store import (
     ARTIFACTS_DIRNAME,
@@ -63,6 +67,7 @@ from ..store import (
     RunRecord,
     RunStore,
 )
+from .acp_e2b_env import E2BAcpSandboxClient
 from .acp_execution import acp_resume_method
 from .acp_env import (
     ACP_HOME_DIRNAME,
@@ -86,15 +91,10 @@ from .agent_env import (
 from .docker_env import (
     build_acp_plan as build_acp_docker_plan,
     build_plan as build_docker_plan,
-    confirm_absent as docker_confirm_absent,
     container_name_for as docker_container_name,
     host_session_path as docker_host_session_path,
     is_available as docker_available,
     stop_argv as docker_stop_argv,
-)
-from .e2b_env import (
-    E2BAcpSandboxClient,
-    confirm_sandbox_absent as e2b_confirm_sandbox_absent,
 )
 from .execution import (
     CleanupReport,
@@ -105,6 +105,9 @@ from .execution import (
     build_adapter,
 )
 from .projection import Projector
+# ``RunBusy`` is defined next to the ledger because both the admission gate and
+# the ledger's adjudication raise it; re-exported here for existing importers.
+from .resource_ledger import ResourceLedger, RunBusy
 from .rpc import PiRpcClient
 from ..tenancy import (
     TenantContext,
@@ -138,14 +141,6 @@ _USAGE_FIELDS = ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
 _OPEN = "open"
 _COMMITTED = "committed"
 _UNCOMMITTED = "uncommitted"
-
-
-class RunBusy(RuntimeError):
-    """Raised when a run is requested while another one is executing."""
-
-    def __init__(self, active_run_id: str) -> None:
-        super().__init__(f"run {active_run_id} is still active")
-        self.active_run_id = active_run_id
 
 
 class ResourcesUnreleased(RuntimeError):
@@ -341,22 +336,7 @@ class RunManager:
         self.store = store
         self._client_factory = client_factory
         self._sandbox_factory = sandbox_factory
-        self._ownership = ownership
         self._credential_store = credential_store
-        #: Identity probes used by the online resource ledger sweep. Tests inject
-        #: fakes here; production addresses only the persisted container name or
-        #: sandbox id (never a name pattern, never a listing). The E2B probe
-        #: authenticates with the frozen host configuration — the same source
-        #: ``Sandbox.create`` gets — instead of the process environment.
-        self._docker_probe = docker_probe or docker_confirm_absent
-        self._sandbox_probe = sandbox_probe or (
-            lambda sandbox_id: e2b_confirm_sandbox_absent(
-                sandbox_id, api_key=config.e2b_api_key
-            )
-        )
-        self._resource_watch: threading.Thread | None = None
-        self._resource_watch_stop: threading.Event | None = None
-        self._resource_sweep_lock = threading.Lock()
         # The host-level redaction boundary: it carries the host's own secrets
         # (global model/search keys, sandbox key, the operator's own search
         # file). Each run derives its own copy and adds only its own credentials
@@ -368,6 +348,45 @@ class RunManager:
             self.redactor.add_from_file(config.web_search_config_path)
         self._lock = threading.RLock()
         self._executions: dict[str, _Execution] = {}
+        #: The external-resource ledger: restart reconciliation, operator
+        #: adjudication and the online identity-probe sweep. It shares this
+        #: manager's admission lock and reads the in-flight table through the
+        #: injected snapshots; the probes themselves (Docker CLI / E2B SDK,
+        #: authenticated from the frozen config) are assembled inside it.
+        self._ledger = ResourceLedger(
+            store=store,
+            config=config,
+            ownership=ownership,
+            redactor=self.redactor,
+            redactor_for_record=self.redactor_for_record,
+            admission_lock=self._lock,
+            execution_ids=lambda: set(self._executions),
+            executing_ids=lambda: {
+                run_id
+                for run_id, execution in self._executions.items()
+                if execution.phase != _COMMITTED
+            },
+            docker_probe=docker_probe,
+            sandbox_probe=sandbox_probe,
+        )
+
+    @property
+    def _docker_probe(self) -> Callable[[str], tuple[bool, str]]:
+        """The ledger's Docker identity probe (tests substitute a fake here)."""
+        return self._ledger._docker_probe
+
+    @_docker_probe.setter
+    def _docker_probe(self, probe: Callable[[str], tuple[bool, str]]) -> None:
+        self._ledger._docker_probe = probe
+
+    @property
+    def _sandbox_probe(self) -> Callable[[str], tuple[bool, str]]:
+        """The ledger's E2B identity probe (tests substitute a fake here)."""
+        return self._ledger._sandbox_probe
+
+    @_sandbox_probe.setter
+    def _sandbox_probe(self, probe: Callable[[str], tuple[bool, str]]) -> None:
+        self._ledger._sandbox_probe = probe
 
     # -- admission ------------------------------------------------------------
 
@@ -910,26 +929,8 @@ class RunManager:
             raise RunQuotaExceeded("global", self.config.max_global_runs)
 
     def _resource_holds(self) -> list[str]:
-        """Runs whose resources are not confirmed released (global fail-closed).
-
-        A run still in flight in this process occupies a concurrency slot
-        instead; only a run past its terminal commit can hold resources beyond
-        that slot. The distinction matters during the window between the commit
-        and the execution leaving the table: the committed run must already
-        block new admissions when its cleanup did not confirm release, otherwise
-        a race would hand its unreleased resources to the next run.
-        """
-        with self._lock:
-            in_flight = {
-                run_id
-                for run_id, execution in self._executions.items()
-                if execution.phase != _COMMITTED
-            }
-        return [
-            record.run_id
-            for record in self.store.holding_records()
-            if record.run_id not in in_flight
-        ]
+        """Runs whose resources are not confirmed released (global fail-closed)."""
+        return self._ledger.resource_holds()
 
     # -- cancellation ---------------------------------------------------------
 
@@ -1052,323 +1053,40 @@ class RunManager:
         return unconfirmed
 
     # -- restart reconciliation and resource adjudication ---------------------
+    #
+    # The implementations live in :class:`pi_glink.kernel.resource_ledger.ResourceLedger`
+    # (the external-resource ledger collaborator built in ``__init__``); these
+    # forwards keep the manager's existing surface for ``app.py``, ``cli.py``
+    # and callers that predate the split.
 
     def reconcile(self) -> list[str]:
-        """Close out runs a previous host process left ``running``.
-
-        Requires proof that this process owns the data root: without it, a
-        run of a live host would be rewritten. A run whose terminal frame is
-        committed is only settled. A run without one is interrupted: a
-        ``run_failed(interrupted)`` frame is committed with the resource state
-        ``released: null`` (unknown), so it keeps holding capacity until an
-        operator adjudicates it. External resources are never touched.
-        Returns the ids that were interrupted.
-        """
-        self._require_ownership()
-        with self._lock:
-            executing = set(self._executions)
-        interrupted: list[str] = []
-        for run_id in self.store.unsettled():
-            if run_id in executing:
-                continue
-            if self.store.committed_terminal(run_id) is None:
-                if self._commit_interrupted(run_id):
-                    interrupted.append(run_id)
-            try:
-                self.store.settle(run_id)
-            except Exception:  # noqa: BLE001 - the committed frame still answers readers
-                logger.exception("遗留 run 的元数据收口失败 run=%s", run_id)
-        if interrupted:
-            logger.warning(
-                "识别到 %d 个上次进程遗留的 running run，已按中断收口: %s",
-                len(interrupted),
-                ", ".join(interrupted),
-            )
-        return interrupted
+        """Close out runs a previous host process left ``running``."""
+        return self._ledger.reconcile()
 
     def _commit_interrupted(self, run_id: str) -> bool:
-        record = self.store.get(run_id)
-        external = {
-            key: value
-            for key, value in (
-                ("container", record.container_name if record else None),
-                ("sandbox", record.sandbox_id if record else None),
-            )
-            if value
-        }
-        payload = {
-            "status": FAILED,
-            "stopReason": "interrupted",
-            "error": "宿主进程在该 run 结束前退出，已按中断收口",
-            "reportPath": None,
-            "reportStatus": "none",
-            "external": external,
-            "cleanup": {
-                "released": None,
-                "failures": ["宿主进程在该 run 结束前退出，执行资源状态未知，未自动回收"],
-                "external": external,
-            },
-        }
-        seq = max(
-            (event["seq"] for event in self.store.iter_events(run_id) if isinstance(event.get("seq"), int)),
-            default=0,
-        ) + 1
-        try:
-            self.store.commit_terminal(
-                run_id,
-                {
-                    "type": events.RUN_FAILED,
-                    "runId": run_id,
-                    "seq": seq,
-                    "ts": time.time(),
-                    "payload": payload,
-                },
-            )
-        except OSError as exc:
-            logger.error("遗留 run 的中断终帧写入失败 run=%s: %s", run_id, exc)
-            return False
-        return True
+        return self._ledger._commit_interrupted(run_id)
 
     def unreleased_resources(self) -> list[dict[str, Any]]:
-        """Runs whose resources are not confirmed released, for operator review.
-
-        Readable holds carry their persisted identity and cleanup facts. Run
-        directories whose ``meta.json`` cannot be read are listed with
-        ``corrupt: true`` and no identity: they count as global holds, and the
-        operator decides them through the same ``--mark-released`` path (the
-        decision goes into the run directory's own sidecar file, never into the
-        unreadable metadata).
-        """
-        holds = set(self._resource_holds())
-        entries = [
-            {
-                "runId": record.run_id,
-                "status": record.status,
-                "stopReason": record.stop_reason,
-                "container": record.container_name,
-                "sandbox": record.sandbox_id,
-                "cleanup": record.cleanup,
-            }
-            for record in self.store.holding_records()
-            if record.run_id in holds
-        ]
-        entries.extend(
-            {
-                "runId": run_id,
-                "status": None,
-                "stopReason": None,
-                "container": None,
-                "sandbox": None,
-                "cleanup": None,
-                "corrupt": True,
-            }
-            for run_id in self.store.unreadable_holds()
-        )
-        return entries
+        """Runs whose resources are not confirmed released, for operator review."""
+        return self._ledger.unreleased_resources()
 
     def adjudicate_release(self, run_id: str, note: str) -> RunRecord | None:
-        """Record an operator's decision that a run's resources are released.
-
-        This is the only way besides a confirmed cleanup to return capacity. It
-        requires data-root ownership (the host is not running) and a note
-        describing how the release was verified; nothing is cleaned up here.
-
-        A run whose ``meta.json`` cannot be read has no record to update; its
-        decision is written to the run directory's sidecar file and ``None`` is
-        returned. The unreadable metadata itself is never rewritten.
-        """
-        self._require_ownership()
-        reason = (note or "").strip()
-        if not reason:
-            raise ValueError("裁决必须附带核对说明")
-        with self._lock:
-            if run_id in self._executions:
-                raise RunBusy(run_id)
-            record = self.store.get(run_id)
-            if record is None:
-                if run_id not in self.store.unreadable_holds():
-                    raise KeyError(run_id)
-                self.store.adjudicate_unreadable(
-                    run_id,
-                    {
-                        "decision": "released",
-                        "source": "operator",
-                        "note": self.redactor.redact(reason),
-                        "at": time.time(),
-                    },
-                )
-                return None
-            if not record.is_terminal:
-                raise ValueError(f"run {run_id} 尚未终态，不能裁决资源")
-            if not record.holds_resources:
-                raise ValueError(f"run {run_id} 没有待确认的执行资源")
-            return self.store.update(
-                run_id,
-                resource_adjudication={
-                    "decision": "released",
-                    "source": "operator",
-                    "note": self.redactor_for_record(record).redact(reason),
-                    "at": time.time(),
-                },
-            )
+        """Record an operator's decision that a run's resources are released."""
+        return self._ledger.adjudicate_release(run_id, note)
 
     # -- online resource reconciliation ---------------------------------------
 
     def reconcile_resources(self) -> list[str]:
-        """Confirm persisted resources are gone and release the verified holds.
-
-        Only the identity stored in the run's own ``meta.json`` is addressed —
-        a container name or a sandbox id — and the probe is run against the
-        face that created it. No name pattern is guessed, no other resource is
-        listed, created or touched. A confirmation records a *separate* fact
-        from the operator's: ``resource_adjudication`` with
-        ``source: "auto-verified"``, the method and the time; the original
-        ``cleanup`` facts and the committed terminal frame stay untouched.
-
-        Fail-closed in every other direction: a missing identity, a probe error,
-        a timeout or an unclear answer leaves the hold exactly where it was. An
-        unreadable record has no identity at all, so it is never probed.
-
-        Never called while the admission lock is held (the ticket bound is per
-        probe call) and never overlapping itself: a tick that finds the previous
-        sweep running is skipped. Returns the run ids it released.
-        """
-        if self.config.executor not in ("docker", "e2b"):
-            # ``inproc`` acquires no external resource and this host therefore
-            # never probes one. (A record left behind by an earlier Docker/E2B
-            # deployment still counts; it just needs the offline operator path
-            # on a host that is not configured for an external face.)
-            return []
-        if not self._resource_sweep_lock.acquire(blocking=False):
-            return []
-        try:
-            with self._lock:
-                in_flight = set(self._executions)
-            released: list[str] = []
-            for record in self.store.holding_records():
-                if record.run_id in in_flight or not record.is_terminal:
-                    continue
-                try:
-                    confirmed, method, detail = self._probe_resource(record)
-                except Exception as exc:  # noqa: BLE001 - uncertainty keeps the hold
-                    logger.warning(
-                        "资源探测异常，保持持有 run=%s: %s: %s",
-                        record.run_id,
-                        type(exc).__name__,
-                        exc,
-                    )
-                    continue
-                if not confirmed:
-                    logger.info(
-                        "执行资源未确认释放，保持持有 run=%s: %s", record.run_id, detail
-                    )
-                    continue
-                try:
-                    self.store.update(
-                        record.run_id,
-                        resource_adjudication={
-                            "decision": "released",
-                            "source": "auto-verified",
-                            "method": method,
-                            "note": self.redactor_for_record(record).redact(detail),
-                            "at": time.time(),
-                        },
-                    )
-                except Exception:  # noqa: BLE001 - the hold simply stays
-                    logger.exception(
-                        "自动对账确认后写入裁决失败，保持持有 run=%s", record.run_id
-                    )
-                    continue
-                released.append(record.run_id)
-                logger.info("执行资源已按持久化身份确认释放 run=%s method=%s", record.run_id, method)
-            return released
-        finally:
-            self._resource_sweep_lock.release()
-
-    def _probe_resource(self, record: RunRecord) -> tuple[bool, str, str]:
-        """``(confirmed, method, detail)`` for one unconfirmed hold.
-
-        The face is chosen from the *record's persisted identity*, not from the
-        host's current configuration: an operator may have switched
-        ``LOCAL_WEB_EXECUTOR`` since the run, and a leftover container must still
-        be probed as a container. A record with no identity at all cannot be
-        confirmed online. A record carrying both identities is released only
-        when every one of them is confirmed gone.
-        """
-        checks: list[tuple[str, str]] = []
-        if record.container_name:
-            checks.append(("docker-inspect", record.container_name))
-        if record.sandbox_id:
-            checks.append(("e2b-kill", record.sandbox_id))
-        if not checks:
-            return False, "none", "缺少持久化的执行身份，不猜测资源"
-        confirmed = True
-        methods: list[str] = []
-        details: list[str] = []
-        for method, target in checks:
-            if method == "docker-inspect":
-                probe = self._docker_probe
-            else:
-                probe = self._sandbox_probe
-            ok, detail = probe(target)
-            methods.append(method)
-            details.append(f"{target}: {detail}")
-            if not ok:
-                confirmed = False
-        return confirmed, "+".join(methods), "; ".join(details)
+        """Confirm persisted resources are gone and release the verified holds."""
+        return self._ledger.reconcile_resources()
 
     def start_resource_watch(self) -> threading.Thread | None:
-        """Start the periodic ledger sweep (once at startup, then every interval).
-
-        The sweep runs in a background daemon thread: it never executes under
-        the admission lock and a sweep that is still probing is skipped, never
-        queued. It is enabled for the external faces (Docker/E2B) only, because
-        only they acquire resources the host can confirm by identity;
-        ``PI_GLINK_RESOURCE_RECONCILE_SECONDS=0`` disables it. The offline
-        operator path stays available either way.
-        """
-        interval = self.config.resource_reconcile_seconds
-        if interval <= 0 or self.config.executor not in ("docker", "e2b"):
-            return None
-        with self._lock:
-            if self._resource_watch is not None:
-                return self._resource_watch
-            stop = threading.Event()
-            thread = threading.Thread(
-                target=self._resource_watch_loop,
-                args=(stop, interval),
-                name="resource-reconcile",
-                daemon=True,
-            )
-            self._resource_watch = thread
-            self._resource_watch_stop = stop
-        thread.start()
-        return thread
-
-    def _resource_watch_loop(self, stop: threading.Event, interval: int) -> None:
-        while not stop.is_set():
-            try:
-                self.reconcile_resources()
-            except Exception:  # noqa: BLE001 - a sweep must never kill the host
-                logger.exception("资源自动对账失败，保留现有持有")
-            stop.wait(interval)
+        """Start the periodic ledger sweep (once at startup, then every interval)."""
+        return self._ledger.start_resource_watch()
 
     def stop_resource_watch(self, timeout: float = 5.0) -> None:
         """Stop the periodic sweep without touching the holds it did not verify."""
-        with self._lock:
-            thread = self._resource_watch
-            stop = self._resource_watch_stop
-            self._resource_watch = None
-            self._resource_watch_stop = None
-        if stop is not None:
-            stop.set()
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout)
-
-    def _require_ownership(self) -> None:
-        if self._ownership is None:
-            raise OwnershipRequired("恢复与资源裁决需要先取得数据目录的执行所有权")
-        self._ownership.require(self.config.data_root)
+        self._ledger.stop_resource_watch(timeout)
 
     # -- execution ------------------------------------------------------------
 
@@ -1454,17 +1172,16 @@ class RunManager:
                 # are never written anywhere else.
                 for value in recovery.secrets:
                     self._run_redactor(execution).add(value)
-                if self.config.executor == "e2b":
-                    recovered_session = adapter.session_info()
-                    # A pi run republishes when its session file travelled back
-                    # with the recovery; an ACP e2b run publishes the
-                    # state-root recovery verdict of its own (``session_file``
-                    # stays None on that face).
-                    if recovered_session and (
-                        recovered_session.session_file
-                        or recovered_session.payload.get("stateRootRecovered")
-                        is not None
-                    ):
+                # A sandbox face can learn session facts only while pulling the
+                # workspace back (the pi face's session file travels with the
+                # recovery; the ACP face's state-root verdict is decided there),
+                # so the adapter answers what is worth republishing; every other
+                # face answers ``None``. Duck-typed test doubles predate this
+                # optional method, so it is looked up rather than assumed.
+                recovered = getattr(adapter, "recovered_session", None)
+                if recovered is not None:
+                    recovered_session = recovered()
+                    if recovered_session is not None:
                         self._publish_session_ready(execution, recovered_session)
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 execution.artifact_failures.append(
@@ -1858,7 +1575,7 @@ class RunManager:
         """The sandbox carrier for one ACP run (M3b).
 
         The ACP family's E2B face reuses the pi face's sandbox lifecycle
-        (:class:`~pi_glink.kernel.e2b_env.E2BAcpSandboxClient`: same frozen
+        (:class:`~pi_glink.kernel.acp_e2b_env.E2BAcpSandboxClient`: same frozen
         credential, bounded lifetime, artifact recovery and identity), and the
         separate ``LOCAL_WEB_E2B_ACP_TEMPLATE`` because the pi template has no
         ACP agent installed. The sandbox id is persisted by the adapter as soon

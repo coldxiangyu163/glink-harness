@@ -35,7 +35,7 @@ from typing import Any, Callable, Mapping
 
 from .. import events
 from ..redaction import SecretRedactor, StreamRedactor
-from .projection import _project_args, extract_text
+from .projection import extract_text, project_args
 
 #: ACP ``StopReason`` values (protocol v1 schema). The runner translates these
 #: into the single product verdict table; an unknown value fails closed there.
@@ -265,7 +265,7 @@ def _agent_tool_call(
     payload: dict[str, Any] = {
         "toolCallId": tool_call_id,
         "toolName": name,
-        "args": _project_args(update.get("rawInput")),
+        "args": project_args(update.get("rawInput")),
     }
     kind = update.get("kind")
     if isinstance(kind, str) and kind:
