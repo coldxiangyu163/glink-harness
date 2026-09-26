@@ -18,6 +18,48 @@ function pythonPath(repoRoot) {
   return existsSync(venv) ? venv : 'python3';
 }
 
+/**
+ * Hosts started by this process, killed on any exit path.
+ *
+ * A probe that crashes before its own cleanup must not leave a host (and its
+ * temporary data root) behind; the hooks are the backstop, `stop()` is still
+ * the normal path and removes the child from the registry first.
+ */
+const liveHosts = new Set();
+let hooksInstalled = false;
+function installExitHooks() {
+  if (hooksInstalled) return;
+  hooksInstalled = true;
+  const killAll = () => {
+    for (const child of liveHosts) {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+  };
+  process.on('exit', killAll);
+  process.on('SIGINT', () => {
+    killAll();
+    process.exit(130);
+  });
+  process.on('SIGTERM', () => {
+    killAll();
+    process.exit(143);
+  });
+  process.on('uncaughtException', (error) => {
+    killAll();
+    console.error(error);
+    process.exit(1);
+  });
+  process.on('unhandledRejection', (error) => {
+    killAll();
+    console.error(error);
+    process.exit(1);
+  });
+}
+
 /** A temporary HOME/XDG keeps the fixture from ever reading the operator's pi state. */
 function isolatedEnv(homeDir) {
   const env = { ...process.env };
@@ -44,6 +86,8 @@ export async function startHost({ repoRoot, mode, stateDir, logFile, requestLog 
       env: isolatedEnv(homeDir),
     },
   );
+  installExitHooks();
+  liveHosts.add(child);
   const log = (chunk) => {
     try {
       writeSync(logFd, chunk);
@@ -95,6 +139,7 @@ export async function startHost({ repoRoot, mode, stateDir, logFile, requestLog 
       clearTimeout(timer);
       lines.close();
       closeSync(logFd);
+      liveHosts.delete(child);
       return result;
     },
   };
