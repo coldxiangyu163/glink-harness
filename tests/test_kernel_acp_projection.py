@@ -247,6 +247,31 @@ def test_session_resumed_tolerates_missing_or_typed_out_fields() -> None:
     assert "replayedUpdates" not in payload
 
 
+def test_session_resumed_payload_passes_through_the_run_redactor() -> None:
+    # Regression: this branch used to return its payload without _redact_all,
+    # unlike every other path out of project(). sessionId/method are
+    # agent-controlled identifiers and can echo a run credential.
+    secret = "opaque-token-value-99"
+    projector = AcpProjector(SecretRedactor([secret]))
+    payload = projector.project(
+        {
+            "type": "acp_session_resumed",
+            "method": "session/load",
+            "sessionId": f"parent-{secret}",
+            "replayedUpdates": 2,
+        }
+    )[0][1]
+    assert secret not in payload["sessionId"]
+    assert "[REDACTED]" in payload["sessionId"]
+    assert secret not in payload["detail"]
+    # Adjacent legal input is untouched: a clean sessionId survives verbatim.
+    clean = projector.project(
+        {"type": "acp_session_resumed", "method": "session/resume", "sessionId": "s-1"}
+    )[0][1]
+    assert clean["sessionId"] == "s-1"
+    assert clean["resumeMethod"] == "session/resume"
+
+
 # -- the permission notice ---------------------------------------------------------
 
 

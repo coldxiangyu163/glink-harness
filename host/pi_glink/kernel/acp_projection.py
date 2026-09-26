@@ -119,7 +119,9 @@ class AcpProjector:
                 payload["sessionId"] = frame["sessionId"]
             if isinstance(replayed, int):
                 payload["replayedUpdates"] = replayed
-            return [(events.KERNEL_STATUS, payload)]
+            # sessionId/method are agent-controlled identifiers: the payload
+            # leaves through the same redaction boundary as every other path.
+            return self._redact_all([(events.KERNEL_STATUS, payload)])
         if frame_type == "acp_permission":
             produced.extend(self.flush())
             produced.append((events.KERNEL_STATUS, self._permission_notice(frame)))
