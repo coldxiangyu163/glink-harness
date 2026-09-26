@@ -283,12 +283,15 @@ test('unknown event types are ignored, not rendered as noise', () => {
 test('the front-end carries no Glink-specific report layer', () => {
   // The workbench renders the Markdown pi wrote and nothing more: no charts,
   // citations, fact labels or other product vocabulary in its own sources.
+  // （口径说明：bare 'artifact' 曾在此列，义务是禁止报告层的 artifact 画廊类
+  // 产品词汇；§3.5 的子代理产物是已批准的独立产品面，有自己的边界与测试，
+  // 因此禁令收窄为报告层的确切措辞。）
   const modules = ['api.mjs', 'markdown.mjs', 'run-stream.mjs', 'run-view.mjs', 'ui.mjs', 'workspace.mjs'];
   const sources = modules
     .map((name) => readFileSync(new URL(`../../web/modules/${name}`, import.meta.url), 'utf8'))
     .join('\n')
     .toLowerCase();
-  for (const forbidden of ['citation', 'qualifier', 'renderchart','report-chart', 'mermaid', 'flowchart', 'artifact', 'factlabel']) {
+  for (const forbidden of ['citation', 'qualifier', 'renderchart','report-chart', 'mermaid', 'flowchart', 'report-artifact', 'artifactgallery', 'factlabel']) {
     assert.ok(!sources.includes(forbidden), `front-end must not carry ${forbidden}`);
   }
   // A chart-like fence stays plain code — the renderer has no diagram path.

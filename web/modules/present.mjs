@@ -287,6 +287,18 @@ export function childrenPanelTitle(count) {
   return count > 1 ? `派发了 ${count} 个子代理` : '派发了 1 个子代理';
 }
 
+/** R2 enrichment as one short row of facts: 43 秒 · 6 次工具调用（没有就空串）。 */
+export function childFacts(child) {
+  const facts = [];
+  if (typeof child?.durationMs === 'number' && child.durationMs > 0) {
+    facts.push(formatDuration(child.durationMs / 1000));
+  }
+  if (typeof child?.toolCount === 'number' && child.toolCount > 0) {
+    facts.push(`${child.toolCount} 次工具调用`);
+  }
+  return facts.filter(Boolean).join(' · ');
+}
+
 /* ── stages & notices ─────────────────────────────────────────────────────
  * Lifecycle stages (a turn starting, the agent loop ending, the run finishing)
  * are bookkeeping; the process header already says where the run is. Only the

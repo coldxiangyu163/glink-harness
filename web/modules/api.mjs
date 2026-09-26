@@ -101,5 +101,7 @@ export function createApi({ fetchImpl = globalThis.fetch } = {}) {
     }),
     eventsUrl: (runId) => `/api/runs/${encodeURIComponent(runId)}/events`,
     reportUrl: (runId) => `/api/runs/${encodeURIComponent(runId)}/report`,
+    childFileUrl: (runId, n, name) =>
+      `/api/runs/${encodeURIComponent(runId)}/children/${encodeURIComponent(String(n))}/${encodeURIComponent(name)}`,
   };
 }

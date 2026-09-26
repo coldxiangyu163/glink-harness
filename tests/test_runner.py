@@ -1384,3 +1384,94 @@ def test_a_run_without_subagents_carries_an_empty_children_summary(tmp_path: Pat
     assert final.status == FINISHED
     terminal = store.committed_terminal(record.run_id)
     assert terminal["payload"]["children"] == []
+
+
+def _pi_runtime(tmp_path: Path, run_id: str):
+    from pi_glink.kernel.agent_env import AgentRuntime  # noqa: PLC0415
+
+    session_dir = tmp_path / "sessions" / run_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    return AgentRuntime(
+        directory=tmp_path / "pi-agent",
+        provider_id="fake",
+        model_id="fake/model",
+        models_path=tmp_path / "pi-agent" / "models.json",
+        session_dir=session_dir,
+    )
+
+
+def _write_subagent_artifacts(session_dir: Path, run_prefix: str, agent: str, index: int, meta: dict) -> None:
+    artifacts = session_dir / "subagent-artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    base = f"{run_prefix}_{agent}_{index}"
+    (artifacts / f"{base}_meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    (artifacts / f"{base}_output.md").write_text("# 调研笔记\n", encoding="utf-8")
+    (artifacts / f"{base}_input.md").write_text("# Task\n", encoding="utf-8")
+
+
+def test_children_are_enriched_from_pi_subagent_artifacts(tmp_path: Path) -> None:
+    """R2：收尾时产物按（agent, 序数）关联进 children/<n>/，_meta.json 白名单增强。"""
+    manager, store = build_manager(tmp_path)
+    execution = open_execution(manager, store, tmp_path / "ws", "enrich1")
+    execution.runtime = _pi_runtime(tmp_path, "enrich1")
+    emit(manager, execution, "subagent_started", {"n": 0, "toolCallId": "call_1", "agent": "researcher", "task": "调研甲"})
+    _write_subagent_artifacts(
+        execution.runtime.session_dir, "a1b2c3d4", "researcher", 0,
+        {"exitCode": 0, "durationMs": 43210, "toolCount": 6, "model": "test/model:high",
+         "usage": {"input": 1234, "output": 567, "cacheRead": 0, "cacheWrite": 0, "turns": 4, "cost": 0.01}},
+    )
+
+    finalize_with(manager, execution, outcome=ExecutionOutcome(settled=True))
+
+    document = store.read_child("enrich1", 0)
+    assert document["enrichment"] == "meta"
+    assert document["durationMs"] == 43210 and document["toolCount"] == 6
+    assert document["usage"] == {"input": 1234, "output": 567, "cacheRead": 0, "cacheWrite": 0, "turns": 4}
+    assert "cost" not in json.dumps(document), "估费不是宿主事实"
+    child_dir = store.run_dir("enrich1") / "children" / "0"
+    assert (child_dir / "output.md").read_text(encoding="utf-8") == "# 调研笔记\n"
+    assert (child_dir / "meta.json").is_file()
+    names = {entry["name"] for entry in document["artifacts"]}
+    assert {"meta.json", "output.md", "input.md"} <= names
+    summary = store.children_summary("enrich1")
+    assert summary[0]["durationMs"] == 43210
+    assert summary[0]["artifacts"] == document["artifacts"]
+    terminal = store.committed_terminal("enrich1")
+    assert terminal["payload"]["children"][0]["enrichment"] == "meta"
+
+
+def test_children_enrichment_marks_unmatched_honestly(tmp_path: Path) -> None:
+    """同名 agent 两次派发产生 index 冲突：不配对，标 unmatched，不伪造。"""
+    manager, store = build_manager(tmp_path)
+    execution = open_execution(manager, store, tmp_path / "ws", "enrich2")
+    execution.runtime = _pi_runtime(tmp_path, "enrich2")
+    emit(manager, execution, "subagent_started", {"n": 0, "toolCallId": "call_1", "agent": "researcher", "task": "甲"})
+    emit(manager, execution, "subagent_started", {"n": 1, "toolCallId": "call_2", "agent": "researcher", "task": "乙"})
+    artifacts = execution.runtime.session_dir / "subagent-artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "a1b2c3d4_researcher_0_meta.json").write_text('{"exitCode": 0}', encoding="utf-8")
+    (artifacts / "b2c3d4e5_researcher_0_meta.json").write_text('{"exitCode": 0}', encoding="utf-8")
+
+    finalize_with(manager, execution, outcome=ExecutionOutcome(settled=True))
+
+    first = store.read_child("enrich2", 0)
+    second = store.read_child("enrich2", 1)
+    assert first["enrichment"] == "unmatched" and second["enrichment"] == "unmatched"
+    assert "durationMs" not in first and "artifacts" not in first
+
+
+def test_children_enrichment_skips_the_acp_family(tmp_path: Path) -> None:
+    """ACP 族没有 pi-subagents 布局：enrichment 保持 none，目录不被触碰。"""
+    manager, store = build_manager(tmp_path, PI_GLINK_HARNESS="acp", PI_GLINK_ACP_COMMAND="true")
+    execution = open_execution(manager, store, tmp_path / "ws", "enrich3")
+    execution.runtime = _pi_runtime(tmp_path, "enrich3")
+    emit(manager, execution, "subagent_started", {"n": 0, "toolCallId": "call_1", "agent": "", "task": "调研"})
+    _write_subagent_artifacts(
+        execution.runtime.session_dir, "a1b2c3d4", "researcher", 0, {"exitCode": 0}
+    )
+
+    finalize_with(manager, execution, outcome=ExecutionOutcome(settled=True))
+
+    document = store.read_child("enrich3", 0)
+    assert document["enrichment"] == "none"
+    assert not (store.run_dir("enrich3") / "children" / "0" / "meta.json").exists()

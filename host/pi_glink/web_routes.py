@@ -28,7 +28,7 @@ from .kernel.runner import (
     RunQuotaExceeded,
     UnsupportedCommand,
 )
-from .store import RunRecord
+from .store import CHILDREN_DIRNAME, RunRecord
 from .tenancy import TenantContext, TenantNotConfigured
 from .web_security import AUTH_POST_PATHS
 
@@ -38,6 +38,10 @@ _RUN_EVENTS_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/events$
 _RUN_STOP_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/stop$")
 _RUN_REPORT_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/report$")
 _RUN_CHILDREN_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/children$")
+_RUN_CHILD_FILE_RE = re.compile(
+    r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/children/(?P<n>\d{1,4})"
+    r"/(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,63})$"
+)
 _RUN_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})$")
 
 #: Run-body fields a client must never use to pick a model or supply a
@@ -279,6 +283,16 @@ class RoutesMixin:
         children_match = _RUN_CHILDREN_RE.match(path)
         if children_match is not None:
             self._send_children(children_match.group("run_id"), context, head_only=head_only)
+            return
+        child_file_match = _RUN_CHILD_FILE_RE.match(path)
+        if child_file_match is not None:
+            self._send_child_file(
+                child_file_match.group("run_id"),
+                child_file_match.group("n"),
+                child_file_match.group("name"),
+                context,
+                head_only=head_only,
+            )
             return
         run_match = _RUN_RE.match(path)
         if run_match is not None:
@@ -591,6 +605,62 @@ class RoutesMixin:
         if page.skipped:
             payload["skipped"] = page.skipped
         self._send_json(HTTPStatus.OK, payload, head_only=head_only)
+
+    #: Content types for the children artifact download, by file extension.
+    _CHILD_FILE_TYPES = {
+        ".md": "text/markdown; charset=utf-8",
+        ".json": "application/json; charset=utf-8",
+        ".jsonl": "application/x-ndjson; charset=utf-8",
+    }
+
+    def _send_child_file(
+        self,
+        run_id: str,
+        n_text: str,
+        name: str,
+        context: TenantContext | None,
+        *,
+        head_only: bool,
+    ) -> None:
+        """One artifact file of one child document (§3.5, R2 enrichment).
+
+        Same rules as the report download: the path is not a capability — only
+        a regular file directly inside ``children/<n>/`` of a run the caller
+        may see is served, read through a directory handle that never follows
+        a link, and redacted again on the way out with the record's own
+        boundary (``X-Redacted`` records whether that happened).
+        """
+        record = (
+            self.server.store.get_for(run_id, context.tenant_id)
+            if context is not None
+            else self.server.store.get(run_id)
+        )
+        not_found = {"error": "no_artifact", "runId": run_id}
+        if record is None:
+            self._send_json(HTTPStatus.NOT_FOUND, not_found, head_only=head_only)
+            return
+        try:
+            with ArtifactTree(self.server.store.run_dir(run_id)) as tree:
+                data = tree.read(
+                    f"{CHILDREN_DIRNAME}/{int(n_text)}/{name}", max_bytes=REPORT_MAX_BYTES
+                )
+        except (ArtifactError, OSError, ValueError) as exc:
+            logger.warning("child artifact refused run=%s n=%s name=%r: %s", run_id, n_text, name, exc)
+            self._send_json(HTTPStatus.NOT_FOUND, not_found, head_only=head_only)
+            return
+        original = data.decode("utf-8", errors="replace")
+        redactor = self.server.manager.redactor_for_record(record)
+        redacted = redactor.redact(original)
+        content_type = self._CHILD_FILE_TYPES.get(
+            "." + name.rsplit(".", 1)[-1], "application/octet-stream"
+        )
+        self._send_bytes(
+            redacted.encode("utf-8"),
+            content_type,
+            "no-cache",
+            head_only=head_only,
+            extra_headers={"X-Redacted": "true" if redacted != original else "false"},
+        )
 
     def _send_report(
         self, run_id: str, context: TenantContext | None, *, head_only: bool

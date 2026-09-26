@@ -472,6 +472,11 @@ function settleChildren(model, status, summary) {
         task: typeof entry.task === 'string' && entry.task ? entry.task : existing?.task ?? '',
         status: typeof entry.status === 'string' && entry.status ? entry.status : existing?.status ?? follow,
         resultPreview: existing?.resultPreview ?? '',
+        // R2 增强字段：终帧摘要带什么就附着什么（durationMs/toolCount/artifacts），
+        // 未增强的 child 没有这些键——面板据此区分「协议可见」与「增强」。
+        ...(typeof entry.durationMs === 'number' ? { durationMs: entry.durationMs } : {}),
+        ...(typeof entry.toolCount === 'number' ? { toolCount: entry.toolCount } : {}),
+        ...(Array.isArray(entry.artifacts) ? { artifacts: entry.artifacts } : {}),
       });
     }
   }
@@ -486,13 +491,16 @@ function settleChildren(model, status, summary) {
   return { ...model, children, items };
 }
 
-/** The children panel's rows (agent / task / status); empty means the panel stays hidden. */
+/** The children panel's rows (agent / task / status / R2 enrichment); empty means the panel stays hidden. */
 export function childrenPanel(model) {
   return model.children.map((child) => ({
     n: child.n,
     agent: child.agent,
     task: child.task,
     status: child.status,
+    ...(typeof child.durationMs === 'number' ? { durationMs: child.durationMs } : {}),
+    ...(typeof child.toolCount === 'number' ? { toolCount: child.toolCount } : {}),
+    ...(Array.isArray(child.artifacts) ? { artifacts: child.artifacts } : {}),
   }));
 }
 

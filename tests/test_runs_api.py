@@ -704,3 +704,36 @@ def test_a_host_artifact_behind_a_directory_link_is_not_served(server: PiGlinkSe
                  report_path=str(store.run_dir("swapartifact") / "artifacts" / "report.md"))
     assert _view(server, "swapartifact")["hasReport"] is False
     assert request(server, "/api/runs/swapartifact/report")[0] == 404
+
+
+def test_child_artifact_download_serves_only_the_child_directory(server: PiGlinkServer) -> None:
+    """GLINK-SUB-R2: GET /api/runs/{id}/children/{n}/{file} serves a regular
+    file directly inside children/<n>/, redacted on the way out; anything else
+    is the same 404, and the owner rules are the run detail's."""
+    _status, _headers, raw = request(server, "/api/runs", method="POST", body={"prompt": "子代理"})
+    run_id = json.loads(raw)["run"]["runId"]
+    wait_for_terminal(server, run_id)
+    child_dir = server.store.run_dir(run_id) / "children" / "0"
+    child_dir.mkdir(parents=True)
+    (child_dir / "output.md").write_text("# 调研笔记\n\n结论在此。\n", encoding="utf-8")
+
+    status, headers, raw = request(server, f"/api/runs/{run_id}/children/0/output.md")
+    assert status == 200
+    assert "markdown" in headers.get("Content-Type", "")
+    assert "结论在此" in raw.decode("utf-8")
+    assert headers.get("X-Redacted") == "false"
+
+    # Missing file / unknown run / path tricks all answer the same 404.
+    status, _h, _r = request(server, f"/api/runs/{run_id}/children/0/absent.md")
+    assert status == 404
+    status, _h, _r = request(server, f"/api/runs/{run_id}/children/9/output.md")
+    assert status == 404
+    status, _h, r = request(server, "/api/runs/ffffffffffff/children/0/output.md")
+    assert status == 404 and json.loads(r)["error"] in ("no_artifact", "unknown_run")
+    status, _h, _r = request(server, f"/api/runs/{run_id}/children/0/..%2Fmeta.json")
+    assert status == 404
+    # 规则就是「children/<n>/ 内的普通文件」：child.json 同样可下载（内容与
+    # children 列表端点一致，均为已脱敏事实）。
+    (child_dir / "child.json").write_text('{"n": 0}', encoding="utf-8")
+    status, _h, raw = request(server, f"/api/runs/{run_id}/children/0/child.json")
+    assert status == 200 and json.loads(raw) == {"n": 0}

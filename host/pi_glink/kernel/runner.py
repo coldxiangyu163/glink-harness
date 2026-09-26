@@ -59,6 +59,7 @@ from ..redaction import SecretRedactor, redactor_from_config
 from ..store import (
     ARTIFACTS_DIRNAME,
     CANCELLED,
+    CHILDREN_DIRNAME,
     FAILED,
     FINISHED,
     REPORT_FILENAME,
@@ -109,6 +110,11 @@ from .projection import Projector
 # the ledger's adjudication raise it; re-exported here for existing importers.
 from .resource_ledger import ResourceLedger, RunBusy
 from .rpc import PiRpcClient
+from .subagent_artifacts import (
+    associate_children,
+    parse_artifact_filename,
+    read_meta_enrichment,
+)
 from ..tenancy import (
     TenantContext,
     TenantCredentialStore,
@@ -123,6 +129,13 @@ RUNTIME_DIRNAME = "pi-agent"
 RESEARCH_PROMPT_FILENAME = "research-prompt.md"
 #: Ceiling for artifacts the host reads back and serves.
 REPORT_MAX_BYTES = 32 * 1024 * 1024
+
+#: Bounds for the children enrichment copy (pi-subagents artifacts →
+#: ``children/<n>/``): the sources are already bounded at recovery, the copy
+#: gets its own ceiling so a pathological layout stays cheap.
+_ENRICH_VISIT_LIMIT = 256
+_ENRICH_FILE_MAX_BYTES = 8 * 1024 * 1024
+_ENRICH_TOTAL_MAX_BYTES = 64 * 1024 * 1024
 #: Ceiling for one file touched by the workspace credential sweep.
 SWEEP_MAX_BYTES = 2 * 1024 * 1024
 #: Bound on how many files one sweep may visit (a runaway workspace must not
@@ -1228,6 +1241,10 @@ class RunManager:
         except Exception:  # noqa: BLE001
             logger.exception("session credential sweep failed run=%s", run_id)
         try:
+            self._enrich_children(execution)
+        except Exception:  # noqa: BLE001 - enrichment is best-effort, never a verdict input
+            logger.exception("children enrichment failed run=%s", run_id)
+        try:
             self._recover_report(execution)
         except Exception:  # noqa: BLE001 - reported as a rejected artifact
             logger.exception("report recovery failed run=%s", run_id)
@@ -2137,6 +2154,113 @@ class RunManager:
         if status in ("finished", "failed", "cancelled", "interrupted"):
             return status
         return "failed" if payload.get("isError") else "finished"
+
+    def _enrich_children(self, execution: _Execution) -> None:
+        """Associate pi-subagents artifacts with the child documents (R2, pi 族).
+
+        The candidates are the E2B mirror (``runs/<id>/subagents/artifacts``)
+        and, on the host-side faces, the session dir's ``subagent-artifacts/``.
+        Matched file groups are copied into ``children/<n>/`` (normalized
+        ``<kind>.<ext>`` names), ``_meta.json`` contributes its whitelisted
+        counters, and the document records the outcome honestly: ``meta`` when
+        paired, ``unmatched`` when the run has artifacts but the ordinal
+        pairing failed, ``none`` when there is nothing to pair. The ACP family
+        has no such layout and is never touched. Copies pass the run's redactor
+        sweep like every other artifact; the sources stay untouched (they are
+        the recovery substrate, not the product surface).
+        """
+        if self.config.harness != "pi":
+            return
+        run_id = execution.record.run_id
+        page = self.store.read_children(run_id)
+        if not page.documents:
+            return
+        candidates: list[tuple[str, Any, str]] = []  # (artifact relpath, source tree, kind dir label)
+        mirror = self.store.run_dir(run_id) / SUBAGENTS_DIRNAME / "artifacts"
+        session_artifacts = (
+            execution.runtime.session_dir / "subagent-artifacts"
+            if execution.runtime is not None
+            else None
+        )
+        for root in (mirror, session_artifacts):
+            if root is None or not root.is_dir():
+                continue
+            try:
+                with ArtifactTree(root) as tree:
+                    for relative in tree.files(max_files=_ENRICH_VISIT_LIMIT):
+                        candidates.append((relative, root, relative))
+            except ArtifactError as exc:
+                logger.warning("子代理产物目录不可读 run=%s %s: %s", run_id, root, exc)
+        named = [
+            (parsed, root, relative)
+            for relative, root, _label in candidates
+            if (parsed := parse_artifact_filename(relative)) is not None
+        ]
+        if not named:
+            return
+        association = associate_children(
+            [dict(document) for document in page.documents],
+            [parsed for parsed, _root, _rel in named],
+        )
+        roots = {id(parsed): (root, relative) for parsed, root, relative in named}
+        copied_total = 0
+        for n, artifacts in association.by_n.items():
+            document = dict(self.store.read_child(run_id, n) or {})
+            if not document:
+                continue
+            listing: list[dict[str, Any]] = []
+            enrichment: dict[str, Any] = {}
+            for artifact in artifacts:
+                root, relative = roots[id(artifact)]
+                stored = f"{artifact.kind}.{artifact.path.rsplit('.', 1)[-1]}"
+                try:
+                    with ArtifactTree(root) as source:
+                        data = source.read(relative, max_bytes=_ENRICH_FILE_MAX_BYTES)
+                    copied_total += len(data)
+                    if copied_total > _ENRICH_TOTAL_MAX_BYTES:
+                        execution.artifact_failures.append("子代理增强复制超过总量上限")
+                        break
+                    with ArtifactTree(self.store.run_dir(run_id)) as run_tree:
+                        run_tree.replace(
+                            f"{CHILDREN_DIRNAME}/{n}/{stored}",
+                            data,
+                            max_bytes=_ENRICH_FILE_MAX_BYTES,
+                            create_parents=True,
+                        )
+                except (ArtifactError, OSError) as exc:
+                    execution.artifact_failures.append(f"子代理产物关联复制失败: {relative}: {exc}")
+                    continue
+                listing.append({"name": stored, "bytes": len(data), "source": artifact.path})
+                if artifact.kind == "meta":
+                    meta = read_meta_enrichment(data)
+                    if meta:
+                        enrichment.update(meta)
+            document.update(enrichment)
+            document["enrichment"] = "meta"
+            if listing:
+                document["artifacts"] = listing
+            try:
+                self.store.write_child(run_id, document)
+            except (ArtifactError, OSError, ValueError) as exc:
+                self._child_doc_warning(execution, f"子代理增强落文档失败 n={n}: {exc}")
+        for n in association.unmatched_children:
+            document = self.store.read_child(run_id, n)
+            if document and document.get("enrichment") in (None, "none"):
+                try:
+                    self.store.write_child(run_id, {**document, "enrichment": "unmatched"})
+                except (ArtifactError, OSError, ValueError) as exc:
+                    self._child_doc_warning(execution, f"子代理关联标记失败 n={n}: {exc}")
+        if association.unmatched_files:
+            logger.info(
+                "未关联的子代理产物保留在回收基质 run=%s: %s",
+                run_id,
+                ", ".join(a.path for a in association.unmatched_files[:8]),
+            )
+        children_dir = self.store.run_dir(run_id) / CHILDREN_DIRNAME
+        if children_dir.is_dir() and self._sanitize_workspace(
+            children_dir, self._run_redactor(execution)
+        ):
+            execution.redacted = True
 
     def _settle_children(self, execution: _Execution, verdict: _Verdict) -> None:
         """Close out children whose own finished event never arrived.

@@ -815,15 +815,23 @@ class RunStore:
         except Exception:  # noqa: BLE001 - a summary must not break its caller
             logger.warning("children summary unavailable run=%s", run_id)
             return []
-        return [
-            {
+        summary: list[dict[str, Any]] = []
+        for document in page.documents:
+            entry: dict[str, Any] = {
                 "n": document.get("n"),
                 "agent": document.get("agent") or "",
                 "task": document.get("task") or "",
                 "status": document.get("status") or "running",
             }
-            for document in page.documents
-        ]
+            # R2 增强（协议可见事实之外的可选附着）：只有文档里真实存在才带；
+            # enrichment 为 none 是默认态，不占摘要空间。
+            for key in ("durationMs", "toolCount", "model", "usage", "artifacts"):
+                if key in document:
+                    entry[key] = document[key]
+            if document.get("enrichment") not in (None, "none"):
+                entry["enrichment"] = document["enrichment"]
+            summary.append(entry)
+        return summary
 
     # -- internals ------------------------------------------------------------
 

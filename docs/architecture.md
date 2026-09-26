@@ -181,8 +181,9 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 ### 3.5 子代理（ChildRun）模型
 
 子代理是 run 作用域内的一等领域对象 ChildRun：**权威表示是文档（`child.json`）与终帧汇总，
-事件只是状态迁移的推送**；子代理正文（逐步工具流、中间消息）永不进事件日志。v1 模型只含
-协议可见事实，两族（pi / ACP）同构；pi 的 `_meta.json` 增强与产物关联属 R2，不在本节范围。
+事件只是状态迁移的推送**；子代理正文（逐步工具流、中间消息）永不进事件日志，只经
+`children/<n>/` 下的产物文件与下载端点暴露。模型主体是协议可见事实（两族同构）；
+pi 族另有 `_meta.json` 增强（R2，见下「R2 增强与关联」）。
 
 **child.json 字段**（落点 `runs/<id>/children/<n>/child.json`，每次状态迁移经目录句柄原子重写，
 与 §6.1 产物写入同一条边界）：
@@ -195,7 +196,8 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 | `task` | 任务描述，限幅 |
 | `status` | `running` / `finished` / `failed` / `cancelled` / `interrupted`；终态跟随 run 的规则与工具终态一致（§3.4「工具终态跟随 run」） |
 | `resultPreview` | 结果摘要，限幅 |
-| `enrichment` | v1 恒为 `"none"`（增强字段属 R2） |
+| `enrichment` | `"none"`（无产物可关联/非 pi 族）/ `"meta"`（已按 `_meta.json` 增强）/ `"unmatched"`（有产物但序数配对失败，不错配） |
+| `artifacts` | R2 增强：关联成功的产物清单 `[{name, bytes, source}]`，文件本体复制在 `children/<n>/` 下（`<kind>.<ext>` 归一名） |
 
 **事件载荷与识别规则**：
 
@@ -220,6 +222,20 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
   interrupted 收口，终帧再带 children）。
 * **历史日志读侧兼容**：事件日志不可变；旧格式（`toolName=subagent` 的通用工具卡片）前端
   必须仍能照常按旧卡片渲染——这是硬约束，读侧兼容不属于写侧变化。
+
+**R2 增强与关联（pi 族）**：pi-subagents 的 `_meta.json`/笔记/transcript 是它的**私有布局**
+（非官方文档化 API），由 `kernel/subagent_artifacts.py` 对照 `tests/fixtures/subagent-artifacts/`
+钉住——包升级改变布局时测试立刻变红，而不是静默丢增强。命名
+`<runId>_<safeAgent>_<index>_{input,output,transcript,meta}`（`index` 是单次派发内序号，
+与 run 文档的全局 `n` 不同坐标系；文件名 runId 是包内派发 id，与 toolCallId 无映射），
+关联因此是**序数启发式**：同 agent 名下文档按 `n`、文件按 `index` 排序，数量一致才配对，
+冲突或缺侧整体标 `unmatched` 不错配。配对成功的文件复制进 `children/<n>/`（归一为
+`<kind>.<ext>`），`_meta.json` 的白名单计数（`exitCode`/`durationMs`/`toolCount`/`model`/
+`usage.{input,output,cacheRead,cacheWrite,turns}`）写入文档；**`cost` 被刻意排除**（估费不是
+宿主事实，§3.4 口径）。增强在收尾时进行（E2B 镜像与会话目录两个候选源，三面统一），
+副本过 run 脱敏边界；终帧 `children` 摘要与 `GET /api/runs/{id}/children` 带上这些字段，
+`GET /api/runs/{id}/children/{n}/{file}` 按报告下载同一套规则（固定位置、目录句柄、
+服务前再脱敏、`X-Redacted`、owner 404）提供产物下载。ACP 族无此布局，永不被触碰。
 
 ## 4. run 生命周期
 
@@ -383,7 +399,7 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 
 **多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
 
-**子代理副产物**：pi-subagents 的分支会话与主会话同名同目录（只能按会话头区分，见上表），产物目录由 `artifactDir: "session"` 落在会话目录的 `subagent-artifacts/`。E2B 面在沙箱销毁前把这些有界镜像到宿主拥有的 `runs/<id>/subagents/`（分支会话进 `sessions/`、产物进 `artifacts/`；深度/文件数/单文件/总量限幅，链接不跟随，失败记 `artifactFailures`），inproc/Docker 面的同类文件本就在宿主会话目录内、不另拷贝；两路的会话目录与镜像目录都在收尾时过 run 的脱敏边界（与 §6.1 会话文件同一条规则）。R1 起每个子代理另有权威文档 `runs/<id>/children/<n>/child.json`（§3.5）：它是协议可见事实的落地，与 P0 的 `subagents/` 原始镜像各自独立——镜像是回收基质，child.json 与镜像的关联及镜像重排属 R2，关联未做前不重排镜像形状。
+**子代理副产物**：pi-subagents 的分支会话与主会话同名同目录（只能按会话头区分，见上表），产物目录由 `artifactDir: "session"` 落在会话目录的 `subagent-artifacts/`。E2B 面在沙箱销毁前把这些有界镜像到宿主拥有的 `runs/<id>/subagents/`（分支会话进 `sessions/`、产物进 `artifacts/`；深度/文件数/单文件/总量限幅，链接不跟随，失败记 `artifactFailures`），inproc/Docker 面的同类文件本就在宿主会话目录内、不另拷贝；两路的会话目录与镜像目录都在收尾时过 run 的脱敏边界（与 §6.1 会话文件同一条规则）。R1 起每个子代理另有权威文档 `runs/<id>/children/<n>/child.json`（§3.5）：它是协议可见事实的落地，与 P0 的 `subagents/` 原始镜像各自独立——镜像是回收基质（保持原样、不改写）；R2 起收尾时按序数启发式把产物关联复制进 `children/<n>/`（§3.5「R2 增强与关联」），未关联的文件留在基质里并记日志。
 
 **事件时序**：E2B 的流式接口是 `commands.run(background=True, …)` 返回的 `CommandHandle`
 （`background=True` 的重载不消费 `run()` 自身的回调）。沙箱命令把 pi 的 stdout 同时 `tee` 到
@@ -468,7 +484,7 @@ Dockerfile 的边界约束，缺 `pi-subagents` 只会退化成“没有子代�
 | 报告文件 | 经工作区目录句柄读取、脱敏、在 run 目录句柄内原子写入 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `kernel/runner.py::_recover_report` |
 | 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源；子代理分支会话与 `subagent-artifacts/` 同目录被同一边界清扫 | `kernel/runner.py::_sanitize_session_file`、`docker_env.host_session_path` |
 | 子代理镜像 | E2B 面回收的 `runs/<id>/subagents/`（分支会话 + 产物）收尾时经目录句柄清扫，与 §5.2 同一条边界 | `kernel/runner.py::_sanitize_workspace`、`kernel/e2b_env.py::recover_subagent_files` |
-| 子代理文档 | `runs/<id>/children/<n>/child.json` 只由已过两道脱敏的事件载荷构造（投影 → 提交前再脱敏），`GET /api/runs/{id}/children` 按存储原样下发，不引入新秘密 | `kernel/runner.py::_emit`、`store.py::read_children`、`web_routes.py` |
+| 子代理文档 | `runs/<id>/children/<n>/child.json` 只由已过两道脱敏的事件载荷构造（投影 → 提交前再脱敏），`GET /api/runs/{id}/children` 按存储原样下发，不引入新秘密；`children/<n>/<file>` 产物下载按报告下载同一套规则（服务前再脱敏、`X-Redacted`） | `kernel/runner.py::_emit`、`store.py::read_children`、`web_routes.py` |
 | 报告下载 | `report_path` 不是下载能力：只认两个固定位置——宿主产物 `runs/<id>/artifacts/report.md`，以及旧版本写下的本 run 工作区 `workspaces/<id>/report.md`（只读，从不改写历史）；其他路径一律视为无报告。服务前再脱敏，响应头 `X-Redacted` 标明是否发生；`hasReport` 用同一位置规则与同一拒绝条件计算 | `store.py::report_location`、`web_routes.py::_send_report`、`artifacts.py` |
 
 **产物路径安全**（`artifacts.py::ArtifactTree`）：宿主从不「先 realpath 校验、再按路径打开」。
@@ -510,7 +526,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `redaction`（出站脱敏）/ `accounts`（站内账号）/ `auth`（身份断言与会话）/ `dotenv`（.env 解析）/ `blueprints`（蓝图目录推导与解析渲染）；组成根 `app`（服务器与 `create_server`） |
 | `host/pi_glink/web_*.py` | 宿主 HTTP 层 | `web_routes`（路由与 run/health/报告 API）/ `web_sse`（事件流与连接额度）/ `web_security`（身份、会话与请求防护）/ `web_http`（请求体、响应、静态资源、脱敏访问日志）；一个 `HostRequestHandler` 由它们组合而成 |
 | `host/pi_glink/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
-| `host/pi_glink/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env`；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面与编排：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）/ `runner` / `resource_ledger`（外部资源台账、重启对账、人工裁决与在线身份探测扫描） |
+| `host/pi_glink/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env` / `subagent_artifacts`（pi-subagents 产物布局解析与关联，R2）；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面与编排：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）/ `runner` / `resource_ledger`（外部资源台账、重启对账、人工裁决与在线身份探测扫描） |
 | `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
 | `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`（最小工作约定）、`prompts/deepresearch.md`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
 | `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |

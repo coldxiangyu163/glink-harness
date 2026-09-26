@@ -1,0 +1,1 @@
+{"runId":"a1b2c3d4","agent":"researcher","task":"调研 ACP 协议的作用","exitCode":0,"processSignal":null,"usage":{"input":1234,"output":567,"cacheRead":890,"cacheWrite":0,"cost":0.0123,"turns":4},"model":"test/model:high","attemptedModels":["test/model:high"],"durationMs":43210,"toolCount":6}

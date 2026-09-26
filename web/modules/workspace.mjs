@@ -638,6 +638,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       onCopy: (text) => copyText(text),
       reportHref: (id) => api.reportUrl(id),
       reportDownloadName: (value) => reportFileName(value.prompt),
+      childFileHref: (id, n, name) => api.childFileUrl(id, n, name),
     });
     current = { runId, model, subscription: null, view,
       prompt: ancestors[0]?.prompt ?? run.prompt, history: [], events: 0 };

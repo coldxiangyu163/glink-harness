@@ -25,6 +25,7 @@
  */
 
 import {
+  childFacts,
   childLabel,
   childStateLabel,
   childStatusText,
@@ -66,6 +67,7 @@ export function createRunView({
   onCopy = null,
   reportHref = () => '#',
   reportDownloadName = () => 'report.md',
+  childFileHref = () => '#',
 }) {
   const uid = `run-view-${(viewCounter += 1)}`;
 
@@ -256,6 +258,21 @@ export function createRunView({
           el('span', 'pi-stage-text', childLabel(child)),
           el('span', 'pi-tool-state', childStatusText(child.status)),
         );
+        // R2 增强：耗时/工具步数（来自 _meta.json 白名单）与产物下载链接。
+        const facts = childFacts(child);
+        if (facts) row.append(el('span', 'pi-child-facts', facts));
+        if (Array.isArray(child.artifacts) && child.artifacts.length && model.runId) {
+          const links = el('span', 'pi-child-artifacts');
+          for (const artifact of child.artifacts) {
+            if (!artifact || typeof artifact.name !== 'string' || !artifact.name) continue;
+            const link = el('a', 'pi-child-artifact', artifact.name);
+            link.href = childFileHref(model.runId, child.n, artifact.name);
+            link.target = '_blank';
+            link.rel = 'noopener';
+            links.append(link);
+          }
+          if (links.children.length) row.append(links);
+        }
         return row;
       }),
     );

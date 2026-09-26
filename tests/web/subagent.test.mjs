@@ -21,6 +21,7 @@ import {
   createRunSubscription,
 } from '../../web/modules/run-stream.mjs';
 import {
+  childFacts,
   childLabel,
   childStateLabel,
   childStatusText,
@@ -222,4 +223,41 @@ test('a malformed started payload without a valid n is ignored, not rendered', (
   assert.equal(model.children.length, 0);
   assert.equal(model.items.length, 0);
   assert.equal(model.lastSeq, 1);
+});
+
+test('R2 enrichment rides the terminal summary into the panel rows', () => {
+  // The run dispatches one child live; the terminal frame then carries the
+  // enrichment the host paired from pi-subagents' _meta.json.
+  let model = createRunModel({ runId: 'r-enrich' });
+  model = applyEvent(model, {
+    type: 'subagent_started',
+    payload: { n: 0, toolCallId: 'call_1', agent: 'researcher', task: '调研甲' },
+  });
+  model = applyEvent(model, {
+    type: 'run_finished',
+    payload: {
+      status: 'finished',
+      children: [
+        {
+          n: 0, agent: 'researcher', task: '调研甲', status: 'finished',
+          durationMs: 43210, toolCount: 6,
+          artifacts: [{ name: 'output.md', bytes: 128, source: 'a1b2c3d4_researcher_0_output.md' }],
+        },
+      ],
+    },
+  });
+  const rows = childrenPanel(model);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].durationMs, 43210, '终帧的增强字段进入面板行');
+  assert.equal(rows[0].toolCount, 6);
+  assert.deepEqual(rows[0].artifacts, [
+    { name: 'output.md', bytes: 128, source: 'a1b2c3d4_researcher_0_output.md' },
+  ]);
+});
+
+test('childFacts formats duration and tool count, empty without enrichment', () => {
+  assert.equal(childFacts({ durationMs: 43210, toolCount: 6 }), '43 秒 · 6 次工具调用');
+  assert.equal(childFacts({ durationMs: 95000 }), '1 分 35 秒');
+  assert.equal(childFacts({}), '', '未增强的 child 没有事实行');
+  assert.equal(childFacts({ durationMs: 0, toolCount: 0 }), '');
 });
