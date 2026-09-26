@@ -1,0 +1,13 @@
+{
+  "name": "pi-glink-browser-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Project-local, lockfile-pinned Playwright driver for the browser acceptance suite (not part of scripts/check.sh).",
+  "scripts": {
+    "acceptance": "node acceptance.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.58.2"
+  }
+}
