@@ -34,6 +34,7 @@ from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
     E2BSandboxExecutionAdapter,
+    ExecutionAdapter,
     ExecutionOutcome,
     ExecutionSpec,
     RpcExecutionAdapter,
@@ -121,14 +122,29 @@ class FakeSource:
         self.closed = True
 
 
-class FakeAdapter:
-    """A duck-typed adapter carrying one progress source (no kernel behind it)."""
+class FakeAdapter(ExecutionAdapter):
+    """An ABC adapter carrying one progress source (no kernel behind it).
+
+    ``start``/``deliver_input``/``wait`` are never called on this path (the
+    tests drive the typed-event seam directly); they exist only to satisfy
+    the ABC.
+    """
 
     def __init__(self, source: FakeSource | None):
+        super().__init__(None, on_frame=lambda frame: None)  # type: ignore[arg-type]
         self._source = source
 
     def child_progress_source(self) -> FakeSource | None:
         return self._source
+
+    def start(self) -> None:
+        raise AssertionError("原路径本不会调到")
+
+    def deliver_input(self) -> None:
+        raise AssertionError("原路径本不会调到")
+
+    def wait(self, *, cancel, deadline):
+        raise AssertionError("原路径本不会调到")
 
     def recover_artifacts(self, destination: Path) -> ArtifactRecovery:
         return ArtifactRecovery()
@@ -289,11 +305,23 @@ def test_no_subagent_means_no_observer(tmp_path: Path) -> None:
     assert source.polls == 0 and source.closed is False
 
 
-def test_an_adapter_without_the_seam_gets_no_thread(tmp_path: Path) -> None:
-    """getattr 先例：适配器不实现该方法即该面无进度，不报错。"""
+def test_an_adapter_inheriting_the_default_seam_gets_no_thread(tmp_path: Path) -> None:
+    """ABC 默认空实现：不覆写该方法即该面无进度，不报错。"""
 
-    class NoSeamAdapter:
-        """Everything an adapter needs except ``child_progress_source``."""
+    class NoSeamAdapter(ExecutionAdapter):
+        """Everything an adapter needs, with the ABC's default (no) seam."""
+
+        def __init__(self) -> None:
+            super().__init__(None, on_frame=lambda frame: None)  # type: ignore[arg-type]
+
+        def start(self) -> None:
+            raise AssertionError("原路径本不会调到")
+
+        def deliver_input(self) -> None:
+            raise AssertionError("原路径本不会调到")
+
+        def wait(self, *, cancel, deadline):
+            raise AssertionError("原路径本不会调到")
 
         def recover_artifacts(self, destination: Path) -> ArtifactRecovery:
             return ArtifactRecovery()

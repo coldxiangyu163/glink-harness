@@ -18,9 +18,11 @@ from pi_glink.kernel.rpc import PiRpcClient
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
+    ExecutionAdapter,
     ExecutionOutcome,
     SessionInfo,
 )
+from pi_glink.kernel.harness import Verdict
 from pi_glink.kernel.runner import (
     FollowupUnavailable,
     RunBusy,
@@ -187,7 +189,7 @@ def test_docker_session_file_is_mapped_back_to_the_host_and_sanitized(
     found nothing and the closing sanitise pass returned silently, leaving a
     tool-echoed credential in the host session log.
     """
-    monkeypatch.setattr("pi_glink.kernel.runner.docker_available", lambda: True)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: True)
 
     secret = "sk-test-0123456789abcdef"
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker", OPENAI_API_KEY=secret)
@@ -234,7 +236,7 @@ def test_subagent_files_in_the_session_dir_are_sanitized_too(
 ) -> None:
     """Branched sessions and subagent artifacts share the session directory on
     the host-side faces; the closing sweep covers them, not just the main file."""
-    monkeypatch.setattr("pi_glink.kernel.runner.docker_available", lambda: True)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: True)
 
     secret = "sk-subagent-0123456789abcdef"
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker", OPENAI_API_KEY=secret)
@@ -725,15 +727,19 @@ def test_missing_credential_refuses_to_start(tmp_path: Path) -> None:
 # -- R4: resource release is its own fact ---------------------------------------
 
 
-class ScriptedAdapter:
+class ScriptedAdapter(ExecutionAdapter):
     """External execution stand-in: settles at once, blocks where told to.
 
     It writes a report during recovery like a sandbox pull-back would, and its
     ``close()`` result is scripted. ``gates`` maps a phase name to an event the
-    call waits on after signalling ``entered[phase]``.
+    call waits on after signalling ``entered[phase]``. Inheriting the ABC gives
+    it the default empty ``recovered_session``/``recover_subagents``/
+    ``child_progress_source``; the spec stub is never read because its
+    ``start()`` is a no-op.
     """
 
     def __init__(self, *, close=None, gates=None) -> None:
+        super().__init__(None, on_frame=lambda frame: None)  # type: ignore[arg-type]
         self._close = close or (lambda: CleanupReport(released=True))
         self.gates = gates or {}
         self.entered = {name: threading.Event() for name in ("recover", "close")}
@@ -778,7 +784,7 @@ def scripted_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter: S
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
-    monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", lambda spec, **kwargs: adapter)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", lambda spec, **kwargs: adapter)
     return config, store, manager
 
 
@@ -974,7 +980,7 @@ def test_a_tail_withheld_during_finalization_is_released_before_the_verdict(
         return original_recover(destination)
 
     adapter.recover_artifacts = recover_with_late_frame  # type: ignore[method-assign]
-    monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", build)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", build)
     record = manager.start("收尾期间到达的帧")
     manager.wait(record.run_id, timeout=30)
     events = read_events(store, record.run_id)
@@ -1032,7 +1038,7 @@ def test_two_concurrent_followups_of_one_parent_admit_exactly_one_child(
     )
     manager = RunManager(config, EventBus(), store)
     monkeypatch.setattr(
-        "pi_glink.kernel.runner.build_adapter",
+        "pi_glink.kernel.harness_pi.compose_adapter",
         lambda spec, **kwargs: _ResumingAdapter(spec.expected_session_id),
     )
 
@@ -1063,14 +1069,17 @@ def test_two_concurrent_followups_of_one_parent_admit_exactly_one_child(
     )
 
     both_snapshotting = threading.Barrier(2, timeout=10)
-    snapshot = manager._resume_seed  # noqa: SLF001 - the lock boundary under test
+    # 锁边界在 pi 族的种子读取上：runner._resume_seed 只做共享门禁与委托，
+    # 快照 IO（读取 + 脱敏）在族方法里，仍在准入锁外。
+    family = manager._family  # noqa: SLF001 - the lock boundary under test
+    snapshot = family.resume_seed
 
-    def gated_snapshot(context_, parent_run_id, redactor):
-        seed = snapshot(context_, parent_run_id, redactor)
+    def gated_snapshot(parent, *, redactor):
+        seed = snapshot(parent, redactor=redactor)
         both_snapshotting.wait()
         return seed
 
-    monkeypatch.setattr(manager, "_resume_seed", gated_snapshot)
+    monkeypatch.setattr(family, "resume_seed", gated_snapshot)
     outcomes: list[tuple[str, str]] = []
     crashes: list[BaseException] = []
     collected = threading.Lock()
@@ -1550,7 +1559,7 @@ def test_same_family_pi_parent_follow_up_is_admitted_unchanged(
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
     monkeypatch.setattr(
-        "pi_glink.kernel.runner.build_adapter",
+        "pi_glink.kernel.harness_pi.compose_adapter",
         lambda spec, **kwargs: _ResumingAdapter(spec.expected_session_id),
     )
     parent_id = "parentrun001"
@@ -1597,7 +1606,7 @@ def test_known_cross_family_parent_is_refused_before_its_session_is_read(
         admitted.append(spec.run_id)
         return _ResumingAdapter(spec.expected_session_id)
 
-    monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", recording_adapter)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", recording_adapter)
     _write_parent_meta(
         config, store, "parentrun001", harness="acp", executor="inproc"
     )
@@ -1689,7 +1698,7 @@ def test_legacy_pi_parent_follow_up_adds_no_new_refusal(
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
     monkeypatch.setattr(
-        "pi_glink.kernel.runner.build_adapter",
+        "pi_glink.kernel.harness_pi.compose_adapter",
         lambda spec, **kwargs: _ResumingAdapter(spec.expected_session_id),
     )
     _write_parent_meta(config, store, "parentrun001")  # 无 harness/executor 键
@@ -1701,3 +1710,61 @@ def test_legacy_pi_parent_follow_up_adds_no_new_refusal(
     assert final.session_id == "same-session"
     assert final.parent_run_id == "parentrun001"
     assert manager.shutdown(timeout=10) == []
+
+
+# -- finalize 编排：拆出的步骤按契约顺序被驱动 ------------------------------------
+
+
+def test_finalize_drives_its_steps_in_the_contract_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """顺序探针：回收 → 关闭 → 清扫 → 增强 → 报告 → 提交。
+
+    `_finalize` 拆成命名私有方法后，本测试用记录型替身钉住编排次序（步骤
+    本身的行为由本文件其余 finalize 用例覆盖）。观察者先死与 projector 首
+    flush 由 `_stop_progress_observer` 与本体承担，不在探针面内。
+    """
+    config = make_config(tmp_path)
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    record = store.create("顺序探针", run_id="orderprobe01")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    from pi_glink.kernel.runner import _Execution  # noqa: PLC0415, SLF001
+
+    execution = _Execution(record=record, workspace=workspace)
+
+    calls: list[str] = []
+
+    def recover(execution_, adapter):
+        calls.append("recover")
+
+    def close(execution_, adapter):
+        calls.append("close")
+        execution_.cleanup = CleanupReport(released=True)
+
+    def sweep(execution_):
+        calls.append("sweep")
+
+    def enrich(execution_):
+        calls.append("enrich")
+
+    def report(execution_):
+        calls.append("report")
+
+    def commit(execution_, projector):
+        calls.append("commit")
+        execution_.verdict = Verdict(FINISHED, None, None)
+        return True
+
+    monkeypatch.setattr(manager, "_recover_face_artifacts", recover)
+    monkeypatch.setattr(manager, "_close_face", close)
+    monkeypatch.setattr(manager, "_sweep_run_artifacts", sweep)
+    monkeypatch.setattr(manager, "_enrich_children", enrich)
+    monkeypatch.setattr(manager, "_recover_report", report)
+    monkeypatch.setattr(manager, "_commit_verdict", commit)
+
+    manager._finalize(execution)  # noqa: SLF001
+
+    assert calls == ["recover", "close", "sweep", "enrich", "report", "commit"]
+    assert execution.finalized.is_set()

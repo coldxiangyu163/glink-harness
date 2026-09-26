@@ -29,15 +29,21 @@ Restart reconciliation, operator adjudication and the online identity-probe
 sweep are implemented by the resource-ledger collaborator
 (:mod:`pi_glink.kernel.resource_ledger`); the manager keeps thin forwards under
 its existing names.
+
+Everything that reads as "the pi family does X, the ACP family does Y" lives
+behind the harness-family interface (:mod:`pi_glink.kernel.harness`), chosen
+once in ``__init__``: admission allowlists, follow-up gates and resume seeds,
+runtime rendering and projector construction, adapter assembly, stop-reason
+normalization, and subagent enrichment. The manager keeps the locks, the
+phases, the finalize ordering and the commits; ``executor`` face concerns
+(container identity persistence, container-path mapping) stay here too.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import re
-import stat
 import threading
 import time
 from dataclasses import dataclass, field
@@ -53,13 +59,12 @@ from ..blueprints import (
     load_blueprint,
     render_blueprint,
 )
-from ..config import ConfigError, HostConfig
+from ..config import HostConfig
 from ..ownership import DataRootOwnership
 from ..redaction import SecretRedactor, redactor_from_config
 from ..store import (
     ARTIFACTS_DIRNAME,
     CANCELLED,
-    CHILDREN_DIRNAME,
     FAILED,
     FINISHED,
     REPORT_FILENAME,
@@ -68,34 +73,11 @@ from ..store import (
     RunRecord,
     RunStore,
 )
-from .acp_e2b_env import E2BAcpSandboxClient
-from .acp_execution import acp_resume_method
-from .acp_env import (
-    ACP_HOME_DIRNAME,
-    ACP_RECOVERED_DIRNAME,
-    ACP_RUNTIME_DIRNAME,
-    AcpRuntime,
-    AcpStateInheritError,
-    build_acp_argv,
-    build_acp_env,
-    prepare_acp_runtime,
-)
-from .acp_projection import ACP_STOP_REASONS, AcpProjector
-from .agent_env import (
-    AgentRuntime,
-    RunCredentials,
-    build_pi_argv,
-    build_pi_env,
-    prepare_agent_dir,
-    prompt_template_names,
-)
+from .acp_env import AcpRuntime
+from .agent_env import AgentRuntime, RunCredentials
 from .docker_env import (
-    build_acp_plan as build_acp_docker_plan,
-    build_plan as build_docker_plan,
     container_name_for as docker_container_name,
     host_session_path as docker_host_session_path,
-    is_available as docker_available,
-    stop_argv as docker_stop_argv,
 )
 from .execution import (
     CleanupReport,
@@ -103,18 +85,17 @@ from .execution import (
     ExecutionOutcome,
     ExecutionSpec,
     SessionInfo,
-    build_adapter,
 )
+
+# ``FollowupUnavailable`` is defined in the family module (family gates raise
+# it) and re-exported here: ``web_routes`` and existing importers keep their
+# ``kernel.runner`` import unchanged.
+from .harness import FollowupUnavailable, HarnessFamily, Verdict, select_family
 from .projection import Projector
 # ``RunBusy`` is defined next to the ledger because both the admission gate and
 # the ledger's adjudication raise it; re-exported here for existing importers.
 from .resource_ledger import ResourceLedger, RunBusy
 from .rpc import PiRpcClient
-from .subagent_artifacts import (
-    associate_children,
-    parse_artifact_filename,
-    read_meta_enrichment,
-)
 from ..tenancy import (
     TenantContext,
     TenantCredentialStore,
@@ -123,30 +104,16 @@ from ..tenancy import (
 
 logger = logging.getLogger("pi_glink.kernel.runner")
 
-#: Per-run pi configuration directory inside the run directory.
-RUNTIME_DIRNAME = "pi-agent"
 #: System prompt appended to every run (pi's own prompt stays untouched).
 RESEARCH_PROMPT_FILENAME = "research-prompt.md"
 #: Ceiling for artifacts the host reads back and serves.
 REPORT_MAX_BYTES = 32 * 1024 * 1024
 
-#: Bounds for the children enrichment copy (pi-subagents artifacts →
-#: ``children/<n>/``): the sources are already bounded at recovery, the copy
-#: gets its own ceiling so a pathological layout stays cheap.
-_ENRICH_VISIT_LIMIT = 256
-_ENRICH_FILE_MAX_BYTES = 8 * 1024 * 1024
-_ENRICH_TOTAL_MAX_BYTES = 64 * 1024 * 1024
 #: Ceiling for one file touched by the workspace credential sweep.
 SWEEP_MAX_BYTES = 2 * 1024 * 1024
 #: Bound on how many files one sweep may visit (a runaway workspace must not
 #: turn run teardown into an unbounded walk).
 SWEEP_MAX_FILES = 2000
-#: Bound on how many committed frames of a parent's log the ACP admission gate
-#: scans for the recorded ``session_ready`` capability matrix. The frame is
-#: published right after a run opens, so the scan is independent of how long the
-#: parent's transcript grew afterwards.
-_ACP_CAPABILITY_SCAN_EVENTS = 50
-_USAGE_FIELDS = ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
 
 #: R3a observer bounds (docs/architecture.md §3.5「运行中进度（R3a）」): one
 #: polling thread per run at this cadence, at most one ``subagent_updated``
@@ -186,18 +153,6 @@ class RunQuotaExceeded(RuntimeError):
         super().__init__(f"{scope} 并发上限 {limit} 已达")
         self.scope = scope
         self.limit = limit
-
-
-class FollowupUnavailable(RuntimeError):
-    """A parent run cannot safely supply a resumable session.
-
-    ``code`` is the refusal an HTTP caller sees (``unknown_run``, ``stale_run``,
-    ``run_busy``, ``session_unavailable``, ``report_unavailable``).
-    """
-
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
 
 
 class UnsupportedCommand(RuntimeError):
@@ -274,13 +229,6 @@ class StopDecision:
     reason: str
 
 
-@dataclass(frozen=True, slots=True)
-class _Verdict:
-    status: str
-    stop_reason: str | None
-    error: str | None
-
-
 @dataclass
 class _Execution:
     """Mutable per-run state held from admission until the verdict is committed."""
@@ -317,7 +265,7 @@ class _Execution:
     projector: Projector | None = None
     #: Set once the finalizer finished (committed or not).
     finalized: threading.Event = field(default_factory=threading.Event)
-    verdict: _Verdict | None = None
+    verdict: Verdict | None = None
     # execution facts
     outcome: ExecutionOutcome | None = None
     failure: str | None = None
@@ -393,6 +341,13 @@ class RunManager:
             self.redactor.add_from_file(config.web_search_config_path)
         self._lock = threading.RLock()
         self._executions: dict[str, _Execution] = {}
+        #: The process-wide harness family, chosen here once: every "the pi
+        #: family does X, the ACP family does Y" decision of the run lifecycle
+        #: goes through it. The admission freeze (``harness=``/``executor=``
+        #: written into the record) stays below — it *is* the freeze point.
+        self._family: HarnessFamily = select_family(
+            config.harness, config=config, store=store
+        )
         #: The external-resource ledger: restart reconciliation, operator
         #: adjudication and the online identity-probe sweep. It shares this
         #: manager's admission lock and reads the in-flight table through the
@@ -496,7 +451,7 @@ class RunManager:
         # refusal happens before a credential is resolved, before the parent's
         # session is read and before any run directory or execution face exists,
         # and the same call serves first turns and follow-ups on every face.
-        allowed_commands = self._allowed_prompt_commands()
+        allowed_commands = self._family.allowed_prompt_commands()
         if prompt_names_unsupported_command(text, allowed_commands):
             raise UnsupportedCommand(allowed_commands)
         # The session template is resolved and rendered before any credential is
@@ -508,24 +463,17 @@ class RunManager:
         blueprint_prompt = (
             render_blueprint(blueprint_template) if blueprint_template is not None else ""
         )
-        if self.config.harness == "acp" and parent_run_id is not None:
-            # Original obligation (M1): ACP had no ``session/resume``, so every
-            # ACP follow-up was refused with ``session_unavailable``. New
-            # obligation (M7): the follow-up is admitted when the parent really
-            # can be continued — same harness, terminal, latest turn, a recorded
-            # ACP session id, and an agent capability matrix that declares a
-            # continuation channel — and refused otherwise. The failure stays
-            # fail-closed: the refusal happens before a credential is resolved or
-            # a run directory exists, and the child adapter re-checks the
-            # capability it negotiates itself before any resume request.
-            self._acp_resumable_parent(context, parent_run_id)
-        credentials = self._credentials_for_context(context)
-        if self.config.harness == "pi" and not credentials.model_api_key:
-            # The ACP family does not use the host's model credential: the agent
-            # brings its own model configuration (injection points are M2 work).
-            raise ConfigError(
-                "OPENAI_API_KEY is not configured; set it in .env before starting a run"
+        if parent_run_id is not None:
+            # 锁外追问门禁：runner 的共享门禁（owner→harness 字段→terminal→
+            # stale）先行，族的追加事实（ACP 族的能力矩阵、session id、状态
+            # 根；pi 族无追加）随后。fail-closed 发生在凭据解析与 run 目录
+            # 创建之前；子 adapter 在任何 resume 请求前还会自查它自己协商
+            # 到的能力。
+            self._family.check_continuation(
+                self._resumable_parent(context, parent_run_id)
             )
+        credentials = self._credentials_for_context(context)
+        self._family.validate_credentials(credentials)
         # Build the run's redaction boundary before anything derived from the
         # prompt can be stored: a credential pasted into the prompt is masked
         # with the same knowledge the run's own output will be.
@@ -542,17 +490,14 @@ class RunManager:
             if parent_run_id is not None:
                 # Authoritative recheck (the snapshot above may have raced a
                 # concurrent follow-up of the same parent): a refusal here
-                # discards the seed, nothing has been written yet.
-                self._resumable_parent(context, parent_run_id)
-                if self.config.harness == "acp":
-                    acp_parent = self._acp_resumable_parent(context, parent_run_id)
-                    # An ACP continuation keeps the conversation's working
-                    # directory: an agent session records its ``cwd``, and the
-                    # resumed agent (and the model's remembered paths) stay in
-                    # it regardless of what a request claims. Making the child
-                    # run use that same workspace is what keeps the agent's
-                    # tools and the host's report contract pointed at one place.
-                    continuation_workspace = Path(acp_parent.workspace)
+                # discards the seed, nothing has been written yet. 共享门禁
+                # 与族追加门禁在同一次调用内保持原次序（先共享后族）。
+                parent = self._resumable_parent(context, parent_run_id)
+                self._family.check_continuation(parent)
+                # The family decides whether the conversation's workspace is
+                # reused (ACP keeps it: the session's ``cwd`` is recorded in
+                # the agent's own state) or fresh (pi).
+                continuation_workspace = self._family.continuation_workspace(parent)
             # The store allocates the id and creates the run directory
             # exclusively (a generated collision is retried there): a new run can
             # never adopt or overwrite an existing record. An ACP continuation
@@ -608,20 +553,6 @@ class RunManager:
             daemon=True,
         ).start()
         return record
-
-    def _allowed_prompt_commands(self) -> tuple[str, ...]:
-        """The ``/`` commands this host admits for the configured harness.
-
-        pi dispatches extension commands and expands prompt templates, so the
-        allowlist is the rendered prompt-template names. An ACP agent's slash
-        commands (advertised through ``available_commands_update``) are its own
-        surface and none of them are routed by this host: that family's
-        allowlist is empty by construction, derived from the harness instead of
-        a template-directory lookup (plan §4.3).
-        """
-        if self.config.harness == "acp":
-            return ()
-        return prompt_template_names(self.config.agent_config_dir)
 
     def _resolve_blueprint(self, blueprint: str) -> Blueprint:
         """Resolve one session template name against the configured directory.
@@ -722,8 +653,9 @@ class RunManager:
         判定放在 owner 门禁之后（跨租户父 run 仍是 ``unknown_run``，不泄露
         存在性）、状态检查之前。无字段的旧记录走 legacy：pi 族 legacy 不
         新增任何拒绝（harness 未知即无法证明跨族，fail-closed 只适用于
-        「已知不等」），ACP 族 legacy 由 :meth:`_acp_resumable_parent` 的帧
-        扫描继续证明。
+        「已知不等」），ACP 族 legacy 由族方法
+        :meth:`pi_glink.kernel.harness_acp.AcpHarnessFamily.recorded_capabilities`
+        的帧扫描继续证明。
 
         One admission calls this twice: outside the lock, to fail fast before
         the parent's session file is read, and inside it, where the decision is
@@ -733,7 +665,7 @@ class RunManager:
         parent = self._authorized_parent(context, parent_run_id)
         if parent is None:
             raise FollowupUnavailable("unknown_run")
-        if parent.harness is not None and parent.harness != self.config.harness:
+        if parent.harness is not None and parent.harness != self._family.name:
             raise FollowupUnavailable("session_unavailable")
         if not parent.is_terminal:
             raise FollowupUnavailable("run_busy")
@@ -743,139 +675,6 @@ class RunManager:
         ):
             raise FollowupUnavailable("stale_run")
         return parent
-
-    def _acp_resumable_parent(
-        self, context: TenantContext | None, parent_run_id: str
-    ) -> RunRecord:
-        """The ACP parent this follow-up may resume, or the refusal it has earned.
-
-        On top of the shared parent gate (:meth:`_resumable_parent`: owner,
-        terminal, latest turn), an ACP continuation needs three more facts, all
-        of which are read from the host's own record of the parent rather than
-        from the caller:
-
-        * the parent ran the **same harness** — the parent record's own
-          ``harness`` field is the proof when it carries one (written at
-          admission from the frozen config); for a legacy record without the
-          field, the ``harness: "acp"`` marker of its ``session_ready`` frame
-          remains the proof, exactly as before. Neither source trusts the
-          current configuration alone (a host switched from ``pi`` to ``acp``
-          must not present a pi run as resumable);
-        * the parent recorded a **session id** (an ACP run without one has
-          nothing to resume);
-        * the capability matrix recorded in that same frame declares a
-          continuation channel (:func:`~pi_glink.kernel.acp_execution.
-          acp_resume_method`). The matrix is a negotiated snapshot and stays
-          in the event stream (it is not a RunRecord field), so the frame
-          scan remains its only source even when the record field already
-          proved the family. No capability means the follow-up is refused
-          here, before a child run exists — it is never downgraded to a new
-          session.
-
-        The E2B face needs one more fact and is admitted by it:
-
-        * **原义务（M7）**：e2b 面一律拒绝（``session_unavailable``）。ACP 沙箱的
-          agent 状态随沙箱销毁，宿主没有可继承的状态根，起沙箱也必然无法 resume。
-        * **新义务（M8）**：沙箱销毁前把该 run 的状态根有界回收到宿主；追问在
-          「父状态根回收成功」时与 inproc/docker 面同样受理。回收到
-          ``acp-agent/recovered`` 是整份成功的才发布，所以下面这个目录检查就是
-          “回收成功”这个事实本身：失败（或未尝试）的回收什么都不留下，追问维持
-          拒绝，而不是先花一个注定 resume 失败的云端沙箱。
-
-        The admitted continuation also reuses the parent run's workspace (the
-        caller reads :attr:`RunRecord.workspace`): the ACP session's ``cwd`` is
-        recorded in the agent's own state and the agent keeps working there.
-        Giving the child a fresh directory would leave the agent's writes (and
-        the model's remembered absolute paths) outside the run whose report the
-        host recovers. The parent's **record and published artifacts** stay
-        immutable; the conversation's workspace is the one piece the turns
-        share.
-
-        The inheritance source is checked to exist as a directory so the common
-        failure is an admission refusal; the copy itself happens off the
-        admission lock in :meth:`_prepare_runtime` and fails the run closed if
-        it cannot complete.
-        """
-        parent = self._resumable_parent(context, parent_run_id)
-        # 族证明：记录字段优先（``harness == "acp"`` 直接成立），帧扫描只
-        # 为无字段的 legacy 记录兼作族证明；能力矩阵（协商快照，不进
-        # RunRecord）两路都仍从这同一扫描取得。已知字段的父 run 扫不到
-        # 能力帧时按无续接通道拒绝，语义与现状一致。
-        capabilities = self._recorded_acp_capabilities(parent)
-        if capabilities is None:
-            raise FollowupUnavailable("session_unavailable")
-        if not parent.session_id:
-            raise FollowupUnavailable("session_unavailable")
-        if acp_resume_method(capabilities) is None:
-            raise FollowupUnavailable("session_unavailable")
-        state_home = self._acp_state_home(parent)
-        try:
-            info = os.stat(state_home, follow_symlinks=False)
-        except OSError as exc:
-            raise FollowupUnavailable("session_unavailable") from exc
-        if not stat.S_ISDIR(info.st_mode):
-            raise FollowupUnavailable("session_unavailable")
-        return parent
-
-    def _recorded_acp_capabilities(
-        self, parent: RunRecord
-    ) -> Mapping[str, Any] | None:
-        """The capability matrix a parent ACP run recorded, or ``None``.
-
-        原义务：扫描同时承担两个角色——能力矩阵的唯一来源，以及「父 run
-        是 ACP 族」的证明（要求帧带 ``harness: "acp"`` 标记）。新义务：角色
-        收缩——族证明优先由父记录自己的 ``harness`` 字段承担（准入时原子
-        写入的事实），本扫描仅为无字段的 legacy 记录兼作族证明；能力矩阵
-        （协商快照，不进 RunRecord）两路都仍只能从 ``session_ready`` 帧取得。
-
-        The parent's ``session_ready`` frame is the only capability source that
-        exists before the child's agent process starts; ``session_ready`` is
-        committed right after the run opens, so the scan is bounded and does not
-        grow with the parent's transcript. A legacy parent with no such marked
-        frame is not proven to be an ACP run (or predates it), which is exactly
-        the ``session_unavailable`` refusal the ACP gate owes it; a parent whose
-        record already proves the family but carries no capability frame is
-        refused the same way, as a run without a continuation channel.
-        """
-        # 记录字段已证明族时，任何 session_ready 帧都是合法的能力来源；
-        # 未证明时（legacy）仍要求帧自带 ``harness: "acp"`` 标记。
-        family_proven = parent.harness == "acp"
-        for index, event in enumerate(self.store.iter_events(parent.run_id)):
-            if index >= _ACP_CAPABILITY_SCAN_EVENTS:
-                break
-            if event.get("type") != events.SESSION_READY:
-                continue
-            payload = event.get("payload")
-            if not isinstance(payload, Mapping):
-                continue
-            if not family_proven and payload.get("harness") != "acp":
-                continue
-            capabilities = payload.get("agentCapabilities")
-            return dict(capabilities) if isinstance(capabilities, Mapping) else {}
-        return None
-
-    def _acp_state_home(self, run: RunRecord) -> Path:
-        """The ACP agent state root of one run a follow-up could inherit.
-
-        In-process and Docker runs keep the state root the run rendered and the
-        agent wrote (``acp-agent/home``). An E2B run's agent state only ever
-        existed inside the sandbox, so the face recovers it to
-        ``acp-agent/recovered`` before destroying the sandbox; that path is
-        derived from the run record like the other one — never from caller
-        input — and its existence is the recovered-state fact itself.
-
-        原义务：按当前 ``config.executor`` 推导——宿主从 e2b 切到
-        inproc/docker 后，追问 e2b 父 run 会推导出 ``acp-agent/home``
-        （不存在）→ 合法追问被误拒。新义务：按父 run 自己记录的
-        ``executor`` 推导（准入时随冻结配置原子写入），宿主切换执行面不影响
-        历史 run 的追问；无字段的旧记录回退为按当前配置推导（原行为，
-        legacy e2b 父 run 的误拒是已知局限，只对新记录修复，不回填）。
-        """
-        executor = run.executor if run.executor is not None else self.config.executor
-        base = self.store.run_dir(run.run_id) / ACP_RUNTIME_DIRNAME
-        if executor == "e2b":
-            return base / ACP_RECOVERED_DIRNAME
-        return base / ACP_HOME_DIRNAME
 
     def _resume_seed(
         self,
@@ -893,37 +692,16 @@ class RunManager:
         kernel comes from a parent that was authorized when it was read *and*
         was still resumable when the child was admitted.
 
-        The pi family seeds the child's session directory with a sanitized copy
-        of the parent's session file. The ACP family has no host session file:
-        its continuation lives in the parent's agent state root, which
-        :meth:`_prepare_runtime` inherits after admission (the gate already ran
-        in :meth:`_acp_resumable_parent`).
+        The seed itself is the family's: the pi family reads the parent's
+        session file (bounded, re-redacted); the ACP family has no host
+        session file and answers ``None`` — its continuation lives in the
+        parent's agent state root, which ``prepare_runtime`` inherits after
+        admission.
         """
         if parent_run_id is None:
             return None
-        if self.config.harness == "acp":
-            return None
         parent = self._resumable_parent(context, parent_run_id)
-        # The recorded path is not a capability. It must be a direct file in
-        # that run's own session directory; ArtifactTree refuses links.
-        session_dir = Path(self.config.session_dir) / parent_run_id
-        path = Path(parent.session_file or "")
-        if path.parent != session_dir or path.suffix != ".jsonl":
-            raise FollowupUnavailable("session_unavailable")
-        try:
-            with ArtifactTree(session_dir) as tree:
-                seed = tree.read(path.name, max_bytes=REPORT_MAX_BYTES)
-        except (ArtifactError, OSError) as exc:
-            raise FollowupUnavailable("session_unavailable") from exc
-        if not seed.strip() or not parent.session_id:
-            raise FollowupUnavailable("session_unavailable")
-        try:
-            # Historical files may predate the latest redaction rules. Never
-            # hand an unchecked copy to the next kernel.
-            seed = redactor.redact(seed.decode("utf-8")).encode("utf-8")
-        except UnicodeError as exc:
-            raise FollowupUnavailable("session_unavailable") from exc
-        return seed
+        return self._family.resume_seed(parent, redactor=redactor)
 
     def _redactor_for(self, credentials: RunCredentials) -> SecretRedactor:
         """A per-run redaction boundary: host secrets + this run's credentials."""
@@ -1199,14 +977,12 @@ class RunManager:
             self._store_external_identity(execution, adapter)
 
             session = adapter.session_info()
-            if execution.parent_run_id and (
-                self.config.executor != "e2b" or self.config.harness == "acp"
+            if execution.parent_run_id and self._family.verifies_continuation_before_turn(
+                self.config.executor
             ):
-                # The pi E2B face discovers its session id mid-stream, so it can
-                # only verify the continuation after the turn; the ACP faces —
-                # including the sandbox one — know the resumed session id right
-                # after ``session/resume``, so the child's session identity is
-                # proven against the parent's before the turn starts.
+                # 面与族的交叉条件收敛为族的一句话策略：pi E2B 面在流中才
+                # 发现 session id，只能回合后校验；其余面（含 ACP 各面）在
+                # 回合前即已证明子会话身份与父一致。
                 parent = self._authorized_parent(
                     execution.context, execution.parent_run_id
                 )
@@ -1241,7 +1017,10 @@ class RunManager:
 
         Every step before the commit is guarded on its own, so a failing sweep
         cannot prevent the verdict. The verdict and its durable commit happen
-        in one critical section with the cancellation flag.
+        in one critical section with the cancellation flag. The ordering is the
+        contract: observer dies → first projector flush → face artifacts → face
+        close → sweeps → children enrichment → report recovery → verdict
+        critical section → post-commit bookkeeping.
         """
         run_id = execution.record.run_id
         # R3a: the progress observer dies first — no transient frame may race
@@ -1258,55 +1037,94 @@ class RunManager:
                         break
 
         adapter = execution.adapter
-        if adapter is not None:
-            # Recover work products before the face is torn down: the sandbox
-            # cannot be read after it is destroyed.
-            try:
-                recovery = adapter.recover_artifacts(execution.workspace)
-                execution.artifact_failures.extend(recovery.failures)
-                # Values the host only learned from recovered material (the E2B
-                # face's state root) join this run's boundary exactly like an
-                # injected credential: a later echo is masked, and the values
-                # are never written anywhere else.
-                for value in recovery.secrets:
-                    self._run_redactor(execution).add(value)
-                # A sandbox face can learn session facts only while pulling the
-                # workspace back (the pi face's session file travels with the
-                # recovery; the ACP face's state-root verdict is decided there),
-                # so the adapter answers what is worth republishing; every other
-                # face answers ``None``. Duck-typed test doubles predate this
-                # optional method, so it is looked up rather than assumed.
-                recovered = getattr(adapter, "recovered_session", None)
-                if recovered is not None:
-                    recovered_session = recovered()
-                    if recovered_session is not None:
-                        self._publish_session_ready(execution, recovered_session)
-                # Subagent side-products die with the sandbox: the face that
-                # has any (pi E2B) mirrors them under the run directory while
-                # the sandbox still exists; faces whose subagent files already
-                # live on the host do not implement the method.
-                recover_subagents = getattr(adapter, "recover_subagents", None)
-                if recover_subagents is not None:
-                    subagent_recovery = recover_subagents(
-                        self.store.run_dir(run_id) / SUBAGENTS_DIRNAME
-                    )
-                    execution.artifact_failures.extend(subagent_recovery.failures)
-            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-                execution.artifact_failures.append(
-                    f"产物回收失败: {type(exc).__name__}: {exc}"
-                )
-            try:
-                execution.cleanup = adapter.close()
-            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-                execution.cleanup = CleanupReport(
-                    released=False,
-                    failures=(f"关闭执行面失败: {type(exc).__name__}: {exc}",),
-                    external=dict(adapter.identity()),
-                )
-        else:
+        self._recover_face_artifacts(execution, adapter)
+        self._close_face(execution, adapter)
+        self._sweep_run_artifacts(execution)
+        try:
+            self._enrich_children(execution)
+        except Exception:  # noqa: BLE001 - enrichment is best-effort, never a verdict input
+            logger.exception("children enrichment failed run=%s", run_id)
+        try:
+            self._recover_report(execution)
+        except Exception:  # noqa: BLE001 - reported as a rejected artifact
+            logger.exception("report recovery failed run=%s", run_id)
+            execution.report_status = "rejected"
+            execution.report_path = None
+
+        committed = self._commit_verdict(execution, projector)
+        verdict = execution.verdict
+        assert verdict is not None  # _commit_verdict always decides one
+        cleanup = execution.cleanup
+        logger.info(
+            "run finalized run=%s status=%s stop=%s committed=%s report=%s released=%s",
+            run_id,
+            verdict.status,
+            verdict.stop_reason,
+            committed,
+            execution.report_path or "<none>",
+            cleanup.released if cleanup is not None else None,
+        )
+        execution.finalized.set()
+
+    def _recover_face_artifacts(
+        self, execution: _Execution, adapter: ExecutionAdapter | None
+    ) -> None:
+        """Pull work products (and what they teach) off the face before teardown."""
+        if adapter is None:
+            return
+        run_id = execution.record.run_id
+        # Recover work products before the face is torn down: the sandbox
+        # cannot be read after it is destroyed.
+        try:
+            recovery = adapter.recover_artifacts(execution.workspace)
+            execution.artifact_failures.extend(recovery.failures)
+            # Values the host only learned from recovered material (the E2B
+            # face's state root) join this run's boundary exactly like an
+            # injected credential: a later echo is masked, and the values
+            # are never written anywhere else.
+            for value in recovery.secrets:
+                self._run_redactor(execution).add(value)
+            # A sandbox face can learn session facts only while pulling the
+            # workspace back (the pi face's session file travels with the
+            # recovery; the ACP face's state-root verdict is decided there),
+            # so the adapter answers what is worth republishing; every other
+            # face answers ``None`` (ABC 默认空实现).
+            recovered_session = adapter.recovered_session()
+            if recovered_session is not None:
+                self._publish_session_ready(execution, recovered_session)
+            # Subagent side-products die with the sandbox: the face that
+            # has any (pi E2B) mirrors them under the run directory while
+            # the sandbox still exists; faces whose subagent files already
+            # live on the host recover nothing (ABC 默认空实现).
+            subagent_recovery = adapter.recover_subagents(
+                self.store.run_dir(run_id) / SUBAGENTS_DIRNAME
+            )
+            execution.artifact_failures.extend(subagent_recovery.failures)
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            execution.artifact_failures.append(
+                f"产物回收失败: {type(exc).__name__}: {exc}"
+            )
+
+    def _close_face(
+        self, execution: _Execution, adapter: ExecutionAdapter | None
+    ) -> None:
+        """Tear the face down into a CleanupReport (synthesized on failure)."""
+        if adapter is None:
             # Nothing was acquired: no process, container or sandbox exists.
             execution.cleanup = CleanupReport(released=True)
+            return
+        try:
+            execution.cleanup = adapter.close()
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            execution.cleanup = CleanupReport(
+                released=False,
+                failures=(f"关闭执行面失败: {type(exc).__name__}: {exc}",),
+                external=dict(adapter.identity()),
+            )
 
+    def _sweep_run_artifacts(self, execution: _Execution) -> None:
+        """Redact credentials out of everything the run left behind (3 sweeps)."""
+        run_id = execution.record.run_id
         try:
             if self._sanitize_workspace(execution.workspace, self._run_redactor(execution)):
                 execution.redacted = True
@@ -1325,17 +1143,12 @@ class RunManager:
                 execution.redacted = True
         except Exception:  # noqa: BLE001
             logger.exception("session credential sweep failed run=%s", run_id)
-        try:
-            self._enrich_children(execution)
-        except Exception:  # noqa: BLE001 - enrichment is best-effort, never a verdict input
-            logger.exception("children enrichment failed run=%s", run_id)
-        try:
-            self._recover_report(execution)
-        except Exception:  # noqa: BLE001 - reported as a rejected artifact
-            logger.exception("report recovery failed run=%s", run_id)
-            execution.report_status = "rejected"
-            execution.report_path = None
 
+    def _commit_verdict(
+        self, execution: _Execution, projector: Projector | None
+    ) -> bool:
+        """Decide and durably commit the verdict, then the bookkeeping."""
+        run_id = execution.record.run_id
         committed = False
         with execution.lock:
             # Frames may have arrived while artifacts were recovered; their
@@ -1370,81 +1183,50 @@ class RunManager:
             logger.critical(
                 "run 终态未能提交，保持占用直至重启对账 run=%s status=%s", run_id, verdict.status
             )
-        cleanup = execution.cleanup
-        logger.info(
-            "run finalized run=%s status=%s stop=%s committed=%s report=%s released=%s",
-            run_id,
-            verdict.status,
-            verdict.stop_reason,
-            committed,
-            execution.report_path or "<none>",
-            cleanup.released if cleanup is not None else None,
-        )
-        execution.finalized.set()
+        return committed
 
     # -- the verdict ----------------------------------------------------------
 
-    def _decide(self, execution: _Execution) -> _Verdict:
+    def _decide(self, execution: _Execution) -> Verdict:
         """Combine every fact into one verdict (call under the run lock).
 
         An accepted cancellation wins: it was accepted while the run was open,
         so it must be the verdict. ``agent_settled`` is deliberately not the
         success signal: pi can settle after an error stop reason or a truncated
-        (``length``) response.
+        (``length``) response. The product terminal vocabulary (status from the
+        store's FINISHED/FAILED/CANCELLED, the ``stop_reason`` string set) is
+        defined here; the family only translates its own stop vocabulary into
+        it (:meth:`HarnessFamily.model_stop_verdict`).
         """
         log_error = execution.event_log_error
         if execution.cancel_requested:
-            return _Verdict(CANCELLED, "abort", log_error)
+            return Verdict(CANCELLED, "abort", log_error)
         if log_error:
-            return _Verdict(FAILED, "event_log_failed", log_error)
+            return Verdict(FAILED, "event_log_failed", log_error)
         if execution.failure:
-            return _Verdict(FAILED, "execution_error", execution.failure)
+            return Verdict(FAILED, "execution_error", execution.failure)
         outcome = execution.outcome
         if outcome is None:
-            return _Verdict(FAILED, "execution_error", "执行面没有给出结果")
+            return Verdict(FAILED, "execution_error", "执行面没有给出结果")
         if outcome.cancelled:
-            return _Verdict(CANCELLED, "abort", None)
+            return Verdict(CANCELLED, "abort", None)
         if outcome.timed_out:
-            return _Verdict(FAILED, "timeout", outcome.error or "run timed out")
+            return Verdict(FAILED, "timeout", outcome.error or "run timed out")
         if outcome.error:
-            return _Verdict(FAILED, outcome.stop_reason or "execution_error", outcome.error)
+            return Verdict(FAILED, outcome.stop_reason or "execution_error", outcome.error)
         stop = execution.model_stop_reason
-        if self.config.harness == "acp":
-            # ACP's own ``StopReason`` vocabulary, recorded verbatim in
-            # ``modelStopReason``. The verdict is still decided only here:
-            # ``max_tokens`` becomes the product's ``length`` (finished, but the
-            # delivery is incomplete), ``refusal`` fails as a model error,
-            # ``cancelled`` takes the cancellation path; an unknown or missing
-            # value fails closed instead of claiming a normal finish. Only
-            # ``end_turn`` falls through to the delivery policy below.
-            if stop is None:
-                return _Verdict(
-                    FAILED, "execution_error", "ACP session/prompt 没有返回 stopReason"
-                )
-            if stop not in ACP_STOP_REASONS:
-                return _Verdict(FAILED, "execution_error", f"未知的 ACP stopReason: {stop!r}")
-            if stop == "refusal":
-                return _Verdict(FAILED, "model_error", "ACP agent 拒绝继续（stopReason=refusal）")
-            if stop == "cancelled":
-                return _Verdict(CANCELLED, "abort", None)
-            if stop == "max_tokens":
-                return _Verdict(FINISHED, "length", None)
-            if stop == "max_turn_requests":
-                return _Verdict(FINISHED, "max_turn_requests", None)
-        elif stop == "error":
-            return _Verdict(FAILED, "model_error", execution.model_error or "模型返回了错误结果")
-        elif stop == "aborted":
-            return _Verdict(FAILED, "aborted", execution.model_error or "模型输出被中断")
-        elif stop == "length":
-            # The execution succeeded, but the answer was cut off at the output
-            # limit. That is a delivery fact the record must carry.
-            return _Verdict(FINISHED, "length", None)
+        # 族把 harness 自己的 stop 词汇（pi 的 error/aborted/length，ACP 的
+        # StopReason 集合）译成产品终态词汇；``None`` 落入下方的交付策略
+        # （报告检查）。映射逐字节不变式见契约 §4 与族实现。
+        verdict = self._family.model_stop_verdict(stop, model_error=execution.model_error)
+        if verdict is not None:
+            return verdict
         if execution.report_path is None:
             reason = "report_rejected" if execution.report_status == "rejected" else "no_report"
-            return _Verdict(FINISHED, reason, None)
-        return _Verdict(FINISHED, None, None)
+            return Verdict(FINISHED, reason, None)
+        return Verdict(FINISHED, None, None)
 
-    def _commit_terminal(self, execution: _Execution, verdict: _Verdict) -> bool:
+    def _commit_terminal(self, execution: _Execution, verdict: Verdict) -> bool:
         """Durably append the terminal frame; True once it is committed."""
         run_id = execution.record.run_id
         current = self.store.get(run_id) or execution.record
@@ -1509,91 +1291,50 @@ class RunManager:
     def _prepare_runtime(self, execution: _Execution) -> AgentRuntime | AcpRuntime:
         """Render the run's own per-harness configuration and session directory.
 
-        pi: one run, one runtime directory — nothing in ``data_root/pi-agent`` is
-        shared or mutated by a run any more, so two runs cannot overwrite each
-        other's credentials, extensions or pi session state. The session
-        directory is the run's subdirectory of the configured session root
-        (``PI_CODING_AGENT_SESSION_DIR``), which keeps that setting meaningful
-        while keeping two runs apart.
-
-        ACP: the run gets its own agent state root (:mod:`acp_env`), which the
-        agent process sees as ``HOME`` — the in-process child directly, the
-        container through the ``HOME`` mount. Credentials are injected into it
-        by read-only copy (:data:`PI_GLINK_ACP_CREDENTIAL_FILES`).
+        The render itself is the family's (:meth:`HarnessFamily.prepare_runtime`):
+        pi gets one runtime directory per run plus its session subdirectory, ACP
+        gets its own agent state root (the agent's ``HOME``) with the parent's
+        state inherited on a follow-up. The runner keeps the orchestration: the
+        parent's re-authorization (a parent that disappeared or became
+        unreadable to this tenant between admission and here is never used as a
+        resume source), the redactor fallback construction (a pure, side-effect
+        -free object), merging the render's newly learned secrets into the run's
+        boundary, and only then the projector — so the original order (ACP
+        ``runtime.secrets`` and pi's ``web-search.json`` enter the boundary
+        before the projector is built) is preserved.
         """
         run_id = execution.record.run_id
         run_dir = self.store.run_dir(run_id)
-        if self.config.harness == "acp":
-            # A follow-up inherits the authorized parent's agent state root into
-            # this run's own HOME. The parent gate ran at admission; this second
-            # authorization keeps a parent that disappeared (or became
-            # unreadable to this tenant) between admission and here from being
-            # used as a copy source. The credential destinations are re-rendered
-            # fresh and excluded from the copy (see :func:`prepare_acp_runtime`).
-            inherit_from: Path | None = None
-            if execution.parent_run_id is not None:
-                parent = self._authorized_parent(
-                    execution.context, execution.parent_run_id
-                )
-                if parent is None:
-                    raise FollowupUnavailable("session_unavailable")
-                inherit_from = self._acp_state_home(parent)
-            try:
-                runtime = prepare_acp_runtime(
-                    self.config,
-                    runtime_dir=run_dir / ACP_RUNTIME_DIRNAME,
-                    inherit_from=inherit_from,
-                )
-            except AcpStateInheritError as exc:
-                # The state could not be inherited safely; the run stops here,
-                # before any agent process exists, instead of resuming from a
-                # partial copy or from nothing.
-                raise FollowupUnavailable(
-                    f"session_unavailable: 继承父 run 的 ACP 状态失败（{exc}）"
-                ) from exc
-            execution.runtime = runtime
-            if execution.session_seed is not None:
-                # The pi session seed has no ACP meaning; reaching it would mean
-                # a pi-shaped continuation was routed to the ACP adapter.
+        parent: RunRecord | None = None
+        if execution.parent_run_id is not None:
+            parent = self._authorized_parent(execution.context, execution.parent_run_id)
+            if parent is None:
                 raise FollowupUnavailable("session_unavailable")
-            if execution.redactor is None:
-                execution.redactor = self._redactor_for(
-                    execution.credentials or RunCredentials.from_host(self.config)
-                )
-            # Credential material copied into this run's HOME — and any
-            # credential-shaped value found in the inherited parent state — joins
-            # this run's redaction boundary (and only this run's): a value the
-            # agent echoes into a stream, tool result or report is masked like
-            # every other secret the host knows. The values never reach a log.
-            for value in runtime.secrets:
-                execution.redactor.add(value)
-            execution.projector = AcpProjector(execution.redactor)
-            return runtime
-        runtime = prepare_agent_dir(
-            self.config,
-            runtime_dir=run_dir / RUNTIME_DIRNAME,
-            session_dir=Path(self.config.session_dir) / run_id,
+        prepared = self._family.prepare_runtime(
+            run_id,
+            run_dir,
+            parent=parent,
+            session_seed=execution.session_seed,
             credentials=execution.credentials,
         )
-        execution.runtime = runtime
-        if execution.session_seed is not None:
-            with ArtifactTree(runtime.session_dir) as tree:
-                tree.replace(
-                    "continued.jsonl", execution.session_seed, max_bytes=REPORT_MAX_BYTES
-                )
+        execution.runtime = prepared.runtime
+        if prepared.seed_consumed:
             execution.session_seed = None
         # This run's own redaction boundary: the host's secrets plus the
-        # credentials this run was actually given. The rendered search
-        # credential only exists in the file, so it is learned here (never
-        # logged, never returned). Adding it to the run's boundary — not to the
-        # host-level one — keeps two tenants' secrets from mixing.
+        # credentials this run was actually given. Newly learned secret shapes
+        # (the ACP ``runtime.secrets``, pi's rendered ``web-search.json``) join
+        # the run's boundary — never the host-level one — and never a log.
         if execution.redactor is None:
             execution.redactor = self._redactor_for(
                 execution.credentials or RunCredentials.from_host(self.config)
             )
-        execution.redactor.add_from_file(runtime.directory / "web-search.json")
-        execution.projector = Projector(execution.redactor)
-        return runtime
+        for value in prepared.secret_values:
+            execution.redactor.add(value)
+        for path in prepared.secret_files:
+            execution.redactor.add_from_file(path)
+        execution.projector = self._family.make_projector(execution.redactor)
+        return prepared.runtime
+
 
     # -- adapters -------------------------------------------------------------
 
@@ -1613,7 +1354,9 @@ class RunManager:
         if self.config.executor == "docker":
             # The container name is fixed by the run id before ``docker run``
             # executes: persist it now so a failure inside the adapter's start()
-            # cannot leave an unnamed container behind.
+            # cannot leave an unnamed container behind. 资源台账身份在
+            # adapter.start() 前落盘是面关切且两族同行为，故留在 runner 而
+            # 不进族方法。
             self._store_identity(
                 execution, {"container": docker_container_name(run_id)}
             )
@@ -1630,120 +1373,17 @@ class RunManager:
             # sanitized session file copied into the run's session directory,
             # while the ACP family resumes the **session id** the parent
             # recorded, against the state root inherited in _prepare_runtime.
-            resume_session=(
-                parent.session_id
-                if parent and self.config.harness == "acp"
-                else ("continued.jsonl" if parent else None)
-            ),
+            resume_session=self._family.resume_value(parent),
             expected_session_id=parent.session_id if parent else None,
         )
-        return build_adapter(
+        return self._family.build_adapter(
             spec,
-            harness=self.config.harness,
             executor=self.config.executor,
-            client_factory=self._client_factory,
             on_frame=lambda frame: self._on_frame(execution, frame),
-            sandbox_factory=self._sandbox_factory,
             on_identity=lambda identity: self._store_identity(execution, identity),
-            rpc_plan=self._rpc_plan,
-            docker_plan=self._docker_plan,
-            docker_stop=docker_stop_argv,
-            acp_plan=self._acp_plan,
-            acp_docker_plan=self._acp_docker_plan,
-            acp_e2b_plan=self._acp_e2b_plan,
-        )
-
-    def _acp_plan(
-        self, spec: ExecutionSpec
-    ) -> tuple[list[str], dict[str, str], Path | None]:
-        """Launch inputs for the in-process ACP agent: argv, filtered env, cwd.
-
-        The argv comes from the frozen ``PI_GLINK_ACP_COMMAND`` and is never
-        shell-expanded; the environment is the pi face's minimal passthrough
-        list plus this run's own ``HOME`` (plan §4.5).
-        """
-        if not isinstance(spec.runtime, AcpRuntime):
-            raise ConfigError("ACP harness 的运行期配置没有按 AcpRuntime 渲染")
-        return (
-            build_acp_argv(spec.config),
-            build_acp_env(spec.config, spec.runtime),
-            spec.workspace,
-        )
-
-    def _acp_docker_plan(
-        self, spec: ExecutionSpec
-    ) -> tuple[list[str], dict[str, str], str]:
-        """Launch inputs for the containerised ACP agent (M3a).
-
-        Same composition rules as :meth:`_docker_plan` (reachable daemon, frozen
-        image, persisted container name, resource ceilings), but the container's
-        stdio carries ACP JSON-RPC and its ``HOME`` is the run's own agent state
-        root with the injected credentials mounted read-only inside it. The
-        command is the frozen ``PI_GLINK_ACP_COMMAND`` executed *inside* the
-        image, so it must name an image-local executable.
-        """
-        if not isinstance(spec.runtime, AcpRuntime):
-            raise ConfigError("ACP harness 的运行期配置没有按 AcpRuntime 渲染")
-        if not docker_available():
-            raise ConfigError(
-                "LOCAL_WEB_EXECUTOR=docker requires a reachable Docker daemon"
-            )
-        plan = build_acp_docker_plan(
-            spec.config,
-            spec.runtime,
-            run_id=spec.run_id,
-            workspace=spec.workspace,
-        )
-        return plan.argv, plan.env, plan.container_name
-
-    def _acp_e2b_plan(self, spec: ExecutionSpec) -> E2BAcpSandboxClient:
-        """The sandbox carrier for one ACP run (M3b).
-
-        The ACP family's E2B face reuses the pi face's sandbox lifecycle
-        (:class:`~pi_glink.kernel.acp_e2b_env.E2BAcpSandboxClient`: same frozen
-        credential, bounded lifetime, artifact recovery and identity), and the
-        separate ``LOCAL_WEB_E2B_ACP_TEMPLATE`` because the pi template has no
-        ACP agent installed. The sandbox id is persisted by the adapter as soon
-        as it exists.
-        """
-        if not isinstance(spec.runtime, AcpRuntime):
-            raise ConfigError("ACP harness 的运行期配置没有按 AcpRuntime 渲染")
-        return E2BAcpSandboxClient(
-            spec.config,
-            spec.runtime,
-            run_id=spec.run_id,
-            workspace=spec.workspace,
+            client_factory=self._client_factory,
             sandbox_factory=self._sandbox_factory,
         )
-
-    def _rpc_plan(
-        self, spec: ExecutionSpec
-    ) -> tuple[list[str], dict[str, str], Path | None]:
-        return (
-            build_pi_argv(spec.config, spec.runtime, extra=[
-                *spec.extra_argv,
-                *(["--session", str(spec.runtime.session_dir / spec.resume_session)] if spec.resume_session else []),
-            ]),
-            build_pi_env(spec.config, spec.runtime),
-            spec.workspace,
-        )
-
-    def _docker_plan(
-        self, spec: ExecutionSpec
-    ) -> tuple[list[str], dict[str, str], str]:
-        if not docker_available():
-            raise ConfigError(
-                "LOCAL_WEB_EXECUTOR=docker requires a reachable Docker daemon"
-            )
-        plan = build_docker_plan(
-            spec.config,
-            spec.runtime,
-            run_id=spec.run_id,
-            workspace=spec.workspace,
-            session_dir=spec.runtime.session_dir,
-            extra=[*spec.extra_argv, *(["--session", f"/sessions/{spec.resume_session}"] if spec.resume_session else [])],
-        )
-        return plan.argv, plan.env, plan.container_name
 
     def _store_external_identity(
         self, execution: _Execution, adapter: ExecutionAdapter
@@ -1872,56 +1512,16 @@ class RunManager:
     def _accumulate_usage(
         self, execution: _Execution, frame: Mapping[str, Any], payload: Mapping[str, Any]
     ) -> dict[str, Any] | None:
-        """Turn one response's usage snapshot into a run cumulative total.
+        """Fold one usage snapshot into the run total — the family's algorithm.
 
-        pi reports the usage of *one assistant response* (its own fields are
-        already cumulative for that request). The run total is the sum across
-        responses; a frame carrying the same message identity is not counted
-        twice. No price is invented: ``cost`` is summed only when pi reported it.
+        pi sums per-response snapshots deduped by message identity (no price is
+        invented: ``cost`` is summed only when pi reported it); ACP replaces
+        the total with the latest cumulative context snapshot. The totals stay
+        on the execution; the family only computes.
         """
-        snapshot = payload.get("usage")
-        if not isinstance(snapshot, Mapping):
-            return None
-        if self.config.harness == "acp":
-            # ACP's usage_update is a cumulative context snapshot (``used`` of
-            # ``size`` plus a session cost), not pi's per-response usage: the
-            # honest conversion keeps that view and replaces the total instead
-            # of summing snapshots (which would fabricate a growing number).
-            # The payload's ``basis`` marker carries the distinction into the
-            # run record.
-            execution.usage_total = dict(snapshot)
-            return dict(payload)
-        key = self._usage_key(frame)
-        if key is not None:
-            if key in execution.usage_keys:
-                return None
-            execution.usage_keys.add(key)
-        total = execution.usage_total
-        for name in _USAGE_FIELDS:
-            value = snapshot.get(name)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                total[name] = total.get(name, 0) + value
-        cost = snapshot.get("cost")
-        if isinstance(cost, Mapping):
-            cost_total = total.setdefault("cost", {})
-            for name, value in cost.items():
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    cost_total[name] = cost_total.get(name, 0) + value
-        total["requests"] = total.get("requests", 0) + 1
-        return {"usage": dict(total), "requestUsage": dict(snapshot)}
-
-    @staticmethod
-    def _usage_key(frame: Mapping[str, Any]) -> str | None:
-        message = frame.get("message")
-        if not isinstance(message, Mapping):
-            return None
-        for name in ("timestamp", "id"):
-            value = message.get(name)
-            if isinstance(value, str) and value:
-                return f"{name}:{value}"
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                return f"{name}:{value}"
-        return None
+        return self._family.accumulate_usage(
+            frame, payload, execution.usage_total, execution.usage_keys
+        )
 
     def _publish_session_ready(
         self, execution: _Execution, session: SessionInfo
@@ -2224,10 +1824,10 @@ class RunManager:
     def _ensure_progress_observer(self, execution: _Execution) -> None:
         """Start the one polling thread on the first committed dispatch.
 
-        Caller holds the run lock. The seam is the adapter's optional
-        ``child_progress_source()`` — the same ``getattr`` precedent as
-        ``recovered_session``/``recover_subagents``; a face without it (or a
-        ``None`` answer) honestly has no progress and gets no thread. A run
+        Caller holds the run lock. The seam is the adapter's
+        ``child_progress_source()`` — an ABC 默认空实现 like
+        ``recovered_session``/``recover_subagents``; a face whose answer is
+        ``None`` honestly has no progress and gets no thread. A run
         that never dispatches a subagent never reaches here, so it pays
         nothing.
         """
@@ -2235,11 +1835,7 @@ class RunManager:
             return
         execution.progress_observer_started = True
         adapter = execution.adapter
-        factory = (
-            getattr(adapter, "child_progress_source", None)
-            if adapter is not None
-            else None
-        )
+        factory = adapter.child_progress_source if adapter is not None else None
         if factory is None:
             return
         try:
@@ -2360,10 +1956,9 @@ class RunManager:
     ) -> tuple[Any, ...] | None:
         """Pair one polled fact with its child ``n``; ``None`` fabricates nothing.
 
-        pi 族：前台守卫保证同一时刻至多一个在飞派发 call；transcript 的
-        ``index`` 是该 call 内的 task 位置，且 ``agent`` 同名才配对。ACP 族：
-        fact 的 ``call_id`` 精确命中 started 事件记录的 toolCallId。对不上即
-        该 child 无进度。
+        通用字段校验（steps/bytes/name/target）留在这里；配对规则是族方法
+        （pi：transcript ``index`` + ``agent`` 同名；ACP：``call_id`` 精确
+        命中）。对不上即该 child 无进度。
         """
         steps = getattr(fact, "steps", None)
         byte_count = getattr(fact, "bytes", None)
@@ -2380,28 +1975,7 @@ class RunManager:
         target = getattr(fact, "last_tool_target", None)
         name = name if isinstance(name, str) and name else None
         target = target if isinstance(target, str) and target else None
-        n: int | None = None
-        if self.config.harness == "acp":
-            call_id = getattr(fact, "call_id", None)
-            entries = (
-                execution.progress_calls.get(call_id)
-                if isinstance(call_id, str)
-                else None
-            )
-            if entries:
-                n = entries[0]["n"]
-        else:
-            agent = getattr(fact, "agent", None)
-            index = getattr(fact, "index", None)
-            if (
-                isinstance(agent, str)
-                and isinstance(index, int)
-                and not isinstance(index, bool)
-            ):
-                for entries in execution.progress_calls.values():
-                    if 0 <= index < len(entries) and entries[index]["agent"] == agent:
-                        n = entries[index]["n"]
-                        break
+        n = self._family.match_progress_n(fact, execution.progress_calls)
         if n is None:
             return None
         return (n, steps, name, target, byte_count)
@@ -2535,113 +2109,28 @@ class RunManager:
         return "failed" if payload.get("isError") else "finished"
 
     def _enrich_children(self, execution: _Execution) -> None:
-        """Associate pi-subagents artifacts with the child documents (R2, pi 族).
+        """Associate subagent artifacts with the child documents — the family's job.
 
-        The candidates are the E2B mirror (``runs/<id>/subagents/artifacts``)
-        and, on the host-side faces, the session dir's ``subagent-artifacts/``.
-        Matched file groups are copied into ``children/<n>/`` (normalized
-        ``<kind>.<ext>`` names), ``_meta.json`` contributes its whitelisted
-        counters, and the document records the outcome honestly: ``meta`` when
-        paired, ``unmatched`` when the run has artifacts but the ordinal
-        pairing failed, ``none`` when there is nothing to pair. The ACP family
-        has no such layout and is never touched. Copies pass the run's redactor
-        sweep like every other artifact; the sources stay untouched (they are
-        the recovery substrate, not the product surface).
+        The pi family copies matched pi-subagents artifact groups into
+        ``children/<n>/`` and records the outcome honestly
+        (``meta``/``unmatched``/``none``); the ACP family has no such layout
+        and does nothing. The runner injects the redactor sweep and the
+        child-doc warning as callbacks and keeps the event emission rights;
+        the family's answer for the closing children-dir sweep flips the
+        run's ``redacted`` fact exactly like the other sweeps.
         """
-        if self.config.harness != "pi":
-            return
-        run_id = execution.record.run_id
-        page = self.store.read_children(run_id)
-        if not page.documents:
-            return
-        candidates: list[tuple[str, Any, str]] = []  # (artifact relpath, source tree, kind dir label)
-        mirror = self.store.run_dir(run_id) / SUBAGENTS_DIRNAME / "artifacts"
-        session_artifacts = (
-            execution.runtime.session_dir / "subagent-artifacts"
-            if execution.runtime is not None
-            else None
-        )
-        for root in (mirror, session_artifacts):
-            if root is None or not root.is_dir():
-                continue
-            try:
-                with ArtifactTree(root) as tree:
-                    for relative in tree.files(max_files=_ENRICH_VISIT_LIMIT):
-                        candidates.append((relative, root, relative))
-            except ArtifactError as exc:
-                logger.warning("子代理产物目录不可读 run=%s %s: %s", run_id, root, exc)
-        named = [
-            (parsed, root, relative)
-            for relative, root, _label in candidates
-            if (parsed := parse_artifact_filename(relative)) is not None
-        ]
-        if not named:
-            return
-        association = associate_children(
-            [dict(document) for document in page.documents],
-            [parsed for parsed, _root, _rel in named],
-        )
-        roots = {id(parsed): (root, relative) for parsed, root, relative in named}
-        copied_total = 0
-        for n, artifacts in association.by_n.items():
-            document = dict(self.store.read_child(run_id, n) or {})
-            if not document:
-                continue
-            listing: list[dict[str, Any]] = []
-            enrichment: dict[str, Any] = {}
-            for artifact in artifacts:
-                root, relative = roots[id(artifact)]
-                stored = f"{artifact.kind}.{artifact.path.rsplit('.', 1)[-1]}"
-                try:
-                    with ArtifactTree(root) as source:
-                        data = source.read(relative, max_bytes=_ENRICH_FILE_MAX_BYTES)
-                    copied_total += len(data)
-                    if copied_total > _ENRICH_TOTAL_MAX_BYTES:
-                        execution.artifact_failures.append("子代理增强复制超过总量上限")
-                        break
-                    with ArtifactTree(self.store.run_dir(run_id)) as run_tree:
-                        run_tree.replace(
-                            f"{CHILDREN_DIRNAME}/{n}/{stored}",
-                            data,
-                            max_bytes=_ENRICH_FILE_MAX_BYTES,
-                            create_parents=True,
-                        )
-                except (ArtifactError, OSError) as exc:
-                    execution.artifact_failures.append(f"子代理产物关联复制失败: {relative}: {exc}")
-                    continue
-                listing.append({"name": stored, "bytes": len(data), "source": artifact.path})
-                if artifact.kind == "meta":
-                    meta = read_meta_enrichment(data)
-                    if meta:
-                        enrichment.update(meta)
-            document.update(enrichment)
-            document["enrichment"] = "meta"
-            if listing:
-                document["artifacts"] = listing
-            try:
-                self.store.write_child(run_id, document)
-            except (ArtifactError, OSError, ValueError) as exc:
-                self._child_doc_warning(execution, f"子代理增强落文档失败 n={n}: {exc}")
-        for n in association.unmatched_children:
-            document = self.store.read_child(run_id, n)
-            if document and document.get("enrichment") in (None, "none"):
-                try:
-                    self.store.write_child(run_id, {**document, "enrichment": "unmatched"})
-                except (ArtifactError, OSError, ValueError) as exc:
-                    self._child_doc_warning(execution, f"子代理关联标记失败 n={n}: {exc}")
-        if association.unmatched_files:
-            logger.info(
-                "未关联的子代理产物保留在回收基质 run=%s: %s",
-                run_id,
-                ", ".join(a.path for a in association.unmatched_files[:8]),
-            )
-        children_dir = self.store.run_dir(run_id) / CHILDREN_DIRNAME
-        if children_dir.is_dir() and self._sanitize_workspace(
-            children_dir, self._run_redactor(execution)
+        if self._family.enrich_children(
+            execution.record.run_id,
+            runtime=execution.runtime,
+            artifact_failures=execution.artifact_failures,
+            sweep=lambda path: self._sanitize_workspace(
+                path, self._run_redactor(execution)
+            ),
+            warn=lambda detail: self._child_doc_warning(execution, detail),
         ):
             execution.redacted = True
 
-    def _settle_children(self, execution: _Execution, verdict: _Verdict) -> None:
+    def _settle_children(self, execution: _Execution, verdict: Verdict) -> None:
         """Close out children whose own finished event never arrived.
 
         The same rule as tools (§3.4「工具终态跟随 run」): a child still

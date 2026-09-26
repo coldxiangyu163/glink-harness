@@ -23,6 +23,7 @@ from pi_glink.config import ConfigError, build_config
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
+    ExecutionAdapter,
     ExecutionOutcome,
     SessionInfo,
 )
@@ -45,12 +46,13 @@ def make_config(tmp_path: Path, **overrides: str):
     return build_config(values, REPO_ROOT)
 
 
-class _Adapter:
+class _Adapter(ExecutionAdapter):
     """A run that stays open until cancelled (``forever=False`` settles at once)."""
 
     kind = "inproc"
 
     def __init__(self, *, forever: bool = True) -> None:
+        super().__init__(None, on_frame=lambda frame: None)  # type: ignore[arg-type]
         self._cancelled = threading.Event()
         self._forever = forever
 
@@ -89,7 +91,7 @@ def stream_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     created: list[PiGlinkServer] = []
 
     def build(adapter: _Adapter, **overrides: str):
-        monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", lambda spec, **kwargs: adapter)
+        monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", lambda spec, **kwargs: adapter)
         instance = create_server(make_config(tmp_path, **overrides))
         created.append(instance)
         thread = threading.Thread(target=instance.serve_forever, daemon=True)

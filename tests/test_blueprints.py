@@ -787,12 +787,16 @@ def test_blueprint_metadata_stays_inside_its_tenant(tmp_path: Path, monkeypatch:
     path, a second owner or an unnamed resource. A refusal creates no record for
     either tenant.
     """
-    from pi_glink.kernel.execution import CleanupReport, ExecutionOutcome, SessionInfo  # noqa: PLC0415
+    from pi_glink.kernel.execution import (  # noqa: PLC0415
+        CleanupReport,
+        ExecutionAdapter,
+        ExecutionOutcome,
+        SessionInfo,
+    )
 
-    class FakeAdapter:
+    class FakeAdapter(ExecutionAdapter):
         def __init__(self, spec, *, on_frame):
-            self.spec = spec
-            self._on_frame = on_frame
+            super().__init__(spec, on_frame=on_frame)
 
         def start(self) -> None:
             self.spec.workspace.mkdir(parents=True, exist_ok=True)
@@ -821,7 +825,7 @@ def test_blueprint_metadata_stays_inside_its_tenant(tmp_path: Path, monkeypatch:
         def close(self):
             return CleanupReport(released=True)
 
-    monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", lambda spec, **kw: FakeAdapter(spec, on_frame=kw["on_frame"]))
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", lambda spec, **kw: FakeAdapter(spec, on_frame=kw["on_frame"]))
 
     secret_file = tmp_path / "gateway.key"
     secret_file.write_bytes(b"0123456789abcdef0123456789abcdef")

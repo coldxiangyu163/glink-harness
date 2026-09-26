@@ -53,6 +53,12 @@ run 继承 agent 状态根（有界、拒绝链接、凭据目标排除后重渲
 「首轮+追问」真实续接。详见 [ACP 集成笔记](acp-integration-notes.md) §14 与
 `docs/evidence/acp-m8-resume-*.txt`。
 宿主默认 harness 仍是 `pi`，ACP 族只在显式配置下启用，执行面已覆盖 inproc / docker / e2b；
+「`kernel/` 泛化为 harness 适配层」已落地为**族接口**：`kernel/harness.py` 的
+`HarnessFamily`（职责 (a)-(f)：准入白名单与凭据、追问门禁与续接种子、runtime 渲染与
+projector、adapter 组装、stop 词汇归一化、子代理增强与运行中事实）加 `harness_pi.py` /
+`harness_acp.py` 两个实现，`RunManager.__init__` 经 `select_family` 唯一选择；runner 保留
+锁/相位、finalize 顺序控制与终帧提交（见架构 §4「族接口」）。§3 的「SDK 直连族」未来实现点
+即 `HarnessFamily` 的第三个实现。
 本文是该方向的事实源：实现与本文出现偏差时回写本文，而不是让代码与文档各自漂移。
 
 ## 1. 决定与定位
@@ -90,13 +96,14 @@ run 继承 agent 状态根（有界、拒绝链接、凭据目标排除后重渲
 ## 3. 目标架构：三个适配族
 
 ```
-HarnessAdapter（抽象随 M1 落地）
+HarnessFamily（已落地：kernel/harness.py + harness_pi.py / harness_acp.py）
 ├─ pi 族   — 现有 kernel/ 原样：rpc（双向 stdio NDJSON，inproc+docker 共用）、
 │            json（单向流，e2b）；作为其它族的参照系与回归基线
 ├─ ACP 族  — 一次 ACP client（JSON-RPC over stdio）覆盖：
 │            dsh 原生 acp server、claude-agent-acp、codex-acp（@agentclientprotocol/codex-acp）、
 │            gemini --acp、opencode；适配器进程与 agent 同容器/沙箱，stdio 桥接
-└─ SDK 直连族（可选，暂不建）— 如 claude-agent-sdk Python 进程内集成
+└─ SDK 直连族（可选，暂不建）— 如 claude-agent-sdk Python 进程内集成；
+             未来落地即 HarnessFamily 的第三个实现
 ```
 
 ACP（Agent Client Protocol，Zed 主导的开放协议）关键能力（v1 schema 已核实）：

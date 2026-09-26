@@ -45,6 +45,7 @@ from pi_glink.kernel.e2b_env import SANDBOX_CONFIG, E2BSandboxClient
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
+    ExecutionAdapter,
     ExecutionOutcome,
 )
 from pi_glink.kernel.runner import RunManager
@@ -569,10 +570,9 @@ class AdapterBehavior:
         self.created: list["FakeAdapter"] = []
 
 
-class FakeAdapter:
+class FakeAdapter(ExecutionAdapter):
     def __init__(self, spec, *, on_frame, behavior: AdapterBehavior) -> None:
-        self.spec = spec
-        self._on_frame = on_frame
+        super().__init__(spec, on_frame=on_frame)
         self._behavior = behavior
         self.runtime_dir = spec.runtime.directory
         self.auth_key = _auth_key(spec.runtime.directory)
@@ -632,7 +632,7 @@ def behavior(monkeypatch: pytest.MonkeyPatch) -> AdapterBehavior:
     def build(spec, **kwargs):
         return FakeAdapter(spec, on_frame=kwargs["on_frame"], behavior=state)
 
-    monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", build)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", build)
     return state
 
 

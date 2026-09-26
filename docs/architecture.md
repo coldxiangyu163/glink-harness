@@ -44,7 +44,9 @@
 两个 harness 族 × 三种执行面共享同一套输入契约与同一套产品事件，因此浏览器、存储与报告下载
 路径完全一致；差异集中在 `kernel/` 内的适配器后面（pi 族：`rpc.py` / `projection.py` /
 `agent_env.py`；ACP 族：`acp_rpc.py` / `acp_projection.py` / `acp_env.py`；执行面传输：
-`execution.py` + `docker_env.py` / `e2b_env.py` / `acp_e2b_env.py`），Run 管理不承担任何单面的收尾逻辑（§5.1）。
+`execution.py` + `docker_env.py` / `e2b_env.py` / `acp_e2b_env.py`；两族各自的 run 生命周期
+策略：`harness.py` 的 `HarnessFamily` 接口与 `harness_pi.py` / `harness_acp.py` 两个实现，
+见 §4「族接口」），Run 管理不承担任何单面的收尾逻辑（§5.1）。
 ACP 族的协议事实、能力矩阵与冒烟证据见 [ACP 集成笔记](acp-integration-notes.md) 与
 [多 harness 方案](multi-harness-plan.md)。
 
@@ -247,9 +249,8 @@ pi 族另有 `_meta.json` 增强（R2，见下「R2 增强与关联」）。
 裁决），观察者失败只发 `kernel_status` 警告，且**不写 `child.json`**——权威文档不被
 瞬时进度污染。
 
-进度由观察者 seam 供给：`ExecutionAdapter.child_progress_source()` 是**可选方法**
-（与 `recovered_session` / `recover_subagents` 同一 `getattr` 先例，不实现即该面
-无进度）。runner 每 run 至多起**一个**轮询线程，finalize 时退出，连续失败按有界退避
+进度由观察者 seam 供给：`ExecutionAdapter.child_progress_source()` 是 **ABC 默认空实现**
+（与 `recovered_session` / `recover_subagents` 同例，不覆写即该面无进度）。runner 每 run 至多起**一个**轮询线程，finalize 时退出，连续失败按有界退避
 后即停，且**不在准入锁内**。关联规则按族区分：
 
 * **pi 族**：前台守卫保证同一时刻至多一个在飞派发 call；transcript 文件
@@ -302,6 +303,30 @@ child 在前端显示为普通「进行中」，不伪造进度。
    提交成功后写落定副本、关闭实时流、移出执行表。若终帧写入或 `fsync` 失败（如磁盘满、I/O 错误），**没有任何读面
    显示终态**：run 保持 `running`、保留执行槽与实时流，停止请求返回 `finalizing`，
    `shutdown()` 报告该 run，下次启动由新 owner 按中断收口。
+
+**族接口（HarnessFamily）**：上文中一切「pi 族做 X、ACP 族做 Y」的策略都收敛在
+`kernel/harness.py` 的 `HarnessFamily` 后面，两个实现是 `harness_pi.py` 的 `PiHarnessFamily`
+与 `harness_acp.py` 的 `AcpHarnessFamily`；族实例由 `select_family` 在 `RunManager.__init__`
+**唯一选出**（构造时注入冻结 config 与 store，此后 runner 不再读当前配置做族分支——准入时
+`harness=`/`executor=` 随记录原子写入是冻结点本身，留在 runner；历史 run 的族与执行面只比
+记录字段或 `family.name`）。族接口覆盖六面职责：(a) 准入——`/` 命令白名单与凭据要求；
+(b) 追问准入与续接种子——族追加门禁、工作区复用、会话种子与 `resume_session` 值、会话身份
+的校验时机；(c) runtime 渲染与 projector 工厂（渲染中新知的秘密经 `PreparedRuntime` 交出，
+由 runner 按原序并入本 run 脱敏边界后才构造 projector）；(d) adapter 组装——各族持有自己的
+plan 方法（pi 的 rpc/docker plan，ACP 的 inproc/docker/e2b plan），内部委托
+`execution.build_adapter`；docker 容器名预持久化是资源台账身份（面关切），留在 runner；
+(e) 终态词汇归一化——`model_stop_verdict` 把各族自己的 stop 词汇（pi 的
+error/aborted/length，ACP 的 StopReason 集合）译成产品终态词汇，译不了即落入 runner 的交付
+策略（报告检查）；产品词汇本身（status 三值与 stop_reason 字符串集合）仍由 runner `_decide`
+定义；(f) 子代理增强与运行中事实——pi 族的产物关联（`meta`/`unmatched`/`none`）、按族的进度
+配对（pi=transcript index+agent 同名，ACP=call_id 精确命中）与按族的用量累计（pi 去重累加，
+ACP 累计快照替换）。runner 保留：锁与相位（open/committed/uncommitted）、准入并发与配额、
+stop()/StopDecision、`_execute` 骨架、`_finalize` 的**顺序控制**（观察者先死 → projector
+首 flush → `_recover_face_artifacts` → `_close_face` → `_sweep_run_artifacts` → 子代理增强
+→ 报告回收 → `_commit_verdict` 临界区 → 提交后簿记）、`_decide` 的共同前缀与交付策略收尾、
+终帧 payload 组装与持久化、事件提交路径、资源台账转发、共享追问门禁
+（owner→harness 字段→terminal→stale 的拒绝次序是生命周期策略）与 harness 无关的蓝图/命令
+门禁。
 
 **终态判定**（`agent_settled` 不是成功信号）：
 

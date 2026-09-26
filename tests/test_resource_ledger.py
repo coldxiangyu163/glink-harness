@@ -28,6 +28,7 @@ from pi_glink.kernel import docker_env, e2b_env
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
+    ExecutionAdapter,
     ExecutionOutcome,
     SessionInfo,
 )
@@ -543,8 +544,8 @@ def test_the_sweep_never_probes_a_run_that_is_still_in_flight(
         docker_probe=lambda name: (calls.append(name) or True, "fake docker: 不存在"),
     )
     adapter = _BlockingAdapter()
-    monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", lambda spec, **kwargs: adapter)
-    monkeypatch.setattr("pi_glink.kernel.runner.docker_available", lambda: True)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", lambda spec, **kwargs: adapter)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: True)
 
     run_id = manager.start("进行中", context("tenant-a")).run_id
     assert store.get(run_id).holds_resources is True, "运行中的 run 也是持有"
@@ -646,7 +647,7 @@ def test_the_docker_face_persists_the_container_name_before_start(
 ) -> None:
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
     store = RunStore(config.data_root / "runs")
-    monkeypatch.setattr("pi_glink.kernel.runner.docker_available", lambda: True)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: True)
     monkeypatch.setattr(
         "pi_glink.kernel.execution.subprocess.run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
@@ -666,12 +667,13 @@ def test_the_docker_face_persists_the_container_name_before_start(
     assert final.cleanup["external"] == {"container": final.container_name}
 
 
-class _BlockingAdapter:
+class _BlockingAdapter(ExecutionAdapter):
     """A run that stays in flight until it is cancelled."""
 
     kind = "docker"
 
     def __init__(self) -> None:
+        super().__init__(None, on_frame=lambda frame: None)  # type: ignore[arg-type]
         self._cancelled = threading.Event()
 
     def start(self) -> None:

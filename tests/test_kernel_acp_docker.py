@@ -454,7 +454,7 @@ def test_a_missing_daemon_fails_closed_and_keeps_the_persisted_identity(
     run record keeps its container name for the online ledger."""
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
     store = RunStore(config.data_root / "runs")
-    monkeypatch.setattr("pi_glink.kernel.runner.docker_available", lambda: False)
+    monkeypatch.setattr("pi_glink.kernel.harness_acp.docker_available", lambda: False)
     manager = RunManager(config, EventBus(), store)
     record = manager.start("docker 不可用时应当失败")
     final = manager.wait(record.run_id, timeout=30)
@@ -547,7 +547,7 @@ def test_the_acp_docker_plan_feeds_the_adapter_through_the_runner(
         timeout_seconds=5,
     )
     manager = RunManager(config, EventBus(), RunStore(config.data_root / "runs"))
-    monkeypatch.setattr("pi_glink.kernel.runner.docker_available", lambda: True)
+    monkeypatch.setattr("pi_glink.kernel.harness_acp.docker_available", lambda: True)
     monkeypatch.setattr("pi_glink.kernel.execution.AcpRpcClient", _RecordingClient)
     monkeypatch.setattr("pi_glink.kernel.acp_execution.subprocess.run", fake_run)
     adapter = build_adapter(
@@ -560,7 +560,7 @@ def test_the_acp_docker_plan_feeds_the_adapter_through_the_runner(
         docker_plan=lambda _spec: ([], {}, "container"),
         docker_stop=docker_env.stop_argv,
         acp_plan=lambda _spec: ([], {}, None),
-        acp_docker_plan=manager._acp_docker_plan,
+        acp_docker_plan=manager._family.acp_docker_plan,  # noqa: SLF001
     )
     expected = docker_env.build_acp_plan(
         config, runtime, run_id="abc123", workspace=tmp_path / "workspace"

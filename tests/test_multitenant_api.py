@@ -26,6 +26,7 @@ from pi_glink.config import build_config
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
+    ExecutionAdapter,
     ExecutionOutcome,
     SessionInfo,
 )
@@ -141,7 +142,7 @@ def _auth_key(directory: Path) -> str:
     return ""
 
 
-class FakeAdapter:
+class FakeAdapter(ExecutionAdapter):
     """Synthetic execution face: records rendered credentials, then settles."""
 
     def __init__(
@@ -156,8 +157,7 @@ class FakeAdapter:
         persist_session=False,
         session_id="fake-session",
     ):
-        self.spec = spec
-        self._on_frame = on_frame
+        super().__init__(spec, on_frame=on_frame)
         self._settle = settle
         self._release = release
         self._frames = tuple(frames)
@@ -255,7 +255,7 @@ def adapters(monkeypatch: pytest.MonkeyPatch) -> AdapterBehavior:
         behavior.created.append(adapter)
         return adapter
 
-    monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", build)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", build)
     return behavior
 
 

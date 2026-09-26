@@ -433,13 +433,13 @@ def _turn(timestamp: Any, tokens: int, **usage_extra: Any) -> dict[str, Any]:
 
 
 def _bare_runner() -> Any:
-    """Just the two members ``_accumulate_usage`` reads off ``self`` — no bus,
-    no store, no RunManager instance."""
-    from pi_glink.kernel.runner import RunManager  # noqa: PLC0415
+    """Just the one member ``_accumulate_usage`` reads off ``self`` — no bus,
+    no store, no RunManager instance. 求和算法已搬进 pi 族（config/store 在
+    这条路径上不被读取），runner 方法只剩委托。"""
+    from pi_glink.kernel.harness_pi import PiHarnessFamily  # noqa: PLC0415
 
     return SimpleNamespace(
-        config=SimpleNamespace(harness="pi"),
-        _usage_key=RunManager._usage_key,  # noqa: SLF001
+        _family=PiHarnessFamily(config=None, store=None),  # type: ignore[arg-type]
     )
 
 

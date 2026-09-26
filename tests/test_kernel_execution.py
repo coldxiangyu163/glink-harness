@@ -120,7 +120,7 @@ def test_the_manager_drives_every_face_through_the_same_protocol(
     config, store, manager = make_manager(tmp_path)
     adapter = RecordingAdapter()
     monkeypatch.setattr(
-        "pi_glink.kernel.runner.build_adapter", lambda spec, **kwargs: adapter
+        "pi_glink.kernel.harness_pi.compose_adapter", lambda spec, **kwargs: adapter
     )
 
     record = manager.start("统一接口")
@@ -157,7 +157,7 @@ def test_cancellation_goes_through_the_adapter_not_a_face_branch(
 
     adapter.wait = slow_wait  # type: ignore[method-assign]
     monkeypatch.setattr(
-        "pi_glink.kernel.runner.build_adapter", lambda spec, **kwargs: adapter
+        "pi_glink.kernel.harness_pi.compose_adapter", lambda spec, **kwargs: adapter
     )
 
     record = manager.start("取消走适配器")
@@ -248,7 +248,7 @@ def _run_face(tmp_path: Path, executor: str, monkeypatch: pytest.MonkeyPatch) ->
         sandbox_factory = lambda **_: _FakeSandbox(events_text)
     else:
         sandbox_factory = None
-        monkeypatch.setattr("pi_glink.kernel.runner.docker_available", lambda: True)
+        monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: True)
         monkeypatch.setattr(
             "pi_glink.kernel.execution.subprocess.run",
             lambda *args, **kwargs: type("R", (), {"returncode": 0, "stderr": ""})(),
@@ -331,7 +331,7 @@ def test_build_adapter_selects_the_face_from_the_frozen_executor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
-    monkeypatch.setattr("pi_glink.kernel.runner.docker_available", lambda: True)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: True)
     monkeypatch.setattr(
         "pi_glink.kernel.execution.subprocess.run",
         lambda *args, **kwargs: type("R", (), {"returncode": 0, "stderr": ""})(),

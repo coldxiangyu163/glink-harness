@@ -44,7 +44,7 @@ from pi_glink.kernel.acp_execution import (
     acp_resume_method,
 )
 from pi_glink.kernel.acp_rpc import AcpError
-from pi_glink.kernel.execution import ExecutionSpec, SessionInfo
+from pi_glink.kernel.execution import ExecutionAdapter, ExecutionSpec, SessionInfo
 from pi_glink.kernel.runner import FollowupUnavailable, RunManager
 from pi_glink.store import FAILED, FINISHED, RunStore
 from pi_glink.tenancy import TenantContext, TenantCredentialStore
@@ -456,10 +456,9 @@ def _fake_acp_adapter_factory(created: list[Any]):
     so the parent must complete with the same shape a real ACP run publishes.
     """
 
-    class FakeAcpAdapter:
+    class FakeAcpAdapter(ExecutionAdapter):
         def __init__(self, spec, *, on_frame):
-            self.spec = spec
-            self._on_frame = on_frame
+            super().__init__(spec, on_frame=on_frame)
             created.append(self)
 
         def start(self) -> None:
@@ -550,7 +549,7 @@ def test_acp_followup_refuses_a_parent_owned_by_another_tenant(
     credentials = TenantCredentialStore.from_file(tenants_file, repo_root=REPO_ROOT)
     created: list[Any] = []
     monkeypatch.setattr(
-        "pi_glink.kernel.runner.build_adapter", _fake_acp_adapter_factory(created)
+        "pi_glink.kernel.harness_acp.compose_adapter", _fake_acp_adapter_factory(created)
     )
     manager = RunManager(config, EventBus(), store, credential_store=credentials)
     alpha = TenantContext(
@@ -724,7 +723,8 @@ def test_family_proof_prefers_the_record_field_over_the_frame_marker(
     parent = craft_parent(
         store, "fieldproof01", harness="acp", executor="inproc", frame_marker=False
     )
-    admitted = manager._acp_resumable_parent(None, parent.run_id)  # noqa: SLF001
+    admitted = manager._resumable_parent(None, parent.run_id)  # noqa: SLF001
+    manager._family.check_continuation(admitted)  # noqa: SLF001
     assert admitted.run_id == parent.run_id
 
 
@@ -746,7 +746,9 @@ def test_a_field_proven_parent_without_a_capability_frame_is_still_refused(
         capabilities={},  # 无续接通道的能力矩阵
     )
     with pytest.raises(FollowupUnavailable) as excinfo:
-        manager._acp_resumable_parent(None, parent.run_id)  # noqa: SLF001
+        manager._family.check_continuation(  # noqa: SLF001
+            manager._resumable_parent(None, parent.run_id)  # noqa: SLF001
+        )
     assert excinfo.value.code == "session_unavailable"
 
 
@@ -766,9 +768,10 @@ def test_state_home_follows_the_parent_recorded_executor(tmp_path: Path) -> None
         executor="e2b",
         state_root="recovered",
     )
-    state_home = manager._acp_state_home(parent)  # noqa: SLF001
+    state_home = manager._family.state_home(parent)  # noqa: SLF001
     assert state_home == store.run_dir(parent.run_id) / "acp-agent" / "recovered"
-    admitted = manager._acp_resumable_parent(None, parent.run_id)  # noqa: SLF001
+    admitted = manager._resumable_parent(None, parent.run_id)  # noqa: SLF001
+    manager._family.check_continuation(admitted)  # noqa: SLF001
     assert admitted.run_id == parent.run_id
 
 
@@ -782,7 +785,8 @@ def test_legacy_parent_keeps_the_frame_marker_family_proof(tmp_path: Path) -> No
     _config, store, manager = build_manager(tmp_path, {})
     parent = craft_parent(store, "legacyparent", frame_marker=True)
     assert parent.harness is None
-    admitted = manager._acp_resumable_parent(None, parent.run_id)  # noqa: SLF001
+    admitted = manager._resumable_parent(None, parent.run_id)  # noqa: SLF001
+    manager._family.check_continuation(admitted)  # noqa: SLF001
     assert admitted.run_id == parent.run_id
 
 
@@ -792,7 +796,9 @@ def test_legacy_parent_without_the_marker_is_still_refused(tmp_path: Path) -> No
     parent = craft_parent(store, "legacyparent", frame_marker=False)
     assert parent.harness is None
     with pytest.raises(FollowupUnavailable) as excinfo:
-        manager._acp_resumable_parent(None, parent.run_id)  # noqa: SLF001
+        manager._family.check_continuation(  # noqa: SLF001
+            manager._resumable_parent(None, parent.run_id)  # noqa: SLF001
+        )
     assert excinfo.value.code == "session_unavailable"
 
 
@@ -803,5 +809,5 @@ def test_legacy_parent_state_home_falls_back_to_the_current_executor(
     _config, store, manager = build_manager(tmp_path, {}, LOCAL_WEB_EXECUTOR="e2b")
     parent = craft_parent(store, "legacyparent")
     assert parent.executor is None
-    state_home = manager._acp_state_home(parent)  # noqa: SLF001
+    state_home = manager._family.state_home(parent)  # noqa: SLF001
     assert state_home == store.run_dir(parent.run_id) / "acp-agent" / "recovered"

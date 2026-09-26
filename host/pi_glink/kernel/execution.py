@@ -44,7 +44,8 @@ The contract is:
     Optional, faces with subagent side-products only (the pi sandbox face):
     mirror branched sessions and subagent artifacts out of the dying sandbox
     before ``close()``. Faces whose subagent files already live on the host
-    (in-process, Docker) do not implement it — there is nothing to pull back.
+    (in-process, Docker) keep the ABC's default empty answer — there is
+    nothing to pull back.
 ``child_progress_source()``
     Optional (R3a, docs/architecture.md §3.5「运行中进度（R3a）」): a polling
     source for *running* subagent progress, built while the face's transcripts
@@ -210,18 +211,28 @@ class ExecutionAdapter(ABC):
     def recovered_session(self) -> SessionInfo | None:
         """Session facts learned through ``recover_artifacts`` worth publishing.
 
-        Only the sandbox faces learn session facts while pulling work products
-        back; every other face knows its session before the turn, so the base
-        answer is ``None``.
+        ABC 默认空实现：only the sandbox faces learn session facts while
+        pulling work products back; every other face knows its session before
+        the turn, so the base answer is ``None``.
         """
         return None
+
+    def recover_subagents(self, destination: Path) -> ArtifactRecovery:
+        """Mirror subagent side-products out of the face before ``close()``.
+
+        ABC 默认空实现：只有 pi 沙箱面有子代理副产物要镜像（branched
+        sessions 与 subagent artifacts 随沙箱销毁，须在 ``close()`` 前镜像回
+        宿主）；其余面的子代理文件本就在宿主，没有可回收之物，基类返回一
+        份空的 :class:`ArtifactRecovery`。
+        """
+        return ArtifactRecovery()
 
     def child_progress_source(self) -> Any | None:
         """Optional R3a seam: a polling source for running subagent progress.
 
-        Same ``getattr`` precedent as ``recovered_session`` /
-        ``recover_subagents``: a face that cannot observe its children's
-        transcripts answers ``None`` and that face honestly has no progress
+        与 ``recovered_session`` / ``recover_subagents`` 同为 ABC 默认空实
+        现：a face that cannot observe its children's transcripts answers
+        ``None`` and that face honestly has no progress
         (docs/architecture.md §3.5「运行中进度（R3a）」). The runner owns the
         polling thread, the throttling and the ``subagent_updated`` emission;
         the source only answers ``poll()``/``close()``.

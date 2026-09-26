@@ -8,6 +8,12 @@ Each harness family owns exactly two jobs:
 * translate that protocol's frames into the product vocabulary
   (:mod:`pi_glink.kernel.projection`, :mod:`pi_glink.kernel.acp_projection`).
 
+The per-harness *policy* of one run lifecycle (admission allowlists, follow-up
+gates, runtime rendering, adapter assembly, stop-reason normalization and
+subagent enrichment) lives behind the family interface in
+:mod:`pi_glink.kernel.harness`, with the two implementations in
+:mod:`pi_glink.kernel.harness_pi` and :mod:`pi_glink.kernel.harness_acp`.
+
 It deliberately owns no research logic, no prompts, and no file layout policy:
 those belong to the per-harness configuration (the pi template in ``agent/``,
 and the ACP agent's own configuration) and its official extension points.
@@ -43,6 +49,9 @@ from .execution import (
     SessionInfo,
     build_adapter,
 )
+from .harness import HarnessFamily, PreparedRuntime, Verdict, select_family
+from .harness_acp import AcpHarnessFamily
+from .harness_pi import PiHarnessFamily
 from .projection import extract_text, project_event, project_frames
 from .runner import REPORT_FILENAME, RESEARCH_PROMPT_FILENAME, RunBusy, RunManager
 from .rpc import (
@@ -59,6 +68,7 @@ __all__ = [
     "AcpClosed",
     "AcpError",
     "AcpExecutionAdapter",
+    "AcpHarnessFamily",
     "AcpProjector",
     "AcpProtocolError",
     "AcpRequestError",
@@ -73,10 +83,13 @@ __all__ = [
     "ExecutionAdapter",
     "ExecutionOutcome",
     "ExecutionSpec",
+    "HarnessFamily",
+    "PiHarnessFamily",
     "PiRpcClient",
     "PiRpcClosed",
     "PiRpcError",
     "PiRpcTimeout",
+    "PreparedRuntime",
     "REPORT_FILENAME",
     "RESEARCH_PROMPT_FILENAME",
     "RpcResponse",
@@ -84,6 +97,7 @@ __all__ = [
     "RunManager",
     "SANDBOX_ACP_HOME",
     "SessionInfo",
+    "Verdict",
     "build_adapter",
     "build_pi_argv",
     "build_pi_env",
@@ -92,6 +106,7 @@ __all__ = [
     "prepare_agent_dir",
     "project_event",
     "project_frames",
+    "select_family",
     "template_manifest",
     "wait_for_idle",
 ]

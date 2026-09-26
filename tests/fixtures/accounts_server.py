@@ -37,12 +37,13 @@ if str(HOST_ROOT) not in sys.path:
     sys.path.insert(0, str(HOST_ROOT))
 
 from pi_glink.accounts import AccountsStore  # noqa: E402
-import pi_glink.kernel.runner as runner_module  # noqa: E402
+import pi_glink.kernel.harness_pi as pi_family  # noqa: E402
 from pi_glink.app import HostRequestHandler, create_server  # noqa: E402
 from pi_glink.config import build_config  # noqa: E402
 from pi_glink.kernel.execution import (  # noqa: E402
     ArtifactRecovery,
     CleanupReport,
+    ExecutionAdapter,
     ExecutionOutcome,
 )
 
@@ -59,12 +60,11 @@ ADMINS = {
 REPORT = "# 合成报告\n\n这是浏览器验收生成的合成报告，不来自真实模型。\n"
 
 
-class FakeAdapter:
+class FakeAdapter(ExecutionAdapter):
     """A synthetic execution face: emits a short synthetic answer, then settles."""
 
     def __init__(self, spec, *, on_frame):
-        self.spec = spec
-        self._on_frame = on_frame
+        super().__init__(spec, on_frame=on_frame)
 
     def start(self) -> None:
         self.spec.workspace.mkdir(parents=True, exist_ok=True)
@@ -234,10 +234,10 @@ def main() -> int:
         REPO_ROOT,
     )
     # Replace only the execution face, exactly like the Python regressions do
-    # (``monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", …)``): the
-    # real Runner, store, event bus, HTTP/SSE and front-end all stay in the
+    # (``monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", …)``):
+    # the real Runner, store, event bus, HTTP/SSE and front-end all stay in the
     # loop, but no pi binary, Docker daemon or sandbox is contacted.
-    runner_module.build_adapter = build_fake
+    pi_family.compose_adapter = build_fake
     server = create_server(config)
     bootstrap = bootstrap_accounts(server.accounts)
     state = {

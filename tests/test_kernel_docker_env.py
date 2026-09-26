@@ -277,7 +277,7 @@ def test_runner_refuses_docker_when_daemon_is_missing(config, tmp_path: Path, mo
     from pi_glink.kernel.runner import RunManager
     from pi_glink.store import RunStore
 
-    monkeypatch.setattr("pi_glink.kernel.runner.docker_available", lambda: False)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: False)
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
     record = manager.start("docker 不可用时应当失败")

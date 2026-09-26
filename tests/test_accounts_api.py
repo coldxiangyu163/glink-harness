@@ -26,6 +26,7 @@ from pi_glink.config import ConfigError, build_config
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
+    ExecutionAdapter,
     ExecutionOutcome,
     SessionInfo,
 )
@@ -71,10 +72,9 @@ class AdapterBehavior:
         self.created: list["FakeAdapter"] = []
 
 
-class FakeAdapter:
+class FakeAdapter(ExecutionAdapter):
     def __init__(self, spec, *, on_frame, behavior: AdapterBehavior):
-        self.spec = spec
-        self._on_frame = on_frame
+        super().__init__(spec, on_frame=on_frame)
         self._behavior = behavior
         self.runtime_dir = spec.runtime.directory
         self.session_file: Path | None = None
@@ -137,7 +137,7 @@ def adapters(monkeypatch: pytest.MonkeyPatch) -> AdapterBehavior:
         behavior.created.append(adapter)
         return adapter
 
-    monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", build)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", build)
     return behavior
 
 

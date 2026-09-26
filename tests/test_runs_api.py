@@ -570,9 +570,17 @@ def test_stop_answers_follow_the_committed_state(server: PiGlinkServer) -> None:
 def test_start_is_refused_while_a_release_is_unconfirmed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from pi_glink.kernel.execution import ArtifactRecovery, CleanupReport, ExecutionOutcome  # noqa: PLC0415
+    from pi_glink.kernel.execution import (  # noqa: PLC0415
+        ArtifactRecovery,
+        CleanupReport,
+        ExecutionAdapter,
+        ExecutionOutcome,
+    )
 
-    class LeakingAdapter:
+    class LeakingAdapter(ExecutionAdapter):
+        def __init__(self):
+            super().__init__(None, on_frame=lambda frame: None)
+
         def start(self): pass
         def identity(self): return {"sandbox": "synthetic-owned-resource"}
         def session_info(self): return None
@@ -583,7 +591,7 @@ def test_start_is_refused_while_a_release_is_unconfirmed(
             return CleanupReport(released=False, failures=("synthetic kill failed",))
         def cancel(self): pass
 
-    monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", lambda spec, **kwargs: LeakingAdapter())
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", lambda spec, **kwargs: LeakingAdapter())
     instance = create_server(make_config(tmp_path), client_factory=fake_factory())
     thread = threading.Thread(target=instance.serve_forever, daemon=True)
     thread.start()

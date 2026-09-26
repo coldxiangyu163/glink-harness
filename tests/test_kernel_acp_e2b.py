@@ -1256,7 +1256,9 @@ def test_the_runner_wires_the_acp_e2b_plan_from_the_frozen_configuration(tmp_pat
 
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store=store, sandbox_factory=factory)
-    client = manager._acp_e2b_plan(make_spec(config, runtime, tmp_path))
+    client = manager._family.acp_e2b_plan(  # noqa: SLF001
+        make_spec(config, runtime, tmp_path), sandbox_factory=factory
+    )
     assert isinstance(client, E2BAcpSandboxClient)
     client.start()
     assert created["template"] == "glink-acp-worker:pinned"
