@@ -575,6 +575,11 @@ class RunManager:
                     if blueprint_template is not None
                     else ()
                 ),
+                # 准入时冻结的宿主事实，与 run id/owner 同一次原子写入：
+                # 追问门禁此后比父记录自己的族与执行面，不再用当前配置反推
+                # 历史 run。
+                harness=self.config.harness,
+                executor=self.config.executor,
             )
             run_id = record.run_id
             workspace = Path(record.workspace)
@@ -709,6 +714,17 @@ class RunManager:
         a parent that is not terminal is ``run_busy``, one that already has a
         follow-up turn is ``stale_run``.
 
+        原义务：门禁不感知 harness 族——宿主从 acp 切到 pi 后，追问一个已知
+        ACP 父 run 会被误放进会话读取，读到一个 ``session_file=None`` 的父
+        run。新义务：同族判定优先比父记录自己的 ``harness`` 字段（准入时随
+        冻结配置原子写入），字段已知且不等即 fail-closed
+        （``session_unavailable``），无论父 run 状态，也不再触发后续扫描；
+        判定放在 owner 门禁之后（跨租户父 run 仍是 ``unknown_run``，不泄露
+        存在性）、状态检查之前。无字段的旧记录走 legacy：pi 族 legacy 不
+        新增任何拒绝（harness 未知即无法证明跨族，fail-closed 只适用于
+        「已知不等」），ACP 族 legacy 由 :meth:`_acp_resumable_parent` 的帧
+        扫描继续证明。
+
         One admission calls this twice: outside the lock, to fail fast before
         the parent's session file is read, and inside it, where the decision is
         authoritative — between the two calls the parent may have gained a
@@ -717,6 +733,8 @@ class RunManager:
         parent = self._authorized_parent(context, parent_run_id)
         if parent is None:
             raise FollowupUnavailable("unknown_run")
+        if parent.harness is not None and parent.harness != self.config.harness:
+            raise FollowupUnavailable("session_unavailable")
         if not parent.is_terminal:
             raise FollowupUnavailable("run_busy")
         if any(
@@ -736,15 +754,21 @@ class RunManager:
         of which are read from the host's own record of the parent rather than
         from the caller:
 
-        * the parent ran the **same harness** — proven by the ``harness: "acp"``
-          marker its ``session_ready`` frame carries, not by the current
-          configuration alone (a host switched from ``pi`` to ``acp`` must not
-          present a pi run as resumable);
+        * the parent ran the **same harness** — the parent record's own
+          ``harness`` field is the proof when it carries one (written at
+          admission from the frozen config); for a legacy record without the
+          field, the ``harness: "acp"`` marker of its ``session_ready`` frame
+          remains the proof, exactly as before. Neither source trusts the
+          current configuration alone (a host switched from ``pi`` to ``acp``
+          must not present a pi run as resumable);
         * the parent recorded a **session id** (an ACP run without one has
           nothing to resume);
         * the capability matrix recorded in that same frame declares a
           continuation channel (:func:`~pi_glink.kernel.acp_execution.
-          acp_resume_method`). No capability means the follow-up is refused
+          acp_resume_method`). The matrix is a negotiated snapshot and stays
+          in the event stream (it is not a RunRecord field), so the frame
+          scan remains its only source even when the record field already
+          proved the family. No capability means the follow-up is refused
           here, before a child run exists — it is never downgraded to a new
           session.
 
@@ -773,6 +797,10 @@ class RunManager:
         it cannot complete.
         """
         parent = self._resumable_parent(context, parent_run_id)
+        # 族证明：记录字段优先（``harness == "acp"`` 直接成立），帧扫描只
+        # 为无字段的 legacy 记录兼作族证明；能力矩阵（协商快照，不进
+        # RunRecord）两路都仍从这同一扫描取得。已知字段的父 run 扫不到
+        # 能力帧时按无续接通道拒绝，语义与现状一致。
         capabilities = self._recorded_acp_capabilities(parent)
         if capabilities is None:
             raise FollowupUnavailable("session_unavailable")
@@ -794,20 +822,33 @@ class RunManager:
     ) -> Mapping[str, Any] | None:
         """The capability matrix a parent ACP run recorded, or ``None``.
 
+        原义务：扫描同时承担两个角色——能力矩阵的唯一来源，以及「父 run
+        是 ACP 族」的证明（要求帧带 ``harness: "acp"`` 标记）。新义务：角色
+        收缩——族证明优先由父记录自己的 ``harness`` 字段承担（准入时原子
+        写入的事实），本扫描仅为无字段的 legacy 记录兼作族证明；能力矩阵
+        （协商快照，不进 RunRecord）两路都仍只能从 ``session_ready`` 帧取得。
+
         The parent's ``session_ready`` frame is the only capability source that
         exists before the child's agent process starts; ``session_ready`` is
         committed right after the run opens, so the scan is bounded and does not
-        grow with the parent's transcript. A parent with no such frame is not an
-        ACP run (or predates it), which is exactly the ``session_unavailable``
-        refusal the ACP gate owes it.
+        grow with the parent's transcript. A legacy parent with no such marked
+        frame is not proven to be an ACP run (or predates it), which is exactly
+        the ``session_unavailable`` refusal the ACP gate owes it; a parent whose
+        record already proves the family but carries no capability frame is
+        refused the same way, as a run without a continuation channel.
         """
+        # 记录字段已证明族时，任何 session_ready 帧都是合法的能力来源；
+        # 未证明时（legacy）仍要求帧自带 ``harness: "acp"`` 标记。
+        family_proven = parent.harness == "acp"
         for index, event in enumerate(self.store.iter_events(parent.run_id)):
             if index >= _ACP_CAPABILITY_SCAN_EVENTS:
                 break
             if event.get("type") != events.SESSION_READY:
                 continue
             payload = event.get("payload")
-            if not isinstance(payload, Mapping) or payload.get("harness") != "acp":
+            if not isinstance(payload, Mapping):
+                continue
+            if not family_proven and payload.get("harness") != "acp":
                 continue
             capabilities = payload.get("agentCapabilities")
             return dict(capabilities) if isinstance(capabilities, Mapping) else {}
@@ -822,9 +863,17 @@ class RunManager:
         ``acp-agent/recovered`` before destroying the sandbox; that path is
         derived from the run record like the other one — never from caller
         input — and its existence is the recovered-state fact itself.
+
+        原义务：按当前 ``config.executor`` 推导——宿主从 e2b 切到
+        inproc/docker 后，追问 e2b 父 run 会推导出 ``acp-agent/home``
+        （不存在）→ 合法追问被误拒。新义务：按父 run 自己记录的
+        ``executor`` 推导（准入时随冻结配置原子写入），宿主切换执行面不影响
+        历史 run 的追问；无字段的旧记录回退为按当前配置推导（原行为，
+        legacy e2b 父 run 的误拒是已知局限，只对新记录修复，不回填）。
         """
+        executor = run.executor if run.executor is not None else self.config.executor
         base = self.store.run_dir(run.run_id) / ACP_RUNTIME_DIRNAME
-        if self.config.executor == "e2b":
+        if executor == "e2b":
             return base / ACP_RECOVERED_DIRNAME
         return base / ACP_HOME_DIRNAME
 
@@ -1890,11 +1939,23 @@ class RunManager:
             else:
                 session_file = mapped
         if session.session_id or session_file:
-            self.store.update(
-                run_id,
-                session_id=session.session_id,
-                session_file=session_file,
-            )
+            # 与 ``session_id`` 同一先例的写回点：agent 身份是内核自己报告
+            # 的事实（ACP 协商结果里的 ``agentInfo.name``），启动后才知道，
+            # 所以不进 create、在这里随同一次 update 落盘。不伪造、已知才写：
+            # pi 协议不报 agent 身份（payload 无 ``agentInfo``，天然不写），
+            # pi 的模型 id 也不冒充 agent。
+            changes: dict[str, Any] = {
+                "session_id": session.session_id,
+                "session_file": session_file,
+            }
+            agent_info = session.payload.get("agentInfo")
+            if isinstance(agent_info, Mapping):
+                agent_name = agent_info.get("name")
+                if isinstance(agent_name, str) and agent_name:
+                    # 与事件载荷同一边界：内核自报的身份同样过 run 的脱敏并
+                    # 限幅，落进 meta.json 的永远是脱敏后的值。
+                    changes["agent"] = self._run_redactor(execution).redact(agent_name)[:128]
+            self.store.update(run_id, **changes)
         payload: dict[str, Any] = dict(session.payload)
         payload["sessionFile"] = session_file
         self._emit_open(execution, events.SESSION_READY, payload)

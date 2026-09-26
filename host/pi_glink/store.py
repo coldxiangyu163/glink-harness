@@ -157,6 +157,20 @@ class RunRecord:
     #: (``id``/``title``/``goal``/``deliverable``/``checkpoint``). Empty for a run
     #: without a blueprint and for records written before blueprints existed.
     blueprint_stages: tuple[Mapping[str, Any], ...] = ()
+    #: Harness family this run executed under ("pi" | "acp"), recorded at
+    #: admission from the frozen config. ``None`` for records written before
+    #: the fact was tracked; those records keep the legacy fallbacks.
+    harness: str | None = None
+    #: Execution face this run used ("inproc" | "docker" | "e2b"), recorded at
+    #: admission. ``None`` for legacy records.
+    executor: str | None = None
+    #: Agent identity the kernel itself reported (ACP ``agentInfo.name`` from the
+    #: negotiated initialize result), written back at the session_ready commit
+    #: point like ``session_id``. ``None`` for pi-family runs (the pi protocol
+    #: reports no agent identity; the model id stays a session_ready payload
+    #: fact, never a stand-in for agent identity), for ACP runs that never
+    #: reached session_ready, and for legacy records.
+    agent: str | None = None
 
     def __post_init__(self) -> None:
         """Canonicalize the stage list whatever representation reached us.
@@ -375,6 +389,8 @@ class RunStore:
         parent_run_id: str | None = None,
         blueprint: str | None = None,
         blueprint_stages: Sequence[Mapping[str, Any]] = (),
+        harness: str | None = None,
+        executor: str | None = None,
     ) -> RunRecord:
         """Admit a run and write its assignment facts in one atomic meta write.
 
@@ -391,7 +407,10 @@ class RunStore:
         optional ``parent_run_id`` records the follow-up chain in the same write.
         ``blueprint`` / ``blueprint_stages`` record the session template the run
         was admitted with: facts decided before admission, never progression
-        state.
+        state. ``harness`` / ``executor`` are frozen-config facts of the same
+        kind, written in this same atomic admission write; ``agent`` is not a
+        create parameter because it is only known after the run starts (the
+        ``session_id`` precedent: written back at the session_ready commit).
         """
         identifier, directory = self._create_run_directory(run_id)
         if workspace is not None:
@@ -411,6 +430,8 @@ class RunStore:
             parent_run_id=parent_run_id,
             blueprint=blueprint,
             blueprint_stages=tuple(blueprint_stages),
+            harness=harness,
+            executor=executor,
         )
         return self._write(record)
 

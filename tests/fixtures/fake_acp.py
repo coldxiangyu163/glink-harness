@@ -540,7 +540,10 @@ def handle_initialize(request: dict) -> None:
             "protocolVersion": advertised
             if advertised != 1
             else (requested if isinstance(requested, int) else 1),
-            "agentInfo": {"name": "fake-acp", "version": "0.1.0"},
+            "agentInfo": {
+                "name": setting("FAKE_ACP_AGENT_NAME", "fake-acp"),
+                "version": "0.1.0",
+            },
             "agentCapabilities": capabilities(),
             "authMethods": [],
         },

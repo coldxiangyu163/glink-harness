@@ -215,3 +215,70 @@ def test_write_child_validates_the_sequence_number(store: RunStore) -> None:
         with pytest.raises(ValueError, match="n"):
             store.write_child("r1", {"n": bad})
     assert store.read_children("r1").documents == ()
+
+
+# -- harness / executor / agent facts on the record -----------------------------
+
+
+def test_create_records_harness_and_executor_with_the_atomic_admission_write(
+    store: RunStore,
+) -> None:
+    """harness/executor 与 run id 同一次准入写落盘，读回与 meta.json 原文一致。
+
+    红→绿机制：旧代码 ``create`` 不接受这两个参数（TypeError）。
+    """
+    record = store.create("问题", run_id="facts1", harness="acp", executor="docker")
+    assert record.harness == "acp"
+    assert record.executor == "docker"
+    # agent 不进 create：它是 run 启动后才知道的事实（session_id 先例）。
+    assert record.agent is None
+
+    loaded = store.get("facts1")
+    assert loaded is not None
+    assert loaded.harness == "acp" and loaded.executor == "docker"
+    listed = {item.run_id: item for item in store.list(limit=None)}
+    assert listed["facts1"].harness == "acp"
+    assert listed["facts1"].executor == "docker"
+
+    meta = json.loads(
+        (store.run_dir("facts1") / "meta.json").read_text(encoding="utf-8")
+    )
+    assert meta["harness"] == "acp"
+    assert meta["executor"] == "docker"
+
+
+def test_legacy_meta_without_the_fact_fields_reads_back_as_none(
+    store: RunStore, tmp_path: Path
+) -> None:
+    """本次改动之前写入的 meta.json 无 harness/executor/agent 键：读回为 None。
+
+    既有字段（status/workspace 等）不受影响；相邻合法输入（含未知键的旧
+    meta）仍被已知键过滤正常读回。
+    """
+    directory = store.run_dir("legacy1")
+    directory.mkdir(parents=True, mode=0o700)
+    (directory / "meta.json").write_text(
+        json.dumps(
+            {
+                "run_id": "legacy1",
+                "prompt": "旧记录",
+                "status": FINISHED,
+                "created_at": 123.0,
+                "workspace": str(tmp_path / "ws"),
+                "session_id": "old-session",
+                "unknown_future_key": {"anything": 1},
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    record = store.get("legacy1")
+    assert record is not None
+    assert record.harness is None
+    assert record.executor is None
+    assert record.agent is None
+    # 既有字段逐字节不变。
+    assert record.status == FINISHED
+    assert record.workspace == str(tmp_path / "ws")
+    assert record.session_id == "old-session"

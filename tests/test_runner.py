@@ -28,7 +28,7 @@ from pi_glink.kernel.runner import (
     UnsupportedCommand,
     prompt_names_unsupported_command,
 )
-from pi_glink.store import CANCELLED, FAILED, FINISHED, RunStore
+from pi_glink.store import CANCELLED, FAILED, FINISHED, RUNNING, RunStore
 from pi_glink.tenancy import TenantContext
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1475,3 +1475,229 @@ def test_children_enrichment_skips_the_acp_family(tmp_path: Path) -> None:
     document = store.read_child("enrich3", 0)
     assert document["enrichment"] == "none"
     assert not (store.run_dir("enrich3") / "children" / "0" / "meta.json").exists()
+
+
+# -- run 记录落 harness/executor/agent 事实 + 追问门禁比字段 ----------------------
+
+
+def test_admission_records_the_harness_and_executor_facts(tmp_path: Path) -> None:
+    """准入时 harness/executor 随 meta 原子写入；pi 面 agent 恒为 None。
+
+    pi 协议不报 agent 身份：``session_ready`` 载荷只有 model/thinkingLevel，
+    模型 id 不冒充 agent。红→绿机制：旧代码 ``RunRecord`` 无此三字段，断
+    言对象不存在（AttributeError）。
+    """
+    manager, _store = build_manager(tmp_path, write_report=True)
+    record = manager.start("记录本 run 的事实")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final.status == FINISHED
+    assert final.harness == manager.config.harness == "pi"
+    assert final.executor == manager.config.executor == "inproc"
+    assert final.agent is None
+
+
+def _write_parent_meta(
+    config: HostConfig,
+    store: RunStore,
+    parent_id: str,
+    *,
+    with_session_file: bool = True,
+    **meta_fields: Any,
+) -> None:
+    """手写一份父记录的 meta.json（与合法 pi 会话文件），不经过 store.create。
+
+    手写而不用 create 是为了让红→绿机制落在行为上而不是签名上：旧代码读
+    回时把 harness/executor 当未知键过滤、门禁也不含族检查，于是跨族追问
+    被放行到会话读取（红）；新代码在读取之前比字段拒绝（绿）。``status``
+    等既有键可按测试需要覆盖。
+    """
+    session_dir = config.session_dir / parent_id
+    directory = store.run_dir(parent_id)
+    meta: dict[str, Any] = {
+        "run_id": parent_id,
+        "prompt": "第一轮",
+        "status": FINISHED,
+        "created_at": time.time(),
+        "workspace": str(directory / "workspace"),
+        "finished_at": time.time(),
+    }
+    if with_session_file:
+        session_dir.mkdir(parents=True, exist_ok=True)
+        session_file = session_dir / "parent.jsonl"
+        session_file.write_text(
+            json.dumps({"id": "same-session", "text": "第一轮"}) + "\n",
+            encoding="utf-8",
+        )
+        meta["session_id"] = "same-session"
+        meta["session_file"] = str(session_file)
+    meta.update(meta_fields)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    (directory / "meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+
+def test_same_family_pi_parent_follow_up_is_admitted_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同族合法输入保护：父记录 harness="pi" 时 pi→pi 追问逐断言不变。
+
+    红→绿机制：旧代码 ``store.create`` 不接受 harness 参数（TypeError）；
+    转绿后本测试钉住 pi→pi 的既有受理路径（读脱敏会话文件、--session 续接）。
+    """
+    config = make_config(tmp_path)
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    monkeypatch.setattr(
+        "pi_glink.kernel.runner.build_adapter",
+        lambda spec, **kwargs: _ResumingAdapter(spec.expected_session_id),
+    )
+    parent_id = "parentrun001"
+    session_dir = config.session_dir / parent_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session_file = session_dir / "parent.jsonl"
+    session_file.write_text(
+        json.dumps({"id": "same-session", "text": "第一轮"}) + "\n", encoding="utf-8"
+    )
+    store.create("第一轮", run_id=parent_id, harness="pi", executor="inproc")
+    store.update(
+        parent_id,
+        status=FINISHED,
+        session_id="same-session",
+        session_file=str(session_file),
+        finished_at=time.time(),
+    )
+
+    child = manager.start("追问", parent_run_id=parent_id)
+    final = manager.wait(child.run_id, timeout=30)
+    assert final.status == FINISHED
+    assert final.session_id == "same-session"
+    assert final.parent_run_id == parent_id
+    assert final.harness == "pi" and final.executor == "inproc"
+    assert manager.shutdown(timeout=10) == []
+
+
+def test_known_cross_family_parent_is_refused_before_its_session_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """宿主从 acp 切到 pi 后，追问已知 ACP 父 run：fail-closed，且不读其会话。
+
+    父记录的会话文件被刻意布置成完全合法：旧代码（门禁不含族检查，读回时
+    harness 键被未知键过滤）会把这次追问放行到 ``_resume_seed`` 的会话读
+    取并受理——本测试因没有任何拒绝而变红；新代码在读取之前的族判定处拒
+    绝（绿）。
+    """
+    config = make_config(tmp_path)  # harness="pi"
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    admitted: list[str] = []
+
+    def recording_adapter(spec, **kwargs):
+        admitted.append(spec.run_id)
+        return _ResumingAdapter(spec.expected_session_id)
+
+    monkeypatch.setattr("pi_glink.kernel.runner.build_adapter", recording_adapter)
+    _write_parent_meta(
+        config, store, "parentrun001", harness="acp", executor="inproc"
+    )
+
+    with pytest.raises(FollowupUnavailable) as excinfo:
+        manager.start("追问", parent_run_id="parentrun001")
+    assert excinfo.value.code == "session_unavailable"
+    # 拒绝发生在会话读取与子 run 建立之前：没有任何子 run 被创建。
+    assert admitted == []
+    assert [record.run_id for record in store.list(limit=None)] == ["parentrun001"]
+
+
+def test_cross_family_refusal_precedes_the_state_checks(tmp_path: Path) -> None:
+    """族判定先于状态检查：run_busy 状态的跨族父 run 仍得 session_unavailable。
+
+    红→绿机制：旧代码不含族检查，未终态父 run 先得到 ``run_busy``，与本
+    测试断言的 ``session_unavailable`` 不同而变红。
+    """
+    config = make_config(tmp_path)
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    # 手写一份 RUNNING 状态的跨族父记录（未终态 → 旧顺序下是 run_busy）。
+    _write_parent_meta(
+        config,
+        store,
+        "busyparent01",
+        with_session_file=False,
+        status=RUNNING,
+        harness="acp",
+        executor="inproc",
+    )
+
+    with pytest.raises(FollowupUnavailable) as excinfo:
+        manager.start("追问", parent_run_id="busyparent01")
+    assert excinfo.value.code == "session_unavailable"
+
+
+def test_foreign_parent_stays_unknown_even_when_its_family_is_known(
+    tmp_path: Path,
+) -> None:
+    """门禁顺序：owner 判定先于一切事实读取。
+
+    跨租户父记录即便 harness 已知且跨族，仍先得到 ``unknown_run``——不泄
+    露存在性，也不泄露 ``session_unavailable`` 这一族判定结果。owner 门
+    禁本身未变，本测试新旧代码同绿，钉住这一不变式。
+    """
+    config = make_config(
+        tmp_path,
+        LOCAL_WEB_EXECUTOR="docker",
+        PI_GLINK_TENANCY="multitenant",
+        PI_GLINK_MODEL_CREDENTIALS="shared",
+        PI_GLINK_TENANCY_AUDIENCE="pi-glink-test",
+        PI_GLINK_GATEWAY_SECRET_FILE=str(tmp_path / "gateway-secret"),
+    )
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    _write_parent_meta(
+        config,
+        store,
+        "foreignparent",
+        with_session_file=False,
+        tenant_id="tenant-alpha",
+        creator_user_id="user-a",
+        harness="acp",
+        executor="docker",
+    )
+    stranger = TenantContext(
+        tenant_id="tenant-beta",
+        user_id="user-b",
+        role="member",
+        audience="pi-glink-test",
+        expires_at=time.time() + 600,
+    )
+
+    with pytest.raises(FollowupUnavailable) as excinfo:
+        manager.start("追问", stranger, parent_run_id="foreignparent")
+    assert excinfo.value.code == "unknown_run"
+
+
+def test_legacy_pi_parent_follow_up_adds_no_new_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """legacy 规则 2：无 harness 字段的父记录 + pi 宿主 → 不新增任何拒绝。
+
+    pi→pi 的 legacy 追问（读脱敏会话文件、--session 续接）行为与旧代码逐
+    断言一致；harness 未知即无法证明跨族，fail-closed 只适用于「已知不等」。
+    """
+    config = make_config(tmp_path)
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    monkeypatch.setattr(
+        "pi_glink.kernel.runner.build_adapter",
+        lambda spec, **kwargs: _ResumingAdapter(spec.expected_session_id),
+    )
+    _write_parent_meta(config, store, "parentrun001")  # 无 harness/executor 键
+    assert store.get("parentrun001").harness is None
+
+    child = manager.start("追问", parent_run_id="parentrun001")
+    final = manager.wait(child.run_id, timeout=30)
+    assert final.status == FINISHED
+    assert final.session_id == "same-session"
+    assert final.parent_run_id == "parentrun001"
+    assert manager.shutdown(timeout=10) == []

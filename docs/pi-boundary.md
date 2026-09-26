@@ -34,13 +34,35 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | fork / patch pi 源码 | 升级会失去可比性，且违背 objective | 仓库内无 pi 源码或补丁文件 |
 | vendor pi 包（复制 dist/src 进仓库） | 同上，并掩盖版本事实 | 仓库内不存在 pi 的构建产物 |
 | import pi 的内部模块/私有路径 | 未文档化接口随版本变化 | 宿主与前端不引用 node_modules 内的 pi 路径 |
-| 依赖未文档化行为 | 同上；实测结论必须来自官方文档或可复现实验 | `docs/pi-integration-notes.md` 每条都标注来源 |
+| 依赖未文档化行为 | 同上；实测结论必须来自官方文档或可复现实验（读私有落盘格式的有界例外见下「私有格式观察者例外」） | `docs/pi-integration-notes.md` 每条都标注来源 |
 | 修改用户全局 `~/.pi` | 会污染用户既有环境 | 宿主总是重定向 `PI_CODING_AGENT_DIR`；只**读**用户的 `web-search.json` |
 | 把密钥写进仓库 | 安全事故 | `.gitignore` + 密钥扫描 |
 | 容器/沙箱依赖宿主运行时 | 隔离面会失去意义 | 镜像与模板自包含（`docker/Dockerfile.worker`、`docker/e2b/Dockerfile.e2b`） |
 | 前端解析终端输出 | 事件契约的基础前提 | `tests/web/run-stream.test.mjs` 的断言 |
 | 凭据不经脱敏边界进入产品面 | 工具回显/env dump 会把 key 带进事件流、报告与会话文件 | 所有出站出口均过 `redaction.py`（含跨 delta 暂存）；`scripts/check-no-secrets.py` 扫描运行态产物；`tests/test_redaction.py` |
 | 把宿主整份环境变量交给 pi | 会把操作员 shell 里的其他凭据一并带入 | `kernel/agent_env.py` 的白名单 `_PASSTHROUGH_ENV` |
+
+### 私有格式观察者例外
+
+§1 与 [architecture.md](architecture.md) §1 的「不依赖未文档化接口」约束的是内核**协议与
+控制面**：启动、协议帧、事件、终态与报告仍只用文档化接口。以下两处读**私有落盘格式**做
+可观测性，是本节钉死的有界例外：
+
+* GLINK-SUB-R2 读 pi-subagents 包写在会话目录下的 `subagent-artifacts/` 私有布局
+  （`_meta.json`、transcript 与产物命名；见 architecture.md §3.5「R2 增强与关联」）；
+* GLINK-SUB-R3a/R3b 读 dsh 私有 zstd 会话格式（关联链与进度帧；见 architecture.md §3.5
+  「运行中进度」与 `docs/evidence/acp-subagent-zstd-spike.txt`）。
+
+例外成立的纪律（三条缺一不可）：
+
+1. **只读观察**：宿主从不写这些文件，也从不在内核控制路径（启动/协议/事件/终态/报告）
+   依赖它们；run 生命周期与权威状态不以其为事实来源，观察者失败只损失子代理进度呈现，
+   不回填 `child.json`。
+2. **精确 pin + pin 测试**：包/格式由 `agent/settings.json` 与 Dockerfile 精确 pin，pin
+   测试钉住所读布局/格式；上游升级导致 pin 变红时观察者**诚实降级**（child 显示普通
+   「进行中」，不伪造进度），修通后才允许滚动升级。
+3. **不承重正确性**：有 pin、有降级、权威路径不依赖；这条例外不放宽 §2 的禁止项本身，
+   新增任何私有格式读取都必须按同三条纪律先立条款再实现。
 
 ## 3. 升级路径
 

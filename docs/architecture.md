@@ -13,7 +13,7 @@
 
 具体接口与迁移在对应任务中决定，不预建无消费者的租户抽象；修改这些承诺遵循 [工程约束](engineering.md)。现有单 run 测试继续保护当前行为，将来的多租户变更在取得决定后同步替换相关断言，而不是把当前串行测试当作永久需求。
 
-另一个既定方向是**多 harness 平台化**：宿主保持 harness 无关，`kernel/` 泛化为 harness 适配层，候选内核包括 deepseek-harness、Claude Code、Codex 及一切 ACP 兼容 agent。方向、架构与里程碑见 [多 harness 方案](multi-harness-plan.md)；当前仓库仍只有 pi 一个内核实现，本文的进程拓扑与事件契约继续以 pi 为参照系描述。
+另一个既定方向是**多 harness 平台化**：宿主保持 harness 无关，`kernel/` 泛化为 harness 适配层，候选内核包括 deepseek-harness、Claude Code、Codex 及一切 ACP 兼容 agent。方向、架构与里程碑见 [多 harness 方案](multi-harness-plan.md)；当前仓库已落地两个 harness 族——pi 族（`--mode rpc` / `--mode json`）与 ACP 族（一切 ACP 兼容 agent 经 stdio JSON-RPC 双向桥接，dsh 0.1.7+ 为首个实测 agent）；本文的进程拓扑、事件契约与追问门禁对两族统一描述，pi 特有的协议细节仍以 pi 为参照系，ACP 族的协议事实见 [ACP 集成笔记](acp-integration-notes.md)。
 
 ## 1. 三层结构
 
@@ -281,7 +281,7 @@ child 在前端显示为普通「进行中」，不伪造进度。
    追问（`parentRunId`）与三个执行面同样适用。该门禁存在的原因：pi 对以 `/` 开头的消息先派发扩展命令
    （docs/rpc-commands.md），载入 pi-subagents 后 `/run --bg`、`/subagents-detach` 这类客户端可控输入
    能绕过 `tool_call` 守卫发起不随本 run 收口的后台进程（见 pi-integration-notes.md §10.4）。
-   `parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
+   `parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。追问门禁的同族判定比 run 记录自身的事实：准入时 `meta.json` 原子写入本 run 的 `harness`/`executor`（来自冻结配置，与 run id/owner 同一次写入），session_ready 提交时写回 `agent`（ACP 为协商到的 agentInfo.name；pi 协议不报 agent 身份，不伪造）；父记录带 `harness` 字段时，跨族追问一律 `session_unavailable`（fail-closed），父记录无该字段的旧数据维持原有证明路径。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
 2. 渲染**本 run 的**运行期配置目录与 session 目录（`runs/<id>/pi-agent`、会话根下的 `<id>/`），
    按 `LOCAL_WEB_EXECUTOR` 选择执行面（见 §5）；
 3. 事件投影 → `EventBus.commit`：先落 `events.jsonl`，再实时给 SSE（见 §3.1）；
@@ -431,7 +431,7 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 `web-search.json`；因此上一 run 的扩展、skill 或凭据不会因增量拷贝而残留。共享项只限于
 仓库 `agent/` 模板目录（只读输入）和 `data_root` 本身。
 
-**多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
+**多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。ACP 追问的状态根继承按**父 run 记录的 `executor`** 推导：父记录带该字段时 e2b 指向 `acp-agent/recovered`、其余执行面指向 `acp-agent/home`，宿主切换执行面后历史 e2b run 的合法追问仍可受理；旧记录无 `executor` 字段时回退为按宿主当前配置推导（原行为）。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
 
 **子代理副产物**：pi-subagents 的分支会话与主会话同名同目录（只能按会话头区分，见上表），产物目录由 `artifactDir: "session"` 落在会话目录的 `subagent-artifacts/`。E2B 面在沙箱销毁前把这些有界镜像到宿主拥有的 `runs/<id>/subagents/`（分支会话进 `sessions/`、产物进 `artifacts/`；深度/文件数/单文件/总量限幅，链接不跟随，失败记 `artifactFailures`），inproc/Docker 面的同类文件本就在宿主会话目录内、不另拷贝；两路的会话目录与镜像目录都在收尾时过 run 的脱敏边界（与 §6.1 会话文件同一条规则）。R1 起每个子代理另有权威文档 `runs/<id>/children/<n>/child.json`（§3.5）：它是协议可见事实的落地，与 P0 的 `subagents/` 原始镜像各自独立——镜像是回收基质（保持原样、不改写）；R2 起收尾时按序数启发式把产物关联复制进 `children/<n>/`（§3.5「R2 增强与关联」），未关联的文件留在基质里并记日志。
 
@@ -576,7 +576,9 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 `models-store.json`。仓库里的 `agent/` 只是模板，永远不作为运行目录使用；`pi-agent/` 不共享，
 所以并发 run 不会互写凭据或扩展。ACP 族的对应物是 `runs/<id>/acp-agent/home`（子进程的
 `HOME`）：凭据只读复制注入且值并入该 run 脱敏边界；e2b 面在沙箱销毁前有界回收为
-`acp-agent/recovered`，追问时灌回新沙箱（详见 [ACP 集成笔记](acp-integration-notes.md)）。
+`acp-agent/recovered`，追问时灌回新沙箱。追问继承哪一个状态根按父 run 记录的 `executor`
+推导（e2b→`recovered`，其余→`home`），不随宿主当前执行面配置漂移；无 `executor` 字段的
+旧记录回退为按当前配置推导（详见 [ACP 集成笔记](acp-integration-notes.md)）。
 
 宿主 HTTP 层的职责边界：路由只决定请求含义（`web_routes`），身份与请求防护集中在
 `web_security`，事件流与连接额度在 `web_sse`，字节读写与静态资源在 `web_http`；`app.py` 只做
@@ -650,7 +652,7 @@ owner/role 判定再受理：其他租户得到与未知 run 相同的 404 且�
 
 多轮追问遵循同一规则：`parentRunId` 的父 run 必须先通过租户门禁，未知/异租户/无 owner 的 parent 统一
 返回 `unknown_run`（404），且在所有者得到确认之前不读取它的状态、会话文件、报告或子 run 计数；
-先读后判会让“运行中/已有后续轮次”的父 run 以 `run_busy`/`stale_run` 泄露存在性。同租户父 run 的
+先读后判会让“运行中/已有后续轮次”的父 run 以 `run_busy`/`stale_run` 泄露存在性。同族判定在租户门禁之后、状态检查之前比父记录的 `harness` 字段：父记录带该字段且与本次请求的 harness 不等时，对本租户调用者拒绝为 `session_unavailable`，不读取其会话/状态根；父记录无该字段的旧数据维持原有证明路径（pi 族不加新拒绝，ACP 族由事件流 `session_ready` 帧的 harness 标记证明）。同租户父 run 的
 `session_unavailable`、`stale_run`、`report_unavailable` 等具体拒绝保持可解释；子 run 始终继承调用者
 自己的 owner、凭据与私有会话/工作区，复制的是已脱敏的会话副本与上一轮报告。
 
