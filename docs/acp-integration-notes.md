@@ -1692,3 +1692,11 @@ p4 方案（GLINK-SUB 可见性）遗留的未验证项：ACP 面是否暴露子
   无大小纪律，大任务量形态未验证。
 * **版本相关**：发布版 dsh 0.1.5-rc.3（M2 钉版）不含 subagent 工具；ACP 子代理能力随
   harness 版本变化，P1 的能力位声明必须按版本实测。
+
+## 17. zstd 会话格式可行性 spike（2026-09-26，R3b）
+
+证据：`docs/evidence/acp-subagent-zstd-spike.txt`。`zstd -dc` 解压即得 JSONL；
+主会话 `tool/call`（callId）+ 相邻 `subagent/catalog`（childId/label/mode）给出派发关联，
+子会话头带 `parentSession`/`origin:"subagent"`/`delegationDepth`，子会话内 step/tool 进度帧
+完整——**dsh 0.1.7 的子代理观察者可行，能力位可由 coarse 升级为 steps**（整份重读 +
+大小上限 + 布局 pin 为前提；增量读取不可行，文件持续重写）。

@@ -1,0 +1,51 @@
+# ACP 子代理 zstd 会话格式可行性 spike（R3b）
+
+日期: 2026-09-26
+前置: docs/evidence/acp-subagent-spike.txt（发现子代理会话与主会话并列、zstd 压缩）
+执行面: inproc ACP（dsh 0.1.7-rc.1 源码构建），临时数据根 /tmp/glink-zstd-spike-*（已清理），
+一次最小真实 run（1 个 subagent 委派，~15s），宿主按记录 PID 终止。
+
+## 问题
+
+1. session.v4.jsonl.zstd 能否解析（解压 + JSONL 结构）？
+2. 子代理会话内是否有进度帧（可作为 ACP 观察者数据源）？
+3. 主会话工具调用（callId）与子代理会话（childId）能否关联？
+
+## 实测事实（run 073a3fc72763，主会话 a9b72aeb + 子会话 e3282967）
+
+**格式可读**：`zstd -dc` 解压即得 JSONL，逐行 JSON 可解析（主会话 31 行/51KB、
+子会话 18 行/36KB，压缩后 20KB/12KB）。帧结构为 `{type, seq, time, data, ...}`。
+
+**关联链存在（主会话内）**：
+- `tool/call {seq:15, data:{callId: "call_00_EKCE…", name: "subagent", arguments: "{description, prompt, run_in_background}"}}`
+- `subagent/catalog {seq:16, data:{version:0, childId: "e3282967-…", childCreatedAt, mode: "one-shot", label}}`
+- catalog 帧紧邻对应 tool/call（seq+1），给出 callId ↔ childId 的关联；catalog.data 内无 callId，
+  关联靠帧相邻位置（同 step 内）。
+- 子会话头：`{type:"session", id: childId, parentSession: <主会话id>, origin: "subagent", delegationDepth: 1}`
+  ——主/子会话判别干净（对比 pi 族靠 parentSession 字段存在与否，dsh 还有 origin 与深度）。
+
+**子会话进度帧完整**：`subagent/descriptor {mode, provider:"spawn", label}`、
+`step/start`、`assistant/message`、`tool/call`、`tool/result`、`step/end`、`turn/end`，
+均带 seq/time——逐步进度（步骤数、最近工具名/目标）可提取，粒度不亚于 pi 族子会话。
+
+**其他观察**：主/子会话都有 `agent/inbox/spliced`（宿主 system prompt 注入记录）、
+`session-log-deepseek/delivery-accepted`、`delegationDepth`（主=0，子=1）；
+dsh 的 subagent 参数含 `run_in_background: false`（前台派发）。
+
+## 结论
+
+1. **ACP（dsh 0.1.7）子代理观察者可行**：主会话 tool/call + 相邻 subagent/catalog 得
+   callId↔childId 映射；子会话提供逐步进度帧。dsh 的能力位可从 coarse 升级为 steps
+   （仅 dsh 0.1.7+ 实测；0.1.5 无 subagent 工具，其余 ACP agent 未测）。
+2. **代价与边界**：格式是 dsh 私有（session v4）且 zstd 压缩——观察者需整份解压
+   （文件 KB 级，按轮询重读，须设大小上限）；文件持续重写（有 session.lock），
+   增量读取不可行，只能整份重解析；布局须像 pi-subagents 一样做 pin 测试。
+3. **与 pi 族的形态对齐**：两族都是「主会话内关联帧 + 子会话进度帧」，
+   ChildRun 的 R3 进度供给（subagent_updated）两族可实现同一语义。
+
+## 未覆盖
+
+- zstd 流式/增量解码的可行性（当前结论按整份重读设计）；
+- 多子代理并行时 catalog 与 call 的相邻性是否稳定（本次单子代理）；
+- run_in_background: true 的形态（pi-glink 的守卫语义只关心前台）；
+- codex-acp / claude-agent-acp / opencode 的子代理会话格式（各自不同，未测）。
