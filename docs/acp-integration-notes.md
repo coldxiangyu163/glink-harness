@@ -1674,3 +1674,21 @@ ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上
   会变长，沙箱寿命可能先到（结论仍 fail-closed，但拒绝原因不同）。若要缩短，需要按 agent
   白名单收缩状态根或提高限制，属产品决策（未在本任务改动）。
 * **e2b 面回收失败后的追问**：拒绝发生在起沙箱之前（§15.3），不预支一次注定失败的云端 run。
+
+## 16. ACP 子代理暴露面与续接 spike（2026-09-26，dsh 0.1.7-rc.1 源码构建）
+
+p4 方案（GLINK-SUB 可见性）遗留的未验证项：ACP 面是否暴露子代理、子代理会话落点与体积、
+带子代理的 run 能否续接。证据：`docs/evidence/acp-subagent-spike.txt`。
+
+* **dsh 的 acp profile 暴露 `subagent` 工具**，产品事件形态与 pi 族一致：派发是普通工具卡片
+  （`tool_started` 带任务描述与子提示，`tool_finished` 带子代理结论文本），无独立的子代理
+  进度事件——观测粒度为「工具卡片级」（coarse）。
+* **子代理会话落点（实测，修正二手描述）**：与主会话**并列**于
+  `.dsh/sessions/--<workspace>--/<sessionId>/session.v4.jsonl.zstd`（zstd 压缩），
+  不在 `subagents/<uuid>/` 下；session_projcache 同步登记。
+* **追问可续接**：带子代理的首轮后 `session/resume` 成功（同一 sessionId，2.7s），
+  追问 run 继承全部 3 个会话（主 + 2 子代理），回答准确复述上轮上下文。
+* **体积**：2 个子代理使状态根约 108K → 远低于 64 MiB 上限，但子代理会话与主会话同目录、
+  无大小纪律，大任务量形态未验证。
+* **版本相关**：发布版 dsh 0.1.5-rc.3（M2 钉版）不含 subagent 工具；ACP 子代理能力随
+  harness 版本变化，P1 的能力位声明必须按版本实测。

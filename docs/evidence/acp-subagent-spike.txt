@@ -1,0 +1,59 @@
+# ACP 子代理暴露面与续接 spike（GLINK-SUB-P0 后续 / P1 门禁）
+
+日期: 2026-09-26
+执行面: inproc（本地 loopback 宿主，随机端口，临时数据根 /tmp/glink-sub-spike-mV1WNY，0700）
+agent: 源码构建 dsh 0.1.7-rc.1（~/AI/git/deepseek-harness/apps/cli/lib/bin.js --profile acp）
+凭据: ~/.dsh/.credentials.yaml 只读复制注入每 run HOME（0600，沿用 M2 形态）
+宿主: PI_GLINK_HARNESS=acp，LOCAL_WEB_EXECUTOR=inproc，任务超时 900s
+成本: 两次真实模型 run（首轮 + 追问），均为秒级小任务
+
+## 问题（p4 修正版留下的未验证项）
+
+1. ACP 面是否暴露子代理信息？暴露什么形态？
+2. dsh 子代理会话落在状态根的哪里、体积增长多少（对照 INHERIT_MAX_TOTAL_BYTES=64 MiB）？
+3. 带子代理的 run 之后追问（session/resume）是否仍可续接？
+
+## 实测事实
+
+### 首轮 run dbebd4245bc5（finished，14.1s，18 事件）
+
+- dsh 0.1.7-rc.1 的 acp profile **暴露名为 `subagent` 的工具**，模型按提示并行调用 2 次。
+- 产品事件形态：与 pi 族一致——子代理派发就是普通工具卡片（§3「不做特例」成立）：
+  - `tool_started {toolName: "subagent", args: {description, prompt}}`（任务描述与完整子提示可见）
+  - `tool_finished {toolName: "subagent", result: "<子代理结论文本>"}`（子代理最终回答直接可见）
+  - 未观察到独立的子代理 session/update 通知或子代理进度事件（18 事件里无此类）。
+- 状态根布局（实测，修正 p4 的二手描述）：**子代理会话不在 `subagents/<uuid>/` 下**，
+  而是与主会话并列于 `.dsh/sessions/--<workspace>--/<sessionId>/session.v4.jsonl.zstd`：
+  - 6363f5ca-bfb8-4d6e-a590-1200e10165b7（主会话，= run 的 sessionId）
+  - 3b728b6b-… 与 adc0a274-…（两个子代理会话）
+  - session_projcache 同步登记全部三个；会话文件为 zstd 压缩。
+- 体积：整个状态根 108K（3 会话 + profile + storages），远低于 64 MiB 上限。
+
+### 追问 run a2f3661989d7（finished，2.7s，9 事件）
+
+- 准入通过，`session/resume` 成功（kernel_status: acp_session_resumed，同一 sessionId 6363f5ca）。
+- 追问回答准确复述上一轮上下文（"调用了 subagent 工具，共 2 次，并行委派；A 任务…B 任务…"），
+  续接语义成立。
+- 追问 run 的状态根继承父 run 全部 3 个会话（含 2 个子代理会话），总 124K。
+
+## 结论（对 P0′ / P1 门禁）
+
+1. **ACP 面（dsh）可观测子代理，但粒度是"工具卡片级"**：派发参数与最终结果可见，
+   无中间进度事件。按 p4 的能力分级这是 `coarse` 级（能展示列表与结果，不能展示实时进度）。
+2. **带子代理的追问可以续接**（inproc 实测）：子代理会话随状态根继承，session/resume 正常。
+3. **状态根体积风险（P0′）在当前形态下不成立**：2 个子代理只带来 ~70K 增长；
+   但子代理会话与主会话同目录、无大小纪律，规模放大后仍可能顶到 64 MiB——
+   结论只覆盖本次小任务形态，大任务量场景未验证。
+4. 子代理会话的定位键存在但需映射：`tool_started` 的 toolCallId 与子代理 sessionId
+   的对应关系不在产品事件里；如 P1 需要"卡片 → 子会话"链接，数据源是状态根里
+   子代理会话的内容（zstd），不是事件流。
+5. pi 族与 ACP 族的子代理暴露形态由此对齐为同一等级（都是工具卡片 + 文件侧细节），
+   p4 的「ACP 是否暴露子代理需要 spike」问题已回答：暴露，且不需要新协议通道。
+
+## 边界与未验证
+
+- 只覆盖 inproc 面 + dsh 0.1.7-rc.1（源码构建）；发布版 dsh 0.1.5-rc.3（M2 钉版）
+  不含 subagent 工具（其包内无 subagent 字样）——ACP 子代理能力与 harness 版本强相关。
+- codex-acp / claude-agent-acp / opencode 的子代理形态未测（各自机制不同）。
+- Docker/E2B 面的子代理继承未测（E2B 面状态根有界回收，文件数/体积上限行为未实测）。
+- 中间进度（子代理逐步工具流）是否存在于主会话 zstd 内未解析（压缩格式，本次未解压核对）。
