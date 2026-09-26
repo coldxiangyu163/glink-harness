@@ -411,3 +411,17 @@ node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 像素级�
 node tests/browser/ui-features.mjs --base-url http://127.0.0.1:7861 # 32 项全功能自检
 node tests/browser/run-smoke.mjs --base-url http://127.0.0.1:7861   # 真实 run 端到端 + 截图
 ```
+
+**自包含的浏览器验收（不需要既有服务、不调模型）**：
+
+```bash
+cd tests/browser && npm install --no-audit --no-fund   # 一次性；lockfile 锁定 playwright
+node tests/browser/acceptance.mjs --mode accounts      # 102 项：多租户 + 站内账号
+node tests/browser/acceptance.mjs --mode local         # 81 项：单用户本地面
+node tests/browser/acceptance.mjs --mode gateway       # 7 项：网关未认证面
+```
+
+它自己起隔离宿主（真实 Runner/存储/事件总线/HTTP/SSE + 生产前端，执行面是合成替身，
+临时数据根与合成凭据），结果与截图写 `--out`（默认系统临时目录）。最近一次全量结果见
+[docs/browser-acceptance-report.md](docs/browser-acceptance-report.md)，用法见
+[tests/browser/README.md](tests/browser/README.md)。它不接入 `scripts/check.sh`。

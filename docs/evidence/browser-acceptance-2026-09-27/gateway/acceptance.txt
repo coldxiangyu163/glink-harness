@@ -1,0 +1,15 @@
+pi-glink 浏览器验收 · mode=gateway
+baseUrl: http://127.0.0.1:57918
+命令: node tests/browser/acceptance.mjs --mode gateway
+时间: 2026-09-26T17:04:53.274Z → 2026-09-26T17:04:55.201Z
+
+[ok]   gateway-identity · 网关模式未认证入口：只有「从统一入口访问」的说明，没有站内表单 · {"authVisible":true,"shellHidden":true,"title":"研究工作台","loginHidden":true,"registerHidden":true,"gatewayNote":"本站通过组织的认证网关访问。请从统一入口登录后重试；站内不提供登录表单。","unavailableHidden":true,"retryHidden":true,"historyLeak":false}
+[ok]   gateway-identity · /api/me：401 + mode=gateway（前端据 mode 选择网关说明） · {"status":401,"body":{"error":"unauthenticated","mode":"gateway"}}
+[ok]   gateway-identity · 网关模式：匿名创建 / 列表读取都被拒绝（401） · {"run":401,"list":401}
+[ok]   gateway-identity · 网关模式：跨站来源的 POST 被拒绝（401 未认证或 403 来源） · 401
+[ok]   gateway-identity · 网关入口文字不暴露内核/执行面/会话事实 · []
+[ok]   assets · 静态资产：前端资源全部 200（CSS/模块/图标/字体） · {"failed":[],"loadedCount":15}
+[ok]   assets · 网关入口控制台无错误（401 探测除外） · []
+
+结果: 7 通过 / 0 失败 / 0 跳过（共 7）
+console 错误: 6

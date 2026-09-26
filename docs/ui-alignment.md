@@ -119,8 +119,13 @@ node --test tests/web/*.test.mjs                                        # 用词
 node tests/browser/ui-parity.mjs   --base-url http://127.0.0.1:7861     # 30 角色逐值（历史脚本，会写 docs/evidence）
 node tests/browser/ui-features.mjs --base-url http://127.0.0.1:7861     # 54 项交互自检（同上）
 node tests/browser/run-smoke.mjs   --base-url http://127.0.0.1:7861     # 真实 run 端到端（同上）
-# 账号模式：隔离 fixture（临时账号库 + fake 执行面）上的人工浏览器验收，
-# 详见 docs/engineering.md 的浏览器段；没有使用 npx 缓存猜版本的自动脚本。
+# 三种身份面的浏览器验收（project-local 锁定依赖 + 隔离 fixture + 合成场景）：
+cd tests/browser && npm install --no-audit --no-fund                     # 一次性
+node tests/browser/acceptance.mjs --mode accounts                        # 102 项
+node tests/browser/acceptance.mjs --mode local                           # 81 项
+node tests/browser/acceptance.mjs --mode gateway                         # 7 项
+# 结果与截图写在 --out（默认系统临时目录），不覆盖 docs/evidence/；
+# 最近一次全量结果见 docs/browser-acceptance-report.md。
 ```
 
 ⚠ 按 [工程约束](engineering.md#浏览器与-live-验收)：`ui-features` 与 `run-smoke` 会向目标服务**提交真实研究**

@@ -88,19 +88,28 @@ bash scripts/check.sh
 
 当前 `tests/browser/run-smoke.mjs`、`ui-features.mjs` 和 `ui-parity.mjs` 仍是**历史脚本**：它们会向目标服务提交真实研究、读取历史或扫描个人 npx 缓存，并写入 `docs/evidence/`。它们不在默认检查内，运行前须明确服务归属、模型/云端授权和证据覆盖范围。不得借用固定端口上的未知服务或停止不属于本任务的 run。
 
-**隔离浏览器入口（账号模式，人工验收）**：`tests/fixtures/accounts_server.py` 启动一个真实宿主
-（真实 Runner/存储/事件总线/HTTP/SSE/生产前端）在 OS 分配的 loopback 端口上，使用临时 data root 与
-临时 SQLite 账号库，只把执行面替换为进程内 fake adapter（`pi_glink.kernel.runner.build_adapter`，
-与 Python 回归同一机制）；它只读合成凭据、不发邮件、不接触真实 `.env`/`~/.pi`/既有服务，退出时由
-调用者按**记录的 PID** 终止（不要用宽匹配 `pkill`）。它不接入 `scripts/check.sh`，也不声明为自动
-门禁。2026-09-23 的账号浏览器验收用 ego-browser（用户已登录的 Chromium，不启动第二个浏览器、不
-读取个人 npx 缓存）在该 fixture 上人工执行，覆盖：登录/邀请注册/账号菜单与邀请对话框/运行与报告/
-跨租户 404/窄栏账号区/注销后无历史闪现；截图与状态保存在会话临时目录，未写入 `docs/evidence/`。
+**隔离浏览器套件（project-local 锁定依赖，不在默认检查内）**：`tests/fixtures/accounts_server.py`
+启动一个真实宿主（真实 Runner/存储/事件总线/HTTP/SSE/生产前端）在 OS 分配的 loopback 端口上，使用
+临时 data root、临时账号库与临时 `HOME`/`XDG`，只把执行面替换为进程内脚本化替身
+（`pi_glink.kernel.harness_pi.compose_adapter`，与 Python 回归同一机制）；它只读合成凭据、不发邮件、
+不接触真实 `.env`/`~/.pi`/既有服务，退出时由调用者按**记录的 PID** 终止（不要用宽匹配 `pkill`）。
+fixture 支持 `accounts` / `local` / `gateway` 三种身份面，题目里的 `[scenario:…]` 标记选择合成场景
+（`tools` / `subagent` / `slow` / `fail` / `length`）。
 
-**仍待实现（需先取得锁定依赖的决定）**：可自动重复、可进默认检查的真实浏览器门禁。它必须使用
-project-local、lockfile 锁定的浏览器依赖（不得扫描 `~/.npm/_npx` 或猜版本），并复用上面的隔离
-fixture；在取得该决定与依赖之前，账号 UI 的浏览器层只有人工验收 + Node DOM 回归，不能把它写成
-自动化已覆盖。
+`tests/browser/acceptance.mjs` 用**仓库内、lockfile 锁定**的 Playwright（`tests/browser/package.json`，
+不扫描 `~/.npm/_npx`、不猜版本；`node_modules` 被忽略）驱动生产前端，覆盖 identity / shell /
+composer / lifecycle / subagent / report / progress / tenancy / resilience / gateway-identity /
+assets 十一个维度；结果写 `--out`（默认系统临时目录），宿主按 PID 终止。2026-09-27 的三面运行
+（accounts 102 项 / local 81 项 / gateway 7 项）见 [浏览器验收报告](browser-acceptance-report.md) 与
+`docs/evidence/browser-acceptance-2026-09-27/`。用法见 `tests/browser/README.md`。
+
+**它不接入 `scripts/check.sh`，也不声明为自动门禁**：进入默认检查需要先决定 CI 是否安装浏览器依赖
+与缓存、以及失败是否阻塞合并。在此之前，浏览器层的自动覆盖是“可重复执行、证据可归档”的定向验收，
+不是默认入口的一部分。
+
+历史脚本（`run-smoke.mjs`、`ui-features.mjs`、`ui-parity.mjs`）保留给“对已在运行的服务做人工核对”：
+它们会提交真实研究、扫描个人 npx 缓存并写入 `docs/evidence/`，运行前仍须明确服务归属、模型/云端
+授权与证据覆盖范围；`ui-parity.mjs` 还需要标准库参考站。
 
 真实 pi / Docker / E2B 验收单独记录版本、执行面、目标服务与资源范围。模板构建、切换及云端付费调用不因一次本地测试授权自动获准。多租户上线还需要架构中列出的跨租户拒绝与隔离证据，不能由单 run smoke 替代；合成矩阵（临时密钥、自签断言、fake 执行面）只证明宿主侧授权、归属、凭据与准入逻辑，不证明真实网关、镜像/模板隔离强度或云沙箱资源限制。
 
