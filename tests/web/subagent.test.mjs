@@ -21,8 +21,10 @@ import {
   createRunSubscription,
 } from '../../web/modules/run-stream.mjs';
 import {
+  childCardState,
   childFacts,
   childLabel,
+  childProgressText,
   childStateLabel,
   childStatusText,
   childrenPanelTitle,
@@ -260,4 +262,117 @@ test('childFacts formats duration and tool count, empty without enrichment', () 
   assert.equal(childFacts({ durationMs: 95000 }), '1 分 35 秒');
   assert.equal(childFacts({}), '', '未增强的 child 没有事实行');
   assert.equal(childFacts({ durationMs: 0, toolCount: 0 }), '');
+});
+
+/* ── R3a 运行中进度（subagent_updated，§3.5） ─────────────────────────────── */
+
+test('subagent_updated attaches progress to the child and its card; the latest frame wins', () => {
+  let model = createRunModel({ runId: 'r1' });
+  model = applyEvents(model, [
+    frame(1, 'subagent_started', { n: 0, toolCallId: 'c1', agent: 'researcher', task: '核查跨境资金监管' }),
+    frame(2, 'subagent_updated', { n: 0, steps: 2, lastToolName: 'web_search', lastToolTarget: '跨境资金监管', bytes: 512 }),
+    frame(3, 'subagent_updated', { n: 0, steps: 3, lastToolName: 'read', lastToolTarget: 'report.md', bytes: 1024 }),
+  ]);
+  // 回放按 seq 顺序施加，同一 child 的多条 updated 只留最后一条的效果。
+  const expected = { steps: 3, lastToolName: 'read', lastToolTarget: 'report.md', bytes: 1024 };
+  assert.deepEqual(model.children[0].progress, expected);
+  const card = model.items.find((item) => item.kind === 'subagent');
+  assert.deepEqual(card.progress, expected, '派发卡片与 child 同步进度');
+  assert.equal(model.children[0].status, 'running', '进度帧不参与终态判定');
+});
+
+test('the step counter never regresses on stale or malformed updated frames', () => {
+  let model = createRunModel({ runId: 'r1' });
+  model = applyEvents(model, [
+    frame(1, 'subagent_started', { n: 0, toolCallId: 'c1', agent: 'researcher', task: '核查' }),
+    frame(2, 'subagent_updated', { n: 0, steps: 5, lastToolName: 'read', lastToolTarget: 'a.md', bytes: 100 }),
+    // 乱序/异常帧：steps 回退与非法值都被挡下，其余字段仍是 latest-wins。
+    frame(3, 'subagent_updated', { n: 0, steps: 2, lastToolName: 'write', lastToolTarget: 'b.md', bytes: 200 }),
+    frame(4, 'subagent_updated', { n: 0, steps: 'many', lastToolName: 'edit', lastToolTarget: 'b.md', bytes: 300 }),
+  ]);
+  const { progress } = model.children[0];
+  assert.equal(progress.steps, 5, 'steps 只增不回退');
+  assert.equal(progress.lastToolName, 'edit', '其他字段取最后一帧');
+  assert.equal(progress.bytes, 300);
+});
+
+test('an updated frame for an unknown child is ignored, not materialised', () => {
+  let model = createRunModel({ runId: 'r1' });
+  model = applyEvent(model, frame(1, 'subagent_updated', { n: 0, steps: 3, lastToolName: 'read', bytes: 10 }));
+  assert.equal(model.children.length, 0, '进度帧不能凭空造出 child');
+  assert.equal(model.items.length, 0);
+  assert.equal(model.lastSeq, 1, '帧仍计入水位线');
+});
+
+test('a replay applies every updated frame in order, so only the last one stands', () => {
+  // 回放路径与实时路径同是 applyEvent：中间帧丢失不改变最终呈现。
+  let full = createRunModel({ runId: 'r1' });
+  full = applyEvents(full, [
+    frame(1, 'subagent_started', { n: 0, toolCallId: 'c1', agent: 'researcher', task: '核查' }),
+    frame(2, 'subagent_updated', { n: 0, steps: 1, lastToolName: 'web_search', lastToolTarget: '甲', bytes: 100 }),
+    frame(3, 'subagent_updated', { n: 0, steps: 2, lastToolName: 'read', lastToolTarget: '乙.md', bytes: 200 }),
+    frame(4, 'subagent_updated', { n: 0, steps: 3, lastToolName: 'write', lastToolTarget: '丙.md', bytes: 300 }),
+  ]);
+  let tailOnly = createRunModel({ runId: 'r1' });
+  tailOnly = applyEvents(tailOnly, [
+    frame(1, 'subagent_started', { n: 0, toolCallId: 'c1', agent: 'researcher', task: '核查' }),
+    frame(4, 'subagent_updated', { n: 0, steps: 3, lastToolName: 'write', lastToolTarget: '丙.md', bytes: 300 }),
+  ]);
+  assert.deepEqual(full.children[0].progress, tailOnly.children[0].progress);
+});
+
+test('the card shows progress only while running; a settled card goes back to its status word', () => {
+  const progress = { steps: 3, lastToolName: 'read', lastToolTarget: 'report.md', bytes: 1024 };
+  assert.equal(childCardState({ status: 'running', progress }), '3 步 · 最近读取 report.md');
+  assert.equal(childCardState({ status: 'finished', progress }), '', '完成后进度行消失');
+  assert.equal(childCardState({ status: 'failed', progress }), '失败');
+  assert.equal(childCardState({ status: 'cancelled', progress }), '已停止');
+  assert.equal(childCardState({ status: 'interrupted', progress }), '已中断');
+  // 终态落定后模型里的 progress 数据不再驱动呈现。
+  let model = createRunModel({ runId: 'r1' });
+  model = applyEvents(model, [
+    frame(1, 'subagent_started', { n: 0, toolCallId: 'c1', agent: 'researcher', task: '核查' }),
+    frame(2, 'subagent_updated', { n: 0, steps: 3, lastToolName: 'read', lastToolTarget: 'report.md', bytes: 1024 }),
+    frame(3, 'subagent_finished', { toolCallId: 'c1', ns: [0], status: 'finished', isError: false, resultPreview: '核查完成' }),
+  ]);
+  const card = model.items.find((item) => item.kind === 'subagent');
+  assert.equal(childCardState(card), '', '收口的卡片不渲染进度行');
+});
+
+test('a running child without a progress source renders no progress line', () => {
+  assert.equal(childProgressText({ status: 'running' }), '');
+  assert.equal(childCardState({ status: 'running' }), '', '无进度源不伪造进度行');
+  assert.equal(childProgressText({ progress: { steps: 0, lastToolName: '', lastToolTarget: '', bytes: 0 } }), '');
+});
+
+test('childProgressText speaks reader language and bounds the target', () => {
+  assert.equal(
+    childProgressText({ progress: { steps: 3, lastToolName: 'read', lastToolTarget: 'report.md', bytes: 9 } }),
+    '3 步 · 最近读取 report.md',
+  );
+  assert.equal(
+    childProgressText({ progress: { steps: 1, lastToolName: 'web_search', lastToolTarget: '跨境资金监管', bytes: 9 } }),
+    '1 步 · 最近检索 跨境资金监管',
+  );
+  // 引擎工具名不上屏：未知工具走 describeTool 的读者语言回退。
+  const unknown = childProgressText({ progress: { steps: 2, lastToolName: 'mcp__internal_x', bytes: 9 } });
+  assert.ok(!unknown.includes('mcp__internal_x'));
+  assert.equal(childProgressText({ progress: { steps: 4, lastToolName: '', bytes: 9 } }), '4 步');
+});
+
+test('the subscription also listens for subagent_updated (named SSE frames never reach onmessage)', () => {
+  const listeners = new Map();
+  const source = {
+    readyState: 0,
+    addEventListener(type, handler) { listeners.set(type, handler); },
+    close() { this.readyState = 2; },
+  };
+  const subscription = createRunSubscription({
+    runId: 'r1',
+    eventsUrl: () => '/api/runs/r1/events',
+    eventSourceFactory: () => source,
+    onEvent: () => {},
+  });
+  assert.ok(listeners.has('subagent_updated'), 'subagent_updated 必须有显式监听');
+  subscription.close();
 });

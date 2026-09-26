@@ -70,6 +70,8 @@ from ..config import (
     ACP_PERMISSION_OPTION_KINDS,
     ACP_PERMISSION_TOOL_KINDS,
 )
+from .acp_child_progress import AcpChildProgressSource
+from .acp_child_progress import available as acp_progress_available
 from .acp_e2b_env import E2BAcpSandboxClient
 from .acp_rpc import (
     REQUEST_TIMEOUT_SECONDS,
@@ -755,6 +757,23 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         # The workspace already is the host directory for this face.
         return ArtifactRecovery()
 
+    def child_progress_source(self) -> AcpChildProgressSource | None:
+        """Poll the state root's dsh session files for child progress (R3a).
+
+        The in-process and Docker faces share the host state root (the
+        container mounts this run's ``HOME``), so one source serves both. The
+        sessions are dsh's private zstd format, so the source exists only
+        while ``zstandard`` is installed (``pi-glink[acp-progress]``); without
+        it this face honestly has no progress. The sandbox face overrides this
+        with ``None`` — its sessions die with the sandbox (coarse capability).
+        """
+        if not acp_progress_available():
+            return None
+        home = getattr(self.spec.runtime, "home", None)
+        if home is None:
+            return None
+        return AcpChildProgressSource(Path(home) / ".dsh" / "sessions")
+
     def identity(self) -> Mapping[str, str]:
         # An in-process agent has no durable external identity (no container, no
         # sandbox), exactly like the pi inproc face. A containerised ACP agent
@@ -1048,6 +1067,12 @@ class AcpSandboxExecutionAdapter(AcpExecutionAdapter):
         # ran, so a publishable answer exists from then on (``session_file``
         # stays None on this face).
         return publishable_recovered_session(self.session_info())
+
+    def child_progress_source(self) -> None:
+        # R3a: the sandbox face stays **coarse** — the dsh session files only
+        # exist inside the sandbox, and this face implements no live mirror of
+        # them, so there is honestly no running progress to poll.
+        return None
 
     def recover_artifacts(self, destination: Path) -> ArtifactRecovery:
         files, failures = self._sandbox.recover_artifacts(destination)

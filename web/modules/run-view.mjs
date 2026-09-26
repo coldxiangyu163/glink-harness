@@ -25,9 +25,9 @@
  */
 
 import {
+  childCardState,
   childFacts,
   childLabel,
-  childStateLabel,
   childStatusText,
   childrenPanelTitle,
   describeChild,
@@ -512,7 +512,11 @@ export function createRunView({
         if (nameNode.textContent !== described.action) nameNode.textContent = described.action;
         const argsNode = node.querySelector('.pi-tool-args');
         if (argsNode.textContent !== described.object) argsNode.textContent = described.object;
-        node.querySelector('.pi-tool-state').textContent = childStateLabel(item);
+        // 进行中时状态位借给 R3a 进度行（3 步 · 最近读取 report.md）；收口后
+        // 回到状态词。复用 pi-tool-state 同一槽位，不引入新类。
+        const stateNode = node.querySelector('.pi-tool-state');
+        const stateText = childCardState(item);
+        if (stateNode.textContent !== stateText) stateNode.textContent = stateText;
         const resultNode = node.querySelector('.pi-tool-result');
         const resultText = displayPath(item.resultPreview || '');
         resultNode.hidden = resultText === '';

@@ -11,6 +11,9 @@ dependencies = []
 dev = ["pytest>=8.0"]
 # E2B 执行面（LOCAL_WEB_EXECUTOR=e2b）。代理网络下 httpx 需要 socks 支持。
 e2b = ["e2b>=2.0", "httpx[socks]>=0.27"]
+# ACP 子代理运行中进度观察者（docs/architecture.md §3.5「运行中进度（R3a）」）：
+# 解析 dsh 的 zstd 会话格式。缺失时 ACP 面的子代理进度如实为无（降级而非报错）。
+acp-progress = ["zstandard>=0.22"]
 
 [project.scripts]
 pi-glink = "pi_glink.app:main"

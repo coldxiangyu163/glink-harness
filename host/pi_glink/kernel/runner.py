@@ -148,6 +148,16 @@ SWEEP_MAX_FILES = 2000
 _ACP_CAPABILITY_SCAN_EVENTS = 50
 _USAGE_FIELDS = ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
 
+#: R3a observer bounds (docs/architecture.md §3.5「运行中进度（R3a）」): one
+#: polling thread per run at this cadence, at most one ``subagent_updated``
+#: per child per throttle window, a bounded consecutive-failure budget before
+#: the observer stops, and a bounded join when the run finalizes.
+_PROGRESS_POLL_SECONDS = 1.0
+_PROGRESS_THROTTLE_SECONDS = 2.0
+_PROGRESS_MAX_FAILURES = 5
+_PROGRESS_MAX_BACKOFF_SECONDS = 5.0
+_PROGRESS_JOIN_SECONDS = 5.0
+
 #: Run phases. ``open`` accepts frames and cancellation; the verdict commit
 #: moves it to ``committed``, or to ``uncommitted`` when the durable terminal
 #: append failed (the run then keeps its slot until a restart reconciles it).
@@ -323,6 +333,28 @@ class _Execution:
     artifact_failures: list[str] = field(default_factory=list)
     # resource facts
     cleanup: CleanupReport | None = None
+    # R3a child-progress observer (transient facts only — never a verdict
+    # input, never written to child.json, §3.5「运行中进度（R3a）」).
+    #: In-flight dispatch calls: toolCallId → children in task order
+    #: (``{"n", "agent"}``); a call leaves the table when its finished event
+    #: commits. Guarded by the run lock like every frame commit.
+    progress_calls: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    #: Children whose finished event committed: no more progress for them.
+    progress_finished_ns: set[int] = field(default_factory=set)
+    progress_observer_started: bool = False
+    #: Once finalize has stopped the observer no started event may start it
+    #: again — frames can still commit between the stop and the verdict, and a
+    #: thread started in that window would never be stopped (set under the run
+    #: lock, checked at start under the same lock).
+    progress_observer_closed: bool = False
+    progress_source: Any = None
+    progress_stop: threading.Event | None = None
+    progress_thread: threading.Thread | None = None
+    progress_warned: bool = False
+    #: Per-child latest emitted tuple ``(steps, lastToolName, lastToolTarget,
+    #: bytes)`` and its emit time — the throttle and the change detection.
+    progress_emitted: dict[int, tuple[Any, ...]] = field(default_factory=dict)
+    progress_emit_ts: dict[int, float] = field(default_factory=dict)
 
 
 ClientFactory = Callable[..., PiRpcClient]
@@ -1163,6 +1195,10 @@ class RunManager:
         in one critical section with the cancellation flag.
         """
         run_id = execution.record.run_id
+        # R3a: the progress observer dies first — no transient frame may race
+        # the artifact facts and the verdict below, and the thread must not
+        # leak into the next run.
+        self._stop_progress_observer(execution)
         projector = execution.projector
         if projector is not None:
             # Release the answer's withheld tail now, so it stays attached to
@@ -2083,7 +2119,289 @@ class RunManager:
             # on the same commit path (the run lock is held). A document failure
             # is observed, never retracts the committed event (§3.5).
             self._upsert_child_documents(execution, event_type, safe_payload or {})
+            # R3a: keep the in-flight call table the progress observer maps
+            # against, and lazily start the observer on the first dispatch.
+            self._track_child_progress(execution, event_type, safe_payload or {})
         return event
+
+    # -- running child progress (R3a, §3.5「运行中进度（R3a）」) -----------------
+    #
+    # The observer is a pure add-on over the committed typed events: it emits
+    # throttled ``subagent_updated`` frames (latest value wins), never touches
+    # the verdict, never writes child.json, and runs outside the admission
+    # lock. Its whole state lives on the ``_Execution`` and dies in finalize.
+
+    def _track_child_progress(
+        self, execution: _Execution, event_type: str, payload: Mapping[str, Any]
+    ) -> None:
+        """Maintain the in-flight dispatch table (caller holds the run lock).
+
+        A pi ``tool_call`` dispatches several tasks; their ``subagent_started``
+        events commit in task order, so an entry's position in the call's list
+        is the task index that the transcript filename's ``index`` carries.
+        ACP dispatches one child per call, hit exactly by ``toolCallId``. A
+        committed ``subagent_finished`` removes the call and seals its
+        children against further progress.
+        """
+        call_id = str(payload.get("toolCallId") or "")
+        if event_type == events.SUBAGENT_STARTED:
+            n = payload.get("n")
+            if call_id and isinstance(n, int) and not isinstance(n, bool):
+                execution.progress_calls.setdefault(call_id, []).append(
+                    {"n": n, "agent": str(payload.get("agent") or "")}
+                )
+            self._ensure_progress_observer(execution)
+            return
+        if call_id:
+            execution.progress_calls.pop(call_id, None)
+        ns = payload.get("ns")
+        if isinstance(ns, list):
+            for n in ns:
+                if isinstance(n, int) and not isinstance(n, bool):
+                    execution.progress_finished_ns.add(n)
+
+    def _ensure_progress_observer(self, execution: _Execution) -> None:
+        """Start the one polling thread on the first committed dispatch.
+
+        Caller holds the run lock. The seam is the adapter's optional
+        ``child_progress_source()`` — the same ``getattr`` precedent as
+        ``recovered_session``/``recover_subagents``; a face without it (or a
+        ``None`` answer) honestly has no progress and gets no thread. A run
+        that never dispatches a subagent never reaches here, so it pays
+        nothing.
+        """
+        if execution.progress_observer_started or execution.progress_observer_closed:
+            return
+        execution.progress_observer_started = True
+        adapter = execution.adapter
+        factory = (
+            getattr(adapter, "child_progress_source", None)
+            if adapter is not None
+            else None
+        )
+        if factory is None:
+            return
+        try:
+            source = factory()
+        except Exception as exc:  # noqa: BLE001 - observer failure is a warning only
+            self._progress_warning(
+                execution, f"子代理进度观察源创建失败: {type(exc).__name__}: {exc}"
+            )
+            return
+        if source is None:
+            return
+        stop = threading.Event()
+        execution.progress_source = source
+        execution.progress_stop = stop
+        thread = threading.Thread(
+            target=self._progress_loop,
+            args=(execution, source, stop),
+            name=f"child-progress-{execution.record.run_id}",
+            daemon=True,
+        )
+        execution.progress_thread = thread
+        thread.start()
+
+    def _progress_loop(
+        self, execution: _Execution, source: Any, stop: threading.Event
+    ) -> None:
+        """Poll the face's progress source until finalize stops the thread.
+
+        Latest-value-wins: a dropped intermediate frame changes nothing, so a
+        poll cycle is cheap to repeat. A failing ``poll()`` backs off with a
+        bound and the observer stops after ``_PROGRESS_MAX_FAILURES``
+        consecutive failures; failures surface as at most one ``kernel_status``
+        warning, never as a verdict input.
+        """
+        run_id = execution.record.run_id
+        failures = 0
+        try:
+            while not stop.wait(_PROGRESS_POLL_SECONDS):
+                try:
+                    facts = source.poll()
+                except Exception as exc:  # noqa: BLE001 - bounded backoff, then stop
+                    failures += 1
+                    self._progress_warning(
+                        execution, f"子代理进度观察失败: {type(exc).__name__}: {exc}"
+                    )
+                    if failures >= _PROGRESS_MAX_FAILURES:
+                        logger.warning(
+                            "子代理进度观察连续失败 %d 次，停止 run=%s", failures, run_id
+                        )
+                        return
+                    stop.wait(
+                        min(
+                            _PROGRESS_POLL_SECONDS * failures,
+                            _PROGRESS_MAX_BACKOFF_SECONDS,
+                        )
+                    )
+                    continue
+                failures = 0
+                self._publish_progress(execution, facts)
+        except Exception:  # noqa: BLE001 - the observer must never kill the run
+            logger.exception("子代理进度观察线程异常退出 run=%s", run_id)
+            self._progress_warning(execution, "子代理进度观察线程异常退出")
+
+    def _publish_progress(self, execution: _Execution, facts: Sequence[Any]) -> None:
+        """Map one poll's facts onto children and emit the throttled updates.
+
+        Unmappable facts are dropped (no fabricated progress); a child whose
+        finished event committed — or a run that left the open phase — gets
+        nothing more. ``bytes`` is a cumulative snapshot kept monotonic across
+        polls (a replaced transcript re-parses from zero but must not move the
+        reported value backwards).
+        """
+        if not facts:
+            return
+        now = time.monotonic()
+        with execution.lock:
+            if execution.phase != _OPEN:
+                return
+            for fact in facts:
+                mapped = self._map_progress_fact(execution, fact)
+                if mapped is None:
+                    continue
+                n, steps, name, target, byte_count = mapped
+                if n in execution.progress_finished_ns:
+                    continue
+                previous = execution.progress_emitted.get(n)
+                if previous is not None:
+                    # 快照语义：steps 与 bytes 都是累计值，transcript 被替换
+                    # 重解析后事件流也不许回退（前端另有一层 Math.max 兜底，
+                    # 事件本身先保证单调）。
+                    byte_count = max(byte_count, previous[3])
+                    steps = max(steps, previous[0])
+                current = (steps, name, target, byte_count)
+                if previous == current:
+                    continue
+                last_emit = execution.progress_emit_ts.get(n)
+                if (
+                    last_emit is not None
+                    and now - last_emit < _PROGRESS_THROTTLE_SECONDS
+                ):
+                    continue
+                payload = {
+                    "n": n,
+                    "steps": steps,
+                    "lastToolName": name,
+                    "lastToolTarget": target,
+                    "bytes": byte_count,
+                }
+                if not self._emit_frame(execution, events.SUBAGENT_UPDATED, payload):
+                    # The durable log is failing; the run converges on that
+                    # verdict, so stop pushing transient frames into it.
+                    return
+                execution.progress_emitted[n] = current
+                execution.progress_emit_ts[n] = now
+
+    def _map_progress_fact(
+        self, execution: _Execution, fact: Any
+    ) -> tuple[Any, ...] | None:
+        """Pair one polled fact with its child ``n``; ``None`` fabricates nothing.
+
+        pi 族：前台守卫保证同一时刻至多一个在飞派发 call；transcript 的
+        ``index`` 是该 call 内的 task 位置，且 ``agent`` 同名才配对。ACP 族：
+        fact 的 ``call_id`` 精确命中 started 事件记录的 toolCallId。对不上即
+        该 child 无进度。
+        """
+        steps = getattr(fact, "steps", None)
+        byte_count = getattr(fact, "bytes", None)
+        if (
+            not isinstance(steps, int)
+            or isinstance(steps, bool)
+            or steps < 0
+            or not isinstance(byte_count, int)
+            or isinstance(byte_count, bool)
+            or byte_count < 0
+        ):
+            return None
+        name = getattr(fact, "last_tool_name", None)
+        target = getattr(fact, "last_tool_target", None)
+        name = name if isinstance(name, str) and name else None
+        target = target if isinstance(target, str) and target else None
+        n: int | None = None
+        if self.config.harness == "acp":
+            call_id = getattr(fact, "call_id", None)
+            entries = (
+                execution.progress_calls.get(call_id)
+                if isinstance(call_id, str)
+                else None
+            )
+            if entries:
+                n = entries[0]["n"]
+        else:
+            agent = getattr(fact, "agent", None)
+            index = getattr(fact, "index", None)
+            if (
+                isinstance(agent, str)
+                and isinstance(index, int)
+                and not isinstance(index, bool)
+            ):
+                for entries in execution.progress_calls.values():
+                    if 0 <= index < len(entries) and entries[index]["agent"] == agent:
+                        n = entries[index]["n"]
+                        break
+        if n is None:
+            return None
+        return (n, steps, name, target, byte_count)
+
+    def _stop_progress_observer(self, execution: _Execution) -> None:
+        """Stop the R3a observer: close under the run lock, then bounded join.
+
+        The field swap happens under the run lock (the same lock
+        :meth:`_ensure_progress_observer` starts under), and the closed flag
+        blocks any later start — a ``subagent_started`` committed between this
+        stop and the verdict must not launch a thread nobody will stop. The
+        join and the source close happen outside the lock because the loop
+        takes the run lock to emit. A run that never dispatched has nothing to
+        stop. The source is closed even when the join times out, so a late poll
+        fails instead of emitting into a finalized run; the thread is a daemon
+        and dies with the process.
+        """
+        with execution.lock:
+            execution.progress_observer_closed = True
+            stop = execution.progress_stop
+            thread = execution.progress_thread
+            source = execution.progress_source
+            execution.progress_stop = None
+            execution.progress_thread = None
+            execution.progress_source = None
+        if stop is not None:
+            stop.set()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=_PROGRESS_JOIN_SECONDS)
+        if source is not None:
+            try:
+                source.close()
+            except Exception:  # noqa: BLE001 - closing must not block finalize
+                logger.debug(
+                    "child progress source close failed run=%s",
+                    execution.record.run_id,
+                    exc_info=True,
+                )
+
+    def _progress_warning(self, execution: _Execution, detail: str) -> None:
+        """An observer failure surfaces as at most one ``kernel_status`` warning."""
+        run_id = execution.record.run_id
+        logger.warning("run=%s %s", run_id, detail)
+        with execution.lock:
+            if execution.progress_warned:
+                return
+            execution.progress_warned = True
+        try:
+            self._emit_open(
+                execution,
+                events.KERNEL_STATUS,
+                {
+                    "level": "warning",
+                    "message": "child_progress_failed",
+                    "detail": detail,
+                },
+            )
+        except EventLogError as exc:
+            logger.error(
+                "child progress warning could not be persisted run=%s: %s", run_id, exc
+            )
 
     # -- child-run (subagent) documents, §3.5 -----------------------------------
 

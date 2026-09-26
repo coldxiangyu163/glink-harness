@@ -237,6 +237,40 @@ pi 族另有 `_meta.json` 增强（R2，见下「R2 增强与关联」）。
 `GET /api/runs/{id}/children/{n}/{file}` 按报告下载同一套规则（固定位置、目录句柄、
 服务前再脱敏、`X-Redacted`、owner 404）提供产物下载。ACP 族无此布局，永不被触碰。
 
+**运行中进度（R3a）**：`running` 期间的子代理可以有一条
+`subagent_updated {n, steps, lastToolName, lastToolTarget, bytes}` 事件。
+`lastToolName`/`lastToolTarget` 可空且限幅；`bytes` 是子会话/transcript 当前字节数的
+**快照**——累计快照不是增量，与 `tool_updated` 同一语义。载荷只含 facts（步骤数、
+最近工具名与目标、字节数），与既有投影过同一道 `_emit` 脱敏。它是「最新值取胜」的
+**瞬时事实**：每 child 节流至 ≤1 条/2s，回放渲染取该 child 的**最后一条**（丢中间帧
+不改变最终呈现）；它**永不参与终态判定**（终态仍只由 `subagent_finished` 与 run 终帧
+裁决），观察者失败只发 `kernel_status` 警告，且**不写 `child.json`**——权威文档不被
+瞬时进度污染。
+
+进度由观察者 seam 供给：`ExecutionAdapter.child_progress_source()` 是**可选方法**
+（与 `recovered_session` / `recover_subagents` 同一 `getattr` 先例，不实现即该面
+无进度）。runner 每 run 至多起**一个**轮询线程，finalize 时退出，连续失败按有界退避
+后即停，且**不在准入锁内**。关联规则按族区分：
+
+* **pi 族**：前台守卫保证同一时刻至多一个在飞派发 call；transcript 文件
+  （`subagent-artifacts/<runId>_<agent>_<index>_transcript.jsonl`）的 `index` 等于该
+  call 内 task 位置，据此把文件配对到在飞 call 的对应 child；对不上即该 child 无
+  进度，不伪造。**归属安全**：同一目录会躺着上一次派发已冻结的同名 `(agent, index)`
+  transcript，因此进度源只报告**自上轮以来有变化**的文件（首次见到只建基线），
+  冻结的旧文件永远不会被错配给新在飞的 child（与 R2「无法区分宁可不关联」同一条
+  不伪造口径）；服务端对 `steps`/`bytes` 做单调钳制（快照语义，替换重解析也不回退）。
+  观察者在线程停止后不再启动：finalize 停止观察者后在 run 锁内置 closed 标志，
+  停止与 verdict 之间迟到的 started 帧不会再起线程。
+* **ACP 族**：主会话 `tool/call` 帧加上**相邻**的 `subagent/catalog` 帧给出
+  callId↔childId 的精确关联，子会话的 step/tool 帧提取进度（实测见
+  docs/evidence/acp-subagent-zstd-spike.txt）。会话文件是 dsh 私有的 zstd 压缩
+  JSONL，按整份重读（有大小上限）；`zstandard` 为可选依赖
+  （`pi-glink[acp-progress]`），缺失时该面如实无进度，不报错。
+
+各面能力：pi 族 inproc/docker/e2b 与 ACP 族 inproc/docker（dsh 0.1.7+）为 **steps**
+（逐步进度）；ACP e2b 面本次不实现，能力如实停留 **coarse**。没有进度源或关联失败的
+child 在前端显示为普通「进行中」，不伪造进度。
+
 ## 4. run 生命周期
 
 1. `POST /api/runs {prompt, parentRunId?}` → 准入（见下）→ 生成 `runId`（run 目录**排他**创建，

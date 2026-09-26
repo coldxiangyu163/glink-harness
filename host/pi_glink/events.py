@@ -72,6 +72,10 @@ TOOL_FINISHED = "tool_finished"
 # terminal frame's ``children`` summary (docs/architecture.md §3.5).
 SUBAGENT_STARTED = "subagent_started"
 SUBAGENT_FINISHED = "subagent_finished"
+# Running progress for a child run (R3a, docs/architecture.md §3.5
+# 「运行中进度（R3a）」): a throttled, latest-value-wins transient fact — never
+# part of any terminal verdict, never written to child.json.
+SUBAGENT_UPDATED = "subagent_updated"
 USAGE_REPORTED = "usage_reported"
 KERNEL_STATUS = "kernel_status"
 

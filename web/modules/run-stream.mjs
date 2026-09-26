@@ -114,6 +114,8 @@ export function applyEvent(model, event) {
       return finishTool(next, payload);
     case 'subagent_started':
       return startChild(next, payload);
+    case 'subagent_updated':
+      return updateChildProgress(next, payload);
     case 'subagent_finished':
       return finishChildren(next, payload);
     case 'run_stage':
@@ -222,7 +224,7 @@ export function createRunSubscription({
       'run_started', 'session_ready', 'turn_started', 'turn_finished',
       'thinking_delta', 'assistant_delta', 'assistant_message',
       'tool_started', 'tool_updated', 'tool_finished',
-      'subagent_started', 'subagent_finished', 'run_stage',
+      'subagent_started', 'subagent_updated', 'subagent_finished', 'run_stage',
       'kernel_status', 'usage_reported', 'run_finished', 'run_failed', 'run_cancelled',
     ]) {
       source.addEventListener(type, (message) => {
@@ -433,6 +435,36 @@ function startChild(model, payload) {
     return { ...model, children, items };
   }
   return appendItem({ ...model, children }, { kind: 'subagent', ...child });
+}
+
+//: R3a 运行中进度（§3.5「运行中进度（R3a）」）：一条节流后的瞬时事实——
+//: 最新值取胜（回放按 seq 顺序施加，同一 child 的多条只留最后一条的效果）、
+//: 永不参与终态判定、不写权威文档。它只能附着在类型生命周期已经打开的
+//: child 上；对未知 n 的进度帧忽略，不凭空造出一个派发。
+function updateChildProgress(model, payload) {
+  const n = payload.n;
+  if (!Number.isInteger(n) || n < 0) return model;
+  const child = model.children.find((entry) => entry.n === n);
+  if (!child) return model;
+  const progress = mergeChildProgress(child.progress, payload);
+  const children = model.children.map((entry) => (entry.n === n ? { ...entry, progress } : entry));
+  const items = model.items.map(
+    (item) => (item.kind === 'subagent' && item.n === n ? { ...item, progress } : item),
+  );
+  return { ...model, children, items };
+}
+
+function mergeChildProgress(previous, payload) {
+  const prevSteps = previous && Number.isFinite(previous.steps) ? previous.steps : 0;
+  // steps 是计数器：乱序或异常输入不得让它回退（latest-wins 的唯一例外）。
+  // 其他字段每帧整体替换，丢中间帧不改变最终呈现。
+  const steps = Number.isFinite(payload.steps) ? Math.max(prevSteps, payload.steps) : prevSteps;
+  return {
+    steps,
+    lastToolName: typeof payload.lastToolName === 'string' ? payload.lastToolName : '',
+    lastToolTarget: typeof payload.lastToolTarget === 'string' ? payload.lastToolTarget : '',
+    bytes: Number.isFinite(payload.bytes) && payload.bytes > 0 ? payload.bytes : 0,
+  };
 }
 
 function finishChildren(model, payload) {

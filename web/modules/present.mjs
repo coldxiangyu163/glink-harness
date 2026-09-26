@@ -282,6 +282,36 @@ export function childStatusText(status) {
   }[status] ?? '未知状态';
 }
 
+/**
+ * R3a 运行中进度作为一短行事实：3 步 · 最近读取 report.md（没有就空串）。
+ * 子会话的工具名同样是引擎词汇，过与主时间轴同一张读者语言表；字节数是
+ * 模型事实，不上屏。
+ */
+export function childProgressText(child) {
+  const progress = child?.progress;
+  if (!progress || typeof progress !== 'object') return '';
+  const parts = [];
+  const steps = Number(progress.steps);
+  if (Number.isFinite(steps) && steps > 0) parts.push(`${steps} 步`);
+  const tool = String(progress.lastToolName ?? '').trim();
+  if (tool) {
+    const described = describeTool(tool, {});
+    const target = oneLine(displayPath(progress.lastToolTarget ?? ''), 40);
+    parts.push(`最近${described.action}${target ? ` ${target}` : ''}`);
+  }
+  return parts.join(' · ');
+}
+
+/**
+ * The dispatch card's state slot: running progress while the child works,
+ * the status word once it settles — a settled card never keeps showing
+ * progress, and a child without a progress source shows nothing extra.
+ */
+export function childCardState(item) {
+  if (item?.status === 'running') return childProgressText(item);
+  return childStateLabel(item);
+}
+
 /** The children panel's title; the panel itself only exists with children. */
 export function childrenPanelTitle(count) {
   return count > 1 ? `派发了 ${count} 个子代理` : '派发了 1 个子代理';

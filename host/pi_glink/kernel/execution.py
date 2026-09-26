@@ -45,6 +45,12 @@ The contract is:
     mirror branched sessions and subagent artifacts out of the dying sandbox
     before ``close()``. Faces whose subagent files already live on the host
     (in-process, Docker) do not implement it — there is nothing to pull back.
+``child_progress_source()``
+    Optional (R3a, docs/architecture.md §3.5「运行中进度（R3a）」): a polling
+    source for *running* subagent progress, built while the face's transcripts
+    are still readable. A face that cannot observe its children answers
+    ``None`` and that face honestly has no progress; the runner owns the
+    polling thread, the throttling and the ``subagent_updated`` emission.
 ``close()``
     Release the process/container/sandbox and report whether that succeeded.
     A cleanup failure is reported, never silently swallowed, and never
@@ -69,8 +75,11 @@ from ..config import ConfigError, HostConfig
 from .acp_e2b_env import E2BAcpSandboxClient
 from .acp_rpc import AcpRpcClient
 from .agent_env import AgentRuntime
+from .child_progress import E2bChildProgressSource, PiChildProgressSource
 from .docker_env import CONTAINER_WORKSPACE
 from .e2b_env import (
+    SANDBOX_SESSIONS,
+    SUBAGENT_ARTIFACTS_DIRNAME,
     E2BSandboxClient,
     SandboxError,
     parse_json_stream_line,
@@ -204,6 +213,18 @@ class ExecutionAdapter(ABC):
         Only the sandbox faces learn session facts while pulling work products
         back; every other face knows its session before the turn, so the base
         answer is ``None``.
+        """
+        return None
+
+    def child_progress_source(self) -> Any | None:
+        """Optional R3a seam: a polling source for running subagent progress.
+
+        Same ``getattr`` precedent as ``recovered_session`` /
+        ``recover_subagents``: a face that cannot observe its children's
+        transcripts answers ``None`` and that face honestly has no progress
+        (docs/architecture.md §3.5「运行中进度（R3a）」). The runner owns the
+        polling thread, the throttling and the ``subagent_updated`` emission;
+        the source only answers ``poll()``/``close()``.
         """
         return None
 
@@ -343,6 +364,18 @@ class RpcExecutionAdapter(ExecutionAdapter):
     def recover_artifacts(self, destination: Path) -> ArtifactRecovery:
         # The workspace already is the host directory for this face.
         return ArtifactRecovery()
+
+    def child_progress_source(self) -> PiChildProgressSource | None:
+        """Poll the session directory's ``subagent-artifacts`` (R3a).
+
+        Both host-side pi faces keep the session directory on the host (the
+        Docker face mounts it), so the transcript layout is directly pollable
+        for the in-process and the container face alike.
+        """
+        session_dir = getattr(self.spec.runtime, "session_dir", None)
+        if session_dir is None:
+            return None
+        return PiChildProgressSource(Path(session_dir) / SUBAGENT_ARTIFACTS_DIRNAME)
 
     def identity(self) -> Mapping[str, str]:
         return {"container": self._container_name} if self._container_name else {}
@@ -644,6 +677,24 @@ class E2BSandboxExecutionAdapter(SealedOutcome, ExecutionAdapter):
             return ArtifactRecovery(failures=("sandbox 已关闭，子代理产物不可回收",))
         files, failures = client.recover_subagent_files(destination)
         return ArtifactRecovery(files=tuple(files), failures=tuple(failures))
+
+    def child_progress_source(self) -> E2bChildProgressSource | None:
+        """Poll the sandbox's ``subagent-artifacts`` listing (R3a).
+
+        The transcripts live inside the sandbox, so a source can only be built
+        while the client — and its sandbox — is still alive; after ``close()``
+        (or a cancel that destroyed the sandbox) there is honestly nothing to
+        poll and the answer is ``None``.
+        """
+        client = self._client
+        if client is None:
+            return None
+        sandbox = client.sandbox
+        if sandbox is None:
+            return None
+        return E2bChildProgressSource(
+            sandbox, f"{SANDBOX_SESSIONS}/{SUBAGENT_ARTIFACTS_DIRNAME}"
+        )
 
     def close(self) -> CleanupReport:
         client = self._client
