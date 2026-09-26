@@ -83,11 +83,17 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
 - **Docker 会话文件是容器路径**：pi 报 `/sessions/<file>.jsonl`，该路径在宿主不存在；宿主必须先在
   `kernel/docker_env.py::host_session_path` 做纯词法映射（拒绝相对路径、前缀伪装、`..`），再做收尾
   脱敏。只映射会话挂载，`/config/auth.json` 永不映射。未映射到的新路径会显式告警而不是静默保留。
-- **E2B 没有双向 stdio**：SDK 不提供持久 stdin，所以这一面用 `pi --mode json "<prompt>"` 单向事件流。
-  事件可以实时：`commands.run(background=True)` 返回的 `CommandHandle` 才是流式接口（迭代它逐块拿到
-  stdout；把 `on_stdout` 传给 `run()` 本身不生效，那是早期的用法误判）；宿主把 pi 的 stdout 同时
-  `tee` 进 `/home/user/events.jsonl`，按 LF 逐行投递，断流时用文件补发未送出的行。宿主侧离线已验证，
-  真实沙箱实时性待 live 复验。
+- **E2B 双向 stdio 已实测可用（旧结论作废，收敛尚未实施）**：本条原结论「SDK 不提供持久 stdin」
+  已被两次实测推翻——ACP 面 M3 帧完整性（`docs/evidence/acp-m3-e2b-framing.txt`，`send_stdin`
+  保序、字节一致）与 GLINK-ARCH-3 的 pi RPC 通道探针
+  （`docs/evidence/pi-e2b-rpc-stdin-spike.txt`）：`pi --mode rpc` 以 `background=True, stdin=True`
+  启动、经 `SandboxCommandProcess` 由仓库自己的 `PiRpcClient` 驱动，get_state 握手、完整回合、
+  **运行中 abort**、`close_stdin` 后退出码 0 全部通过（15/15）。探针同时记录了一个收敛缺口：
+  `PiRpcClient` 需要 `returncode` 属性，`SandboxCommandProcess` 上移至生产类时补上。
+  **当前实现仍是旧路径**（收敛是另案重构，需重设计断流恢复）：`pi --mode json "<prompt>"` 单向
+  事件流，`tee` 进 `/home/user/events.jsonl`，按 LF 逐行投递，断流时用文件补发未送出的行；运行中
+  不能 abort。`commands.run(background=True)` 返回的 `CommandHandle` 才是流式接口（迭代它逐块拿到
+  stdout；把 `on_stdout` 传给 `run()` 本身不生效，那是早期的用法误判）。
 - **Node 与 pi 固定在两侧镜像**：`node:24.21.0-bookworm-slim` 精确 tag + pi 0.86.1，镜像自包含
   （无挂载时 `docker run --rm pi-glink-worker:latest pi --version` = 0.86.1）。
 - 证据：`docs/evidence/docker-run.txt`、`docs/evidence/e2b-run.txt`、`docs/evidence/credential-boundary.txt`。

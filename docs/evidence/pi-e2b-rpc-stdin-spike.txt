@@ -1,0 +1,19 @@
+pi --mode rpc 经 E2B 双向 stdio 通道实测（GLINK-ARCH-3 spike）
+日期: 2026-09-26 19:28:15
+模板: pi-glink-worker
+sandbox_id: id6wmblnfse9yk9tbu1ip
+凭据: E2B_API_KEY 与 OPENAI_API_KEY 经 --env-file 注入，未写入本证据
+
+PASS 模板内 pi 可用 :: pi --version = '0.86.1'
+PASS 配置上传（生产路径） :: files=8
+PASS get_state 握手
+PASS prompt 被受理 :: error=None
+PASS 回合结束（isStreaming=False）
+PASS 回合文本经事件流到达 :: event_types=['agent_end', 'agent_settled', 'agent_start', 'extension_ui_request', 'message_end', 'message_start', 'message_update', 'turn_end', 'turn_start']
+PASS 回合后 get_state 事实 :: sessionId=present isStreaming=False
+PASS 第二个 prompt 被受理 :: error=None
+PASS abort 前确认在流式
+PASS 运行中 abort 被受理 :: error=None
+PASS abort 后不再流式 :: isStreaming=False
+PASS abort 后事件流停止增长 :: events@9 -> 9
+PASS close 后进程退出 :: exit_code=0（None=仍在运行，需 kill）

@@ -950,8 +950,15 @@ def test_each_run_renders_only_its_own_tenants_credentials(
     assert wait_for_terminal(server, alpha["runId"], assertion("tenant-alpha", "user-a"))
     assert wait_for_terminal(server, beta["runId"], assertion("tenant-beta", "user-b"))
 
-    alpha_adapter = adapters.created[0]
-    beta_adapter = adapters.created[1]
+    # 两个 run 并发启动，adapter 创建次序由调度决定，不能按下标对应；
+    # runtime 目录在 run 目录下（run_dir/agent），按 runId 归因才稳定。
+    def adapter_for(run_id: str) -> FakeAdapter:
+        matched = [a for a in adapters.created if run_id in str(a.runtime_dir)]
+        assert len(matched) == 1, f"run {run_id} 应恰好有一个执行面"
+        return matched[0]
+
+    alpha_adapter = adapter_for(alpha["runId"])
+    beta_adapter = adapter_for(beta["runId"])
     assert alpha_adapter.auth_key == ALPHA_KEY
     assert beta_adapter.auth_key == BETA_KEY
     assert alpha_adapter.web_search_present is True
