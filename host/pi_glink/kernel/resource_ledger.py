@@ -42,10 +42,7 @@ from ..store import FAILED, RunRecord, RunStore
 from .docker_env import confirm_absent as docker_confirm_absent
 from .e2b_env import confirm_sandbox_absent as e2b_confirm_sandbox_absent
 
-#: The ledger's log records keep the historical ``pi_glink.kernel.runner``
-#: logger name: the sweep's diagnostics are part of the runner's observable
-#: surface (tests and operator log filters address that name).
-logger = logging.getLogger("pi_glink.kernel.runner")
+logger = logging.getLogger("pi_glink.kernel.resource_ledger")
 
 
 class RunBusy(RuntimeError):
