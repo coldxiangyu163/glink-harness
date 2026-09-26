@@ -13,7 +13,7 @@
 
 具体接口与迁移在对应任务中决定，不预建无消费者的租户抽象；修改这些承诺遵循 [工程约束](engineering.md)。现有单 run 测试继续保护当前行为，将来的多租户变更在取得决定后同步替换相关断言，而不是把当前串行测试当作永久需求。
 
-另一个既定方向是**多 harness 平台化**：宿主保持 harness 无关，`kernel/` 泛化为 harness 适配层，候选内核包括 deepseek-harness、Claude Code、Codex 及一切 ACP 兼容 agent。方向、架构与里程碑见 [多 harness 方案](multi-harness-plan.md)；当前仓库已落地两个 harness 族——pi 族（`--mode rpc` / `--mode json`）与 ACP 族（一切 ACP 兼容 agent 经 stdio JSON-RPC 双向桥接，dsh 0.1.7+ 为首个实测 agent）；本文的进程拓扑、事件契约与追问门禁对两族统一描述，pi 特有的协议细节仍以 pi 为参照系，ACP 族的协议事实见 [ACP 集成笔记](acp-integration-notes.md)。
+另一个既定方向是**多 harness 平台化**：宿主保持 harness 无关，`kernel/` 泛化为 harness 适配层，候选内核包括 deepseek-harness、Claude Code、Codex 及一切 ACP 兼容 agent。方向、架构与里程碑见 [多 harness 方案](multi-harness-plan.md)；当前仓库已落地两个 harness 族——pi 族（三个执行面均 `--mode rpc`，GLINK-ARCH-3 起 e2b 面也已收敛）与 ACP 族（一切 ACP 兼容 agent 经 stdio JSON-RPC 双向桥接，dsh 0.1.7+ 为首个实测 agent）；本文的进程拓扑、事件契约与追问门禁对两族统一描述，pi 特有的协议细节仍以 pi 为参照系，ACP 族的协议事实见 [ACP 集成笔记](acp-integration-notes.md)。
 
 ## 1. 三层结构
 
@@ -36,7 +36,8 @@
                        ├─ EventBus（每 run 单调 seq；先落盘再发布；有界实时队列）
                        ├─ RunStore（meta.json / events.jsonl / artifacts；终帧即终态提交）
                        └─ KernelRunner ── harness 选择（配置级 PI_GLINK_HARNESS，默认 pi）
-                              ├─ pi 族：  inproc（stdio RPC）/ docker（docker run -i，stdio RPC）/ e2b（--mode json 单向流）
+                              ├─ pi 族：  inproc（stdio RPC）/ docker（docker run -i，stdio RPC）/ e2b（沙箱后台命令
+                              │          stdin=True + send_stdin，同一套 stdio RPC）
                               └─ ACP 族： inproc / docker / e2b 均为 stdio JSON-RPC 双向桥接
                                          （e2b 面经后台命令 stdin=True + send_stdin）
 ```
@@ -313,7 +314,7 @@ child 在前端显示为普通「进行中」，不伪造进度。
 (b) 追问准入与续接种子——族追加门禁、工作区复用、会话种子与 `resume_session` 值、会话身份
 的校验时机；(c) runtime 渲染与 projector 工厂（渲染中新知的秘密经 `PreparedRuntime` 交出，
 由 runner 按原序并入本 run 脱敏边界后才构造 projector）；(d) adapter 组装——各族持有自己的
-plan 方法（pi 的 rpc/docker plan，ACP 的 inproc/docker/e2b plan），内部委托
+plan 方法（pi 的 rpc/docker/e2b_rpc plan，ACP 的 inproc/docker/e2b plan），内部委托
 `execution.build_adapter`；docker 容器名预持久化是资源台账身份（面关切），留在 runner；
 (e) 终态词汇归一化——`model_stop_verdict` 把各族自己的 stop 词汇（pi 的
 error/aborted/length，ACP 的 StopReason 集合）译成产品终态词汇，译不了即落入 runner 的交付
@@ -344,7 +345,10 @@ stop()/StopDecision、`_execute` 骨架、`_finalize` 的**顺序控制**（观�
 **取消**：`POST /api/runs/{id}/stop` 与结论在同一把锁上裁决。受理返回 `200 {"requested": true}`，
 结论必为 `cancelled`（执行面自身的 cancel 只缩短等待，失败不改变受理）；已越过提交点返回
 `409 run_not_cancellable`，带已提交的 `status` 与 `reason`（`terminal`，或提交失败时的
-`finalizing`）；未知 run 返回 `404 unknown_run`。取消请求在 pi 尚未启动时也被受理。
+`finalizing`）；未知 run 返回 `404 unknown_run`。取消请求在 pi 尚未启动时也被受理。三个执行面的
+取消都是协议级 abort：E2B 面沙箱存活到收尾，被取消的 run 与完成的 run 一样回收 `report.md` 与
+主会话（终态表第一行的「已回收的报告保留」对三面一致成立；旧 `--mode json` 路径运行中不能
+abort、取消即毁沙箱的义务已随 GLINK-ARCH-3 删除，见 §5.1/§5.2）。
 
 **准入与资源**：新 run 只在「本进程没有执行中的 run（仅 local 模式；否则 `409 run_busy`）」且容量未满时
 受理。资源台账直接由持久记录导出：未终态的 run、`cleanup.released` 不为 `true`（`false` 为已知失败，
@@ -396,8 +400,8 @@ data_root 若是符号链接、不是目录或带组/其他人写权限，宿主
 | 维度 | inproc（本机） | docker | e2b |
 |---|---|---|---|
 | 内核进程位置 | 宿主机器 | 一次性容器 | 云沙箱 |
-| 协议 | `--mode rpc`（双向 JSONL） | `--mode rpc`（跨容器 stdio） | `--mode json`（单向流） |
-| 事件时序 | 实时 | 实时 | 实时（命令 stdout `tee` 到 JSONL 后逐 LF 行投递；断流按文件补齐，见 §5.2） |
+| 协议 | `--mode rpc`（双向 JSONL） | `--mode rpc`（跨容器 stdio） | `--mode rpc`（沙箱后台命令 `background=True, stdin=True` 的双向 stdio，经 `SandboxCommandProcess` 以 `popen=` 注入共享 `PiRpcClient`） |
+| 事件时序 | 实时 | 实时 | 实时（沙箱命令流即权威：断流即 `execution_error`，不补发、不对账，见 §5.2） |
 | 运行时来源 | 宿主安装的 Node v24.16.0 / pi | 镜像自包含（`pi-glink-worker:latest`，node v24.21.0 + pi 0.86.1 + `/opt/pi-packages` 预装 pi 包；镜像名在启动时冻结） | 模板自包含（`pi-glink-worker`，node v24.21.0 + pi 0.86.1 + `/opt/pi-packages` 预装 pi 包） |
 | 运行期配置 | `runs/<id>/pi-agent`（本 run 独占） | 同目录挂到 `/config` | 同一目录整棵上传到沙箱 `/home/user/config` |
 | 工作区 | `<data>/workspaces/<runId>` | 同左（挂到 `/workspace`） | 沙箱内 `/home/user/workspace`，结束后拉回宿主 |
@@ -423,16 +427,24 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 * **最终 Outcome**：`ExecutionOutcome` 只携带执行层事实（是否落定、exit code、取消、超时、错误）；
   最终终态由宿主结合模型结果与产物策略判定（§4）。`ExecutionOutcome` 与 driver 线程适配器共用的
   封存基类（outcome 锁、settle/seal 临界区协议）在 `kernel/outcome.py`；各面的 `wait` 循环与
-  错误文案仍属各自适配器（pi E2B 面取消后等驱动收尾，ACP 面即时判定且超时拆解是 `session/cancel`）。
+  错误文案仍属各自适配器（pi 三面共用 `RpcExecutionAdapter` 的 `wait` 循环，E2B 子类只追加
+  两条面事实：`cancelled`/`timed_out` 返回前多等一个 abort 收尾宽限
+  （`ABORT_SETTLE_GRACE_SECONDS` = 10s，只保护回收完整性，终态判定不受宽限影响），带
+  `stream_error` 的 `kernel_exit` 改写为 `execution_error`——断流即失败，见 §5.2；
+  ACP 面即时判定且超时拆解是 `session/cancel`）。
 * **取消/截止时间**：取消是一个 flag（run 管理拥有），`cancel()` 只负责提前结束阻塞；超时由
-  `wait(deadline)` 的适配器实现处理，返回 `timed_out` 而不是抛异常。
+  `wait(deadline)` 的适配器实现处理，返回 `timed_out` 而不是抛异常。pi 三面的 `cancel()`
+  都是协议级 RPC `abort`（spike 实测被受理：流停止增长、`get_state` 回 idle）；E2B 面因此
+  沙箱存活到收尾，**被取消的 run 也能回收 `report.md` 与主会话**——旧 `--mode json` 路径
+  运行中不能 abort、cancel 只能直接销毁沙箱，报告与会话随沙箱即毁，该旧义务已随旧适配器删除。
 * **产物回收与关闭**：`recover_artifacts` 先把该面的产物放到宿主工作区（inproc/Docker 本来就是
   宿主目录，是 no-op；E2B 从沙箱拉回，逐文件限幅并拒绝路径分隔符），然后 `close()` 才销毁
   进程/容器/沙箱并报告 `CleanupReport(released, failures)`。清理失败会被记入 run 记录并继续占用容量（§4），不谎报已释放。
   回收只取**普通文件**：沙箱条目按 SDK 报告的 `EntryInfo.type`（真实 SDK 是 `FileType` 枚举）跳过目录与
   符号链接——不跟随链接，与 §6.1 的 ArtifactTree 同一条边界——它们不记为失败；超限或不可读的普通文件
   才记为失败并写进终态 `artifactFailures`。回收后由 `recovered_session()` 回答「回收过程才得知、值得
-  补发 `session_ready` 的会话事实」（pi 沙箱面随回收带回的会话文件、ACP 沙箱面的 state-root 回收结论）；
+  补发 `session_ready` 的会话事实」（pi 沙箱面在 `session_ready` 即知会话身份、回收带回会话文件后
+  补发一帧带宿主 `session_file` 的 `session_ready`、ACP 沙箱面的 state-root 回收结论）；
   其余面在 run 开始前已知会话，恒返回 `None`。
 * **持久执行身份**：`identity()` 给出容器名或沙箱 id。身份在资源一存在时就写入 `meta.json`：
   Docker 面在 `docker run` 之前的容器名确定后写入，E2B 面在拿到 `sandbox_id` 后、上传配置/续接之前
@@ -456,28 +468,42 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 `web-search.json`；因此上一 run 的扩展、skill 或凭据不会因增量拷贝而残留。共享项只限于
 仓库 `agent/` 模板目录（只读输入）和 `data_root` 本身。
 
-**多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。ACP 追问的状态根继承按**父 run 记录的 `executor`** 推导：父记录带该字段时 e2b 指向 `acp-agent/recovered`、其余执行面指向 `acp-agent/home`，宿主切换执行面后历史 e2b run 的合法追问仍可受理；旧记录无 `executor` 字段时回退为按宿主当前配置推导（原行为）。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
+**多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。E2B 面的续接身份验证时点与另两面相同（GLINK-ARCH-3 起）：pi 以 `--session /home/user/sessions/continued.jsonl` 原地打开续接会话（保持原 session id），RPC `get_state` 在 `session_ready` 即知会话身份，追问身份不符在**回合前、第一次模型调用前**拒 `session_unavailable`；e2b 面 `session_ready` 也从回合后补发改为回合前发布（回收后 `recovered_session()` 仍会补发一帧带宿主 `session_file` 的 `session_ready`）。旧义务（沙箱面流中才发现 session id、只能回合后由驱动线程比对 `expected_session_id`，模型调用已发生）随旧 `--mode json` 适配器整体删除。ACP 追问的状态根继承按**父 run 记录的 `executor`** 推导：父记录带该字段时 e2b 指向 `acp-agent/recovered`、其余执行面指向 `acp-agent/home`，宿主切换执行面后历史 e2b run 的合法追问仍可受理；旧记录无 `executor` 字段时回退为按宿主当前配置推导（原行为）。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
 
 **子代理副产物**：pi-subagents 的分支会话与主会话同名同目录（只能按会话头区分，见上表），产物目录由 `artifactDir: "session"` 落在会话目录的 `subagent-artifacts/`。E2B 面在沙箱销毁前把这些有界镜像到宿主拥有的 `runs/<id>/subagents/`（分支会话进 `sessions/`、产物进 `artifacts/`；深度/文件数/单文件/总量限幅，链接不跟随，失败记 `artifactFailures`），inproc/Docker 面的同类文件本就在宿主会话目录内、不另拷贝；两路的会话目录与镜像目录都在收尾时过 run 的脱敏边界（与 §6.1 会话文件同一条规则）。R1 起每个子代理另有权威文档 `runs/<id>/children/<n>/child.json`（§3.5）：它是协议可见事实的落地，与 P0 的 `subagents/` 原始镜像各自独立——镜像是回收基质（保持原样、不改写）；R2 起收尾时按序数启发式把产物关联复制进 `children/<n>/`（§3.5「R2 增强与关联」），未关联的文件留在基质里并记日志。
 
-**事件时序**：E2B 的流式接口是 `commands.run(background=True, …)` 返回的 `CommandHandle`
-（`background=True` 的重载不消费 `run()` 自身的回调）。沙箱命令把 pi 的 stdout 同时 `tee` 到
-`/home/user/events.jsonl`，宿主在命令运行期间迭代 handle，按 LF 拆出完整行立即经
-`parse_json_stream_line` → `on_frame`（沿用 `strip_trailing_cr`；合法 JSON 字符串里的
-U+2028/U+2029 不拆帧，与 RPC 面共用 `tests/fixtures/lf-framing.json` 语料）。「已送出」以
-**完整行数**计：正常结束时文件与流一致、不重复投递；流中途断开（未收到 end）不算 run 失败，
-宿主等命令结束后（命令在管道后把退出码写入 `/home/user/pi-exit-code.txt`）只从文件补发该计数
-之后的帧。非零退出码由 SDK `CommandExitException` 映射为 `kernel_exit` + stderr tail，不退化成
-`execution_error`。**补读是 fail-closed 的**：流已中断（或本来就没有流式接口）时，文件是唯一完整的
-证据，读不到、不存在或超过事件文件上限（`EVENTS_MAX_BYTES` = 32 MiB）都以 `execution_error` 失败，
-不得判 `finished`；流自己正常结束并拿到退出标记时，已交付行数与退出标记就是完整性证明，文件读取失败
-不改变结论。沙箱文件读取（事件流、stderr 尾部、产物）都先按 SDK 条目元数据或分块读取在**读取前**
-限幅，SDK 既不提供大小也不支持分块时拒绝整份载入，不将沙箱内容无界读入宿主内存。宿主侧离线验证已完成
-（fake handle 分块推送：行跨块/UTF-8 跨块、断流补齐、取消、非零退出码、命令字符串）；**真实 E2B 沙箱的
-实时性尚未验收**。沙箱内的 JSONL 按 LF 分帧；
-配置交付带有 `(相对路径, sha256)` 清单，`AGENTS.md`、`settings.json`、`extensions/`、`skills/`、
-`prompts/` 与生成文件都按同一路径语义送达。该接口此前的误读与更正过程记录在
-`docs/evidence/e2b-run.txt` 末尾。
+**事件时序**：E2B 面自 GLINK-ARCH-3 起与另两面说同一个协议：pi 以 `pi --mode rpc` 作为沙箱
+*background* 命令启动（`E2BSandboxClient.spawn_rpc`，`background=True, stdin=True`），
+`CommandHandle` 经 `SandboxCommandProcess`（`acp_e2b_env.py`，`subprocess.Popen` 形状的门面：
+`send_stdin`/`close_stdin`/流迭代/`kill`，`returncode` 属性给客户端读退出码）以 `popen=` 注入
+宿主共享的 `PiRpcClient`——帧分发、投影与终态判定与 inproc/docker 复用同一套代码（ACP 面同构
+先例：`E2BAcpSandboxClient.spawn()`）。stdout 块不保证帧对齐，仍按 LF 拆帧（合法 JSON 字符串里的
+U+2028/U+2029 不拆帧，与 RPC 面共用 `tests/fixtures/lf-framing.json` 语料）；prompt 本体走 stdin
+的 `prompt` 帧，不再出现在命令行（旧的 base64 prompt/system 编码机制已随 `--mode json` 路径整体废除）。
+
+**断流即失败（与旧 tee 路径的取舍，如实记录）**：RPC 通道没有第二份事件副本——旧路径把 stdout
+`tee` 进 `/home/user/events.jsonl` 作「exactly-once 完整性权威」，断流可按已交付行数补发剩余帧；
+新通道**流即权威**，沙箱流断开（拿不到退出码）时 run 判 `failed` / `execution_error`：已交付的帧
+保留在事件日志（它们真实到达过），缺失的尾巴不存在于任何权威副本——**不补发、不伪造完整性、
+不做 `get_state` 对账**（其响应帧走同一条已断的 stdout；SDK 重连是否重放已消费输出未规定，
+重复投递比失败更糟；run 已至终态判定窗口，沙箱随即销毁，对账也不改变任何后续行为）。断流后
+`SandboxCommandProcess.wait()` 拿不到退出码的 `OSError` 在 `close()` 内降级为日志——沙箱
+`kill()` 才是释放权威，一次已判定失败的断流不再被谎报为资源未释放。这套取舍换来的是双向通道：
+**运行中 abort**（取消是协议级动作，沙箱存活到收尾，被取消的 run 也能回收 `report.md` 与主会话，
+见 §5.1）与 **`session_ready` 前即知会话身份**（追问身份不符在回合前拒收，见本节「多轮续接」）。
+整套 tee/marker/补读机制（事件文件、stderr/退出码落盘、`LFLineFramer`、`EventCatchUpFailed`）
+已随旧 `E2BSandboxExecutionAdapter` 删除。
+
+命令链由 `spawn_rpc` 组合（ACP `command()` 先例）：先 `test -x` 验包守卫——模板早于宿主时以
+exit 78 失败（`kernel_exit`）——再 `cd` 工作区并 `exec` 整条 argv（`shlex.join` 负责
+`--append-system-prompt` 文本的引用）。沙箱文件读取（产物、会话、子代理镜像）仍先按 SDK 条目
+元数据或分块读取在**读取前**限幅，SDK 既不提供大小也不支持分块时拒绝整份载入，不将沙箱内容
+无界读入宿主内存。双向 stdio 的可行性由 spike 实测钉死（get_state 握手、完整回合、运行中 abort、
+`close_stdin` 后退出码 0，15/15，证据 `docs/evidence/pi-e2b-rpc-stdin-spike.txt`）；宿主侧离线
+验证用 stdin 版 fake 沙箱（fake handle + 真实 fake pi 子进程）；**通道级 spike 已过，host 级真实
+E2B live 冒烟未做**。配置交付带有 `(相对路径, sha256)` 清单，`AGENTS.md`、`settings.json`、
+`extensions/`、`skills/`、`prompts/` 与生成文件都按同一路径语义送达。旧路径接口的误读与更正过程
+记录在 `docs/evidence/e2b-run.txt` 末尾（历史证据，描述的是已删除的机制）。
 
 同一个适配器显式传 `commands.run(..., timeout=<沙箱寿命>)`：SDK 默认值是命令累计运行 60 秒，
 而真实研究 run 是分钟级，遗留默认会把内核在沙箱仍存活时杀掉（run 以 `execution_error` 结束于
@@ -504,9 +530,12 @@ U+2028/U+2029 不拆帧，与 RPC 面共用 `tests/fixtures/lf-framing.json` 语
 
 **包缺失必须是明确失败。** pi 对不存在的本地包路径完全静默，所以两个镜像都带
 `/opt/pi-packages/check-packages.sh`：Docker 面把它作为容器的 `--entrypoint`（镜像早于宿主时
-容器起不来，退出 127；包被删时 exit 78），E2B 面在命令链里先验证守卫存在再交给守卫执行。崩溃
-语义与其它内核启动失败一致：Docker 面为 `kernel_exit`（退出码 78），E2B 面为 `kernel_exit` +
-stderr tail 里的中文原因。构建、候选 tag、回滚句柄、实测耗时与研究记录的实测事实见
+容器起不来，退出 127；包被删时 exit 78），E2B 面在 `spawn_rpc` 的命令链里先验证守卫存在（守卫脚本
+本身缺失同样 exit 78）再交给守卫执行。失败分类两面不同：Docker 面容器起不来/守卫 exit 78 是
+`kernel_exit`；E2B 面守卫失败时 pi 从未启动，RPC 客户端的首个请求无处应答，run 以
+`execution_error` 收场（错误文本为 `PiRpcClosed` 或「pi exited with code 78」，竞态相关）。
+两面守卫写出的中文原因都只留在 stderr（Docker 面容器日志、E2B 面 RPC 客户端的
+`stderr_tail` 历史），不拼进 outcome 错误文本。构建、候选 tag、回滚句柄、实测耗时与研究记录的实测事实见
 `docs/evidence/prebaked-packages.txt` 与 `docs/pi-integration-notes.md` §9。
 
 **子代理包（GLINK-SUB-02）**：`pi-subagents` 自本任务起真正加载，并且仍受第 5.3 节的同一套

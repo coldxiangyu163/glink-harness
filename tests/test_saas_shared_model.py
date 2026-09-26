@@ -39,6 +39,8 @@ from pi_glink.app import PiGlinkServer, create_server
 from pi_glink.app import main as app_main
 from pi_glink.config import ConfigError, build_config
 from pi_glink.events import EventBus
+
+from e2b_fake import FakeSandbox
 from pi_glink.kernel.agent_env import RunCredentials, prepare_agent_dir
 from pi_glink.kernel.docker_env import build_plan as build_docker_plan
 from pi_glink.kernel.e2b_env import SANDBOX_CONFIG, E2BSandboxClient
@@ -303,122 +305,10 @@ def test_shared_mode_never_substitutes_the_operator_search_file(tmp_path: Path) 
 
 
 # -- fake E2B sandbox ----------------------------------------------------------
-
-
-class _Result:
-    def __init__(self, exit_code: int) -> None:
-        self.exit_code = exit_code
-
-
-class _Handle:
-    def __init__(self, exit_code: int) -> None:
-        self._exit_code = exit_code
-
-    def wait(self) -> _Result:
-        return _Result(self._exit_code)
-
-
-class _Stream:
-    """Stand-in for the SDK's ``format="stream"`` reader (chunks + close)."""
-
-    def __init__(self, chunks: list[bytes]) -> None:
-        self._chunks = chunks
-        self.closed = False
-
-    def __iter__(self) -> Any:
-        return iter(self._chunks)
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class FakeFiles:
-    def __init__(self, sandbox: "FakeSandbox") -> None:
-        self._sandbox = sandbox
-
-    def make_dir(self, path: str) -> None:
-        self._sandbox.dirs.append(path)
-
-    def write(self, path: str, content: Any) -> None:
-        self._sandbox.written[path] = (
-            content.decode("utf-8") if isinstance(content, bytes) else str(content)
-        )
-
-    def read(self, path: str, format: str | None = None) -> Any:
-        if path in self._sandbox.readable:
-            value = self._sandbox.readable[path]
-            data = value if isinstance(value, bytes) else value.encode("utf-8")
-        else:
-            raise FileNotFoundError(path)
-        if format == "stream":
-            return _Stream([data])
-        return data
-
-    def get_info(self, path: str) -> Any:
-        """The SDK's entry metadata: the host bounds the read by ``size`` first."""
-        if path not in self._sandbox.readable:
-            raise FileNotFoundError(path)
-        value = self._sandbox.readable[path]
-        size = len(value) if isinstance(value, bytes) else len(value.encode("utf-8"))
-
-        class Info:
-            pass
-
-        info = Info()
-        info.size = size
-        return info
-
-    def list(self, path: str) -> list[Any]:
-        readable = self._sandbox.readable
-
-        class Entry:
-            def __init__(self, name: str) -> None:
-                self.name = name
-                self.path = f"{path}/{name}"
-                self.type = "file"
-                content = readable.get(self.path)
-                if content is None:
-                    self.size = 0
-                elif isinstance(content, bytes):
-                    self.size = len(content)
-                else:
-                    self.size = len(content.encode("utf-8"))
-
-        names = (
-            self._sandbox.session_files
-            if path == "/home/user/sessions"
-            else self._sandbox.workspace_files
-        )
-        return [Entry(name) for name in names]
-
-
-class FakeCommands:
-    def __init__(self, sandbox: "FakeSandbox") -> None:
-        self._sandbox = sandbox
-
-    def run(self, cmd: str, *, background: bool = False, envs: dict[str, str] | None = None, **_: Any) -> _Handle:
-        self._sandbox.command = cmd
-        self._sandbox.command_envs = envs or {}
-        return _Handle(0)
-
-
-class FakeSandbox:
-    def __init__(self) -> None:
-        self.sandbox_id = "fake-sandbox"
-        self.dirs: list[str] = []
-        self.written: dict[str, str] = {}
-        # A real sandbox always writes its event file (the command tees into it).
-        self.readable: dict[str, Any] = {"/home/user/events.jsonl": ""}
-        self.workspace_files: tuple[str, ...] = []
-        self.session_files: tuple[str, ...] = ()
-        self.command = ""
-        self.command_envs: dict[str, str] = {}
-        self.killed = False
-        self.files = FakeFiles(self)
-        self.commands = FakeCommands(self)
-
-    def kill(self) -> None:
-        self.killed = True
+#
+# The shared stdin-shaped fake lives in tests/e2b_fake.py: the sandbox command
+# runs a real fake-pi subprocess behind a stand-in CommandHandle (the RPC
+# channel), while uploads/recovery keep their dictionary assertions.
 
 
 def _e2b_config(tmp_path: Path):
@@ -443,33 +333,22 @@ def test_shared_model_key_stays_out_of_the_e2b_environment_and_command(tmp_path:
     )
     client.start()
     client.upload_config()
-    client.run_prompt("合成问题")
-    assert SHARED_KEY in sandbox.written[f"{SANDBOX_CONFIG}/auth.json"]
-    assert SHARED_KEY not in sandbox.command
-    assert "OPENAI_API_KEY" not in sandbox.command_envs
-    assert SHARED_KEY not in json.dumps(sandbox.command_envs)
-    assert "OPENAI_API_KEY" not in captured["envs"]
-    assert SHARED_KEY not in json.dumps(captured)
-    assert captured["api_key"] == "e2b-secret"
-    assert any(path.endswith("/config/auth.json") for path in client.uploaded)
-    client.close()
+    # The kernel runs over the RPC channel; the prompt travels as a stdin
+    # frame, so the command line is guard + argv only.
+    process = client.spawn_rpc(["pi", "--mode", "rpc", "--provider", "shared", "--model", "test/model"])
+    try:
+        assert SHARED_KEY in sandbox.written[f"{SANDBOX_CONFIG}/auth.json"]
+        assert SHARED_KEY not in sandbox.command
+        assert "OPENAI_API_KEY" not in sandbox.command_envs
+        assert SHARED_KEY not in json.dumps(sandbox.command_envs)
+        assert "OPENAI_API_KEY" not in captured["envs"]
+        assert SHARED_KEY not in json.dumps(captured)
+        assert captured["api_key"] == "e2b-secret"
+        assert any(path.endswith("/config/auth.json") for path in client.uploaded)
+    finally:
+        process.kill()
+        client.close()
     assert sandbox.killed is True, "the sandbox (and its auth.json) must be destroyed"
-
-
-_E2B_EVENTS = [
-    {"type": "agent_start"},
-    {"type": "turn_start"},
-    {
-        "type": "message_update",
-        "assistantMessageEvent": {"type": "text_delta", "delta": f"工具回显 OPENAI_API_KEY={SHARED_KEY}"},
-    },
-    {
-        "type": "turn_end",
-        "message": {"role": "assistant", "usage": {"input": 5, "output": 7, "totalTokens": 12}},
-        "toolResults": [],
-    },
-    {"type": "agent_settled"},
-]
 
 
 def _context(tenant_id: str = "tenant-alpha", user_id: str = "user-a") -> TenantContext:
@@ -485,10 +364,14 @@ def _context(tenant_id: str = "tenant-alpha", user_id: str = "user-a") -> Tenant
 
 def test_shared_e2b_run_redacts_the_host_key_and_reconciles_the_sandbox_id(tmp_path: Path) -> None:
     config = _e2b_config(tmp_path)
-    sandbox = FakeSandbox()
-    sandbox.readable["/home/user/events.jsonl"] = "\n".join(json.dumps(event) for event in _E2B_EVENTS)
-    sandbox.readable["/home/user/workspace/report.md"] = f"# 报告\n\n共享 key: {SHARED_KEY}\n"
-    sandbox.workspace_files = ("report.md",)
+    # fake pi echoes the credential the way a kernel tool would (reading the
+    # uploaded auth.json) and writes it into its report: both channels must be
+    # masked by the run's redaction boundary.
+    sandbox = FakeSandbox(
+        tmp_path / "sandbox",
+        report=None,
+        fake_pi_env={"FAKE_PI_WRITE_REPORT": "1", "FAKE_PI_ECHO_SECRET": "1"},
+    )
     storage = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store=storage, sandbox_factory=lambda **_: sandbox)
     record = manager.start("合成问题", _context())
@@ -509,23 +392,23 @@ def test_shared_e2b_run_redacts_the_host_key_and_reconciles_the_sandbox_id(tmp_p
 def test_shared_e2b_followup_keeps_the_session_and_resource_boundaries(tmp_path: Path) -> None:
     """The E2B continuation path is unchanged under the ``shared`` policy."""
     config = _e2b_config(tmp_path)
-    first = FakeSandbox()
-    first.sandbox_id = "fake-sandbox-1"
-    first.readable["/home/user/events.jsonl"] = "\n".join(
-        json.dumps(event) for event in [{"type": "session", "id": "same-session"}, *_E2B_EVENTS]
+    first = FakeSandbox(
+        tmp_path / "sb1",
+        sandbox_id="fake-sandbox-1",
+        report=None,
+        fake_pi_env={"FAKE_PI_WRITE_REPORT": "1", "FAKE_PI_SESSION_ID": "same-session"},
     )
-    first.readable["/home/user/workspace/report.md"] = "# 报告\n\n来自沙箱。\n"
-    first.workspace_files = ("report.md",)
     first.session_files = ("research.jsonl",)
     parent_session = (
         b'{"type":"session","version":3,"id":"same-session","timestamp":"t1","cwd":"/home/user/workspace"}\n'
     )
     first.readable["/home/user/sessions/research.jsonl"] = parent_session
 
-    second = FakeSandbox()
-    second.sandbox_id = "fake-sandbox-2"
-    second.readable["/home/user/events.jsonl"] = "\n".join(
-        json.dumps(event) for event in [{"type": "session", "id": "same-session"}, *_E2B_EVENTS]
+    second = FakeSandbox(
+        tmp_path / "sb2",
+        sandbox_id="fake-sandbox-2",
+        report=None,
+        fake_pi_env={"FAKE_PI_SESSION_ID": "same-session"},
     )
     second.session_files = ("continued.jsonl",)
     second.readable["/home/user/sessions/continued.jsonl"] = (

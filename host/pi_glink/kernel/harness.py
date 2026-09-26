@@ -153,10 +153,13 @@ class HarnessFamily(ABC):
     @abstractmethod
     def verifies_continuation_before_turn(self, executor: str) -> bool:
         """Whether the child's session identity is proven before the turn
-        （自 runner L1202-1214 的条件搬迁）。
+        （自 runner L1202-1214 的条件搬迁；GLINK-ARCH-3 收敛后两族皆恒 True）。
 
-        pi：``executor != "e2b"``（沙箱面流中才发现 session id，只能回合
-        后校验）；ACP：恒 True（session/resume 之后即知）。
+        pi：恒 True——e2b 面自 RPC 通道收敛起与 inproc/docker 同规则，
+        ``get_state`` 在 ``session_ready`` 即知会话身份（原义务：沙箱面流
+        中才发现 session id，只能回合后校验，已随旧 ``--mode json`` 适配器
+        删除）；ACP：恒 True（session/resume 之后即知）。``executor`` 参数
+        保留以稳定签名。
         """
 
     # -- (c) runtime 渲染与 projector 工厂 -------------------------------------

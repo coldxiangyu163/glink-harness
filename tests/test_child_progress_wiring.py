@@ -33,7 +33,7 @@ from pi_glink.kernel.child_progress import ProgressFact as PiProgressFact
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
-    E2BSandboxExecutionAdapter,
+    E2BSandboxRpcExecutionAdapter,
     ExecutionAdapter,
     ExecutionOutcome,
     ExecutionSpec,
@@ -231,19 +231,21 @@ def test_rpc_adapter_sources_the_host_session_dir(tmp_path: Path) -> None:
 
 def test_e2b_adapter_sources_only_while_the_sandbox_lives(tmp_path: Path) -> None:
     """pi e2b: no client (or a closed sandbox) honestly means no source."""
-    adapter = E2BSandboxExecutionAdapter(
+    adapter = E2BSandboxRpcExecutionAdapter(
         _spec(tmp_path, SimpleNamespace(session_dir=tmp_path / "s")),
+        argv=[],
+        client_factory=lambda *a, **k: None,
         on_frame=lambda frame: None,
     )
     assert adapter.child_progress_source() is None, "start 前没有沙箱可观察"
 
     sandbox = SimpleNamespace(files=SimpleNamespace())
-    adapter._client = SimpleNamespace(sandbox=sandbox)  # noqa: SLF001
+    adapter._sandbox = SimpleNamespace(sandbox=sandbox)  # noqa: SLF001
     source = adapter.child_progress_source()
     assert isinstance(source, E2bChildProgressSource)
     assert source._root.endswith("/subagent-artifacts")  # noqa: SLF001
 
-    adapter._client = SimpleNamespace(sandbox=None)  # noqa: SLF001 - sandbox 已销毁
+    adapter._sandbox = SimpleNamespace(sandbox=None)  # noqa: SLF001 - sandbox 已销毁
     assert adapter.child_progress_source() is None
 
 

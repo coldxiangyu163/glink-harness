@@ -15,7 +15,6 @@ Two properties are pinned here:
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import re
 import sys
@@ -31,6 +30,7 @@ from pi_glink.events import EventBus
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
+    E2BSandboxRpcExecutionAdapter,
     ExecutionAdapter,
     ExecutionOutcome,
     ExecutionSpec,
@@ -41,16 +41,10 @@ from pi_glink.kernel.rpc import PiRpcClient
 from pi_glink.kernel.runner import RunManager
 from pi_glink.store import FINISHED, RunStore
 
+from e2b_fake import FakeSandbox
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
-
-
-def _fixture_module():
-    spec = importlib.util.spec_from_file_location("fake_pi_fixture", FAKE_PI)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def make_config(tmp_path: Path, **overrides: str):
@@ -173,79 +167,18 @@ def test_cancellation_goes_through_the_adapter_not_a_face_branch(
 # -- cross-face equivalence ---------------------------------------------------
 
 
-class _FakeSandboxFiles:
-    def __init__(self, events_text: str) -> None:
-        self.events_text = events_text
-        self.written: dict[str, Any] = {}
-
-    def make_dir(self, path: str) -> None:
-        return None
-
-    def write(self, path: str, content: Any) -> None:
-        self.written[path] = content
-
-    def read(self, path: str, format: str | None = None) -> Any:
-        if path == "/home/user/events.jsonl":
-            data: Any = self.events_text
-        elif path == "/home/user/workspace/report.md":
-            data = "# 沙箱报告\n"
-        else:
-            raise FileNotFoundError(path)
-        if format == "stream":
-            raw = data if isinstance(data, bytes) else data.encode("utf-8")
-            return iter([raw])
-        return data
-
-    def get_info(self, path: str) -> Any:
-        data = self.read(path)
-        size = len(data) if isinstance(data, bytes) else len(data.encode("utf-8"))
-
-        class _Info:
-            pass
-
-        info = _Info()
-        info.size = size
-        return info
-
-    def list(self, path: str) -> list[Any]:
-        class _Entry:
-            name = "report.md"
-            path = "/home/user/workspace/report.md"
-            type = "file"
-
-        return [_Entry()]
-
-
-class _FakeSandbox:
-    def __init__(self, events_text: str) -> None:
-        self.sandbox_id = "fake-sandbox"
-        self.files = _FakeSandboxFiles(events_text)
-        self.killed = False
-
-        class _Handle:
-            def wait(self):
-                class _Result:
-                    exit_code = 0
-
-                return _Result()
-
-        class _Commands:
-            def run(self, cmd: str, **kwargs: Any) -> _Handle:
-                return _Handle()
-
-        self.commands = _Commands()
-
-    def kill(self) -> None:
-        self.killed = True
-
-
 def _run_face(tmp_path: Path, executor: str, monkeypatch: pytest.MonkeyPatch) -> tuple:
-    frames = _fixture_module().PROMPT_EVENTS
-    events_text = "\n".join(json.dumps(frame, ensure_ascii=False) for frame in frames)
     overrides: dict[str, str] = {"LOCAL_WEB_EXECUTOR": executor}
     if executor == "e2b":
+        # The sandbox face runs the same fake pi as a real subprocess behind
+        # the stand-in CommandHandle (the ACP face's FakeAgentHandle shape);
+        # only the carrier differs, the protocol drive is shared.
         overrides["E2B_API_KEY"] = "e2b-secret"
-        sandbox_factory = lambda **_: _FakeSandbox(events_text)
+        sandbox_factory = lambda **_: FakeSandbox(  # noqa: E731
+            tmp_path / "sandbox-root",
+            report=None,
+            fake_pi_env={"FAKE_PI_WRITE_REPORT": "1"},
+        )
     else:
         sandbox_factory = None
         monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: True)
@@ -255,7 +188,11 @@ def _run_face(tmp_path: Path, executor: str, monkeypatch: pytest.MonkeyPatch) ->
         )
     config = make_config(tmp_path, **overrides)
 
-    def fake_factory(argv, *, cwd=None, env=None, on_event=None):
+    def fake_factory(argv, *, cwd=None, env=None, on_event=None, popen=None):
+        if popen is not None:
+            # The E2B adapter injects the already-started sandbox process
+            # facade; the client is the shared one, unchanged.
+            return PiRpcClient(argv, cwd=cwd, env=env, on_event=on_event, popen=popen)
         merged = dict(env or {})
         merged["FAKE_PI_WRITE_REPORT"] = "1"
         if executor == "docker":
@@ -364,3 +301,19 @@ def test_build_adapter_selects_the_face_from_the_frozen_executor(
     assert isinstance(adapter, ExecutionAdapter)
     assert adapter.kind == "docker"
     assert adapter.identity() == {"container": "pi-glink-abc123"}
+
+    # The e2b face composes the RPC adapter over the sandbox channel; the
+    # kernel argv comes from the face-specific plan.
+    e2b_adapter = build_adapter(
+        spec,
+        executor="e2b",
+        client_factory=PiRpcClient,
+        on_frame=lambda frame: None,
+        sandbox_factory=lambda **_: FakeSandbox(),
+        rpc_plan=lambda s: ([], {}, None),
+        docker_plan=lambda s: (["docker", "run"], {}, "pi-glink-abc123"),
+        docker_stop=lambda name: ["docker", "rm", "-f", name],
+        e2b_rpc_plan=lambda s: ["pi", "--mode", "rpc"],
+    )
+    assert isinstance(e2b_adapter, E2BSandboxRpcExecutionAdapter)
+    assert e2b_adapter.kind == "e2b"

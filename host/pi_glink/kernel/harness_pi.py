@@ -32,6 +32,7 @@ from .docker_env import (
     is_available as docker_available,
     stop_argv as docker_stop_argv,
 )
+from .e2b_env import SANDBOX_SESSIONS
 from .execution import ExecutionAdapter, ExecutionSpec
 from .execution import build_adapter as compose_adapter
 from .harness import (
@@ -119,9 +120,13 @@ class PiHarnessFamily(HarnessFamily):
         return "continued.jsonl" if parent else None
 
     def verifies_continuation_before_turn(self, executor: str) -> bool:
-        # The pi E2B face discovers its session id mid-stream, so it can only
-        # verify the continuation after the turn.
-        return executor != "e2b"
+        # 恒 True：三面同规则。e2b 面自 GLINK-ARCH-3 收敛起走 RPC 通道，
+        # ``get_state`` 在 ``session_ready`` 即知会话身份（pi 以
+        # ``--session continued.jsonl`` 启动，续接会话原地打开、保持原
+        # session id）——原义务（沙箱面流中才发现 session id，只能回合后由
+        # 驱动线程比对 ``expected_session_id``）随旧 ``--mode json`` 适配器
+        # 整体删除。``executor`` 参数保留以合 ABC 签名。
+        return True
 
     # -- (c) runtime 渲染与 projector 工厂 --------------------------------------
 
@@ -184,6 +189,7 @@ class PiHarnessFamily(HarnessFamily):
             rpc_plan=self._rpc_plan,
             docker_plan=self._docker_plan,
             docker_stop=docker_stop_argv,
+            e2b_rpc_plan=self._e2b_rpc_plan,
         )
 
     def _rpc_plan(
@@ -214,6 +220,29 @@ class PiHarnessFamily(HarnessFamily):
             extra=[*spec.extra_argv, *(["--session", f"/sessions/{spec.resume_session}"] if spec.resume_session else [])],
         )
         return plan.argv, plan.env, plan.container_name
+
+    def _e2b_rpc_plan(self, spec: ExecutionSpec) -> list[str]:
+        """e2b 面沙箱内 pi 的 RPC argv（命令链由 ``E2BSandboxClient.spawn_rpc`` 组合）。
+
+        ``argv[0]`` 是字面量 ``"pi"``（镜像 PATH 内，docker_env.py 先例）：
+        宿主路径 ``config.pi_bin`` 在沙箱里没有意义。``spec.extra_argv`` 已含
+        ``--name pi-glink-<run_id>`` 与可选 ``--append-system-prompt <text>``
+        （runner 统一注入，三面不变），``shlex.join`` 在 spawn 时负责其引
+        用。续接形式与另两面同形（``--session <路径>``），只是路径是沙箱内
+        的 ``/home/user/sessions/continued.jsonl``——``upload_continuation``
+        的上传位置与该路径一致。prompt 本体走 stdin 的 ``prompt`` 帧，不进
+        argv。
+        """
+        argv = [
+            "pi",
+            "--mode", "rpc",
+            "--provider", spec.runtime.provider_id,
+            "--model", spec.runtime.model_id,
+            *spec.extra_argv,
+        ]
+        if spec.resume_session:
+            argv.extend(["--session", f"{SANDBOX_SESSIONS}/{spec.resume_session}"])
+        return argv
 
     # -- (e) 终态词汇归一化 ------------------------------------------------------
 

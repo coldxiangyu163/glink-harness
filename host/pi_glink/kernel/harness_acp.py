@@ -308,6 +308,7 @@ class AcpHarnessFamily(HarnessFamily):
             rpc_plan=_unused_pi_plan,
             docker_plan=_unused_pi_plan,
             docker_stop=docker_stop_argv,
+            e2b_rpc_plan=_unused_pi_plan,
             acp_plan=self.acp_plan,
             acp_docker_plan=self.acp_docker_plan,
             acp_e2b_plan=lambda s: self.acp_e2b_plan(s, sandbox_factory=sandbox_factory),

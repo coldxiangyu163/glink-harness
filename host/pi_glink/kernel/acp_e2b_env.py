@@ -178,6 +178,17 @@ class SandboxCommandProcess:
         # client reads it for — without inventing a real status.
         return self._exit_code if self._exit_code is not None else -1
 
+    @property
+    def returncode(self) -> int | None:
+        """``subprocess.Popen`` 形状：退出后是状态（无码为 -1，同 poll()），否则 None。
+
+        pi 的 RPC 客户端在 ``exit_code`` 与 ``_write`` 两处读这个属性（ACP
+        客户端不读它）；自 GLINK-ARCH-3 收敛起由生产类直接提供，spike 的
+        探针子类（``scripts/spikes/pi_e2b_rpc/rpc_channel_probe.py``）是它的
+        前瞻。
+        """
+        return self.poll() if self._exited.is_set() else None
+
     def wait(self, timeout: float | None = None) -> int:
         if not self._exited.wait(timeout):
             raise subprocess.TimeoutExpired("e2b sandbox command", timeout)

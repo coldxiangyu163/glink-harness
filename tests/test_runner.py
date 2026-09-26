@@ -15,6 +15,8 @@ import pytest
 from pi_glink.config import HostConfig, build_config
 from pi_glink.events import EventBus
 from pi_glink.kernel.rpc import PiRpcClient
+
+from e2b_fake import FakeSandbox
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
@@ -639,7 +641,7 @@ def test_cleanup_failure_is_recorded_not_hidden(tmp_path: Path) -> None:
         E2B_API_KEY="e2b-secret",
         PI_GLINK_WEB_SEARCH_CONFIG=str(tmp_path / "absent.json"),
     )
-    sandbox = _PoorlyClosingSandbox()
+    sandbox = _PoorlyClosingSandbox(tmp_path / "sandbox")
     store = RunStore(config.data_root / "runs")
     manager = RunManager(
         config, EventBus(), store, sandbox_factory=lambda **_: sandbox
@@ -654,64 +656,16 @@ def test_cleanup_failure_is_recorded_not_hidden(tmp_path: Path) -> None:
     assert final.sandbox_id == "poorly-closing"
 
 
-class _PoorlyClosingSandbox:
-    """Minimal E2B stand-in whose ``kill()`` fails."""
+class _PoorlyClosingSandbox(FakeSandbox):
+    """stdin 假沙箱：内核真实跑完 fake pi，但沙箱 ``kill()`` 失败。"""
 
-    def __init__(self) -> None:
-        self.sandbox_id = "poorly-closing"
-
-        class _Files:
-            def make_dir(self, path: str) -> None:
-                pass
-
-            def write(self, path: str, content: object) -> None:
-                pass
-
-            def read(self, path: str, format: str | None = None) -> Any:
-                if path == "/home/user/events.jsonl":
-                    data: Any = b'{"type": "agent_settled"}\n'
-                elif path == "/home/user/workspace/report.md":
-                    data = b"# report\n"
-                else:
-                    raise FileNotFoundError(path)
-                if format == "stream":
-                    raw = data if isinstance(data, bytes) else data.encode("utf-8")
-                    return iter([raw])
-                return data
-
-            def get_info(self, path: str) -> Any:
-                data = self.read(path)
-                size = len(data) if isinstance(data, bytes) else len(data.encode("utf-8"))
-
-                class _Info:
-                    pass
-
-                info = _Info()
-                info.size = size
-                return info
-
-            def list(self, path: str) -> list:
-                class _Entry:
-                    name = "report.md"
-                    path = "/home/user/workspace/report.md"
-                    type = "file"
-
-                return [_Entry()]
-
-        self.files = _Files()
-
-        class _Commands:
-            def run(self, cmd: str, **kwargs: object):
-                class _Handle:
-                    def wait(self):
-                        class _Result:
-                            exit_code = 0
-
-                        return _Result()
-
-                return _Handle()
-
-        self.commands = _Commands()
+    def __init__(self, root: Path) -> None:
+        super().__init__(
+            root,
+            sandbox_id="poorly-closing",
+            report=None,
+            fake_pi_env={"FAKE_PI_WRITE_REPORT": "1"},
+        )
 
     def kill(self) -> None:
         raise RuntimeError("kill failed")

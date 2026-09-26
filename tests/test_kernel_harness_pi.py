@@ -94,11 +94,15 @@ def test_pi_resume_value(tmp_path: Path) -> None:
 
 
 def test_pi_verifies_continuation_before_turn_per_executor(tmp_path: Path) -> None:
-    """pi 的沙箱面流中才发现 session id，只能回合后校验；其余面回合前校验。"""
+    """三面同规则（恒 True）：e2b 面走 RPC 通道后 get_state 在回合前即知会话身份。
+
+    原义务（沙箱面流中才发现 session id，只能回合后校验）随旧 ``--mode
+    json`` 适配器删除。
+    """
     _config, _store, family = make_family(tmp_path)
     assert family.verifies_continuation_before_turn("inproc") is True
     assert family.verifies_continuation_before_turn("docker") is True
-    assert family.verifies_continuation_before_turn("e2b") is False
+    assert family.verifies_continuation_before_turn("e2b") is True
 
 
 def test_continuation_workspace_defaults_to_none(tmp_path: Path) -> None:

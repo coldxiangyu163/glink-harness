@@ -980,9 +980,11 @@ class RunManager:
             if execution.parent_run_id and self._family.verifies_continuation_before_turn(
                 self.config.executor
             ):
-                # 面与族的交叉条件收敛为族的一句话策略：pi E2B 面在流中才
-                # 发现 session id，只能回合后校验；其余面（含 ACP 各面）在
-                # 回合前即已证明子会话身份与父一致。
+                # 两族三面同规则（GLINK-ARCH-3 收敛后恒 True）：RPC
+                # ``get_state`` 在 session_ready 即知会话身份，续接身份不符
+                # 在回合前、第一次模型调用前拒 session_unavailable。原义务
+                # （pi e2b 面流中才发现 session id，回合后才校验）已随旧
+                # ``--mode json`` 适配器删除。
                 parent = self._authorized_parent(
                     execution.context, execution.parent_run_id
                 )

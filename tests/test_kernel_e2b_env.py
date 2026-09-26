@@ -1,229 +1,59 @@
 """Regressions for the E2B execution face (no cloud calls).
 
+pi E2B 面自 GLINK-ARCH-3 收敛起走 RPC 通道：pi 以 ``pi --mode rpc`` 作为沙
+箱 background 命令（``stdin=True``）启动，沙箱 handle 经
+``SandboxCommandProcess`` 包装后注入与其余两面共享的 ``PiRpcClient``——
+只有载体变化，协议驱动、投影与终态判定复用同一套代码。这里的假沙箱
+（tests/e2b_fake.py）以真实子进程跑 tests/fixtures/fake_pi.py，正是
+tests/test_kernel_acp_e2b.py 的 FakeAgentHandle 先例。
+
 They pin the behaviours the completion audit flagged:
 
 * the credential read from ``.env`` reaches ``Sandbox.create`` (``api_key``);
-* a run replays its JSONL frames and pulls the report back into the host workspace;
+* a run streams its RPC frames and pulls the report back into the host workspace;
 * a non-zero sandbox exit is a failure even when a report file exists.
 
 They also pin the delivery contract added with the architecture hardening:
-LF-only framing (U+2028 stays inside a frame), a verifiable configuration
-manifest, shell-safe command composition, and bounded/safe artifact recovery.
+a verifiable configuration manifest, the guarded/quoted spawn command chain
+(the prompt travels over stdin, never the command line), and bounded/safe
+artifact recovery. New semantics from the RPC convergence: 断流即失败（不补
+发、不伪造完整性）、取消是协议级 abort（沙箱存活到收尾，被取消的 run 也
+能回收 report.md）、续接身份在回合前的 ``session_ready`` 即验证。
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
-import sys
+import shlex
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, Mapping
 
 import pytest
 
+from e2b_fake import BrokenHandle, FakeSandbox, IdleHandle
 from pi_glink.config import build_config
 from pi_glink.events import EventBus
 from pi_glink.kernel import agent_env, e2b_env
+from pi_glink.kernel.acp_e2b_env import SandboxCommandProcess
 from pi_glink.kernel.e2b_env import (
     ARTIFACT_MAX_BYTES,
-    EVENTS_MAX_BYTES,
-    STDERR_MAX_BYTES,
+    SANDBOX_PACKAGE_GUARD,
+    SANDBOX_SESSIONS,
+    SANDBOX_WORKSPACE,
     SUBAGENT_RECOVER_MAX_FILE_BYTES,
     E2BSandboxClient,
-    EventCatchUpFailed,
-    SandboxError,
-    parse_json_stream_line,
+    _read_file_bounded,
 )
+from pi_glink.kernel.execution import E2BSandboxRpcExecutionAdapter, ExecutionSpec
+from pi_glink.kernel.rpc import PiRpcClient
 from pi_glink.kernel.runner import RunManager
 from pi_glink.store import RunStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FRAMING_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "lf-framing.json"
-FRAMING_FIXTURE_TEXT = FRAMING_FIXTURE.read_text(encoding="utf-8")
-
-_FAKE_EVENTS = [
-    {"type": "agent_start"},
-    {"type": "turn_start"},
-    {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "沙箱里的一句话"}},
-    {"type": "tool_execution_start", "toolCallId": "c1", "toolName": "write", "args": {"path": "notes.md"}},
-    {"type": "tool_execution_end", "toolCallId": "c1", "toolName": "write", "result": "ok", "isError": False},
-    {"type": "turn_end", "message": {"role": "assistant", "usage": {"input": 5, "output": 7, "totalTokens": 12}}, "toolResults": []},
-    {"type": "agent_settled"},
-]
-
-
-class _Stream:
-    """Stand-in for the SDK's ``format="stream"`` reader (chunks + close)."""
-
-    def __init__(self, chunks: list[bytes]) -> None:
-        self._chunks = chunks
-        self.closed = False
-
-    def __iter__(self) -> Any:
-        return iter(self._chunks)
-
-    def close(self) -> None:
-        self.closed = True
-
-
-class FakeFiles:
-    def __init__(self, sandbox: "FakeSandbox") -> None:
-        self._sandbox = sandbox
-
-    def make_dir(self, path: str) -> None:
-        self._sandbox.dirs.append(path)
-
-    def write(self, path: str, content: Any) -> None:
-        text = content.decode("utf-8") if isinstance(content, bytes) else str(content)
-        self._sandbox.written[path] = text
-
-    def read(self, path: str, format: str | None = None) -> Any:
-        self._sandbox.reads.append(path)
-        if path in self._sandbox.readable:
-            value = self._sandbox.readable[path]
-            data = value if isinstance(value, bytes) else value.encode("utf-8")
-        else:
-            raise FileNotFoundError(path)
-        if format == "stream":
-            return _Stream([data])
-        return data
-
-    def get_info(self, path: str) -> Any:
-        """The SDK's entry metadata: the host bounds the read by ``size`` first."""
-        if path not in self._sandbox.readable:
-            raise FileNotFoundError(path)
-        value = self._sandbox.readable[path]
-        size = self._sandbox.sizes.get(
-            path, len(value) if isinstance(value, bytes) else len(value.encode("utf-8"))
-        )
-
-        class Info:
-            pass
-
-        info = Info()
-        info.size = size
-        return info
-
-    def list(self, path: str, depth: int = 1, **_kwargs: Any) -> list[Any]:
-        readable = self._sandbox.readable
-        sizes = self._sandbox.sizes
-        types = self._sandbox.entry_types
-
-        class Entry:
-            def __init__(self, name: str) -> None:
-                self.name = name
-                self.path = f"{path}/{name}"
-                # The real SDK reports an EntryInfo.type (an enum); absent
-                # means a regular file.
-                self.type = types.get(self.path, "file")
-                content = readable.get(self.path)
-                if self.path in sizes:
-                    self.size = sizes[self.path]
-                elif content is None:
-                    self.size = 0
-                elif isinstance(content, bytes):
-                    self.size = len(content)
-                else:
-                    self.size = len(content.encode("utf-8"))
-
-        names = (
-            self._sandbox.artifact_files
-            if path == "/home/user/sessions/subagent-artifacts"
-            else self._sandbox.session_files
-            if path == "/home/user/sessions"
-            else self._sandbox.workspace_files
-        )
-        return [Entry(name) for name in names]
-
-
-class _Result:
-    def __init__(self, exit_code: int) -> None:
-        self.exit_code = exit_code
-
-
-class _Handle:
-    def __init__(self, exit_code: int) -> None:
-        self._exit_code = exit_code
-
-    def wait(self) -> _Result:
-        return _Result(self._exit_code)
-
-
-class FakeCommands:
-    def __init__(self, sandbox: "FakeSandbox") -> None:
-        self._sandbox = sandbox
-
-    def run(
-        self,
-        cmd: str,
-        *,
-        background: bool = False,
-        envs: dict[str, str] | None = None,
-        timeout: float | None = None,
-        **_: Any,
-    ) -> _Handle:
-        self._sandbox.command = cmd
-        self._sandbox.command_envs = envs or {}
-        self._sandbox.command_timeout = timeout
-        return _Handle(self._sandbox.exit_code)
-
-
-class FakeSandbox:
-    """Minimal stand-in for ``e2b.Sandbox`` driven by the tests."""
-
-    def __init__(
-        self,
-        *,
-        exit_code: int = 0,
-        report: str | None = "# 报告\n\n来自沙箱。\n",
-        workspace_files: tuple[str, ...] = ("report.md",),
-        events: list[dict[str, Any]] | None = None,
-        events_text: str | None = None,
-    ) -> None:
-        self.sandbox_id = "fake-sandbox"
-        self.exit_code = exit_code
-        self.dirs: list[str] = []
-        self.written: dict[str, str] = {}
-        self.readable: dict[str, Any] = {}
-        self.workspace_files = workspace_files
-        self.session_files: tuple[str, ...] = ()
-        #: Relative names inside ``/home/user/sessions/subagent-artifacts``
-        #: (nested names contain ``/``); kinds via ``entry_types``.
-        self.artifact_files: tuple[str, ...] = ()
-        self.command = ""
-        self.command_envs: dict[str, str] = {}
-        #: ``timeout`` the host passed to ``commands.run`` (``None`` when the
-        #: caller left the SDK default in place).
-        self.command_timeout: float | None = None
-        self.killed = False
-        #: Paths the host asked to read (the bounded-read regressions).
-        self.reads: list[str] = []
-        #: Entry sizes the SDK reports instead of the real content length.
-        self.sizes: dict[str, int] = {}
-        #: Entry kinds the SDK reports (path -> "file"/"dir"/"symlink"/enum).
-        self.entry_types: dict[str, Any] = {}
-        if events is not None:
-            self.readable["/home/user/events.jsonl"] = "\n".join(
-                json.dumps(event) for event in events
-            )
-        elif events_text is not None:
-            self.readable["/home/user/events.jsonl"] = events_text
-        else:
-            # A real sandbox always writes the file (the command tees into it),
-            # so a run whose face never streamed still finds an empty timeline
-            # instead of an unresolved one. Tests that own the fail-closed case
-            # delete this entry explicitly.
-            self.readable["/home/user/events.jsonl"] = ""
-        if report is not None:
-            self.readable["/home/user/workspace/report.md"] = report
-        self.files = FakeFiles(self)
-        self.commands = FakeCommands(self)
-
-    def kill(self) -> None:
-        self.killed = True
 
 
 def make_config(tmp_path: Path, **overrides: str):
@@ -249,6 +79,15 @@ def _prepare(config, tmp_path: Path, name: str = "run-1"):
         runtime_dir=run_dir / "pi-agent",
         session_dir=run_dir / "sessions",
     )
+
+
+def wait_for(predicate, *, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
 
 
 # -- credential plumbing ------------------------------------------------------
@@ -321,12 +160,20 @@ def test_sandbox_followup_uploads_and_recovers_a_private_session(tmp_path: Path)
         "utf-8"
     )
     assert sandbox.written["/home/user/workspace/report.md"] == "# previous report"
-    command = client._command("追问", "", resume_session="continued.jsonl")
-    assert "--session /home/user/sessions/continued.jsonl" in command
+    # The continuation argv names the uploaded session at its sandbox path, in
+    # the same ``--session <path>`` shape the in-process and Docker faces use.
+    process = client.spawn_rpc(
+        ["pi", "--mode", "rpc", "--session", f"{SANDBOX_SESSIONS}/continued.jsonl"]
+    )
+    try:
+        assert "--session /home/user/sessions/continued.jsonl" in sandbox.command
+    finally:
+        process.kill()
     saved, error = client.recover_session()
     assert error is None
     assert saved == runtime.session_dir / "continued.jsonl"
     assert saved.read_bytes() == session_bytes
+    client.close()
 
 
 def test_sandbox_session_recovery_rejects_a_path_escape(tmp_path: Path) -> None:
@@ -442,6 +289,29 @@ def test_recover_session_refuses_an_unreadable_candidate(tmp_path: Path) -> None
     assert "branch.jsonl" in error
 
 
+def test_read_file_bounded_refuses_a_full_load_without_size_or_stream() -> None:
+    """SDK 既不提供文件大小也不支持流式读取时，拒绝整份载入（不猜）。
+
+    ``_read_file_bounded`` 的这个分支是 recover_session/recover_artifacts/
+    recover_subagent_files 四处回收的共同前置限幅：只有整读 ``read()`` 的
+    SDK（或替身）让限幅无从执行，必须如实失败，而不是载入后才发现超限。
+    """
+
+    class _WholeReadOnlyFiles:
+        def get_info(self, path: str) -> object:
+            return SimpleNamespace(size=None)
+
+        def read(self, path: str) -> bytes:
+            return b"x" * 1024
+
+    class _WholeReadOnlySandbox:
+        files = _WholeReadOnlyFiles()
+
+    data, reason = _read_file_bounded(_WholeReadOnlySandbox(), "/home/user/x", 16)
+    assert data is None
+    assert reason is not None and "拒绝整份载入" in reason
+
+
 # -- subagent mirror -----------------------------------------------------------
 
 
@@ -520,7 +390,9 @@ def test_e2b_run_mirrors_and_redacts_subagent_files(tmp_path: Path) -> None:
     config = make_config(tmp_path, OPENAI_API_KEY=secret)
     branch = _session_bytes("branch", parent="/home/user/sessions/research.jsonl")
     branch += f'{{"type":"message","text":"the key {secret} was here"}}\n'.encode("utf-8")
-    sandbox = FakeSandbox(events=[{"type": "session", "id": "s1"}, *_FAKE_EVENTS])
+    sandbox = FakeSandbox(
+        tmp_path / "sandbox", report=None, fake_pi_env={"FAKE_PI_WRITE_REPORT": "1"}
+    )
     sandbox.session_files = ("research.jsonl", "branch.jsonl")
     sandbox.readable["/home/user/sessions/research.jsonl"] = _session_bytes("main")
     sandbox.readable["/home/user/sessions/branch.jsonl"] = branch
@@ -547,7 +419,6 @@ def test_e2b_run_mirrors_and_redacts_subagent_files(tmp_path: Path) -> None:
         (storage.run_dir(record.run_id) / "events.jsonl").read_text("utf-8").strip().splitlines()[-1]
     )
     assert last_frame["payload"].get("artifactFailures", []) == []
-
 
 
 def test_upload_config_delivers_the_runtime_directory_with_a_manifest(tmp_path: Path) -> None:
@@ -607,7 +478,7 @@ def test_upload_manifest_covers_reviewable_template_entries(tmp_path: Path) -> N
     client.close()
 
 
-# -- sandbox run --------------------------------------------------------------
+# -- sandbox run (RPC channel) --------------------------------------------------
 
 
 def _manager(config, sandbox, tmp_path: Path):
@@ -618,21 +489,35 @@ def _manager(config, sandbox, tmp_path: Path):
     return manager, storage
 
 
+def _event_kinds(storage: RunStore, run_id: str) -> list[str]:
+    path = storage.events_path(run_id)
+    if not path.is_file():
+        return []
+    return [
+        json.loads(line)["type"]
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 def test_run_replays_frames_and_pulls_the_report(tmp_path: Path) -> None:
     config = make_config(tmp_path)
-    sandbox = FakeSandbox(events=_FAKE_EVENTS)
+    sandbox = FakeSandbox(
+        tmp_path / "sandbox", report=None, fake_pi_env={"FAKE_PI_WRITE_REPORT": "1"}
+    )
     manager, storage = _manager(config, sandbox, tmp_path)
     record = manager.start("把结果写成 report.md")
     final = manager.wait(record.run_id, timeout=30)
 
     assert final.status == "finished"
     assert final.report_path is not None
-    assert "来自沙箱" in Path(final.report_path).read_text(encoding="utf-8")
+    report_text = Path(final.report_path).read_text(encoding="utf-8")
+    assert "研究报告（fake pi）" in report_text and "把结果写成 report.md" in report_text
     # The served report is the host-owned artifact copy inside the run directory.
     assert Path(final.report_path).is_relative_to(storage.run_dir(record.run_id))
     assert final.report_status == "ok"
 
-    kinds = [json.loads(line)["type"] for line in storage.events_path(record.run_id).read_text(encoding="utf-8").splitlines() if line.strip()]
+    kinds = _event_kinds(storage, record.run_id)
     assert "assistant_delta" in kinds
     assert "tool_started" in kinds and "tool_finished" in kinds
     assert kinds[-1] == "run_finished"
@@ -640,6 +525,9 @@ def test_run_replays_frames_and_pulls_the_report(tmp_path: Path) -> None:
     # Neither the prompt nor the model credential travels through the sandbox env.
     assert "OPENAI_API_KEY" not in sandbox.command_envs
     assert "把结果写成 report.md" not in sandbox.command
+    # The prompt travels as a stdin ``prompt`` frame, never on the command line.
+    prompts = [frame for frame in sandbox.stdin_frames if frame.get("type") == "prompt"]
+    assert prompts and prompts[-1].get("message") == "把结果写成 report.md"
     # The sandbox identity is durable for restart reconciliation.
     assert final.sandbox_id == "fake-sandbox"
 
@@ -652,10 +540,16 @@ def test_sandbox_followup_through_runner_keeps_session_and_run_boundaries(tmp_pa
     child_session = (
         b'{"type":"session","version":3,"id":"same-session","timestamp":"t2","cwd":"/home/user/workspace"}\n'
     )
-    first = FakeSandbox(events=[{"type": "session", "id": "same-session"}, *_FAKE_EVENTS])
+    first = FakeSandbox(
+        tmp_path / "sb1",
+        report=None,
+        fake_pi_env={"FAKE_PI_WRITE_REPORT": "1", "FAKE_PI_SESSION_ID": "same-session"},
+    )
     first.session_files = ("research.jsonl",)
     first.readable["/home/user/sessions/research.jsonl"] = parent_session
-    second = FakeSandbox(events=[{"type": "session", "id": "same-session"}, *_FAKE_EVENTS])
+    second = FakeSandbox(
+        tmp_path / "sb2", report=None, fake_pi_env={"FAKE_PI_SESSION_ID": "same-session"}
+    )
     second.session_files = ("continued.jsonl",)
     second.readable["/home/user/sessions/continued.jsonl"] = child_session
     sandboxes = iter([first, second])
@@ -678,95 +572,54 @@ def test_sandbox_followup_through_runner_keeps_session_and_run_boundaries(tmp_pa
     assert second.written["/home/user/sessions/continued.jsonl"] == parent_session.decode(
         "utf-8"
     )
-    assert second.written["/home/user/workspace/report.md"] == "# 报告\n\n来自沙箱。\n"
+    parent_report = (Path(original.workspace) / "report.md").read_text(encoding="utf-8")
+    assert second.written["/home/user/workspace/report.md"] == parent_report
     assert Path(original.session_file).read_bytes() == first.readable["/home/user/sessions/research.jsonl"]
     assert Path(final.session_file).read_bytes() == second.readable["/home/user/sessions/continued.jsonl"]
     assert _event_kinds(storage, parent.run_id)[-1] == "run_finished"
-    assert _event_kinds(storage, child.run_id)[-1] == "run_finished"
+    child_kinds = _event_kinds(storage, child.run_id)
+    assert child_kinds[-1] == "run_finished"
+    # 续接身份在回合前验证（三面同规则）：session_ready 先于回合帧发布。
+    assert child_kinds.index("session_ready") < child_kinds.index("turn_started")
+    prompts = [frame for frame in second.stdin_frames if frame.get("type") == "prompt"]
+    assert prompts and prompts[-1].get("message") == "追问细节"
 
 
 def test_nonzero_exit_fails_the_run_even_with_a_report(tmp_path: Path) -> None:
     config = make_config(tmp_path)
-    sandbox = FakeSandbox(exit_code=3, report="# 仍然有报告\n")
+    # fake pi 接受 prompt、写下报告后以非零码退出（不报告 agent_settled）：
+    # returncode 经 SandboxCommandProcess 到达客户端，run 以 kernel_exit 收场。
+    sandbox = FakeSandbox(
+        tmp_path / "sandbox", report=None, fake_pi_env={"FAKE_PI_WRITE_REPORT": "1"}
+    )
     manager, storage = _manager(config, sandbox, tmp_path)
-    record = manager.start("强制失败")
+    record = manager.start("强制失败 CRASH")
     final = manager.wait(record.run_id, timeout=30)
     assert final.status == "failed"
+    assert final.stop_reason == "kernel_exit", "真实非零退出是 kernel_exit，不是 execution_error"
     assert final.error is not None and "exit" in final.error.lower()
-    kinds = [json.loads(line)["type"] for line in storage.events_path(record.run_id).read_text(encoding="utf-8").splitlines() if line.strip()]
+    kinds = _event_kinds(storage, record.run_id)
     assert kinds[-1] == "run_failed"
 
 
-# -- cancellation -------------------------------------------------------------
+# -- cancellation (protocol-level abort) -----------------------------------------
 #
-# The completion audit flagged this path: stopping an E2B run closes the
-# sandbox, so the in-flight command either raises or returns normally. Both
-# must end as ``cancelled`` — never ``failed`` and never ``finished``.
+# 新义务（GLINK-ARCH-3 收敛）：取消是协议级 abort——宿主向运行中的 pi 发 RPC
+# ``abort`` 命令，沙箱存活到收尾，因此被取消的 run 也能回收 report.md 与主
+# 会话。原义务（旧 ``--mode json`` 路径运行中不能 abort，cancel 只能直接销
+# 毁沙箱，report 与主会话随沙箱即毁）已随旧适配器删除。
 
 
-def _event_kinds(storage: RunStore, run_id: str) -> list[str]:
-    path = storage.events_path(run_id)
-    return [
-        json.loads(line)["type"]
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-
-
-class BlockingHandle:
-    """Handle whose command blocks until the sandbox is killed."""
-
-    def __init__(self, sandbox: "BlockingSandbox") -> None:
-        self._sandbox = sandbox
-
-    def wait(self) -> _Result:
-        self._sandbox.command_started.set()
-        if not self._sandbox.released.wait(timeout=10):
-            raise AssertionError("sandbox was never killed")
-        if self._sandbox.raise_on_release:
-            # The E2B SDK surfaces a killed sandbox as an error on the handle.
-            raise SandboxError("sandbox was killed")
-        return _Result(self._sandbox.exit_code)
-
-
-class BlockingCommands(FakeCommands):
-    def run(
-        self,
-        cmd: str,
-        *,
-        background: bool = False,
-        envs: dict[str, str] | None = None,
-        **_: Any,
-    ) -> BlockingHandle:
-        self._sandbox.command = cmd
-        self._sandbox.command_envs = envs or {}
-        return BlockingHandle(self._sandbox)
-
-
-class BlockingSandbox(FakeSandbox):
-    """FakeSandbox whose command blocks until ``kill()`` — a real E2B stop."""
-
-    def __init__(self, *, raise_on_release: bool = True, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.command_started = threading.Event()
-        self.released = threading.Event()
-        self.raise_on_release = raise_on_release
-        self.commands = BlockingCommands(self)
-
-    def kill(self) -> None:
-        super().kill()
-        self.released.set()
-
-
-@pytest.mark.parametrize("raise_on_release", [True, False])
-def test_stop_during_a_sandbox_run_is_cancelled_not_failed(
-    tmp_path: Path, raise_on_release: bool
-) -> None:
+def test_stop_during_a_sandbox_run_aborts_the_kernel_then_cancels(tmp_path: Path) -> None:
     config = make_config(tmp_path)
-    sandbox = BlockingSandbox(raise_on_release=raise_on_release, events=_FAKE_EVENTS)
+    sandbox = FakeSandbox(
+        tmp_path / "sandbox", report=None, fake_pi_env={"FAKE_PI_WRITE_REPORT": "1"}
+    )
     manager, storage = _manager(config, sandbox, tmp_path)
-    record = manager.start("取消正在执行的沙箱 run")
-    assert sandbox.command_started.wait(timeout=10), "the sandbox command never started"
+    record = manager.start("永不结束 NOSETTLE 的研究")
+    assert wait_for(lambda: "assistant_delta" in _event_kinds(storage, record.run_id)), (
+        "the kernel never streamed"
+    )
     assert manager.stop(record.run_id).accepted is True
 
     final = manager.wait(record.run_id, timeout=30)
@@ -776,7 +629,12 @@ def test_stop_during_a_sandbox_run_is_cancelled_not_failed(
     kinds = _event_kinds(storage, record.run_id)
     assert kinds[-1] == "run_cancelled"
     assert "run_failed" not in kinds and "run_finished" not in kinds
+    # 取消经 RPC abort 到达运行中的 pi，而不是只能销毁沙箱（对旧路径红：
+    # 旧面没有 abort 通道，cancel 即毁沙箱）。
+    assert any(frame.get("type") == "abort" for frame in sandbox.stdin_frames)
     assert sandbox.killed is True, "a cancelled run must still destroy its sandbox"
+    # 沙箱存活到收尾：被取消的 run 也能回收 report.md（行为改善）。
+    assert final.report_path is not None
 
 
 def test_stop_that_lands_before_the_sandbox_starts_is_still_cancelled(
@@ -789,7 +647,7 @@ def test_stop_that_lands_before_the_sandbox_starts_is_still_cancelled(
     after ``start()`` and end as cancelled without prompting.
     """
     config = make_config(tmp_path)
-    sandbox = FakeSandbox(events=_FAKE_EVENTS)
+    sandbox = FakeSandbox(tmp_path / "sandbox", report=None)
     created = threading.Event()
     release = threading.Event()
 
@@ -811,176 +669,107 @@ def test_stop_that_lands_before_the_sandbox_starts_is_still_cancelled(
     assert final.stop_reason == "abort"
     kinds = _event_kinds(storage, record.run_id)
     assert kinds[-1] == "run_cancelled"
-    assert sandbox.command == "", "a cancelled run must not run the prompt"
+    assert not any(frame.get("type") == "prompt" for frame in sandbox.stdin_frames), (
+        "a cancelled run must not prompt the kernel"
+    )
     assert sandbox.killed is True, "a cancelled run must still destroy its sandbox"
 
 
-# -- the deadline's late-write race -------------------------------------------
+# -- stream loss: 断流即失败 -----------------------------------------------------
 #
-# GLINK-ACP-11 fixed this family on the ACP face: the outcome is a shared,
-# mutable object, and a driver write that lands after ``wait()`` decided the
-# deadline could rewrite the decided error text. The E2B pi face had no freeze:
-# its ``_drive`` checkpoint (``if self._cancelled.is_set(): return``) refuses
-# writes the cancellation got to see first, but a driver that already passed
-# that checkpoint before the deadline was decided still writes afterwards.
-# This regression holds that window open deterministically.
+# RPC 通道没有第二份事件副本（旧 tee 路径的 events.jsonl 权威已删）：沙箱流
+# 断开时 run 判 execution_error——不补发、不做 get_state 对账、不伪造完整
+# 性。已交付的帧保留在事件日志（它们真实到达过）。
 
 
-class LateWriteGate:
-    """The window between the driver's checkpoint and its outcome write."""
-
-    def __init__(self) -> None:
-        self.entered = threading.Event()
-        self.open = threading.Event()
-
-
-class _GatedExitCode:
-    """An exit code whose ``int()`` blocks inside the late-write window.
-
-    ``_drive`` converts the result's exit code with ``int()`` after its
-    cancellation checkpoint and before writing the outcome, so blocking
-    exactly there makes the race deterministic instead of hoping for a
-    scheduling coincidence.
-    """
-
-    def __init__(self, code: int, gate: LateWriteGate) -> None:
-        self._code = code
-        self._gate = gate
-
-    def __int__(self) -> int:
-        self._gate.entered.set()
-        # A bounded wait keeps a failing test from hanging the suite.
-        self._gate.open.wait(timeout=10)
-        return self._code
-
-    def __eq__(self, other: object) -> bool:
-        return self._code == other
-
-    def __ne__(self, other: object) -> bool:
-        return self._code != other
-
-    def __hash__(self) -> int:
-        return hash(self._code)
-
-    def __str__(self) -> str:
-        return str(self._code)
-
-
-class _GatedResult:
-    """The real run result with its exit code replaced by the gated one."""
-
-    def __init__(self, result: Any, gate: LateWriteGate) -> None:
-        self._result = result
-        self.exit_code = _GatedExitCode(result.exit_code, gate)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._result, name)
-
-
-class DeadlineRaceSandbox(FakeSandbox):
-    """FakeSandbox that opens the late-write window when the deadline kills it."""
-
-    def __init__(self, *, gate: LateWriteGate, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._gate = gate
-
-    def kill(self) -> None:
-        super().kill()
-        self._gate.open.set()
-
-
-def test_e2b_timeout_error_text_survives_a_late_driver_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The deadline's error text is final; the driver's late write cannot rewrite it.
-
-    The window is deterministic: the driver's exit code is converted with a
-    gated ``int()`` that releases when the deadline path kills the sandbox, so
-    the ``kernel_exit`` write lands after ``wait()`` wrote the timeout verdict.
-    Without a freeze the run keeps ``stop_reason=timeout`` but its error text
-    becomes the kernel-exit report.
-    """
-    gate = LateWriteGate()
-    config = make_config(tmp_path, LOCAL_WEB_TASK_TIMEOUT_SECONDS="1")
-    sandbox = DeadlineRaceSandbox(gate=gate, exit_code=1, events=_FAKE_EVENTS)
-    original = E2BSandboxClient.run_prompt
-
-    def gated_run_prompt(self: Any, *args: Any, **kwargs: Any) -> _GatedResult:
-        return _GatedResult(original(self, *args, **kwargs), gate)
-
-    monkeypatch.setattr(E2BSandboxClient, "run_prompt", gated_run_prompt)
+def test_a_dropped_stream_fails_the_run_without_replaying(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    # 交付到第一个 toolcall 帧后流断开：此前帧真实到达，此后尾巴不存在于
+    # 任何权威副本（对旧路径红：旧面会从 events.jsonl 补齐并 finished）。
+    sandbox = FakeSandbox(
+        tmp_path / "sandbox",
+        report=None,
+        fake_pi_env={"FAKE_PI_WRITE_REPORT": "1"},
+        stream_break_marker=b"toolcall_start",
+    )
     manager, storage = _manager(config, sandbox, tmp_path)
-    record = manager.start("超时后 driver 才写完 outcome")
-    # The driver passed its cancellation checkpoint and is held before its
-    # outcome write, so the deadline cannot settle the run while it is held.
-    assert gate.entered.wait(timeout=10), "the driver never reached the late-write window"
-
+    record = manager.start("断流的研究")
     final = manager.wait(record.run_id, timeout=30)
-    assert final is not None
-    assert (final.status, final.stop_reason) == ("failed", "timeout")
-    assert "run did not settle within" in (final.error or "")
-    assert sandbox.killed is True, "the deadline must still destroy its sandbox"
-    assert _event_kinds(storage, record.run_id)[-1] == "run_failed"
+
+    assert final.status == "failed"
+    assert final.stop_reason == "execution_error", final.error
+    assert final.error is not None and "沙箱流断开" in final.error
+    assert "不补发" in final.error and "不伪造完整性" in final.error
+    kinds = _event_kinds(storage, record.run_id)
+    assert kinds[-1] == "run_failed"
+    # 已交付的帧保留；断点之后的回合收尾不存在于事件日志。
+    assert "assistant_delta" in kinds
+    assert "turn_finished" not in kinds
+    # 断流已判定失败：close 不再把「无退出码」谎报为资源未释放（沙箱
+    # kill 才是释放权威），cleanup 如实 released。
+    assert final.cleanup is not None and final.cleanup["released"] is True
+    assert sandbox.killed is True
 
 
-# -- stream parsing -----------------------------------------------------------
+# -- continuation identity: 回合前验证 -------------------------------------------
 
 
-def test_json_stream_parser_ignores_non_json_noise() -> None:
-    assert parse_json_stream_line("") is None
-    assert parse_json_stream_line("npm warn something") is None
-    assert parse_json_stream_line("[]") is None
-    frame = parse_json_stream_line('{"type": "agent_start"}')
-    assert frame == {"type": "agent_start"}
+def test_a_followup_with_a_mismatched_session_is_refused_before_the_prompt(
+    tmp_path: Path,
+) -> None:
+    """RPC get_state 在 session_ready 即知会话身份：不符在回合前拒收。
 
-
-def test_event_frames_are_split_on_lf_only(tmp_path: Path) -> None:
-    """U+2028 inside a JSON string must not tear a frame (shared corpus)."""
-    corpus = json.loads(FRAMING_FIXTURE_TEXT)
-    separator = "\u2028"
-    wire = "".join(
-        json.dumps(frame, ensure_ascii=False) + ("\r\n" if index % 2 else "\n")
-        for index, frame in enumerate(corpus["frames"])
-    )
-    assert separator in wire, "the corpus must contain the separator inside a string"
-
+    对旧路径红：旧 e2b 面流中才发现 session id，只能回合后由驱动线程比对
+    ``expected_session_id``——第一次模型调用已经发生。
+    """
     config = make_config(tmp_path)
-    runtime = _prepare(config, tmp_path)
-    sandbox = FakeSandbox()
-    sandbox.readable["/home/user/events.jsonl"] = wire
-    client = E2BSandboxClient(
-        config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
+    parent_session = (
+        b'{"type":"session","version":3,"id":"same-session","timestamp":"t1","cwd":"/home/user/workspace"}\n'
     )
-    client.start()
-    records = [parse_json_stream_line(line) for line in client.fetch_events()]
-    assert records == corpus["frames"]
-    client.close()
-
-
-# -- command composition ------------------------------------------------------
-
-
-def test_sandbox_command_is_shell_safe_for_hostile_prompts(tmp_path: Path) -> None:
-    """Quotes, newlines, backticks, ``$(…)`` and Unicode are base64-encoded."""
-    config = make_config(tmp_path)
-    runtime = _prepare(config, tmp_path)
-    client = E2BSandboxClient(
-        config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: FakeSandbox()
+    first = FakeSandbox(
+        tmp_path / "sb1",
+        report=None,
+        fake_pi_env={"FAKE_PI_WRITE_REPORT": "1", "FAKE_PI_SESSION_ID": "same-session"},
     )
-    prompt = 'echo "$(rm -rf /)" `whoami` \'quote\' \\ backslash\n第二行 \u2028 line'
-    command = client._command(prompt, "系统提示 with 'quotes' and $vars")  # noqa: SLF001
-    assert prompt not in command
-    assert "$(rm -rf /)" not in command
-    assert "`whoami`" not in command
-    # Both payloads survive the shell line exactly.
-    encoded_prompt = base64.b64encode(prompt.encode("utf-8")).decode("ascii")
-    encoded_system = base64.b64encode("系统提示 with 'quotes' and $vars".encode("utf-8")).decode("ascii")
-    assert f"'{encoded_prompt}'" in command
-    assert f"'{encoded_system}'" in command
-    assert base64.b64decode(encoded_prompt).decode("utf-8") == prompt
+    first.session_files = ("research.jsonl",)
+    first.readable["/home/user/sessions/research.jsonl"] = parent_session
+    # The follow-up's kernel reports a *different* session id: the refusal
+    # must land before any prompt frame reaches the sandbox.
+    second = FakeSandbox(
+        tmp_path / "sb2", report=None, fake_pi_env={"FAKE_PI_SESSION_ID": "other-session"}
+    )
+    second.session_files = ("continued.jsonl",)
+    second.readable["/home/user/sessions/continued.jsonl"] = (
+        b'{"type":"session","version":3,"id":"same-session","timestamp":"t2","cwd":"/home/user/workspace"}\n'
+    )
+    sandboxes = iter([first, second])
+    storage = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store=storage, sandbox_factory=lambda **_: next(sandboxes))
+    parent = manager.start("初始问题")
+    original = manager.wait(parent.run_id, timeout=30)
+    assert original.status == "finished" and original.session_id == "same-session"
+    deadline = time.monotonic() + 5
+    while manager.active_run_id is not None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert manager.active_run_id is None
+
+    child = manager.start("追问", parent_run_id=parent.run_id)
+    final = manager.wait(child.run_id, timeout=30)
+
+    assert final.status == "failed"
+    assert "session_unavailable" in (final.error or "")
+    child_kinds = _event_kinds(storage, child.run_id)
+    assert "turn_started" not in child_kinds, "回合前拒收：回合从未开始"
+    assert not any(frame.get("type") == "prompt" for frame in second.stdin_frames), (
+        "追问身份不符时不得发出 prompt 帧"
+    )
+    assert second.killed is True
 
 
-def test_sandbox_command_guards_the_prebaked_packages(tmp_path: Path) -> None:
+# -- spawn command chain ---------------------------------------------------------
+
+
+def test_spawn_rpc_composes_the_guarded_command_chain(tmp_path: Path) -> None:
     """沙箱面同样从镜像内路径加载包；模板早于宿主/缺包时必须明确失败。
 
     E2B 没有 docker 的 ``--entrypoint``，所以守卫是命令链的一环：先验证
@@ -988,23 +777,65 @@ def test_sandbox_command_guards_the_prebaked_packages(tmp_path: Path) -> None:
     """
     config = make_config(tmp_path)
     runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
     client = E2BSandboxClient(
-        config,
-        runtime,
-        run_id="abc123",
-        workspace=tmp_path / "ws",
-        sandbox_factory=lambda **_: FakeSandbox(),
+        config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
     )
-    command = client._command("问题", "")  # noqa: SLF001
-    guard = e2b_env.SANDBOX_PACKAGE_GUARD
-    assert f"test -x {guard}" in command
-    assert "exit 78" in command
-    assert command.index(f"test -x {guard}") < command.index(f"{guard} pi --mode json")
-    settings = json.loads((runtime.directory / "settings.json").read_text(encoding="utf-8"))
-    assert settings["packages"] == [
-        f"{agent_env.IMAGE_PACKAGE_NODE_MODULES}/pi-web-access",
-        f"{agent_env.IMAGE_PACKAGE_NODE_MODULES}/pi-subagents",
-    ]
+    client.start()
+    argv = ["pi", "--mode", "rpc", "--provider", "fake", "--model", "fake/model"]
+    process = client.spawn_rpc(argv)
+    try:
+        command = sandbox.command
+        guard = SANDBOX_PACKAGE_GUARD
+        assert f"test -x {guard}" in command
+        assert "exit 78" in command
+        assert command.index(f"test -x {guard}") < command.index(f"exec {guard}")
+        assert f"cd {SANDBOX_WORKSPACE} && exec {shlex.join([guard, *argv])}" in command
+        kwargs = sandbox.command_kwargs
+        assert kwargs["background"] is True and kwargs["stdin"] is True
+        assert kwargs["cwd"] == SANDBOX_WORKSPACE
+        assert kwargs["timeout"] == client.sandbox_timeout
+        assert "OPENAI_API_KEY" not in sandbox.command_envs
+        settings = json.loads((runtime.directory / "settings.json").read_text(encoding="utf-8"))
+        assert settings["packages"] == [
+            f"{agent_env.IMAGE_PACKAGE_NODE_MODULES}/pi-web-access",
+            f"{agent_env.IMAGE_PACKAGE_NODE_MODULES}/pi-subagents",
+        ]
+    finally:
+        process.kill()
+        client.close()
+
+
+def test_spawn_rpc_quotes_hostile_argv_and_keeps_the_prompt_off_the_command_line(
+    tmp_path: Path,
+) -> None:
+    """``--append-system-prompt`` 文本作为一个 argv 词存活；prompt 走 stdin。
+
+    原义务：prompt/system 经 base64 编码进命令行。新义务：prompt 本体走
+    stdin 的 ``prompt`` 帧，从不出现在命令行；argv 里的文本由
+    ``shlex.join`` 引用，逐词回解析等于原 argv。
+    """
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    client = E2BSandboxClient(
+        config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
+    )
+    client.start()
+    hostile = "系统提示 with 'quotes' and $(rm -rf /) `whoami` \\ backslash\n第二行  line"
+    argv = ["pi", "--mode", "rpc", "--append-system-prompt", hostile]
+    process = client.spawn_rpc(argv)
+    try:
+        command = sandbox.command
+        assert shlex.quote(hostile) in command, "the text must survive as one quoted word"
+        # The fake parsed the chain back into an argv: quoting cannot have
+        # silently split or re-joined a word.
+        assert sandbox.agent_argv == argv
+        assert "把结果写成 report.md" not in command
+        assert "base64" not in command, "旧的 base64 编码机制已整体废除"
+    finally:
+        process.kill()
+        client.close()
 
 
 # -- artifact recovery --------------------------------------------------------
@@ -1068,12 +899,14 @@ def test_the_kernel_command_is_allowed_to_run_for_the_whole_sandbox_lifetime(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
     )
     client.start()
-    client.run_prompt("把结果写成 report.md")
-
-    assert sandbox.command_timeout is not None, "the SDK default (60 s) must not be left in place"
-    # The command may run as long as the sandbox it runs in; never longer.
-    assert sandbox.command_timeout == client.sandbox_timeout == 1200
-    client.close()
+    process = client.spawn_rpc(["pi", "--mode", "rpc"])
+    try:
+        assert sandbox.command_timeout is not None, "the SDK default (60 s) must not be left in place"
+        # The command may run as long as the sandbox it runs in; never longer.
+        assert sandbox.command_timeout == client.sandbox_timeout == 1200
+    finally:
+        process.kill()
+        client.close()
 
 
 def test_the_command_timeout_follows_a_tighter_configured_sandbox_ceiling(
@@ -1088,10 +921,12 @@ def test_the_command_timeout_follows_a_tighter_configured_sandbox_ceiling(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
     )
     client.start()
-    client.run_prompt("把结果写成 report.md")
-
-    assert sandbox.command_timeout == 300
-    client.close()
+    process = client.spawn_rpc(["pi", "--mode", "rpc"])
+    try:
+        assert sandbox.command_timeout == 300
+    finally:
+        process.kill()
+        client.close()
 
 
 def test_recovered_artifacts_are_bounded_and_path_safe(tmp_path: Path) -> None:
@@ -1116,588 +951,7 @@ def test_recovered_artifacts_are_bounded_and_path_safe(tmp_path: Path) -> None:
     client.close()
 
 
-# -- live streaming (GLINK-E2B-LIVE-01) --------------------------------------
-#
-# The e2b 2.x background handle *is* the streaming interface: iterating it
-# yields ``(stdout, stderr, pty)`` chunks while the command runs. The old face
-# was built on the misdiagnosis that no callback fires for
-# ``commands.run(background=True)``, so it redirected stdout to a file and
-# replayed the file once the command settled. These fakes model the real handle
-# contract (chunks, end event, drop without end) and never contact E2B.
-
-_EVENTS_PATH = "/home/user/events.jsonl"
-_EXIT_PATH = "/home/user/pi-exit-code.txt"
-
-
-def _record_lines(records: list[dict[str, Any]]) -> list[str]:
-    """The exact LF-terminated wire records for ``records``."""
-    return [json.dumps(record, ensure_ascii=False) + "\n" for record in records]
-
-
-def _delivered(lines: list[str]) -> list[str]:
-    """The wire records as ``on_line`` sees them: LF/CR removed."""
-    return [line.removesuffix("\n").removesuffix("\r") for line in lines]
-
-
-class FakeCommandExit(Exception):
-    """Stand-in for the SDK's ``CommandExitException`` (carries the code)."""
-
-    def __init__(self, exit_code: int, stderr: str) -> None:
-        super().__init__(f"Command exited with code {exit_code} and error:\n{stderr}")
-        self.exit_code = exit_code
-        self.stderr = stderr
-
-
-class StreamedHandle:
-    """The e2b 2.x ``CommandHandle`` contract: iterate for output, then wait().
-
-    ``drop_after`` makes the stream raise after that many chunks, before the
-    end event, which is the "connection lost without end" case. ``gate_after``
-    blocks after delivering that chunk so a test can observe the run *while the
-    command is running*.
-    """
-
-    def __init__(self, sandbox: "StreamingSandbox") -> None:
-        self.pid = 4242
-        self._sandbox = sandbox
-        self.ended = False
-        self.dropped = False
-
-    def __iter__(self):
-        sandbox = self._sandbox
-        for index, chunk in enumerate(sandbox.stream_chunks):
-            yield chunk, None, None
-            if index == 0:
-                sandbox.stream_started.set()
-            if sandbox.gate_after == index:
-                assert sandbox.released.wait(timeout=10), "the test never released the stream"
-        if sandbox.drop_after is not None and sandbox.drop_after <= len(sandbox.stream_chunks):
-            self.dropped = True
-            raise SandboxError("stream disconnected before the end event")
-        self.ended = True
-
-    def wait(self) -> "_Result":
-        if not self.ended and not self.dropped:
-            for _ in self:
-                pass
-        if self.dropped:
-            # The SDK raises a generic error when the stream ends without an
-            # end event: "Command ended without an end event".
-            raise Exception("Command ended without an end event")
-        if self._sandbox.exit_code != 0:
-            raise FakeCommandExit(
-                self._sandbox.exit_code,
-                str(self._sandbox.readable.get("/home/user/pi-stderr.txt", "")),
-            )
-        return _Result(self._sandbox.exit_code)
-
-
-class StreamingCommands(FakeCommands):
-    def run(
-        self,
-        cmd: str,
-        *,
-        background: bool = False,
-        envs: dict[str, str] | None = None,
-        timeout: float | None = None,
-        **_: Any,
-    ) -> StreamedHandle:
-        self._sandbox.command = cmd
-        self._sandbox.command_envs = envs or {}
-        self._sandbox.command_timeout = timeout
-        return StreamedHandle(self._sandbox)
-
-
-class StreamingSandbox(FakeSandbox):
-    """FakeSandbox whose command streams stdout chunks like the real SDK."""
-
-    def __init__(
-        self,
-        *,
-        events_text: str | None = None,
-        chunks: tuple[str | bytes, ...] = (),
-        exit_code: int = 0,
-        drop_after: int | None = None,
-        gate_after: int | None = None,
-        marker: str | None = None,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(exit_code=exit_code, events_text=events_text, **kwargs)
-        if marker is not None:
-            self.readable[_EXIT_PATH] = marker
-        self.stream_chunks = chunks
-        self.drop_after = drop_after
-        self.gate_after = gate_after
-        self.stream_started = threading.Event()
-        self.released = threading.Event()
-        self.commands = StreamingCommands(self)
-
-    def kill(self) -> None:
-        super().kill()
-        # Killing the sandbox ends the command; a gated stream unblocks.
-        self.released.set()
-
-
-def test_live_frames_reach_the_event_bus_before_the_sandbox_command_ends(
-    tmp_path: Path,
-) -> None:
-    """The behavioural red line: frames must be committed while pi still runs.
-
-    The file-replay mechanism had produced nothing here yet, because every
-    frame only arrived after ``wait()`` returned.
-    """
-    config = make_config(tmp_path)
-    records = [
-        {
-            "type": "message_update",
-            "assistantMessageEvent": {"type": "text_delta", "delta": "第一帧"},
-        },
-        {"type": "session", "id": "live-session"},
-        {"type": "agent_settled"},
-    ]
-    lines = _record_lines(records)
-    sandbox = StreamingSandbox(
-        events_text="".join(lines),
-        chunks=tuple(lines),
-        gate_after=0,
-    )
-    sandbox.session_files = ("live.jsonl",)
-    sandbox.readable["/home/user/sessions/live.jsonl"] = (
-        b'{"type":"session","version":3,"id":"live-session","timestamp":"t","cwd":"/home/user/workspace"}\n'
-    )
-    manager, storage = _manager(config, sandbox, tmp_path)
-    record = manager.start("实时投递")
-    try:
-        assert sandbox.stream_started.wait(timeout=10), "the sandbox never streamed a chunk"
-        # The command is still blocked before its final chunk, so nothing has
-        # settled; the first frame must already be committed regardless.
-        assert "assistant_delta" in _event_kinds(storage, record.run_id)
-    finally:
-        sandbox.released.set()
-    final = manager.wait(record.run_id, timeout=30)
-    assert final.status == "finished"
-    assert final.session_id == "live-session", "the streamed session frame still sets the id"
-    assert _event_kinds(storage, record.run_id)[-1] == "run_finished"
-
-
-def test_run_prompt_delivers_lines_while_the_command_is_still_running(
-    tmp_path: Path,
-) -> None:
-    config = make_config(tmp_path)
-    records = [
-        {"type": "session", "id": "s"},
-        {"type": "agent_settled"},
-    ]
-    lines = _record_lines(records)
-    sandbox = StreamingSandbox(events_text="".join(lines), chunks=tuple(lines), gate_after=0)
-    client = E2BSandboxClient(
-        config,
-        _prepare(config, tmp_path),
-        run_id="abc123",
-        workspace=tmp_path / "ws",
-        sandbox_factory=lambda **_: sandbox,
-    )
-    client.start()
-    outcome: dict[str, Any] = {}
-    seen: list[str] = []
-
-    def drive() -> None:
-        outcome["result"] = client.run_prompt("实时投递", on_line=seen.append)
-
-    worker = threading.Thread(target=drive, daemon=True)
-    worker.start()
-    try:
-        assert sandbox.stream_started.wait(timeout=10), "the stream never delivered a chunk"
-        assert _delivered(seen) == [lines[0].removesuffix("\n")], (
-            "the first record must reach on_line before the end event"
-        )
-    finally:
-        sandbox.released.set()
-    worker.join(timeout=10)
-    assert not worker.is_alive()
-    assert outcome["result"].exit_code == 0
-    assert _delivered(seen) == _delivered(lines)
-    client.close()
-
-
-def test_lf_framer_splits_on_lf_only_and_survives_byte_boundaries() -> None:
-    framer = e2b_env.LFLineFramer()
-    frame = json.dumps(
-        {"type": "message_update", "delta": "你\u2028好\u2029尾"},
-        ensure_ascii=False,
-    )
-    wire = (frame + "\n" + '{"type": "agent_settled"}\n').encode("utf-8")
-    # Cut inside the multi-byte CJK character: the decoder must reassemble it.
-    cut = wire.index("你".encode("utf-8")) + 1
-    assert framer.feed(wire[:cut]) == []
-    records = framer.feed(wire[cut : wire.index(b"\n") + 1])
-    assert records == [frame], "U+2028/U+2029 inside a JSON string are not separators"
-    assert framer.feed(wire[wire.index(b"\n") + 1 :]) == ['{"type": "agent_settled"}']
-    # CRLF writers leave one CR before the LF; the caller strips it.
-    assert framer.feed('{"type":"x"}\r\n') == ['{"type":"x"}\r']
-
-
-def test_streamed_records_survive_chunk_and_utf8_boundaries(tmp_path: Path) -> None:
-    config = make_config(tmp_path)
-    records = [
-        {"type": "session", "id": "s"},
-        {
-            "type": "message_update",
-            "assistantMessageEvent": {"type": "text_delta", "delta": "你\u2028好"},
-        },
-        {
-            "type": "message_update",
-            "assistantMessageEvent": {"type": "text_delta", "delta": "跨块"},
-        },
-        {"type": "agent_settled"},
-    ]
-    wire = "".join(_record_lines(records))
-    raw = wire.encode("utf-8")
-    head = raw.index("你".encode("utf-8"))
-    chunks = (raw[: head + 1], raw[head + 1 : head + 4], raw[head + 4 :])
-    sandbox = StreamingSandbox(events_text=wire, chunks=chunks, marker="0")
-    client = E2BSandboxClient(
-        config,
-        _prepare(config, tmp_path),
-        run_id="abc123",
-        workspace=tmp_path / "ws",
-        sandbox_factory=lambda **_: sandbox,
-    )
-    client.start()
-    seen: list[str] = []
-    result = client.run_prompt("分块", on_line=seen.append)
-    client.close()
-
-    assert [json.loads(line) for line in seen] == records
-    assert result.delivered_lines == len(records)
-    assert result.exit_code == 0
-    assert result.stream_error is None
-
-
-def test_a_dropped_stream_is_caught_up_from_the_file_exactly_once(tmp_path: Path) -> None:
-    config = make_config(tmp_path)
-    records = [
-        {"type": "session", "id": "s"},
-        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "一"}},
-        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "二"}},
-        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "三"}},
-        {"type": "agent_settled"},
-    ]
-    lines = _record_lines(records)
-    sandbox = StreamingSandbox(
-        events_text="".join(lines),
-        chunks=(lines[0], lines[1]),
-        drop_after=2,
-        marker="0",
-    )
-    client = E2BSandboxClient(
-        config,
-        _prepare(config, tmp_path),
-        run_id="abc123",
-        workspace=tmp_path / "ws",
-        sandbox_factory=lambda **_: sandbox,
-    )
-    client.start()
-    seen: list[str] = []
-    result = client.run_prompt("断流补齐", on_line=seen.append)
-    client.close()
-
-    assert seen == _delivered(lines), "every record exactly once, in order"
-    assert result.delivered_lines == len(lines)
-    assert result.exit_code == 0
-    assert result.stream_error, "the drop is still reported as a stream problem"
-    # The same run without streaming delivers the same frames (no duplicate, no loss).
-    assert [json.loads(line) for line in seen] == records
-
-
-def test_a_dropped_stream_waits_for_the_command_then_reads_the_finished_file(
-    tmp_path: Path,
-) -> None:
-    """A drop must not read a half-written file: wait for the command's end."""
-    config = make_config(tmp_path)
-    records = [
-        {"type": "session", "id": "s"},
-        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "前半"}},
-        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "后半"}},
-        {"type": "agent_settled"},
-    ]
-    lines = _record_lines(records)
-    # The command is still running at the drop: only its first record exists.
-    sandbox = StreamingSandbox(events_text=lines[0], chunks=(lines[0],), drop_after=1)
-
-    def finish_command() -> None:
-        time.sleep(0.1)
-        sandbox.readable[_EVENTS_PATH] = "".join(lines)
-        sandbox.readable[_EXIT_PATH] = "0"
-
-    finisher = threading.Thread(target=finish_command, daemon=True)
-    finisher.start()
-
-    client = E2BSandboxClient(
-        config,
-        _prepare(config, tmp_path),
-        run_id="abc123",
-        workspace=tmp_path / "ws",
-        sandbox_factory=lambda **_: sandbox,
-    )
-    client.start()
-    seen: list[str] = []
-    result = client.run_prompt("等待结束再补齐", on_line=seen.append)
-    client.close()
-    finisher.join(timeout=10)
-
-    assert seen == _delivered(lines)
-    assert result.exit_code == 0
-
-
-def test_a_final_record_the_stream_never_terminated_comes_from_the_file(
-    tmp_path: Path,
-) -> None:
-    config = make_config(tmp_path)
-    records = [
-        {"type": "session", "id": "s"},
-        {"type": "agent_settled"},
-    ]
-    lines = _record_lines(records)
-    unterminated = lines[1].removesuffix("\n")
-    sandbox = StreamingSandbox(
-        events_text=lines[0] + unterminated,
-        chunks=(lines[0],),
-        drop_after=1,
-        marker="0",
-    )
-    client = E2BSandboxClient(
-        config,
-        _prepare(config, tmp_path),
-        run_id="abc123",
-        workspace=tmp_path / "ws",
-        sandbox_factory=lambda **_: sandbox,
-    )
-    client.start()
-    seen: list[str] = []
-    result = client.run_prompt("末行无换行", on_line=seen.append)
-    client.close()
-
-    assert [json.loads(line) for line in seen] == records
-    assert result.delivered_lines == len(records)
-
-
-def test_cancel_during_a_live_stream_stops_delivery(tmp_path: Path) -> None:
-    config = make_config(tmp_path)
-    records = [
-        {"type": "session", "id": "s"},
-        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "已送达"}},
-        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "不应送达"}},
-        {"type": "agent_settled"},
-    ]
-    lines = _record_lines(records)
-    sandbox = StreamingSandbox(
-        events_text="".join(lines),
-        chunks=tuple(lines),
-        gate_after=1,
-        marker="0",
-    )
-    manager, storage = _manager(config, sandbox, tmp_path)
-    record = manager.start("取消实时流")
-    assert sandbox.stream_started.wait(timeout=10), "the sandbox never streamed"
-    assert manager.stop(record.run_id).accepted is True
-
-    final = manager.wait(record.run_id, timeout=30)
-    assert final.status == "cancelled", final.error
-    assert sandbox.killed is True, "a cancelled stream still kills the sandbox"
-    kinds = _event_kinds(storage, record.run_id)
-    assert kinds[-1] == "run_cancelled"
-    log = storage.events_path(record.run_id).read_text(encoding="utf-8")
-    assert "已送达" in log, "frames delivered before the cancel stay"
-    assert "不应送达" not in log, "no frame may be delivered after the cancel"
-
-
-def test_a_dropped_stream_run_matches_a_full_replay_frame_for_frame(tmp_path: Path) -> None:
-    records = [
-        {"type": "session", "id": "s"},
-        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "一"}},
-        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "二"}},
-        {"type": "agent_settled"},
-    ]
-    lines = _record_lines(records)
-    config = make_config(tmp_path)
-    baseline_manager, baseline_store = _manager(config, FakeSandbox(events=records), tmp_path)
-    baseline = baseline_manager.start("完整回放")
-    baseline_final = baseline_manager.wait(baseline.run_id, timeout=30)
-    assert baseline_final.status == "finished"
-    baseline_kinds = _event_kinds(baseline_store, baseline.run_id)
-
-    sandbox = StreamingSandbox(events_text="".join(lines), chunks=(lines[0],), drop_after=1, marker="0")
-    manager, storage = _manager(config, sandbox, tmp_path)
-    record = manager.start("断流补齐")
-    final = manager.wait(record.run_id, timeout=30)
-
-    assert final.status == "finished", final.error
-    assert _event_kinds(storage, record.run_id) == baseline_kinds, (
-        "the catch-up must neither lose nor repeat a frame"
-    )
-
-
-def test_nonzero_exit_is_reported_as_an_exit_code_not_a_stream_error(tmp_path: Path) -> None:
-    config = make_config(tmp_path)
-    records = [{"type": "agent_settled"}]
-    lines = _record_lines(records)
-    sandbox = StreamingSandbox(events_text="".join(lines), chunks=tuple(lines), exit_code=3, marker="3")
-    sandbox.readable["/home/user/pi-stderr.txt"] = "pi exploded\n"
-    client = E2BSandboxClient(
-        config,
-        _prepare(config, tmp_path),
-        run_id="abc123",
-        workspace=tmp_path / "ws",
-        sandbox_factory=lambda **_: sandbox,
-    )
-    client.start()
-    result = client.run_prompt("强制失败", on_line=lambda line: None)
-    client.close()
-
-    assert result.exit_code == 3
-    assert "pi exploded" in result.stderr_tail
-
-
-def test_a_nonzero_sandbox_exit_is_kernel_exit_not_execution_error(tmp_path: Path) -> None:
-    """The SDK raises ``CommandExitException`` for a non-zero command exit."""
-    config = make_config(tmp_path)
-    lines = _record_lines([{"type": "agent_settled"}])
-    sandbox = StreamingSandbox(events_text="".join(lines), chunks=tuple(lines), exit_code=7, marker="7")
-    sandbox.readable["/home/user/pi-stderr.txt"] = "sdkerror\n"
-    manager, storage = _manager(config, sandbox, tmp_path)
-    record = manager.start("非零退出码")
-    final = manager.wait(record.run_id, timeout=30)
-
-    assert final.status == "failed"
-    assert final.stop_reason == "kernel_exit", final.error
-    assert final.error is not None and "exit" in final.error.lower()
-    assert "sdkerror" in final.error
-    assert "execution_error" not in (final.error or "")
-    assert _event_kinds(storage, record.run_id)[-1] == "run_failed"
-
-
-def test_sandbox_command_streams_stdout_and_records_the_pipeline_exit_code(
-    tmp_path: Path,
-) -> None:
-    config = make_config(tmp_path)
-    client = E2BSandboxClient(
-        config,
-        _prepare(config, tmp_path),
-        run_id="abc123",
-        workspace=tmp_path / "ws",
-        sandbox_factory=lambda **_: FakeSandbox(),
-    )
-    prompt = 'echo "$(rm -rf /)" `whoami` \'quote\' \\ backslash\n第二行 \u2028 line'
-    command = client._command(prompt, "系统提示 with 'quotes' and $vars")  # noqa: SLF001
-
-    assert command.startswith("set -o pipefail && "), "a pipeline must not swallow pi's exit code"
-    assert "| tee /home/user/events.jsonl" in command, "stdout must stream *and* persist"
-    assert "2> /home/user/pi-stderr.txt" in command
-    assert 'rc=$?' in command and "> /home/user/pi-exit-code.txt" in command
-    assert 'exit "$rc"' in command, "the command's own exit code must survive the marker write"
-    # The base64 contract is unchanged: no prompt text reaches the shell line.
-    assert prompt not in command
-    assert "$(rm -rf /)" not in command
-    assert "`whoami`" not in command
-    assert f"'{base64.b64encode(prompt.encode('utf-8')).decode('ascii')}'" in command
-
-
-# -- bounded reads and fail-closed catch-up (GLINK-INTEG-01) -------------------
-#
-# The sandbox's event file is the completeness authority when the live stream
-# dropped; an unreadable or oversized file must make the run unresolved rather
-# than produce a conclusion nobody can prove. Every sandbox read is bounded by
-# entry metadata (or a streamed read) *before* a byte is loaded.
-
-
-def test_a_dropped_stream_with_an_unreadable_event_file_fails_the_run(
-    tmp_path: Path,
-) -> None:
-    """The file decided the outcome and could not be read: fail, not finish."""
-    config = make_config(tmp_path)
-    records = [
-        {"type": "session", "id": "s"},
-        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "一"}},
-        {"type": "agent_settled"},
-    ]
-    lines = _record_lines(records)
-    sandbox = StreamingSandbox(
-        events_text="".join(lines),
-        chunks=(lines[0],),
-        drop_after=1,
-        marker="0",
-    )
-    del sandbox.readable[_EVENTS_PATH]  # the drop means only the file could prove the rest
-
-    manager, storage = _manager(config, sandbox, tmp_path)
-    record = manager.start("断流且补读失败")
-    final = manager.wait(record.run_id, timeout=30)
-
-    assert final.status == "failed"
-    assert final.stop_reason == "execution_error", final.stop_reason
-    assert final.error and "补读失败" in final.error
-    assert _event_kinds(storage, record.run_id)[-1] == "run_failed"
-
-
-def test_an_oversized_event_file_fails_closed_without_loading_it(tmp_path: Path) -> None:
-    config = make_config(tmp_path)
-    records = [{"type": "session", "id": "s"}, {"type": "agent_settled"}]
-    lines = _record_lines(records)
-    sandbox = StreamingSandbox(
-        events_text="".join(lines),
-        chunks=(lines[0],),
-        drop_after=1,
-        marker="0",
-    )
-    sandbox.sizes[_EVENTS_PATH] = EVENTS_MAX_BYTES + 1  # the metadata says "too big"
-    sandbox.reads.clear()
-
-    client = E2BSandboxClient(
-        config,
-        _prepare(config, tmp_path),
-        run_id="abc123",
-        workspace=tmp_path / "ws",
-        sandbox_factory=lambda **_: sandbox,
-    )
-    client.start()
-    with pytest.raises(EventCatchUpFailed) as refusal:
-        client.run_prompt("断流且事件文件超限")
-    client.close()
-
-    assert "超过上限" in str(refusal.value) or "补读失败" in str(refusal.value)
-    assert _EVENTS_PATH not in sandbox.reads, "超限的事件文件必须在读取前被拒绝"
-
-
-def test_a_healthy_stream_does_not_need_the_event_file(tmp_path: Path) -> None:
-    """A stream that ended on its own proved the timeline; the file is redundant."""
-    config = make_config(tmp_path)
-    records = [
-        {"type": "session", "id": "s"},
-        {"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": "完整"}},
-        {"type": "agent_settled"},
-    ]
-    lines = _record_lines(records)
-    sandbox = StreamingSandbox(
-        events_text="".join(lines), chunks=tuple(lines), marker="0"
-    )
-    del sandbox.readable[_EVENTS_PATH]
-
-    client = E2BSandboxClient(
-        config,
-        _prepare(config, tmp_path),
-        run_id="abc123",
-        workspace=tmp_path / "ws",
-        sandbox_factory=lambda **_: sandbox,
-    )
-    client.start()
-    seen: list[str] = []
-    result = client.run_prompt("健康流", on_line=seen.append)
-    client.close()
-
-    assert seen == _delivered(lines)
-    assert result.exit_code == 0 and result.stream_error is None
-    assert result.delivered_lines == len(lines)
+# -- bounded reads ---------------------------------------------------------------
 
 
 def test_artifacts_are_bounded_by_listing_metadata_before_reading(tmp_path: Path) -> None:
@@ -1721,57 +975,6 @@ def test_artifacts_are_bounded_by_listing_metadata_before_reading(tmp_path: Path
     assert {path.name for path in files} == {"report.md"}
     assert any("上限" in failure for failure in failures)
     assert "/home/user/workspace/huge.bin" not in sandbox.reads
-
-
-def test_a_sandbox_without_size_metadata_or_streaming_refuses_the_read(
-    tmp_path: Path,
-) -> None:
-    """Neither bound available: refuse the load instead of guessing."""
-    config = make_config(tmp_path)
-    sandbox = FakeSandbox()
-    sandbox.readable[_EVENTS_PATH] = "{}"
-
-    class PlainFiles:
-        def read(self, path: str) -> bytes:
-            raise AssertionError("不存在上限依据时不得整份载入沙箱文件")
-
-    sandbox.files = PlainFiles()  # type: ignore[assignment]
-    client = E2BSandboxClient(
-        config,
-        _prepare(config, tmp_path),
-        run_id="abc123",
-        workspace=tmp_path / "ws",
-        sandbox_factory=lambda **_: sandbox,
-    )
-    client.start()
-    try:
-        assert client.fetch_event_lines() == []
-        with pytest.raises(EventCatchUpFailed) as refusal:
-            client.fetch_event_lines(required=True)
-        assert "拒绝整份载入" in str(refusal.value)
-    finally:
-        client.close()
-
-
-def test_the_stderr_tail_stays_empty_when_the_read_is_refused(tmp_path: Path) -> None:
-    config = make_config(tmp_path)
-    sandbox = FakeSandbox()
-    sandbox.sizes["/home/user/pi-stderr.txt"] = STDERR_MAX_BYTES + 1
-    sandbox.readable["/home/user/pi-stderr.txt"] = "trace"
-    sandbox.reads.clear()
-    client = E2BSandboxClient(
-        config,
-        _prepare(config, tmp_path),
-        run_id="abc123",
-        workspace=tmp_path / "ws",
-        sandbox_factory=lambda **_: sandbox,
-    )
-    client.start()
-    try:
-        assert client.fetch_stderr_tail() == ""
-        assert "/home/user/pi-stderr.txt" not in sandbox.reads
-    finally:
-        client.close()
 
 
 def _recover_from(sandbox: FakeSandbox, tmp_path: Path):
@@ -1828,3 +1031,187 @@ def test_the_real_sdk_file_type_enum_is_understood(tmp_path: Path) -> None:
     assert sandbox.reads.count("/home/user/workspace/report.md") >= 1
     assert "/home/user/workspace/notes" not in sandbox.reads
     assert e2b is not None
+
+
+# -- adapter unit tests (E2BSandboxRpcExecutionAdapter) ---------------------------
+
+
+def _adapter_spec(config, runtime, tmp_path: Path, **overrides: Any) -> ExecutionSpec:
+    values: dict[str, Any] = {
+        "config": config,
+        "runtime": runtime,
+        "run_id": "abc123",
+        "prompt": "合成问题",
+        "system_prompt": "",
+        "workspace": tmp_path / "ws",
+        "timeout_seconds": 30,
+    }
+    values.update(overrides)
+    return ExecutionSpec(**values)
+
+
+def test_start_records_the_sandbox_identity_before_uploading(tmp_path: Path) -> None:
+    """身份在上传之前落盘：部分失败也留下可点名的资源。"""
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    identities: list[dict[str, str]] = []
+    written_at_identity: list[int] = []
+
+    def on_identity(identity: Mapping[str, str]) -> None:
+        identities.append(dict(identity))
+        written_at_identity.append(len(sandbox.written))
+
+    adapter = E2BSandboxRpcExecutionAdapter(
+        _adapter_spec(config, runtime, tmp_path),
+        argv=["pi", "--mode", "rpc"],
+        client_factory=PiRpcClient,
+        on_frame=lambda frame: None,
+        sandbox_factory=lambda **_: sandbox,
+        on_identity=on_identity,
+    )
+    adapter.start()
+    try:
+        assert identities == [{"sandbox": "fake-sandbox"}]
+        assert written_at_identity == [0], "身份落盘之前不得有任何上传"
+        assert sandbox.written, "upload_config 在身份落盘之后运行"
+    finally:
+        adapter.close()
+
+
+def test_popen_injection_reaches_the_shared_rpc_client(tmp_path: Path) -> None:
+    """spawn_rpc 的进程门面经 ``popen=`` 注入共享的 PiRpcClient。"""
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    captured: dict[str, Any] = {}
+
+    def spy_factory(argv, **kwargs):
+        captured.update(kwargs)
+        return PiRpcClient(argv, **kwargs)
+
+    adapter = E2BSandboxRpcExecutionAdapter(
+        _adapter_spec(config, runtime, tmp_path),
+        argv=["pi", "--mode", "rpc"],
+        client_factory=spy_factory,
+        on_frame=lambda frame: None,
+        sandbox_factory=lambda **_: sandbox,
+    )
+    adapter.start()
+    try:
+        popen = captured.get("popen")
+        assert popen is not None, "E2B 面必须把进程门面经 popen= 注入"
+        process = popen("ignored-argv")
+        assert isinstance(process, SandboxCommandProcess)
+        assert process.sandbox_id == "fake-sandbox"
+        # session_info 包装：get_state 载荷上追加 sandboxId/template。
+        session = adapter.session_info()
+        assert session is not None
+        assert session.payload["sandboxId"] == "fake-sandbox"
+        assert session.payload["template"] == "pi-glink-worker"
+    finally:
+        adapter.close()
+
+
+def test_abort_settle_grace_does_not_change_the_cancelled_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """宽限只等收尾落盘，不改终态判定；pi 不理会 abort 时宽限到期照常返回。"""
+    import pi_glink.kernel.execution as execution_module
+
+    monkeypatch.setattr(execution_module, "ABORT_SETTLE_GRACE_SECONDS", 0.2)
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    requests: list[str] = []
+
+    class _Client:
+        """A client whose kernel never settles after the abort command."""
+
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        @property
+        def running(self) -> bool:
+            return True
+
+        def request(self, command: Mapping[str, Any], *, timeout: float = 30.0):
+            requests.append(str(command.get("type")))
+            return SimpleNamespace(success=True, data={}, error=None)
+
+        def close(self, *, timeout: float = 5.0) -> int:
+            return 0
+
+    adapter = E2BSandboxRpcExecutionAdapter(
+        _adapter_spec(config, runtime, tmp_path),
+        argv=["pi", "--mode", "rpc"],
+        client_factory=_Client,
+        on_frame=lambda frame: None,
+        sandbox_factory=lambda **_: sandbox,
+    )
+    started_at = time.monotonic()
+    adapter.start()
+    outcome = adapter.wait(cancel=lambda: True, deadline=time.monotonic() + 60)
+    elapsed = time.monotonic() - started_at
+
+    assert outcome.cancelled is True and outcome.stop_reason == "abort"
+    assert "abort" in requests
+    assert elapsed < 10, "宽限到期照常返回，不拖住终态"
+    report = adapter.close()
+    assert report.released is True, report.failures
+
+
+def test_stream_loss_oserror_in_close_is_a_log_not_a_cleanup_failure(tmp_path: Path) -> None:
+    """断流后 ``SandboxCommandProcess.wait()`` 的 OSError 在 close 内降级。
+
+    沙箱 ``kill()`` 才是释放权威：一次已判定失败的断流不再被谎报为资源未
+    释放——OSError 降级为日志，不进 ``CleanupReport.failures``。
+    """
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    # get_state 的响应帧还没收完整流就断了：pump 以「无退出码」收场。
+    sandbox = FakeSandbox(tmp_path / "sandbox", stream_break_marker=b"get_state")
+    adapter = E2BSandboxRpcExecutionAdapter(
+        _adapter_spec(config, runtime, tmp_path),
+        argv=["pi", "--mode", "rpc"],
+        client_factory=PiRpcClient,
+        on_frame=lambda frame: None,
+        sandbox_factory=lambda **_: sandbox,
+    )
+    adapter.start()
+    process = adapter._process  # noqa: SLF001 - 测试钉死断流事实
+    # fake pi 沉默到收到命令：get_state 触发那半条响应帧，流随即断开。
+    assert adapter.session_info() is None
+    assert wait_for(lambda: process.stream_error is not None), "the stream never broke"
+
+    report = adapter.close()
+
+    assert report.released is True, report.failures
+    assert report.failures == ()
+    assert sandbox.killed is True
+
+
+def test_returncode_mirrors_the_popen_shape(tmp_path: Path) -> None:
+    """``subprocess.Popen`` 形状：运行中 None，退出后是状态，断流无码为 -1。"""
+    idle = SandboxCommandProcess(IdleHandle())
+    try:
+        assert idle.returncode is None, "运行中不得伪装已退出"
+        assert idle.poll() is None
+    finally:
+        idle.kill()
+    assert idle.wait(timeout=10) == 0
+    assert idle.returncode == 0
+
+    exited = SandboxCommandProcess(IdleHandle(exit_code=3, blocked=False))
+    assert exited.wait(timeout=10) == 3
+    assert exited.returncode == 3
+
+    broken = SandboxCommandProcess(BrokenHandle())
+    with pytest.raises(OSError):
+        broken.wait(timeout=10)
+    assert broken.poll() == -1, "断流不得伪装成活进程或真实退出码"
+    assert broken.returncode == -1
+    assert broken.stream_error is not None

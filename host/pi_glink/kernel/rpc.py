@@ -90,12 +90,17 @@ class PiRpcClient:
         env: Mapping[str, str] | None = None,
         on_event: Callable[[Mapping[str, Any]], None] | None = None,
         on_stderr: Callable[[str], None] | None = None,
+        popen: Callable[..., Any] | None = None,
     ) -> None:
         self._argv = list(argv)
         self._cwd = cwd
         self._env = dict(env) if env is not None else None
         self._on_event = on_event
         self._on_stderr = on_stderr
+        #: 进程工厂：默认 ``subprocess.Popen``；E2B 面注入一个返回
+        #: ``SandboxCommandProcess`` 的 callable（沙箱内命令已在
+        #: ``spawn_rpc`` 时启动，这里只把它的句柄交给客户端），协议驱动不变。
+        self._popen = popen or subprocess.Popen
         self._process: subprocess.Popen[bytes] | None = None
         self._write_lock = threading.Lock()
         self._pending_lock = threading.Lock()
@@ -115,7 +120,7 @@ class PiRpcClient:
         if self._process is not None:
             raise PiRpcError("client already started")
         logger.info("starting pi: %s", " ".join(self._argv))
-        self._process = subprocess.Popen(
+        self._process = self._popen(
             self._argv,
             cwd=str(self._cwd) if self._cwd is not None else None,
             env=self._env,
