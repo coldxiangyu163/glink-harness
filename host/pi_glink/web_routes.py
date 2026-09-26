@@ -37,6 +37,7 @@ logger = logging.getLogger("pi_glink.host")
 _RUN_EVENTS_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/events$")
 _RUN_STOP_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/stop$")
 _RUN_REPORT_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/report$")
+_RUN_CHILDREN_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/children$")
 _RUN_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})$")
 
 #: Run-body fields a client must never use to pick a model or supply a
@@ -274,6 +275,10 @@ class RoutesMixin:
         report_match = _RUN_REPORT_RE.match(path)
         if report_match is not None:
             self._send_report(report_match.group("run_id"), context, head_only=head_only)
+            return
+        children_match = _RUN_CHILDREN_RE.match(path)
+        if children_match is not None:
+            self._send_children(children_match.group("run_id"), context, head_only=head_only)
             return
         run_match = _RUN_RE.match(path)
         if run_match is not None:
@@ -553,6 +558,39 @@ class RoutesMixin:
         self._send_json(
             HTTPStatus.OK, {"run": self._run_view_live(record)}, head_only=head_only
         )
+
+    def _send_children(
+        self, run_id: str, context: TenantContext | None, *, head_only: bool
+    ) -> None:
+        """The run's authoritative child-run documents (§3.5), read-only.
+
+        Owner rules are exactly the run detail's: an unknown run, another
+        tenant's run and a legacy ownerless record all answer the same 404, and
+        local mode reads directly. The documents hold only redacted,
+        protocol-visible facts (they are built from committed event payloads),
+        so they are served as stored. ``skipped`` reports corruption honestly
+        instead of equating an unreadable document with absence; it appears
+        only when it is non-zero.
+        """
+        record = (
+            self.server.store.get_for(run_id, context.tenant_id)
+            if context is not None
+            else self.server.store.get(run_id)
+        )
+        if record is None:
+            self._send_json(
+                HTTPStatus.NOT_FOUND,
+                {"error": "unknown_run", "runId": run_id},
+                head_only=head_only,
+            )
+            return
+        page = self.server.store.read_children(run_id)
+        payload: dict[str, Any] = {
+            "children": [dict(document) for document in page.documents]
+        }
+        if page.skipped:
+            payload["skipped"] = page.skipped
+        self._send_json(HTTPStatus.OK, payload, head_only=head_only)
 
     def _send_report(
         self, run_id: str, context: TenantContext | None, *, head_only: bool

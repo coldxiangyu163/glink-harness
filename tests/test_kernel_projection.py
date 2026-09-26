@@ -21,9 +21,13 @@ from pi_glink.kernel.projection import (
     ARG_LIST_LIMIT,
     ASSISTANT_TEXT_LIMIT,
     DELTA_LIMIT,
+    SUBAGENT_AGENT_LIMIT,
+    SUBAGENT_TASK_LIMIT,
+    SUBAGENT_TOOL_NAME,
     TOOL_TEXT_LIMIT,
     Projector,
     extract_text,
+    parse_subagent_tasks,
     project_args,
     project_event,
     project_frames,
@@ -668,3 +672,265 @@ def test_project_frames_is_sequential_project_event() -> None:
         (events.TURN_STARTED, {}),
         (events.TURN_FINISHED, {}),
     ]
+
+
+# -- 子代理类型化投影（docs/architecture.md §3.5，Projector 的每 run 状态） ------------
+#
+# 识别依据：工具名等于 SUBAGENT_TOOL_NAME（pi-subagents 的派发工具名，常量钉住）。
+# 类型化是每 run 契约：Projector 记住哪些 toolCallId 派发了子代理，因此只有
+# 有状态投影路径产生 subagent_started/subagent_finished；无状态 project_event
+# 保持通用卡片（旧格式日志与单帧检查仍能按原形状投影）。
+
+
+def _dispatch(
+    tool_call_id: str = "sub-1",
+    tasks: Any = None,
+    **extra_args: Any,
+) -> dict[str, Any]:
+    args: dict[str, Any] = dict(extra_args)
+    if tasks is not None:
+        args["tasks"] = tasks
+    return {
+        "type": "tool_execution_start",
+        "toolCallId": tool_call_id,
+        "toolName": SUBAGENT_TOOL_NAME,
+        "args": args,
+    }
+
+
+_TWO_TASKS = [
+    {"agent": "researcher", "task": "法域 A 取证"},
+    {"agent": "researcher", "task": "法域 B 取证"},
+]
+
+
+def test_tool_name_constant_matches_the_dispatch_tool() -> None:
+    """识别依据钉住：pi-subagents 的派发工具就叫 ``subagent``（§3.5）。"""
+    assert SUBAGENT_TOOL_NAME == "subagent"
+
+
+def test_dispatch_emits_one_started_per_task_with_increasing_n() -> None:
+    projector = Projector(SecretRedactor())
+    produced = projector.project(_dispatch(tasks=list(_TWO_TASKS)))
+    assert _kinds(produced) == [events.SUBAGENT_STARTED, events.SUBAGENT_STARTED]
+    first, second = (payload for _kind, payload in produced)
+    assert first == {
+        "n": 0,
+        "toolCallId": "sub-1",
+        "agent": "researcher",
+        "task": "法域 A 取证",
+    }
+    assert second["n"] == 1
+    assert second["task"] == "法域 B 取证"
+    # n 是 run 内单调分配的序号：下一次派发从 2 继续，不按调用重置。
+    followup = projector.project(
+        _dispatch(tool_call_id="sub-2", tasks=[{"task": "法域 C"}])
+    )
+    assert _kinds(followup) == [events.SUBAGENT_STARTED]
+    assert followup[0][1]["n"] == 2
+    assert followup[0][1]["agent"] == "", "缺失的 agent 取空，不伪造"
+
+
+def test_dispatch_updates_are_suppressed_and_end_closes_every_child() -> None:
+    projector = Projector(SecretRedactor())
+    projector.project(_dispatch(tasks=list(_TWO_TASKS)))
+    # "(running...)" 占位没有信息：该 toolCallId 的 update 一律抑制。
+    assert (
+        projector.project(
+            {
+                "type": "tool_execution_update",
+                "toolCallId": "sub-1",
+                "toolName": SUBAGENT_TOOL_NAME,
+                "partialResult": "(running...)",
+            }
+        )
+        == []
+    )
+    produced = projector.project(
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "sub-1",
+            "toolName": SUBAGENT_TOOL_NAME,
+            "result": {"content": [{"type": "text", "text": "两个子代理都完成"}]},
+            "isError": False,
+        }
+    )
+    assert _kinds(produced) == [events.SUBAGENT_FINISHED]
+    payload = produced[0][1]
+    assert payload == {
+        "toolCallId": "sub-1",
+        "ns": [0, 1],
+        "status": "finished",
+        "isError": False,
+        "resultPreview": "两个子代理都完成",
+    }
+
+
+def test_dispatch_end_reports_failed_status_on_error() -> None:
+    projector = Projector(SecretRedactor())
+    projector.project(_dispatch(tasks=[{"task": "取证"}]))
+    (_kind, payload), = projector.project(
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "sub-1",
+            "toolName": SUBAGENT_TOOL_NAME,
+            "result": "子代理异常",
+            "isError": True,
+        }
+    )
+    assert payload["status"] == "failed"
+    assert payload["isError"] is True
+    assert payload["ns"] == [0]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {},  # 没有 tasks
+        {"tasks": []},  # 空数组：没有可指认的子代理
+        {"tasks": "法域 A"},  # 不是数组
+        {"tasks": [{"agent": "researcher"}, "裸字符串"]},  # 数组元素不全是对象
+        {"tasks": [None]},  # 同上
+    ],
+)
+def test_malformed_dispatch_args_fall_back_to_a_generic_card(args: dict[str, Any]) -> None:
+    """args 形状不符时回退普通工具卡片（防御，不伪造类型事件），且该 toolCallId
+    不进入子代理登记表：后续 update/end 仍按通用卡片流动。"""
+    projector = Projector(SecretRedactor())
+    (kind, payload), = projector.project(
+        {
+            "type": "tool_execution_start",
+            "toolCallId": "sub-9",
+            "toolName": SUBAGENT_TOOL_NAME,
+            "args": args,
+        }
+    )
+    assert kind == events.TOOL_STARTED
+    assert payload["toolName"] == SUBAGENT_TOOL_NAME
+    updated = projector.project(
+        {
+            "type": "tool_execution_update",
+            "toolCallId": "sub-9",
+            "toolName": SUBAGENT_TOOL_NAME,
+            "partialResult": "out",
+        }
+    )
+    assert _kinds(updated) == [events.TOOL_UPDATED], "未登记的调用不抑制 update"
+    finished = projector.project(
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "sub-9",
+            "toolName": SUBAGENT_TOOL_NAME,
+            "result": "done",
+            "isError": False,
+        }
+    )
+    assert _kinds(finished) == [events.TOOL_FINISHED], "未登记的调用不发 subagent_finished"
+
+
+def test_parse_subagent_tasks_shape_rules() -> None:
+    assert parse_subagent_tasks({"tasks": [{"task": "x"}]}) == [{"task": "x"}]
+    for bad in (None, "tasks", {"tasks": None}, {"tasks": {}}, {"tasks": [[1]]}):
+        assert parse_subagent_tasks(bad) is None
+
+
+def test_subagent_payloads_pass_through_the_run_redactor() -> None:
+    """类型事件载荷与现有投影同一道 redactor：task 与结果里的凭据形状值被脱敏。"""
+    secret = "sk-subagent0123456789abcdef"
+    projector = Projector(SecretRedactor([secret]))
+    (kind, payload), = projector.project(
+        _dispatch(tasks=[{"agent": "researcher", "task": f"用 {secret} 取证"}])
+    )
+    assert kind == events.SUBAGENT_STARTED
+    assert payload["task"] == f"用 {REPLACEMENT} 取证"
+    (_kind, finished), = projector.project(
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "sub-1",
+            "toolName": SUBAGENT_TOOL_NAME,
+            "result": f"回显 {secret}",
+            "isError": False,
+        }
+    )
+    assert finished["resultPreview"] == f"回显 {REPLACEMENT}"
+    rendered = json.dumps(finished, ensure_ascii=False)
+    assert secret not in rendered
+
+
+def test_subagent_fields_are_bounded() -> None:
+    projector = Projector(SecretRedactor())
+    (kind, payload), = projector.project(
+        _dispatch(
+            tasks=[
+                {
+                    "agent": "a" * (SUBAGENT_AGENT_LIMIT + 50),
+                    "task": "t" * (SUBAGENT_TASK_LIMIT + 50),
+                }
+            ]
+        )
+    )
+    assert kind == events.SUBAGENT_STARTED
+    assert payload["agent"].endswith("…[truncated 50 chars]")
+    assert payload["task"].endswith("…[truncated 50 chars]")
+    (_kind, finished), = projector.project(
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "sub-1",
+            "toolName": SUBAGENT_TOOL_NAME,
+            "result": "r" * (TOOL_TEXT_LIMIT + 10),
+            "isError": False,
+        }
+    )
+    assert finished["resultPreview"].endswith("…[truncated 10 chars]")
+
+
+def test_non_subagent_calls_are_untouched_by_a_dispatch_in_the_same_run() -> None:
+    """普通工具调用的投影逐点不变：与子代理派发交错时仍走通用卡片。"""
+    projector = Projector(SecretRedactor())
+    projector.project(_dispatch(tasks=list(_TWO_TASKS)))
+    (kind, payload), = projector.project(
+        {
+            "type": "tool_execution_start",
+            "toolCallId": "c1",
+            "toolName": "bash",
+            "args": {"command": "ls"},
+        }
+    )
+    assert kind == events.TOOL_STARTED
+    assert payload == {"toolCallId": "c1", "toolName": "bash", "args": {"command": "ls"}}
+    updated = projector.project(
+        {
+            "type": "tool_execution_update",
+            "toolCallId": "c1",
+            "toolName": "bash",
+            "partialResult": "out",
+        }
+    )
+    assert _kinds(updated) == [events.TOOL_UPDATED]
+    finished = projector.project(
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "c1",
+            "toolName": "bash",
+            "result": "done",
+            "isError": False,
+        }
+    )
+    assert _kinds(finished) == [events.TOOL_FINISHED]
+
+
+def test_stateless_projection_keeps_subagent_calls_as_generic_cards() -> None:
+    """钉住分工：类型化需要记住 toolCallId，只有 Projector 能做到；无状态
+    project_event 保持通用卡片，旧格式日志与单帧检查因此仍按原形状投影。"""
+    produced = project_event(_dispatch(tasks=list(_TWO_TASKS)))
+    assert _kinds(produced) == [events.TOOL_STARTED]
+    end = project_event(
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "sub-1",
+            "toolName": SUBAGENT_TOOL_NAME,
+            "result": "done",
+            "isError": False,
+        }
+    )
+    assert _kinds(end) == [events.TOOL_FINISHED]

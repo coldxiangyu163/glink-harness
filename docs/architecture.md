@@ -61,7 +61,8 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 | `thinking_delta` | `message_update.thinking_delta` | 思考折叠块（流式） |
 | `assistant_delta` | `message_update.text_delta` | 正文流 |
 | `assistant_message` | `message_end`（权威全文） | 收口后的 Markdown |
-| `tool_started` / `tool_updated` / `tool_finished` | `tool_execution_*` | 工具卡片（含流式输出/错误态）；子代理派发（`subagent`）不做特例，就是普通工具卡片 |
+| `tool_started` / `tool_updated` / `tool_finished` | `tool_execution_*` | 工具卡片（含流式输出/错误态） |
+| `subagent_started` / `subagent_finished` | `tool_execution_*`（工具名 `subagent`） | 子代理（ChildRun）的类型化生命周期事件，替代该 toolCallId 的通用工具卡片（§3.5） |
 | `usage_reported` | `turn_end.message.usage` | token 统计（`usage` 为 run 累计，`requestUsage` 为本次请求快照） |
 | `kernel_status` | `extension_error` 等 | 警告提示 |
 | `run_finished` / `run_failed` / `run_cancelled` | 宿主 | 终态、报告入口 |
@@ -176,6 +177,49 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
   run 正常收尾为 `done`，失败为 `interrupted`，取消为 `cancelled`；已拿到终态帧的工具保持原状态。
 
 前端从不解析终端文本：`tests/web/run-stream.test.mjs` 里有对应断言。
+
+### 3.5 子代理（ChildRun）模型
+
+子代理是 run 作用域内的一等领域对象 ChildRun：**权威表示是文档（`child.json`）与终帧汇总，
+事件只是状态迁移的推送**；子代理正文（逐步工具流、中间消息）永不进事件日志。v1 模型只含
+协议可见事实，两族（pi / ACP）同构；pi 的 `_meta.json` 增强与产物关联属 R2，不在本节范围。
+
+**child.json 字段**（落点 `runs/<id>/children/<n>/child.json`，每次状态迁移经目录句柄原子重写，
+与 §6.1 产物写入同一条边界）：
+
+| 字段 | 含义 |
+|---|---|
+| `n` | run 内序号，从 0 开始单调分配 |
+| `toolCallId` | 派发它的那次工具调用 id（一次调用可派发多个子代理） |
+| `agent` | 子代理名（派发参数给定；ACP 族无此字段时按协议可见事实取空/省略，不伪造） |
+| `task` | 任务描述，限幅 |
+| `status` | `running` / `finished` / `failed` / `cancelled` / `interrupted`；终态跟随 run 的规则与工具终态一致（§3.4「工具终态跟随 run」） |
+| `resultPreview` | 结果摘要，限幅 |
+| `enrichment` | v1 恒为 `"none"`（增强字段属 R2） |
+
+**事件载荷与识别规则**：
+
+* 工具名识别：pi 族与 ACP 族当前都以工具名 `"subagent"` 识别子代理派发（常量 + 钉住测试），
+  其他 harness 不做特例。
+* `subagent_started {n, toolCallId, agent, task}`：pi 族一次 `tool_call` 可派发多个
+  （`args.tasks` 数组），每个 task 一个 started；ACP（dsh）一次一个
+  （`args.description` / `args.prompt`）。args 形状不符合预期时**回退为普通工具卡片**
+  （防御，不伪造类型事件）。
+* `subagent_finished {toolCallId, ns: [...], status, isError, resultPreview}`：一次
+  `tool_finished` 收口该 call 的全部子代理；`resultPreview` 不切分，每个 child 文档记同一份
+  限幅摘要。
+* subagent 调用的 `tool_updated` 一律抑制（`"(running...)"` 占位无信息）；通用
+  `tool_started` / `tool_finished` 对这些 toolCallId 不再产生。
+* 类型事件载荷只能由**已脱敏**的值构造（与现有投影同一道 redactor，§3.3/§6.1）。
+* 终帧 payload 新增 `children: [{n, agent, task, status}]` 汇总，是回放渲染的事实源。
+* **读面与有界**：文档经 `GET /api/runs/{id}/children` 暴露（owner 与 404 口径和 run 详情
+  一致，见 §10.2）；`read_children` 每次最多读 `CHILD_READ_LIMIT`（64）个文档——损坏、
+  序号不符与**超出上限**的文档都计入响应的 `skipped` 如实上报，不静默等同缺失（>64 的
+  派发属 runaway 场景，有界是故意设计；终帧汇总同样以这 64 个为界）。重启对账的
+  `run_failed(interrupted)` 终帧与正常终帧走同一套子代理收口与汇总（文档先按
+  interrupted 收口，终帧再带 children）。
+* **历史日志读侧兼容**：事件日志不可变；旧格式（`toolName=subagent` 的通用工具卡片）前端
+  必须仍能照常按旧卡片渲染——这是硬约束，读侧兼容不属于写侧变化。
 
 ## 4. run 生命周期
 
@@ -339,7 +383,7 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 
 **多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
 
-**子代理副产物**：pi-subagents 的分支会话与主会话同名同目录（只能按会话头区分，见上表），产物目录由 `artifactDir: "session"` 落在会话目录的 `subagent-artifacts/`。E2B 面在沙箱销毁前把这些有界镜像到宿主拥有的 `runs/<id>/subagents/`（分支会话进 `sessions/`、产物进 `artifacts/`；深度/文件数/单文件/总量限幅，链接不跟随，失败记 `artifactFailures`），inproc/Docker 面的同类文件本就在宿主会话目录内、不另拷贝；两路的会话目录与镜像目录都在收尾时过 run 的脱敏边界（与 §6.1 会话文件同一条规则）。
+**子代理副产物**：pi-subagents 的分支会话与主会话同名同目录（只能按会话头区分，见上表），产物目录由 `artifactDir: "session"` 落在会话目录的 `subagent-artifacts/`。E2B 面在沙箱销毁前把这些有界镜像到宿主拥有的 `runs/<id>/subagents/`（分支会话进 `sessions/`、产物进 `artifacts/`；深度/文件数/单文件/总量限幅，链接不跟随，失败记 `artifactFailures`），inproc/Docker 面的同类文件本就在宿主会话目录内、不另拷贝；两路的会话目录与镜像目录都在收尾时过 run 的脱敏边界（与 §6.1 会话文件同一条规则）。R1 起每个子代理另有权威文档 `runs/<id>/children/<n>/child.json`（§3.5）：它是协议可见事实的落地，与 P0 的 `subagents/` 原始镜像各自独立——镜像是回收基质，child.json 与镜像的关联及镜像重排属 R2，关联未做前不重排镜像形状。
 
 **事件时序**：E2B 的流式接口是 `commands.run(background=True, …)` 返回的 `CommandHandle`
 （`background=True` 的重载不消费 `run()` 自身的回调）。沙箱命令把 pi 的 stdout 同时 `tee` 到
@@ -424,6 +468,7 @@ Dockerfile 的边界约束，缺 `pi-subagents` 只会退化成“没有子代�
 | 报告文件 | 经工作区目录句柄读取、脱敏、在 run 目录句柄内原子写入 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `kernel/runner.py::_recover_report` |
 | 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源；子代理分支会话与 `subagent-artifacts/` 同目录被同一边界清扫 | `kernel/runner.py::_sanitize_session_file`、`docker_env.host_session_path` |
 | 子代理镜像 | E2B 面回收的 `runs/<id>/subagents/`（分支会话 + 产物）收尾时经目录句柄清扫，与 §5.2 同一条边界 | `kernel/runner.py::_sanitize_workspace`、`kernel/e2b_env.py::recover_subagent_files` |
+| 子代理文档 | `runs/<id>/children/<n>/child.json` 只由已过两道脱敏的事件载荷构造（投影 → 提交前再脱敏），`GET /api/runs/{id}/children` 按存储原样下发，不引入新秘密 | `kernel/runner.py::_emit`、`store.py::read_children`、`web_routes.py` |
 | 报告下载 | `report_path` 不是下载能力：只认两个固定位置——宿主产物 `runs/<id>/artifacts/report.md`，以及旧版本写下的本 run 工作区 `workspaces/<id>/report.md`（只读，从不改写历史）；其他路径一律视为无报告。服务前再脱敏，响应头 `X-Redacted` 标明是否发生；`hasReport` 用同一位置规则与同一拒绝条件计算 | `store.py::report_location`、`web_routes.py::_send_report`、`artifacts.py` |
 
 **产物路径安全**（`artifacts.py::ArtifactTree`）：宿主从不「先 realpath 校验、再按路径打开」。
@@ -474,7 +519,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `scripts/` | 运维 | 启动、测试、真实 run 冒烟、E2B 模板构建；`spikes/`（ACP 各面的 live 探针） |
 | `docs/` | 文档与证据 | 架构、边界、集成笔记、`evidence/` |
 | `tests/` | 回归 | `test_*.py`（宿主/内核）、`web/*.test.mjs`（前端模型）、`browser/`（真实浏览器） |
-| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/<id>/{meta.json,events.jsonl,pi-agent/ 或 acp-agent/,artifacts/,subagents/}`（按本 run 的 harness 渲染；`subagents/` 为 E2B 面回收的子代理镜像）、`sessions/<id>/`、`workspaces/<id>/`；目录由宿主以 0700 创建，已存在的符号链接或组/其他人可写目录拒绝启动（不自动 chmod） |
+| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/<id>/{meta.json,events.jsonl,pi-agent/ 或 acp-agent/,artifacts/,subagents/,children/}`（按本 run 的 harness 渲染；`subagents/` 为 E2B 面回收的子代理镜像；`children/<n>/child.json` 为子代理权威文档，§3.5）、`sessions/<id>/`、`workspaces/<id>/`；目录由宿主以 0700 创建，已存在的符号链接或组/其他人可写目录拒绝启动（不自动 chmod） |
 
 运行期配置目录 `runs/<id>/pi-agent/` 是 pi 的 `PI_CODING_AGENT_DIR`：宿主在其中渲染
 `models.json` 与 `web-search.json`，复制 `agent/` 的可版本化配置，pi 自己往里写 `auth.json` /

@@ -38,6 +38,19 @@ DELTA_LIMIT = 20000
 ARG_LIST_LIMIT = 20
 ARG_ITEM_LIMIT = 500
 
+#: Tool name that identifies a subagent dispatch (docs/architecture.md §3.5).
+#: pi-subagents registers its dispatch tool under exactly this name
+#: (pi-subagents 0.40.0, also pinned by the foreground guard's own constant in
+#: ``agent/extensions/subagent-foreground-guard.ts``); the ACP family (dsh)
+#: exposes the same tool name. Both families recognise a dispatch by this name
+#: alone — no other harness or tool gets the typed treatment.
+SUBAGENT_TOOL_NAME = "subagent"
+#: Bounds for the typed subagent payload fields: the agent name and the task
+#: description are model-controlled text, so they are clipped like any other
+#: payload string (§3.5 child.json: ``task`` 限幅).
+SUBAGENT_AGENT_LIMIT = 200
+SUBAGENT_TASK_LIMIT = 500
+
 # pi assistant-stream delta types -> product event type
 _DELTA_EVENTS = {
     "text_delta": events.ASSISTANT_DELTA,
@@ -57,6 +70,15 @@ def project_event(
     When no redactor is supplied the module falls back to a shape-only one:
     forgetting the host redactor degrades detection (known values are missed) but
     never turns into a leak.
+
+    This stateless view always projects tool calls as generic tool cards. The
+    typed subagent lifecycle (``subagent_started``/``subagent_finished``
+    replacing the generic card for a dispatch's ``toolCallId``,
+    docs/architecture.md §3.5) is a per-run contract: it must remember which
+    call ids dispatched children, which only the stateful :class:`Projector`
+    can. The runner always drives :class:`Projector`, so the product stream is
+    typed; this helper stays generic so single-frame checks and old-format log
+    replay keep working.
     """
     frame_type = frame.get("type")
     handler = _HANDLERS.get(frame_type)
@@ -87,20 +109,39 @@ class Projector:
     deltas bypass per-frame redaction and go through one
     :class:`~pi_glink.redaction.StreamRedactor` as raw text; every other payload
     is redacted exactly as in :func:`project_event`.
+
+    The projector also owns the typed subagent lifecycle
+    (docs/architecture.md §3.5): a ``tool_execution_start`` for the
+    :data:`SUBAGENT_TOOL_NAME` tool whose args match the dispatch shape is
+    projected as one ``subagent_started`` per task instead of a generic tool
+    card, that call id's ``tool_execution_update`` frames are suppressed, and
+    its ``tool_execution_end`` closes every dispatched child with one
+    ``subagent_finished``. Which call ids are dispatches is per-run state: it
+    lives on this instance, each entry is released when the call ends, and the
+    whole map dies with the projector at run end.
     """
 
     def __init__(self, redactor: SecretRedactor) -> None:
         self._redactor = redactor
         self._stream = StreamRedactor(redactor)
+        #: toolCallId -> the child ``n`` values that call dispatched.
+        self._subagent_calls: dict[str, list[int]] = {}
+        #: Next child sequence number (``n``) within this run, from 0 up.
+        self._next_child_n = 0
 
     def project(self, frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         produced: list[tuple[str, dict[str, Any]]] = []
         if frame.get("type") in STREAM_BOUNDARY_FRAMES:
             produced.extend(self.flush())
-        handler = _HANDLERS.get(frame.get("type"))
-        if handler is None:
-            return produced
-        for kind, payload in handler(frame):
+        frame_type = frame.get("type")
+        if frame_type in _TOOL_EXECUTION_FRAMES:
+            handled = self._project_tool_execution(frame_type, frame)
+        else:
+            handler = _HANDLERS.get(frame_type)
+            if handler is None:
+                return produced
+            handled = handler(frame)
+        for kind, payload in handled:
             if kind in STREAM_EVENTS:
                 text = self._stream.push(kind, payload["text"])
                 if text:
@@ -117,6 +158,65 @@ class Projector:
             if text:
                 released.append((kind, {"text": text}))
         return released
+
+    # -- typed subagent projection (§3.5) --------------------------------------
+
+    def _project_tool_execution(
+        self, frame_type: str, frame: Mapping[str, Any]
+    ) -> list[tuple[str, dict[str, Any]]]:
+        tool_call_id = str(frame.get("toolCallId") or "")
+        if frame_type == "tool_execution_start":
+            if str(frame.get("toolName") or "") == SUBAGENT_TOOL_NAME:
+                tasks = parse_subagent_tasks(frame.get("args"))
+                if tasks is not None:
+                    return self._dispatch_subagents(tool_call_id, tasks)
+                # A subagent-named call whose args do not match the dispatch
+                # shape falls back to a generic card: no typed event is
+                # fabricated (§3.5 回退规则).
+            return _tool_execution_start(frame)
+        ns = self._subagent_calls.get(tool_call_id)
+        if ns is None:
+            return _HANDLERS[frame_type](frame)
+        if frame_type == "tool_execution_update":
+            # A subagent call only ever streams a "(running...)" placeholder;
+            # the typed lifecycle replaces the generic card's updates (§3.5).
+            return []
+        # tool_execution_end closes every child this call dispatched; the call
+        # id is never reused, so its per-run state is released here.
+        self._subagent_calls.pop(tool_call_id, None)
+        is_error = bool(frame.get("isError"))
+        return [
+            (
+                events.SUBAGENT_FINISHED,
+                {
+                    "toolCallId": tool_call_id,
+                    "ns": list(ns),
+                    "status": "failed" if is_error else "finished",
+                    "isError": is_error,
+                    "resultPreview": _clip_text(
+                        extract_text(frame.get("result")), TOOL_TEXT_LIMIT
+                    ),
+                },
+            )
+        ]
+
+    def _dispatch_subagents(
+        self, tool_call_id: str, tasks: list[Mapping[str, Any]]
+    ) -> list[tuple[str, dict[str, Any]]]:
+        ns: list[int] = []
+        produced: list[tuple[str, dict[str, Any]]] = []
+        for task in tasks:
+            n = self._next_child_n
+            self._next_child_n += 1
+            ns.append(n)
+            produced.append(
+                (
+                    events.SUBAGENT_STARTED,
+                    subagent_started_payload(n, tool_call_id, task),
+                )
+            )
+        self._subagent_calls[tool_call_id] = ns
+        return produced
 
 
 def _agent_start(_frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
@@ -183,6 +283,55 @@ def _message_end(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     if usage is not None:
         payload["usage"] = usage
     return [(events.ASSISTANT_MESSAGE, payload)]
+
+
+#: pi frames that carry a tool call's lifecycle; the stateful :class:`Projector`
+#: routes them through the typed-subagent rules before the generic handlers.
+_TOOL_EXECUTION_FRAMES = frozenset(
+    {"tool_execution_start", "tool_execution_update", "tool_execution_end"}
+)
+
+
+def parse_subagent_tasks(args: Any) -> list[Mapping[str, Any]] | None:
+    """The pi-family dispatch shape: ``args.tasks`` is a non-empty list of task
+    objects (``{"agent": …, "task": …}`` — one ``tool_call`` may dispatch
+    several children, docs/architecture.md §3.5).
+
+    Returns the task list, or ``None`` when the shape does not match. A ``None``
+    means the caller falls back to a generic tool card: a malformed dispatch is
+    rendered honestly as a tool call, never as a fabricated typed event.
+    """
+    if not isinstance(args, Mapping):
+        return None
+    tasks = args.get("tasks")
+    if not isinstance(tasks, (list, tuple)) or not tasks:
+        return None
+    if not all(isinstance(item, Mapping) for item in tasks):
+        return None
+    return list(tasks)
+
+
+def subagent_started_payload(
+    n: int, tool_call_id: str, task: Mapping[str, Any]
+) -> dict[str, Any]:
+    """One ``subagent_started`` payload (§3.5): ``{n, toolCallId, agent, task}``.
+
+    ``agent``/``task`` are model-controlled text: clipped, and absent or
+    non-string values degrade to an empty string rather than being invented.
+    The payload still leaves through the run's redactor like every other event.
+    """
+    agent = task.get("agent")
+    task_text = task.get("task")
+    return {
+        "n": n,
+        "toolCallId": tool_call_id,
+        "agent": _clip_text(agent, SUBAGENT_AGENT_LIMIT)
+        if isinstance(agent, str)
+        else "",
+        "task": _clip_text(task_text, SUBAGENT_TASK_LIMIT)
+        if isinstance(task_text, str)
+        else "",
+    }
 
 
 def _tool_execution_start(

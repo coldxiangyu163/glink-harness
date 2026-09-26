@@ -711,3 +711,36 @@ def test_the_run_state_helper_keeps_its_meaning() -> None:
         run_id="x", prompt="p", status=RUNNING, created_at=time.time(), workspace="/tmp/x"
     )
     assert record.holds_resources is True
+
+
+def test_reconcile_closes_leftover_children_and_summarizes_them(tmp_path: Path) -> None:
+    """The interrupted close-out sweeps child documents too, and its terminal
+    frame carries the same ``children`` summary as a normal verdict."""
+    config = make_config(tmp_path)
+    store = RunStore(config.data_root / "runs")
+    store.create("遗留 run", run_id="leftover-kids")
+    store.write_child(
+        "leftover-kids",
+        {"n": 0, "toolCallId": "c1", "agent": "researcher", "task": "调研甲",
+         "status": "running", "resultPreview": "", "enrichment": "none"},
+    )
+    store.write_child(
+        "leftover-kids",
+        {"n": 1, "toolCallId": "c2", "agent": "researcher", "task": "调研乙",
+         "status": "finished", "resultPreview": "摘要", "enrichment": "none"},
+    )
+    ownership = DataRootOwnership.acquire(config.data_root)
+    try:
+        manager = RunManager(config, EventBus(), store, ownership=ownership)
+        assert manager.reconcile() == ["leftover-kids"]
+    finally:
+        ownership.release()
+
+    assert store.read_child("leftover-kids", 0)["status"] == "interrupted"
+    assert store.read_child("leftover-kids", 1)["status"] == "finished", "已收口的不改写"
+    terminal = store.committed_terminal("leftover-kids")
+    assert terminal["type"] == "run_failed"
+    assert terminal["payload"]["children"] == [
+        {"n": 0, "agent": "researcher", "task": "调研甲", "status": "interrupted"},
+        {"n": 1, "agent": "researcher", "task": "调研乙", "status": "finished"},
+    ]

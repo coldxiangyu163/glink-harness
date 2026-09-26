@@ -849,3 +849,228 @@ def test_tool_payloads_keep_the_pi_family_shape() -> None:
         "result",
     }
     assert acp_finished["isError"] == pi_finished["isError"] is True
+
+
+# -- typed subagent projection (docs/architecture.md §3.5) ----------------------
+#
+# dsh exposes a tool named ``subagent`` whose dispatch args are
+# ``{description, prompt}`` — one child per call (acp-subagent-spike.txt). The
+# typed lifecycle mirrors the pi family: ``subagent_started`` replaces the
+# generic card, progress updates are suppressed, and the terminal update closes
+# the child with ``subagent_finished``. The ACP args carry no agent name, so
+# the ``agent`` field stays empty rather than being invented (§3.5 取空规则).
+
+
+def _subagent_call(
+    tool_call_id: str = "sub-1",
+    raw_input: Any = None,
+    status: str = "pending",
+    **update_fields: Any,
+) -> dict[str, Any]:
+    update: dict[str, Any] = {
+        "sessionUpdate": "tool_call",
+        "toolCallId": tool_call_id,
+        "name": "subagent",
+        "status": status,
+        "rawInput": {"description": "法域 A 取证", "prompt": "完整子提示"}
+        if raw_input is None
+        else raw_input,
+    }
+    update.update(update_fields)
+    return update
+
+
+def test_subagent_dispatch_projects_a_typed_started_event() -> None:
+    projector = AcpProjector(SecretRedactor())
+    produced = _project(projector, _subagent_call())
+    assert produced == [
+        (
+            events.SUBAGENT_STARTED,
+            {"n": 0, "toolCallId": "sub-1", "agent": "", "task": "法域 A 取证"},
+        )
+    ]
+
+
+def test_subagent_dispatch_recognised_by_title_when_name_is_absent() -> None:
+    """dsh puts the actual tool name in ``title`` (kind is ``other`` for every
+    tool): the typed rule keys on the same resolved label as the generic card."""
+    projector = AcpProjector(SecretRedactor())
+    call = _subagent_call()
+    del call["name"]
+    call["title"] = "subagent"
+    call["kind"] = "other"
+    produced = _project(projector, call)
+    assert [kind for kind, _ in produced] == [events.SUBAGENT_STARTED]
+
+
+def test_subagent_task_falls_back_to_the_prompt_without_a_description() -> None:
+    projector = AcpProjector(SecretRedactor())
+    produced = _project(
+        projector, _subagent_call(raw_input={"prompt": "完整子提示"}),
+    )
+    assert produced[0][1]["task"] == "完整子提示"
+
+
+def test_subagent_updates_are_suppressed_and_the_terminal_update_finishes() -> None:
+    projector = AcpProjector(SecretRedactor())
+    _project(projector, _subagent_call())
+    running = _project(
+        projector,
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "sub-1",
+            "status": "in_progress",
+            "content": [{"type": "content", "content": {"type": "text", "text": "(running...)"}}],
+        },
+    )
+    assert running == [], "子代理调用的进度占位一律抑制（§3.5）"
+    finished = _project(
+        projector,
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "sub-1",
+            "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": "子代理结论"}}],
+        },
+    )
+    assert finished == [
+        (
+            events.SUBAGENT_FINISHED,
+            {
+                "toolCallId": "sub-1",
+                "ns": [0],
+                "status": "finished",
+                "isError": False,
+                "resultPreview": "子代理结论",
+            },
+        )
+    ]
+
+
+def test_subagent_failed_status_marks_the_finished_event() -> None:
+    projector = AcpProjector(SecretRedactor())
+    _project(projector, _subagent_call())
+    (_kind, payload), = _project(
+        projector,
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "sub-1",
+            "status": "failed",
+            "content": [{"type": "content", "content": {"type": "text", "text": "boom"}}],
+        },
+    )
+    assert payload["status"] == "failed"
+    assert payload["isError"] is True
+    assert payload["resultPreview"] == "boom"
+
+
+def test_subagent_terminal_on_arrival_emits_started_then_finished() -> None:
+    projector = AcpProjector(SecretRedactor())
+    produced = _project(
+        projector,
+        _subagent_call(
+            status="completed",
+            content=[{"type": "content", "content": {"type": "text", "text": "done"}}],
+        ),
+    )
+    assert [kind for kind, _ in produced] == [events.SUBAGENT_STARTED, events.SUBAGENT_FINISHED]
+    assert produced[0][1]["n"] == 0
+    assert produced[1][1]["ns"] == [0]
+    assert produced[1][1]["resultPreview"] == "done"
+
+
+def test_subagent_n_increments_across_dispatches() -> None:
+    projector = AcpProjector(SecretRedactor())
+    first = _project(projector, _subagent_call(tool_call_id="sub-1"))
+    second = _project(
+        projector, _subagent_call(tool_call_id="sub-2", raw_input={"description": "法域 B 取证"})
+    )
+    assert first[0][1]["n"] == 0
+    assert second[0][1]["n"] == 1, "n 是 run 内单调分配的序号，不按调用重置"
+    finished = _project(
+        projector,
+        {"sessionUpdate": "tool_call_update", "toolCallId": "sub-2", "status": "completed"},
+    )
+    assert finished[0][1]["ns"] == [1]
+
+
+@pytest.mark.parametrize(
+    "raw_input",
+    [
+        None,
+        "plain-string",
+        {},  # neither description nor prompt
+        {"description": ""},  # empty strings cannot label a child
+        {"task": "pi 族字段名"},  # the pi family's shape, not dsh's
+        {"description": 42},
+    ],
+)
+def test_malformed_dispatch_args_fall_back_to_a_generic_card(raw_input: Any) -> None:
+    """args 形状不符时回退普通工具卡片（防御，不伪造类型事件），且该 toolCallId
+    不进入子代理登记表：后续 update 仍按通用卡片流动。"""
+    projector = AcpProjector(SecretRedactor())
+    update = _subagent_call(tool_call_id="sub-9")
+    update["rawInput"] = raw_input
+    produced = _project(projector, update)
+    assert [kind for kind, _ in produced] == [events.TOOL_STARTED]
+    assert produced[0][1]["toolName"] == "subagent"
+    running = _project(
+        projector,
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "sub-9",
+            "status": "in_progress",
+            "content": [{"type": "content", "content": {"type": "text", "text": "x"}}],
+        },
+    )
+    assert [kind for kind, _ in running] == [events.TOOL_UPDATED], "未登记的调用不抑制 update"
+
+
+def test_subagent_payloads_pass_through_the_run_redactor() -> None:
+    """类型事件载荷与现有投影同一道 redactor：task 与结果里的凭据值被脱敏。"""
+    secret = "opaque-token-value-99"
+    projector = AcpProjector(SecretRedactor([secret]))
+    started = _project(
+        projector, _subagent_call(raw_input={"description": f"用 {secret} 取证"})
+    )
+    assert started[0][1]["task"] == "用 [REDACTED] 取证"
+    finished = _project(
+        projector,
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "sub-1",
+            "status": "completed",
+            "content": [
+                {"type": "content", "content": {"type": "text", "text": f"回显 {secret}"}}
+            ],
+        },
+    )
+    assert finished[0][1]["resultPreview"] == "回显 [REDACTED]"
+
+
+def test_non_subagent_calls_are_untouched_by_a_dispatch_in_the_same_run() -> None:
+    """普通工具调用的投影逐点不变：与子代理派发交错时仍走通用卡片。"""
+    projector = AcpProjector(SecretRedactor())
+    _project(projector, _subagent_call())
+    started = _project(
+        projector,
+        {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "c1",
+            "name": "bash",
+            "status": "pending",
+            "rawInput": {"command": "ls"},
+        },
+    )
+    assert [kind for kind, _ in started] == [events.TOOL_STARTED]
+    assert started[0][1]["toolName"] == "bash"
+    finished = _project(
+        projector,
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "c1",
+            "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": "done"}}],
+        },
+    )
+    assert [kind for kind, _ in finished] == [events.TOOL_FINISHED]

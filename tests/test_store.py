@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.store import CANCELLED, FINISHED, RUNNING, RunStore
+from pi_glink.store import (
+    CANCELLED,
+    CHILD_READ_LIMIT,
+    FINISHED,
+    RUNNING,
+    RunStore,
+)
 
 
 @pytest.fixture()
@@ -125,3 +131,87 @@ def test_run_directories_are_created_private(tmp_path: Path) -> None:
     store.append_event(record.run_id, {"type": "run_started", "seq": 1})
     assert stat.S_IMODE(store.root.stat().st_mode) == 0o700
     assert stat.S_IMODE(store.run_dir(record.run_id).stat().st_mode) == 0o700
+
+
+# -- child-run documents (§3.5) -------------------------------------------------
+
+
+def _child(n: int, **overrides: object) -> dict:
+    document: dict[str, object] = {
+        "n": n,
+        "toolCallId": "call_1",
+        "agent": "researcher",
+        "task": f"调研任务 {n}",
+        "status": "running",
+        "resultPreview": None,
+        "enrichment": "none",
+    }
+    document.update(overrides)
+    return document  # type: ignore[return-value]
+
+
+def test_child_document_roundtrip_through_the_directory_handle(store: RunStore) -> None:
+    store.create("q", run_id="r1")
+    store.write_child("r1", _child(1))
+    store.write_child("r1", _child(0))
+
+    path = store.child_doc_path("r1", 0)
+    assert path.is_file()
+    assert json.loads(path.read_text(encoding="utf-8"))["task"] == "调研任务 0"
+    assert store.read_child("r1", 1)["status"] == "running"
+    page = store.read_children("r1")
+    assert [document["n"] for document in page.documents] == [0, 1]
+    assert page.skipped == 0
+
+    # A state migration republishes the whole document atomically.
+    store.write_child("r1", _child(0, status="finished", resultPreview="结论"))
+    assert store.read_child("r1", 0)["resultPreview"] == "结论"
+
+
+def test_read_children_skips_and_counts_unusable_documents(store: RunStore, tmp_path: Path) -> None:
+    store.create("q", run_id="r1")
+    store.write_child("r1", _child(0))
+    corrupt = store.run_dir("r1") / "children" / "1"
+    corrupt.mkdir(parents=True)
+    (corrupt / "child.json").write_text("not json", encoding="utf-8")
+    mismatched = store.run_dir("r1") / "children" / "2"
+    mismatched.mkdir(parents=True)
+    (mismatched / "child.json").write_text(json.dumps(_child(7)), encoding="utf-8")
+
+    page = store.read_children("r1")
+    assert [document["n"] for document in page.documents] == [0]
+    assert page.skipped == 2, "不可读/不可解析/序号不符的文档必须如实计数"
+    assert store.read_child("r1", 1) is None
+    assert store.read_child("r1", 2) is None
+
+    # A run without a children tree is not corruption.
+    assert store.read_children("r2").documents == ()
+    assert store.read_children("r2").skipped == 0
+
+
+def test_read_children_is_bounded(store: RunStore) -> None:
+    store.create("q", run_id="r1")
+    for n in range(CHILD_READ_LIMIT + 6):
+        store.write_child("r1", _child(n))
+    page = store.read_children("r1")
+    assert len(page.documents) == CHILD_READ_LIMIT
+    assert [document["n"] for document in page.documents] == list(range(CHILD_READ_LIMIT))
+    assert page.skipped == 6, "超出上限的文档计入 skipped，不静默缺席"
+
+
+def test_read_children_reports_an_unopenable_tree(store: RunStore) -> None:
+    store.create("q", run_id="r1")
+    # The children root exists but is not a directory: one unreadable unit,
+    # reported instead of silently equated with absence.
+    (store.run_dir("r1") / "children").write_text("not a directory", encoding="utf-8")
+    page = store.read_children("r1")
+    assert page.documents == ()
+    assert page.skipped == 1
+
+
+def test_write_child_validates_the_sequence_number(store: RunStore) -> None:
+    store.create("q", run_id="r1")
+    for bad in (-1, True, "0", None, 1.5):
+        with pytest.raises(ValueError, match="n"):
+            store.write_child("r1", {"n": bad})
+    assert store.read_children("r1").documents == ()

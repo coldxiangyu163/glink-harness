@@ -853,3 +853,80 @@ def test_a_reconciled_interruption_is_invisible_until_its_fsync_returns(
         server = started.get("server")
         if server is not None:
             server.server_close()
+
+
+# -- child-run documents vs. the committed terminal frame (§3.5) -----------------
+
+
+def test_child_documents_and_the_terminal_summary_survive_a_restart(tmp_path: Path) -> None:
+    """The committed terminal frame's ``children`` summary and the durable
+    ``children/<n>/child.json`` documents are two read surfaces of the same
+    facts: a fresh process over the same data root must read them identically."""
+    config = make_config(tmp_path)
+    bus = EventBus()
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, bus, store, client_factory=fake_factory())
+    record = manager.start("NOSETTLE 挂住，等注入子代理事件")
+    assert wait_for(
+        lambda: any(event["type"] == "session_ready" for event in read_log(store, record.run_id))
+    )
+    execution = manager._executions[record.run_id]  # noqa: SLF001 - injection seam
+    with execution.lock:
+        # The typed events are the projection layer's output; the seam under
+        # test starts at their commit (docs/architecture.md §3.5).
+        assert manager._emit_frame(  # noqa: SLF001
+            execution,
+            "subagent_started",
+            {"n": 0, "toolCallId": "call_1", "agent": "researcher", "task": "调研甲"},
+        )
+        assert manager._emit_frame(  # noqa: SLF001
+            execution,
+            "subagent_finished",
+            {
+                "toolCallId": "call_1",
+                "ns": [0],
+                "status": "finished",
+                "isError": False,
+                "resultPreview": "甲的结论摘要",
+            },
+        )
+        assert manager._emit_frame(  # noqa: SLF001
+            execution,
+            "subagent_started",
+            {"n": 1, "toolCallId": "call_2", "agent": "researcher", "task": "调研乙"},
+        )
+    assert manager.stop(record.run_id).accepted is True
+    final = manager.wait(record.run_id, timeout=30)
+    assert final.status == "cancelled"
+
+    expected_children = [
+        {"n": 0, "agent": "researcher", "task": "调研甲", "status": "finished"},
+        # 未收口的子代理跟随 run 的终态（§3.4「工具终态跟随 run」）。
+        {"n": 1, "agent": "researcher", "task": "调研乙", "status": "cancelled"},
+    ]
+    terminal = store.committed_terminal(record.run_id)
+    assert terminal["payload"]["children"] == expected_children
+
+    # The restart: a fresh store/manager over the same data root reads the
+    # same committed frame and the same documents.
+    restarted_store = RunStore(config.data_root / "runs")
+    replayed_terminal = restarted_store.committed_terminal(record.run_id)
+    assert replayed_terminal["payload"]["children"] == expected_children
+    page = restarted_store.read_children(record.run_id)
+    assert page.skipped == 0
+    summary_from_docs = [
+        {
+            "n": document["n"],
+            "agent": document["agent"],
+            "task": document["task"],
+            "status": document["status"],
+        }
+        for document in page.documents
+    ]
+    assert summary_from_docs == expected_children
+    assert page.documents[0]["resultPreview"] == "甲的结论摘要"
+    assert page.documents[0]["enrichment"] == "none"
+    # The replayed log carries the typed events plus exactly one terminal frame.
+    types = [event["type"] for event in restarted_store.iter_events(record.run_id)]
+    assert "subagent_started" in types and "subagent_finished" in types
+    assert types[-1] == "run_cancelled"

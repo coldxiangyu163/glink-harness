@@ -55,6 +55,12 @@ export function createRunModel(run = {}) {
     stopReason: run.stopReason ?? null,
     error: run.error ?? null,
     usage: run.usage ?? null,
+    /**
+     * ChildRun collection (docs/architecture.md §3.5), keyed by `n`: the typed
+     * subagent events maintain it live, and the terminal frame's `children`
+     * summary is the replay-time source of truth that settles it.
+     */
+    children: [],
     items: [],
     turn: 0,
     lastSeq: 0,
@@ -106,6 +112,10 @@ export function applyEvent(model, event) {
       return updateTool(next, payload);
     case 'tool_finished':
       return finishTool(next, payload);
+    case 'subagent_started':
+      return startChild(next, payload);
+    case 'subagent_finished':
+      return finishChildren(next, payload);
     case 'run_stage':
       return appendItem(next, {
         kind: 'stage',
@@ -211,7 +221,8 @@ export function createRunSubscription({
     for (const type of [
       'run_started', 'session_ready', 'turn_started', 'turn_finished',
       'thinking_delta', 'assistant_delta', 'assistant_message',
-      'tool_started', 'tool_updated', 'tool_finished', 'run_stage',
+      'tool_started', 'tool_updated', 'tool_finished',
+      'subagent_started', 'subagent_finished', 'run_stage',
       'kernel_status', 'usage_reported', 'run_finished', 'run_failed', 'run_cancelled',
     ]) {
       source.addEventListener(type, (message) => {
@@ -383,23 +394,126 @@ const INTERRUPTED_TOOL_STATUS = {
   cancelled: 'cancelled',
 };
 
+// -- ChildRun (§3.5): the typed lifecycle replaces generic tool cards ---------
+//
+// The event stream is only the push side: `model.children` mirrors the
+// authoritative child.json documents, and each dispatch also owns one timeline
+// card (kind 'subagent') so the reader sees the delegation where it happened.
+// Historical logs in the old format (a generic tool card whose toolName is
+// `subagent`) contain no typed events and keep rendering as plain tool cards —
+// the read side never rewrites history.
+
+function upsertChild(children, child) {
+  const index = children.findIndex((entry) => entry.n === child.n);
+  if (index < 0) return [...children, child].sort((a, b) => a.n - b.n);
+  const next = children.slice();
+  next[index] = { ...next[index], ...child };
+  return next;
+}
+
+function startChild(model, payload) {
+  // A payload without a valid child number is not a dispatch the host committed
+  // (the projection pins `{n, toolCallId, agent, task}`); ignore it rather than
+  // inventing an identity.
+  const n = payload.n;
+  if (!Number.isInteger(n) || n < 0) return model;
+  const child = {
+    n,
+    toolCallId: typeof payload.toolCallId === 'string' ? payload.toolCallId : '',
+    agent: typeof payload.agent === 'string' ? payload.agent : '',
+    task: typeof payload.task === 'string' ? payload.task : '',
+    status: 'running',
+    resultPreview: '',
+  };
+  const children = upsertChild(model.children, child);
+  const existing = model.items.findIndex((item) => item.kind === 'subagent' && item.n === n);
+  if (existing >= 0) {
+    const items = model.items.slice();
+    items[existing] = { ...items[existing], ...child };
+    return { ...model, children, items };
+  }
+  return appendItem({ ...model, children }, { kind: 'subagent', ...child });
+}
+
+function finishChildren(model, payload) {
+  const ns = Array.isArray(payload.ns) ? payload.ns.filter((value) => Number.isInteger(value)) : [];
+  if (!ns.length) return model;
+  const status = typeof payload.status === 'string' && payload.status
+    ? payload.status
+    : payload.isError ? 'failed' : 'finished';
+  // One tool call closes every child it dispatched; the preview is shared, not
+  // split (§3.5).
+  const preview = typeof payload.resultPreview === 'string' ? payload.resultPreview : '';
+  const children = model.children.map(
+    (child) => (ns.includes(child.n) ? { ...child, status, resultPreview: preview } : child),
+  );
+  const items = model.items.map(
+    (item) => (item.kind === 'subagent' && ns.includes(item.n) ? { ...item, status, resultPreview: preview } : item),
+  );
+  return { ...model, children, items };
+}
+
+//: A child still running at the verdict follows the run — the same rule as
+//: tools (§3.4). The terminal frame's `children` summary is the replay-time
+//: source of truth: it settles children whose own finished frame never
+//: arrived, and it is the only place a replay learns the final status of a
+//: dispatch whose typed events are complete.
+function settleChildren(model, status, summary) {
+  const follow = status === 'finished' ? 'finished' : INTERRUPTED_TOOL_STATUS[status];
+  let children = model.children;
+  if (Array.isArray(summary)) {
+    for (const entry of summary) {
+      if (!entry || !Number.isInteger(entry.n) || entry.n < 0) continue;
+      const existing = children.find((child) => child.n === entry.n);
+      children = upsertChild(children, {
+        n: entry.n,
+        toolCallId: existing?.toolCallId ?? '',
+        agent: typeof entry.agent === 'string' && entry.agent ? entry.agent : existing?.agent ?? '',
+        task: typeof entry.task === 'string' && entry.task ? entry.task : existing?.task ?? '',
+        status: typeof entry.status === 'string' && entry.status ? entry.status : existing?.status ?? follow,
+        resultPreview: existing?.resultPreview ?? '',
+      });
+    }
+  }
+  children = children.map((child) => (child.status === 'running' ? { ...child, status: follow } : child));
+  const byN = new Map(children.map((child) => [child.n, child]));
+  const items = model.items.map((item) => {
+    if (item.kind !== 'subagent') return item;
+    const settled = byN.get(item.n);
+    if (!settled) return item.status === 'running' ? { ...item, status: follow } : item;
+    return { ...item, agent: settled.agent, task: settled.task, status: settled.status };
+  });
+  return { ...model, children, items };
+}
+
+/** The children panel's rows (agent / task / status); empty means the panel stays hidden. */
+export function childrenPanel(model) {
+  return model.children.map((child) => ({
+    n: child.n,
+    agent: child.agent,
+    task: child.task,
+    status: child.status,
+  }));
+}
+
 function finishRun(model, status, payload) {
   const withStage = appendItem(model, {
     kind: 'stage',
     stage: status,
     label: status === 'finished' ? '本次运行完成' : status === 'cancelled' ? '本次运行已取消' : '本次运行失败',
   });
+  const settled = settleChildren(withStage, status, payload.children);
   return {
-    ...withStage,
+    ...settled,
     status,
     finishedAt: Date.now() / 1000,
-    durationSeconds: payload.durationSeconds ?? withStage.durationSeconds,
-    hasReport: Boolean(payload.reportPath) || withStage.hasReport,
-    sessionId: payload.sessionId ?? withStage.sessionId,
-    stopReason: payload.stopReason ?? withStage.stopReason,
-    error: payload.error ?? withStage.error,
-    usage: payload.usage ?? withStage.usage,
-    items: withStage.items.map((item) => {
+    durationSeconds: payload.durationSeconds ?? settled.durationSeconds,
+    hasReport: Boolean(payload.reportPath) || settled.hasReport,
+    sessionId: payload.sessionId ?? settled.sessionId,
+    stopReason: payload.stopReason ?? settled.stopReason,
+    error: payload.error ?? settled.error,
+    usage: payload.usage ?? settled.usage,
+    items: settled.items.map((item) => {
       if (item.kind !== 'tool' || item.status !== 'running') return item;
       const terminal = status === 'finished' ? 'done' : INTERRUPTED_TOOL_STATUS[status];
       return { ...item, status: terminal };

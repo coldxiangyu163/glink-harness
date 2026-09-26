@@ -138,12 +138,22 @@ class ResourceLedger:
             )
             if value
         }
+        # Children follow the run here too: a leftover run's still-running
+        # child documents are closed as interrupted (the same sweep the run's
+        # own verdict applies, shared via the store), so the reconciled
+        # terminal frame and the documents never diverge.
+        failures = self.store.settle_children(run_id, "interrupted")
+        if failures != 0:
+            logger.warning(
+                "遗留 run 的子代理文档收口不完整 run=%s failures=%s", run_id, failures
+            )
         payload = {
             "status": FAILED,
             "stopReason": "interrupted",
             "error": "宿主进程在该 run 结束前退出，已按中断收口",
             "reportPath": None,
             "reportStatus": "none",
+            "children": self.store.children_summary(run_id),
             "external": external,
             "cleanup": {
                 "released": None,

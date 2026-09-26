@@ -334,6 +334,61 @@ def test_report_is_served_as_markdown(server: PiGlinkServer) -> None:
     assert "fake pi" in body.decode("utf-8")
 
 
+def test_children_endpoint_lists_the_runs_child_documents(server: PiGlinkServer) -> None:
+    """GLINK-SUB-R1: GET /api/runs/{id}/children serves the authoritative
+    child.json documents (§3.5); a run without a children/ tree has none."""
+    _status, _headers, raw = request(server, "/api/runs", method="POST", body={"prompt": "子代理"})
+    run_id = json.loads(raw)["run"]["runId"]
+    wait_for_terminal(server, run_id)
+
+    # A run without children answers 200 with an empty list, not a 404.
+    status, _headers, raw = request(server, f"/api/runs/{run_id}/children")
+    assert status == 200
+    assert json.loads(raw) == {"children": []}
+
+    server.store.write_child(
+        run_id,
+        {
+            "n": 0,
+            "toolCallId": "call-1",
+            "agent": "researcher",
+            "task": "核查跨境资金监管",
+            "status": "finished",
+            "resultPreview": "核查完成",
+            "enrichment": "none",
+        },
+    )
+    server.store.write_child(
+        run_id,
+        {
+            "n": 1,
+            "toolCallId": "call-1",
+            "agent": "researcher",
+            "task": "比对两地口径",
+            "status": "interrupted",
+            "resultPreview": None,
+            "enrichment": "none",
+        },
+    )
+    status, _headers, raw = request(server, f"/api/runs/{run_id}/children")
+    assert status == 200
+    body = json.loads(raw)
+    assert [child["n"] for child in body["children"]] == [0, 1]
+    assert body["children"][0]["agent"] == "researcher"
+    assert body["children"][0]["task"] == "核查跨境资金监管"
+    assert body["children"][0]["status"] == "finished"
+    assert body["children"][0]["resultPreview"] == "核查完成"
+    assert body["children"][1]["status"] == "interrupted"
+
+
+def test_children_endpoint_404s_like_the_run_detail(server: PiGlinkServer) -> None:
+    status, _headers, raw = request(server, "/api/runs/nosuchrun/children")
+    assert status == 404
+    body = json.loads(raw)
+    assert body["error"] == "unknown_run"
+    assert body["runId"] == "nosuchrun"
+
+
 def test_missing_report_is_a_404(tmp_path: Path) -> None:
     instance = create_server(
         make_config(tmp_path), client_factory=fake_factory(write_report=False)

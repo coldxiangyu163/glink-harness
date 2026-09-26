@@ -1244,6 +1244,10 @@ class RunManager:
                         break
             verdict = self._decide(execution)
             execution.verdict = verdict
+            # Children that never closed themselves follow the run's terminal
+            # state in their documents (§3.4/§3.5) — before the terminal frame
+            # summarizes them.
+            self._settle_children(execution, verdict)
             try:
                 committed = self._commit_terminal(execution, verdict)
             except Exception:  # noqa: BLE001 - an unexpected error is an uncommitted verdict
@@ -1367,6 +1371,7 @@ class RunManager:
                 "external": dict(cleanup.external),
             },
             "artifactFailures": list(execution.artifact_failures),
+            "children": self._children_summary(execution),
         }
         try:
             self._emit(execution, terminal_type, payload, terminal=True)
@@ -2046,7 +2051,7 @@ class RunManager:
         run_id = execution.record.run_id
         write = self.store.commit_terminal if terminal else self.store.append_event
         try:
-            return self.bus.commit(
+            event = self.bus.commit(
                 run_id,
                 event_type,
                 safe_payload,
@@ -2056,3 +2061,129 @@ class RunManager:
             raise EventLogError(
                 f"事件日志写入失败: {type(exc).__name__}: {exc}"
             ) from exc
+        if event_type in (events.SUBAGENT_STARTED, events.SUBAGENT_FINISHED):
+            # The typed event is committed; now land its authoritative document
+            # on the same commit path (the run lock is held). A document failure
+            # is observed, never retracts the committed event (§3.5).
+            self._upsert_child_documents(execution, event_type, safe_payload or {})
+        return event
+
+    # -- child-run (subagent) documents, §3.5 -----------------------------------
+
+    def _upsert_child_documents(
+        self, execution: _Execution, event_type: str, payload: Mapping[str, Any]
+    ) -> None:
+        """Maintain ``children/<n>/child.json`` after a committed typed event.
+
+        The payload is already redacted (projection + the commit path above),
+        so the document is built from exactly the values the event log holds.
+        The write rides the same critical section as the event commit: no
+        reader of the documents observes a state the committed events have
+        already passed. A failure is reported as a ``kernel_status`` warning
+        and nothing more — the document is an enhancement over the committed
+        event, not a racing fact source.
+        """
+        run_id = execution.record.run_id
+        try:
+            if event_type == events.SUBAGENT_STARTED:
+                self.store.write_child(
+                    run_id,
+                    {
+                        "n": payload.get("n"),
+                        "toolCallId": payload.get("toolCallId") or "",
+                        "agent": payload.get("agent") or "",
+                        "task": payload.get("task") or "",
+                        "status": "running",
+                        "resultPreview": None,
+                        "enrichment": "none",
+                    },
+                )
+                return
+            ns = payload.get("ns")
+            if not isinstance(ns, list):
+                raise ValueError("subagent_finished 载荷缺少 ns 列表")
+            status = self._child_terminal_status(payload)
+            for n in ns:
+                if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+                    raise ValueError(f"subagent_finished 的 ns 含非法序号: {n!r}")
+                document = self.store.read_child(run_id, n)
+                if document is None:
+                    # The started document never landed (its warning was
+                    # emitted then): record what this event proves, nothing
+                    # more — agent/task are not fabricated.
+                    document = {
+                        "n": n,
+                        "toolCallId": payload.get("toolCallId") or "",
+                        "agent": "",
+                        "task": "",
+                        "enrichment": "none",
+                    }
+                document["status"] = status
+                document["resultPreview"] = payload.get("resultPreview")
+                self.store.write_child(run_id, document)
+        except (ArtifactError, OSError, ValueError) as exc:
+            self._child_doc_warning(
+                execution, f"子代理文档写入失败（{event_type}）: {type(exc).__name__}: {exc}"
+            )
+
+    @staticmethod
+    def _child_terminal_status(payload: Mapping[str, Any]) -> str:
+        """The child status a ``subagent_finished`` payload asserts.
+
+        The projection's own vocabulary wins; a payload without one degrades
+        to the ``isError`` fact instead of inventing a success.
+        """
+        status = payload.get("status")
+        if status in ("finished", "failed", "cancelled", "interrupted"):
+            return status
+        return "failed" if payload.get("isError") else "finished"
+
+    def _settle_children(self, execution: _Execution, verdict: _Verdict) -> None:
+        """Close out children whose own finished event never arrived.
+
+        The same rule as tools (§3.4「工具终态跟随 run」): a child still
+        ``running`` at the verdict follows the run — ``finished`` on a clean
+        finish, ``interrupted`` on failure, ``cancelled`` on cancellation. The
+        documents are authoritative, so the sweep reads and rewrites them on
+        disk (shared with the restart ledger via ``store.settle_children``);
+        a write failure is a warning, never a blocker for the verdict.
+        """
+        followed = {
+            FINISHED: "finished",
+            FAILED: "interrupted",
+            CANCELLED: "cancelled",
+        }[verdict.status]
+        run_id = execution.record.run_id
+        failures = self.store.settle_children(run_id, followed)
+        if failures < 0:
+            self._child_doc_warning(
+                execution, "子代理文档读取失败，未收口的按文档现状保留"
+            )
+        elif failures:
+            self._child_doc_warning(
+                execution,
+                f"{failures} 个子代理文档未能落终态（run 终态 {verdict.status}）",
+            )
+
+    def _children_summary(self, execution: _Execution) -> list[dict[str, Any]]:
+        """The terminal frame's ``children`` summary, built from the documents.
+
+        The committed documents are the fact source for replay rendering
+        (§3.5); a read failure here degrades to an empty summary (with a log
+        line), never to a blocked verdict.
+        """
+        return self.store.children_summary(execution.record.run_id)
+
+    def _child_doc_warning(self, execution: _Execution, detail: str) -> None:
+        run_id = execution.record.run_id
+        logger.warning("run=%s %s", run_id, detail)
+        try:
+            self._emit_open(
+                execution,
+                events.KERNEL_STATUS,
+                {"level": "warning", "message": "child_doc_failed", "detail": detail},
+            )
+        except EventLogError as exc:
+            logger.error(
+                "child document warning could not be persisted run=%s: %s", run_id, exc
+            )

@@ -35,7 +35,12 @@ from typing import Any, Callable, Mapping
 
 from .. import events
 from ..redaction import SecretRedactor, StreamRedactor
-from .projection import extract_text, project_args
+from .projection import (
+    SUBAGENT_TOOL_NAME,
+    extract_text,
+    project_args,
+    subagent_started_payload,
+)
 
 #: ACP ``StopReason`` values (protocol v1 schema). The runner translates these
 #: into the single product verdict table; an unknown value fails closed there.
@@ -76,6 +81,14 @@ class AcpProjector:
         self._tool_names: dict[str, str] = {}
         #: Notice keys already emitted (one notice per kind, never a flood).
         self._noted: set[str] = set()
+        #: toolCallId -> the child ``n`` values that call dispatched (typed
+        #: subagent lifecycle, docs/architecture.md §3.5). An ACP dispatch is
+        #: one child per call (dsh's ``{description, prompt}`` args), so every
+        #: list here holds exactly one ``n``; the entry is released when the
+        #: call ends, and the map dies with the projector at run end.
+        self._subagent_calls: dict[str, list[int]] = {}
+        #: Next child sequence number (``n``) within this run, from 0 up.
+        self._next_child_n = 0
 
     # -- the projection -------------------------------------------------------
 
@@ -264,6 +277,24 @@ def _agent_tool_call(
     name = _tool_name(update)
     if name:
         projector._tool_names[tool_call_id] = name
+    if name == SUBAGENT_TOOL_NAME:
+        task = _acp_subagent_task(update.get("rawInput"))
+        if task is not None:
+            n = projector._next_child_n
+            projector._next_child_n += 1
+            projector._subagent_calls[tool_call_id] = [n]
+            # §3.5: an ACP dispatch carries no agent name in its args, so the
+            # field stays honestly empty (取空，不伪造) — the pi family's
+            # ``agent`` only exists when the dispatch parameters give one.
+            started = subagent_started_payload(n, tool_call_id, {"task": task})
+            produced = [(events.SUBAGENT_STARTED, started)]
+            if update.get("status") in _TERMINAL_TOOL_STATUS:
+                produced.append(
+                    (events.SUBAGENT_FINISHED, _subagent_finished_payload(update, projector))
+                )
+            return produced
+        # A subagent-named call whose args do not match the dispatch shape
+        # falls back to a generic card: no typed event is fabricated (§3.5).
     payload: dict[str, Any] = {
         "toolCallId": tool_call_id,
         "toolName": name,
@@ -284,6 +315,14 @@ def _agent_tool_update(
     update: Mapping[str, Any], projector: AcpProjector
 ) -> list[tuple[str, dict[str, Any]]]:
     tool_call_id = str(update.get("toolCallId") or "")
+    if tool_call_id in projector._subagent_calls:
+        if update.get("status") in _TERMINAL_TOOL_STATUS:
+            return [
+                (events.SUBAGENT_FINISHED, _subagent_finished_payload(update, projector))
+            ]
+        # A subagent call only ever reports placeholder progress; the typed
+        # lifecycle replaces the generic card's updates (§3.5).
+        return []
     name = _tool_name(update) or projector._tool_names.get(tool_call_id, "")
     if name:
         projector._tool_names[tool_call_id] = name
@@ -417,6 +456,47 @@ def _tool_name(update: Mapping[str, Any]) -> str:
         if isinstance(value, str) and value:
             return value
     return ""
+
+
+def _acp_subagent_task(raw_input: Any) -> str | None:
+    """The task text of an ACP subagent dispatch, or ``None`` to fall back.
+
+    dsh's measured dispatch args are ``{description, prompt}`` — one child per
+    call (``docs/evidence/acp-subagent-spike.txt``): ``description`` is the
+    short task label, ``prompt`` the full sub-prompt. The description wins; the
+    prompt is the fallback when no description was given. Anything else means
+    the shape was not a dispatch we can describe honestly, so the caller
+    renders a generic tool card instead of fabricating a typed event (§3.5).
+    """
+    if not isinstance(raw_input, Mapping):
+        return None
+    for key in ("description", "prompt"):
+        value = raw_input.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _subagent_finished_payload(
+    update: Mapping[str, Any], projector: AcpProjector
+) -> dict[str, Any]:
+    """The ``subagent_finished`` payload (§3.5) closing one ACP dispatch.
+
+    One terminal update closes every child the call dispatched (exactly one on
+    this family); the call id is never reused, so its per-run state is released
+    here. ``resultPreview`` is the bounded whole-call summary — it is not split
+    per child.
+    """
+    tool_call_id = str(update.get("toolCallId") or "")
+    ns = projector._subagent_calls.pop(tool_call_id, [])
+    is_error = update.get("status") == "failed"
+    return {
+        "toolCallId": tool_call_id,
+        "ns": list(ns),
+        "status": "failed" if is_error else "finished",
+        "isError": is_error,
+        "resultPreview": _clip(_tool_text(update), TOOL_TEXT_LIMIT),
+    }
 
 
 def _tool_finished_payload(

@@ -1135,3 +1135,252 @@ def test_run_data_directories_are_created_private(tmp_path: Path) -> None:
         manager.config.workspace_root,
     ):
         assert stat.S_IMODE(path.stat().st_mode) == 0o700, f"{path} 应为 0700"
+
+
+# -- child-run documents: typed events → child.json → terminal summary (§3.5) ---
+#
+# The typed ``subagent_started``/``subagent_finished`` events are the projection
+# layer's output; the runner's seam under test here starts at their commit
+# (``_emit_frame`` → ``_emit`` → document upsert → verdict sweep → summary).
+
+
+def open_execution(manager: RunManager, store: RunStore, workspace: Path, run_id: str):
+    """An open execution without a kernel: the typed-event commit seam."""
+    from pi_glink.kernel.runner import _Execution  # noqa: PLC0415
+
+    record = store.create("子代理", run_id=run_id, workspace=workspace)
+    execution = _Execution(record=record, workspace=workspace)
+    manager.bus.open_run(record.run_id)
+    return execution
+
+
+def emit(manager: RunManager, execution, event_type: str, payload: Mapping[str, Any]) -> None:
+    with execution.lock:
+        assert manager._emit_frame(execution, event_type, payload) is True  # noqa: SLF001
+
+
+def test_pi_subagent_frames_flow_through_the_real_projection_into_documents(
+    tmp_path: Path,
+) -> None:
+    """End to end through the real projector: raw pi ``tool_execution_*`` frames
+    for a ``subagent`` call become typed events, child documents and the
+    terminal summary — the generic card and the ``(running...)`` update vanish."""
+    from pi_glink.kernel.projection import Projector  # noqa: PLC0415
+
+    manager, store = build_manager(tmp_path)
+    execution = open_execution(manager, store, tmp_path / "ws", "subdoc0")
+    execution.projector = Projector(manager.redactor)
+    frames = [
+        {
+            "type": "tool_execution_start",
+            "toolCallId": "call_1",
+            "toolName": "subagent",
+            "args": {"tasks": [{"agent": "researcher", "task": "调研甲"}, {"agent": "researcher", "task": "调研乙"}]},
+        },
+        {
+            "type": "tool_execution_update",
+            "toolCallId": "call_1",
+            "toolName": "subagent",
+            "partialResult": "(running...)",
+        },
+        {
+            "type": "tool_execution_end",
+            "toolCallId": "call_1",
+            "toolName": "subagent",
+            "result": {"content": [{"type": "text", "text": "两份结论"}]},
+            "isError": False,
+        },
+    ]
+    for frame in frames:
+        manager._on_frame(execution, frame)  # noqa: SLF001
+
+    logged = read_events(store, "subdoc0")
+    assert [event["type"] for event in logged] == [
+        "subagent_started",
+        "subagent_started",
+        "subagent_finished",
+    ]
+    page = store.read_children("subdoc0")
+    assert [(doc["n"], doc["status"]) for doc in page.documents] == [(0, "finished"), (1, "finished")]
+    assert all(doc["resultPreview"] == "两份结论" for doc in page.documents)
+
+    finalize_with(manager, execution, outcome=ExecutionOutcome(settled=True))
+    terminal = store.committed_terminal("subdoc0")
+    assert terminal["payload"]["children"] == [
+        {"n": 0, "agent": "researcher", "task": "调研甲", "status": "finished"},
+        {"n": 1, "agent": "researcher", "task": "调研乙", "status": "finished"},
+    ]
+
+
+def test_subagent_started_event_commits_the_child_document(tmp_path: Path) -> None:
+    manager, store = build_manager(tmp_path)
+    execution = open_execution(manager, store, tmp_path / "ws", "subdoc1")
+
+    emit(
+        manager,
+        execution,
+        "subagent_started",
+        {"n": 0, "toolCallId": "call_1", "agent": "researcher", "task": "调研甲"},
+    )
+
+    document = store.read_child("subdoc1", 0)
+    assert document == {
+        "n": 0,
+        "toolCallId": "call_1",
+        "agent": "researcher",
+        "task": "调研甲",
+        "status": "running",
+        "resultPreview": None,
+        "enrichment": "none",
+    }
+    logged = read_events(store, "subdoc1")
+    assert logged[-1]["type"] == "subagent_started"
+
+
+def test_subagent_finished_closes_every_child_of_the_call(tmp_path: Path) -> None:
+    manager, store = build_manager(tmp_path)
+    execution = open_execution(manager, store, tmp_path / "ws", "subdoc2")
+    emit(manager, execution, "subagent_started", {"n": 0, "toolCallId": "call_1", "agent": "researcher", "task": "调研甲"})
+    emit(manager, execution, "subagent_started", {"n": 1, "toolCallId": "call_1", "agent": "researcher", "task": "调研乙"})
+
+    emit(
+        manager,
+        execution,
+        "subagent_finished",
+        {
+            "toolCallId": "call_1",
+            "ns": [0, 1],
+            "status": "finished",
+            "isError": False,
+            "resultPreview": "两份结论的摘要",
+        },
+    )
+
+    for n, task in ((0, "调研甲"), (1, "调研乙")):
+        document = store.read_child("subdoc2", n)
+        assert document["status"] == "finished"
+        assert document["resultPreview"] == "两份结论的摘要"
+        assert document["task"] == task, "started 落档的事实必须保留"
+        assert document["enrichment"] == "none"
+
+
+def test_subagent_finished_without_a_started_document_records_only_what_it_proves(
+    tmp_path: Path,
+) -> None:
+    """A finished event for a child whose started write failed must not invent facts."""
+    manager, store = build_manager(tmp_path)
+    execution = open_execution(manager, store, tmp_path / "ws", "subdoc3")
+
+    emit(
+        manager,
+        execution,
+        "subagent_finished",
+        {"toolCallId": "call_9", "ns": [4], "isError": True, "resultPreview": "失败输出"},
+    )
+
+    document = store.read_child("subdoc3", 4)
+    assert document["status"] == "failed", "没有 status 时按 isError 推导"
+    assert document["agent"] == "" and document["task"] == ""
+    assert document["toolCallId"] == "call_9"
+
+
+def test_child_documents_carry_only_redacted_values(tmp_path: Path) -> None:
+    secret = "sk-child-0123456789abcdef"
+    manager, store = build_manager(tmp_path, OPENAI_API_KEY=secret)
+    execution = open_execution(manager, store, tmp_path / "ws", "subdoc4")
+
+    emit(
+        manager,
+        execution,
+        "subagent_started",
+        {"n": 0, "toolCallId": "call_1", "agent": "researcher", "task": f"读取 {secret} 后总结"},
+    )
+
+    document = store.read_child("subdoc4", 0)
+    assert secret not in json.dumps(document, ensure_ascii=False)
+    assert "[REDACTED]" in document["task"]
+    logged = read_events(store, "subdoc4")
+    assert secret not in json.dumps(logged, ensure_ascii=False)
+
+
+def test_a_document_write_failure_is_a_warning_not_a_blocked_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The document is an enhancement: a failed write never retracts the committed event."""
+    manager, store = build_manager(tmp_path)
+    execution = open_execution(manager, store, tmp_path / "ws", "subdoc5")
+
+    def failing_write(run_id: str, document: Mapping[str, Any]) -> None:
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(store, "write_child", failing_write)
+    emit(manager, execution, "subagent_started", {"n": 0, "toolCallId": "call_1", "agent": "a", "task": "t"})
+
+    logged = read_events(store, "subdoc5")
+    types = [event["type"] for event in logged]
+    assert "subagent_started" in types, "事件已提交，文档失败不能撤回它"
+    warnings = [event for event in logged if event["type"] == "kernel_status"]
+    assert warnings and warnings[-1]["payload"]["message"] == "child_doc_failed"
+
+
+def finalize_with(manager: RunManager, execution, **facts) -> None:
+    """Drive the real finalizer on a kernel-less execution with chosen facts."""
+    for name, value in facts.items():
+        setattr(execution, name, value)
+    manager._finalize(execution)  # noqa: SLF001 - the verdict path under test
+
+
+def test_open_children_follow_a_cleanly_finished_run(tmp_path: Path) -> None:
+    manager, store = build_manager(tmp_path)
+    execution = open_execution(manager, store, tmp_path / "ws", "subdoc6")
+    emit(manager, execution, "subagent_started", {"n": 0, "toolCallId": "call_1", "agent": "researcher", "task": "调研甲"})
+    emit(manager, execution, "subagent_finished", {"toolCallId": "call_1", "ns": [0], "status": "finished", "isError": False, "resultPreview": "摘要"})
+    emit(manager, execution, "subagent_started", {"n": 1, "toolCallId": "call_2", "agent": "researcher", "task": "调研乙"})
+
+    finalize_with(manager, execution, outcome=ExecutionOutcome(settled=True))
+
+    assert store.read_child("subdoc6", 0)["status"] == "finished", "已收口的保持原状态"
+    assert store.read_child("subdoc6", 1)["status"] == "finished", "未收口的跟随 run"
+    terminal = store.committed_terminal("subdoc6")
+    assert terminal["type"] == "run_finished"
+    assert terminal["payload"]["children"] == [
+        {"n": 0, "agent": "researcher", "task": "调研甲", "status": "finished"},
+        {"n": 1, "agent": "researcher", "task": "调研乙", "status": "finished"},
+    ]
+
+
+def test_open_children_follow_a_cancelled_run(tmp_path: Path) -> None:
+    manager, store = build_manager(tmp_path)
+    execution = open_execution(manager, store, tmp_path / "ws", "subdoc7")
+    emit(manager, execution, "subagent_started", {"n": 0, "toolCallId": "call_1", "agent": "researcher", "task": "调研甲"})
+
+    finalize_with(manager, execution, cancel_requested=True)
+
+    assert store.read_child("subdoc7", 0)["status"] == "cancelled"
+    terminal = store.committed_terminal("subdoc7")
+    assert terminal["type"] == "run_cancelled"
+    assert terminal["payload"]["children"] == [
+        {"n": 0, "agent": "researcher", "task": "调研甲", "status": "cancelled"}
+    ]
+
+
+def test_open_children_follow_a_failed_run(tmp_path: Path) -> None:
+    manager, store = build_manager(tmp_path)
+    execution = open_execution(manager, store, tmp_path / "ws", "subdoc8")
+    emit(manager, execution, "subagent_started", {"n": 0, "toolCallId": "call_1", "agent": "researcher", "task": "调研甲"})
+
+    finalize_with(manager, execution, failure="RuntimeError: boom")
+
+    assert store.read_child("subdoc8", 0)["status"] == "interrupted"
+    terminal = store.committed_terminal("subdoc8")
+    assert terminal["type"] == "run_failed"
+    assert terminal["payload"]["children"][0]["status"] == "interrupted"
+
+
+def test_a_run_without_subagents_carries_an_empty_children_summary(tmp_path: Path) -> None:
+    manager, store = build_manager(tmp_path, write_report=True)
+    record = manager.start("没有子代理的普通 run")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final.status == FINISHED
+    terminal = store.committed_terminal(record.run_id)
+    assert terminal["payload"]["children"] == []

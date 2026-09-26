@@ -66,6 +66,12 @@ THINKING_DELTA = "thinking_delta"
 TOOL_STARTED = "tool_started"
 TOOL_UPDATED = "tool_updated"
 TOOL_FINISHED = "tool_finished"
+# Typed subagent projection (kernel-owned): a dispatch through the ``subagent``
+# tool is projected as these typed events instead of generic tool cards; the
+# child run's authoritative record is runs/<id>/children/<n>/child.json and the
+# terminal frame's ``children`` summary (docs/architecture.md §3.5).
+SUBAGENT_STARTED = "subagent_started"
+SUBAGENT_FINISHED = "subagent_finished"
 USAGE_REPORTED = "usage_reported"
 KERNEL_STATUS = "kernel_status"
 

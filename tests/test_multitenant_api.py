@@ -899,7 +899,44 @@ def test_legacy_ownerless_records_are_invisible_to_every_tenant(
     assert request(server, "/api/runs/legacy01/report", token=token)[0] == 404
     assert request(server, "/api/runs/legacy01/events", token=token)[0] == 404
     assert request(server, "/api/runs/legacy01/stop", method="POST", token=token)[0] == 404
+    assert request(server, "/api/runs/legacy01/children", token=token)[0] == 404
     assert (workspace / "report.md").read_text(encoding="utf-8") == "# 旧报告\n"
+
+
+def test_children_follow_the_same_owner_rules_as_the_run_detail(server: PiGlinkServer) -> None:
+    """GET /api/runs/{id}/children: 同租户 200，异租户/未知同形 404，未认证 401。"""
+    seed_history(server, "alpha-children", tenant="tenant-alpha")
+    server.store.write_child(
+        "alpha-children",
+        {
+            "n": 0,
+            "toolCallId": "call-1",
+            "agent": "researcher",
+            "task": "核查事实",
+            "status": "finished",
+            "resultPreview": "核查完成",
+            "enrichment": "none",
+        },
+    )
+    owner = assertion("tenant-alpha", "user-a")
+    status, _headers, raw = request(server, "/api/runs/alpha-children/children", token=owner)
+    assert status == 200
+    body = json.loads(raw)
+    assert [child["n"] for child in body["children"]] == [0]
+    assert body["children"][0]["agent"] == "researcher"
+    assert body["children"][0]["status"] == "finished"
+
+    other = assertion("tenant-beta", "user-b")
+    status, _headers, raw = request(server, "/api/runs/alpha-children/children", token=other)
+    assert status == 404
+    assert json.loads(raw)["error"] == "unknown_run"
+    status, _headers, raw = request(server, "/api/runs/nosuchrun/children", token=owner)
+    assert status == 404
+    assert json.loads(raw)["error"] == "unknown_run"
+
+    # 未认证请求在任何记录被读取之前就是 401。
+    status, _headers, _raw = request(server, "/api/runs/alpha-children/children")
+    assert status == 401
 
 
 # -- credentials --------------------------------------------------------------

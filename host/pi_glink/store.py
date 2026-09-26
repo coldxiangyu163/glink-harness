@@ -6,6 +6,7 @@ A run owns one directory:
     ├── meta.json          admission facts, in-flight facts, settled terminal copy
     ├── events.jsonl       every committed event, one JSON object per line
     ├── pi-agent/          the run's runtime configuration (PI_CODING_AGENT_DIR)
+    ├── children/<n>/child.json  authoritative document of one dispatched subagent
     └── artifacts/report.md  the host-owned, redacted report copy
 
 **Readers see only the committed prefix of a log.** The owning process keeps a
@@ -56,6 +57,7 @@ from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
+from .artifacts import ArtifactError, ArtifactTree
 from .events import TERMINAL_EVENT_TYPES
 
 logger = logging.getLogger("pi_glink.store")
@@ -75,9 +77,25 @@ ARTIFACTS_DIRNAME = "artifacts"
 #: out of the sandbox before it is destroyed; other faces keep theirs in the
 #: session directory). Recovered raw, then swept by the run's redactor.
 SUBAGENTS_DIRNAME = "subagents"
+#: Authoritative child-run (subagent) documents (docs/architecture.md §3.5):
+#: one ``children/<n>/child.json`` per dispatched subagent, atomically
+#: rewritten on every state migration. The typed events are only the push
+#: side of these documents.
+CHILDREN_DIRNAME = "children"
+CHILD_DOC_NAME = "child.json"
+#: Bound on how many child documents one run read returns. A runaway dispatch
+#: must not turn a read into an unbounded walk; the terminal-frame summary
+#: shares this bound.
+CHILD_READ_LIMIT = 64
 
 _META_NAME = "meta.json"
 _EVENTS_NAME = "events.jsonl"
+#: Bound on one child document. The projection already clips ``task`` and
+#: ``resultPreview``; this is the store's own backstop, not the editorial limit.
+_CHILD_DOC_MAX_BYTES = 64 * 1024
+#: Candidate files ``read_children`` visits before stopping. Corruption in the
+#: host-owned tree must not turn a bounded read into an unbounded one.
+_CHILD_VISIT_LIMIT = 4 * CHILD_READ_LIMIT
 #: Bounded retries when a generated run id collides with an existing directory.
 _RUN_ID_ATTEMPTS = 5
 _TAIL_CHUNK = 64 * 1024
@@ -300,6 +318,20 @@ class ReportLocation:
     root: Path
     relative: str
     layout: str
+
+
+@dataclass(frozen=True, slots=True)
+class ChildDocuments:
+    """The readable child-run documents of one run, plus the honest skip count.
+
+    ``documents`` holds the parsed ``child.json`` payloads (ordered by ``n``);
+    ``skipped`` counts the documents that existed but could not be read or
+    parsed. A missing ``children/`` tree is not corruption: it is simply a run
+    without subagents (``skipped`` stays 0).
+    """
+
+    documents: tuple[dict[str, Any], ...] = ()
+    skipped: int = 0
 
 
 class RunStore:
@@ -659,6 +691,139 @@ class RunStore:
         path = self.events_path(run_id)
         end = _WATERMARKS.committed_end(path)
         return _terminal_line(path, end) if end else None
+
+    # -- children (authoritative subagent documents, §3.5) ---------------------
+
+    def child_doc_path(self, run_id: str, n: int) -> Path:
+        return self.run_dir(run_id) / CHILDREN_DIRNAME / str(n) / CHILD_DOC_NAME
+
+    def write_child(self, run_id: str, document: Mapping[str, Any]) -> None:
+        """Atomically rewrite one child-run document (the authoritative record).
+
+        The document is small and always written whole: every state migration
+        republishes ``children/<n>/child.json`` through the run directory's
+        handle (temporary file + rename inside the verified parent, the same
+        boundary as the report copy). ``n`` is taken from the document itself;
+        anything but a non-negative integer is refused.
+        """
+        n = document.get("n")
+        if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+            raise ValueError(f"child.json 需要非负整数序号 n: {n!r}")
+        payload = json.dumps(dict(document), ensure_ascii=False, indent=2) + "\n"
+        with ArtifactTree(self.run_dir(run_id)) as tree:
+            tree.replace(
+                f"{CHILDREN_DIRNAME}/{n}/{CHILD_DOC_NAME}",
+                payload.encode("utf-8"),
+                max_bytes=_CHILD_DOC_MAX_BYTES,
+                create_parents=True,
+            )
+
+    def read_child(self, run_id: str, n: int) -> dict[str, Any] | None:
+        """One child-run document, or ``None`` when it is missing or unusable."""
+        try:
+            with ArtifactTree(self.run_dir(run_id)) as tree:
+                raw = tree.read(
+                    f"{CHILDREN_DIRNAME}/{n}/{CHILD_DOC_NAME}",
+                    max_bytes=_CHILD_DOC_MAX_BYTES,
+                )
+            data = json.loads(raw.decode("utf-8"))
+        except (ArtifactError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict) or data.get("n") != n:
+            return None
+        return data
+
+    def read_children(self, run_id: str) -> ChildDocuments:
+        """All readable child-run documents of one run, bounded and honest.
+
+        At most :data:`CHILD_READ_LIMIT` documents are returned, ordered by
+        ``n``. A document that exists but cannot be read, parsed or matched to
+        its directory is skipped and counted in ``skipped`` — corruption is
+        reported, never silently equated with absence; the same holds for a
+        ``children/`` tree that itself cannot be opened (counted as one) and
+        for documents beyond the read cap. A run without a ``children/`` tree
+        simply has no children.
+        """
+        try:
+            tree = ArtifactTree(self.run_dir(run_id) / CHILDREN_DIRNAME)
+        except ArtifactError as exc:
+            children_root = self.run_dir(run_id) / CHILDREN_DIRNAME
+            if children_root.exists():
+                # The tree exists but cannot be opened: one unreadable unit,
+                # reported instead of silently equated with absence.
+                return ChildDocuments((), 1)
+            logger.debug("children tree unavailable run=%s: %s", run_id, exc)
+            return ChildDocuments()
+        with tree:
+            found = tree.files(max_files=_CHILD_VISIT_LIMIT)
+            candidates: list[tuple[int, str]] = []
+            for relative in found:
+                parts = relative.split("/")
+                if len(parts) != 2 or parts[1] != CHILD_DOC_NAME:
+                    continue
+                try:
+                    number = int(parts[0])
+                except ValueError:
+                    continue
+                candidates.append((number, relative))
+            candidates.sort()
+            documents: list[dict[str, Any]] = []
+            skipped = 0
+            for number, relative in candidates:
+                if len(documents) >= CHILD_READ_LIMIT:
+                    # Every document past the cap is absent from the page; the
+                    # absence is counted, not silent.
+                    skipped += 1
+                    continue
+                try:
+                    raw = tree.read(relative, max_bytes=_CHILD_DOC_MAX_BYTES)
+                    data = json.loads(raw.decode("utf-8"))
+                except (ArtifactError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    skipped += 1
+                    continue
+                if not isinstance(data, dict) or data.get("n") != number:
+                    skipped += 1
+                    continue
+                documents.append(data)
+        return ChildDocuments(tuple(documents), skipped)
+
+    def settle_children(self, run_id: str, status: str) -> int:
+        """Close every still-``running`` child document to ``status``.
+
+        Shared by the run's own verdict sweep and the restart ledger's
+        interrupted close-out (both apply the same "children follow the run"
+        rule). Returns the number of documents that could not be rewritten.
+        """
+        try:
+            page = self.read_children(run_id)
+        except Exception:  # noqa: BLE001 - the caller reports, never blocks
+            return -1
+        failures = 0
+        for document in page.documents:
+            if document.get("status") != "running":
+                continue
+            try:
+                self.write_child(run_id, {**document, "status": status})
+            except (ArtifactError, OSError, ValueError):
+                failures += 1
+        return failures
+
+    def children_summary(self, run_id: str) -> list[dict[str, Any]]:
+        """The ``children`` summary of a terminal frame, built from documents."""
+        try:
+            page = self.read_children(run_id)
+        except Exception:  # noqa: BLE001 - a summary must not break its caller
+            logger.warning("children summary unavailable run=%s", run_id)
+            return []
+        return [
+            {
+                "n": document.get("n"),
+                "agent": document.get("agent") or "",
+                "task": document.get("task") or "",
+                "status": document.get("status") or "running",
+            }
+            for document in page.documents
+        ]
 
     # -- internals ------------------------------------------------------------
 

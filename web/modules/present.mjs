@@ -239,6 +239,54 @@ export function toolStateLabel(item) {
   return '';
 }
 
+/* ── ChildRun（子代理，§3.5） ────────────────────────────────────────────────
+ * A dispatched subagent is a first-class object of the run: the timeline shows
+ * a dispatch card where it happened, and the detail area lists every child
+ * with its status. The words follow the tool cards' register — a verb the
+ * reader recognises plus what it acted on, never the engine's call ids. */
+
+/** The dispatch card, in the same shape describeTool returns. */
+export function describeChild(item) {
+  const agent = String(item?.agent ?? '').trim();
+  return {
+    icon: 'agent',
+    action: agent ? `派发子代理 · ${agent}` : '派发子代理',
+    active: agent ? `子代理 ${agent} 运行中` : '子代理运行中',
+    object: oneLine(item?.task ?? '', 56),
+  };
+}
+
+/** Card states that deserve words; a finished child says nothing extra. */
+export function childStateLabel(item) {
+  if (item?.status === 'failed') return '失败';
+  if (item?.status === 'interrupted') return '已中断';
+  if (item?.status === 'cancelled') return '已停止';
+  return '';
+}
+
+/** One child as a row of words: agent：task, degrading to what is known. */
+export function childLabel(child) {
+  const agent = String(child?.agent ?? '').trim();
+  const task = oneLine(child?.task ?? '', 56);
+  return [agent, task].filter(Boolean).join('：') || '子代理';
+}
+
+/** The panel row's status word — unlike the card, a running child is named here. */
+export function childStatusText(status) {
+  return {
+    running: '进行中',
+    finished: '已完成',
+    failed: '失败',
+    interrupted: '已中断',
+    cancelled: '已停止',
+  }[status] ?? '未知状态';
+}
+
+/** The children panel's title; the panel itself only exists with children. */
+export function childrenPanelTitle(count) {
+  return count > 1 ? `派发了 ${count} 个子代理` : '派发了 1 个子代理';
+}
+
 /* ── stages & notices ─────────────────────────────────────────────────────
  * Lifecycle stages (a turn starting, the agent loop ending, the run finishing)
  * are bookkeeping; the process header already says where the run is. Only the

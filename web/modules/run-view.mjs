@@ -25,6 +25,11 @@
  */
 
 import {
+  childLabel,
+  childStateLabel,
+  childStatusText,
+  childrenPanelTitle,
+  describeChild,
   describeTool,
   displayPath,
   formatDuration,
@@ -32,6 +37,7 @@ import {
   stageText,
   toolStateLabel,
 } from './present.mjs';
+import { childrenPanel } from './run-stream.mjs';
 
 let viewCounter = 0;
 
@@ -136,6 +142,17 @@ export function createRunView({
   outputRow.append(outputOpen, outputDownload);
   output.append(outputTitle, outputRow);
 
+  // ── children panel (ChildRun, §3.5) ────────────────────────────────────────
+  // A run with dispatched subagents lists them in the detail area; a run
+  // without any never renders an empty panel. The rows reuse the process-row
+  // geometry (pi-step-row) and the output section's chrome — no new styles.
+  const childrenSection = el('section', 'pi-output pi-children');
+  childrenSection.setAttribute('aria-label', '子代理');
+  childrenSection.hidden = true;
+  const childrenTitle = el('p', 'pi-output-title');
+  const childrenList = el('div', 'pi-children-list');
+  childrenSection.append(childrenTitle, childrenList);
+
   const outcome = el('section', 'pi-outcome');
   outcome.hidden = true;
 
@@ -161,7 +178,7 @@ export function createRunView({
   rerunButton.addEventListener('click', () => onRerun?.(latest?.prompt ?? ''));
   actions.append(copyButton, downloadButton, rerunButton);
 
-  answer.append(answerHead, answerBody, output, outcome, actions);
+  answer.append(answerHead, answerBody, childrenSection, output, outcome, actions);
   root.replaceChildren(process, answer);
 
   // Answers often point at the report by its relative name ("见 report.md"); the
@@ -215,13 +232,41 @@ export function createRunView({
     drawItems(model);
     drawProcessHead(model);
     drawAnswer(model);
+    drawChildren(model);
     syncFold();
+  }
+
+  // ── children panel ─────────────────────────────────────────────────────────
+
+  function drawChildren(model) {
+    const rows = childrenPanel(model);
+    childrenSection.hidden = rows.length === 0;
+    if (!rows.length) {
+      if (childrenList.children?.length) childrenList.replaceChildren();
+      return;
+    }
+    const title = childrenPanelTitle(rows.length);
+    if (childrenTitle.textContent !== title) childrenTitle.textContent = title;
+    childrenList.replaceChildren(
+      ...rows.map((child) => {
+        const row = el('div', 'pi-stage pi-step-row pi-child-row');
+        row.dataset.status = child.status;
+        row.append(
+          icon('agent', 14),
+          el('span', 'pi-stage-text', childLabel(child)),
+          el('span', 'pi-tool-state', childStatusText(child.status)),
+        );
+        return row;
+      }),
+    );
   }
 
   // ── process ──────────────────────────────────────────────────────────────
 
   function stepCount(model) {
-    return model.items.filter((item) => item.kind === 'tool' || item.kind === 'thinking').length;
+    return model.items.filter(
+      (item) => item.kind === 'tool' || item.kind === 'thinking' || item.kind === 'subagent',
+    ).length;
   }
 
   function activity(model) {
@@ -229,6 +274,9 @@ export function createRunView({
     if (!last) return { label: '正在准备研究', live: false };
     if (last.kind === 'tool' && last.status === 'running') {
       return { label: describeTool(last.name, last.args).active, live: true };
+    }
+    if (last.kind === 'subagent' && last.status === 'running') {
+      return { label: describeChild(last).active, live: true };
     }
     if (last.kind === 'thinking' && !last.closed) return { label: '正在思考', live: true };
     if (last.kind === 'text' && !last.closed) return { label: '正在撰写回答', live: true };
@@ -261,7 +309,7 @@ export function createRunView({
   function finalAnswerIndex(items) {
     for (let index = items.length - 1; index >= 0; index -= 1) {
       const item = items[index];
-      if (item.kind === 'tool' || item.kind === 'thinking') return -1;
+      if (item.kind === 'tool' || item.kind === 'thinking' || item.kind === 'subagent') return -1;
       if (item.kind === 'text' && item.text.trim()) return index;
     }
     return -1;
@@ -328,6 +376,29 @@ export function createRunView({
         const detail = el('div', 'pi-tool-detail');
         const wrap = el('div', 'pi-tool-detail-wrap');
         wrap.append(el('pre', 'pi-tool-output scroll-area'), el('div', 'pi-tool-result'));
+        detail.append(wrap);
+        card.append(head, detail);
+        return card;
+      }
+      case 'subagent': {
+        // The dispatch card reuses the tool card's component and styles: one
+        // compact row while the child runs, a folded result preview once it
+        // settles. The child run's own step stream never enters the timeline
+        // (§3.5: 子代理正文永不进事件日志).
+        const card = el('details', 'pi-tool pi-subagent');
+        const head = el('summary', 'pi-tool-head pi-step-row trace-toggle');
+        const args = el('span', 'pi-tool-args');
+        head.append(icon('agent', 14), el('span', 'pi-tool-name'), args, el('span', 'pi-tool-state'), chevron('pi-tool-chevron'));
+        head.addEventListener('click', (event) => {
+          if (card.dataset.hasDetail !== 'true') {
+            event.preventDefault();
+            return;
+          }
+          card.dataset.touched = 'true';
+        });
+        const detail = el('div', 'pi-tool-detail');
+        const wrap = el('div', 'pi-tool-detail-wrap');
+        wrap.append(el('div', 'pi-tool-result'));
         detail.append(wrap);
         card.append(head, detail);
         return card;
@@ -403,6 +474,39 @@ export function createRunView({
         node.querySelector('.pi-tool-chevron').hidden = !hasDetail;
         if (!hasDetail) node.open = false;
         else if (node.dataset.touched !== 'true') node.open = item.status === 'running';
+        return;
+      }
+      case 'subagent': {
+        // Child statuses map onto the tool card's own status vocabulary, so
+        // the running pulse, the error tint and the state words come from the
+        // same styles a tool row uses.
+        const cardStatus = {
+          running: 'running',
+          finished: 'done',
+          failed: 'error',
+          interrupted: 'interrupted',
+          cancelled: 'cancelled',
+        }[item.status] ?? 'running';
+        node.dataset.status = cardStatus;
+        const described = describeChild(item);
+        const iconNode = node.querySelector('.pi-tool-head .icon');
+        if (iconNode.dataset.icon !== described.icon) iconNode.dataset.icon = described.icon;
+        const nameNode = node.querySelector('.pi-tool-name');
+        if (nameNode.textContent !== described.action) nameNode.textContent = described.action;
+        const argsNode = node.querySelector('.pi-tool-args');
+        if (argsNode.textContent !== described.object) argsNode.textContent = described.object;
+        node.querySelector('.pi-tool-state').textContent = childStateLabel(item);
+        const resultNode = node.querySelector('.pi-tool-result');
+        const resultText = displayPath(item.resultPreview || '');
+        resultNode.hidden = resultText === '';
+        if (resultNode.textContent !== resultText) resultNode.textContent = resultText;
+        // A settled dispatch folds back to a chip with an optional preview;
+        // the reader's own open/close wins from then on.
+        const hasDetail = resultText !== '';
+        node.dataset.hasDetail = String(hasDetail);
+        node.querySelector('.pi-tool-chevron').hidden = !hasDetail;
+        if (!hasDetail) node.open = false;
+        else if (node.dataset.touched !== 'true') node.open = false;
         return;
       }
       case 'text': {
