@@ -73,7 +73,7 @@ from ..store import (
     RunRecord,
     RunStore,
 )
-from ..kernel.acp_env import AcpRuntime
+from ..kernel.acp_env import AcpRuntime, credential_secrets_from_text
 from ..kernel.agent_env import AgentRuntime, RunCredentials
 from ..kernel.docker_env import (
     container_name_for as docker_container_name,
@@ -1665,34 +1665,34 @@ class RunManager:
             logger.error("report warning could not be persisted run=%s: %s", run_id, exc)
 
     def _sanitize_session(self, execution: _Execution) -> bool:
-        """Mask credentials pi wrote into its own session log.
+        """Sweep every session/state path the run's runtime declares.
 
-        The kernel owns that file, so redaction cannot happen on the way in; it
-        happens here on the way out. The path is only trusted inside the run's
-        own session directory — a kernel-reported path elsewhere on the host is
-        refused rather than rewritten. Subagent forks and their artifacts share
-        the session directory on the faces where it lives on the host
-        (in-process, Docker), so the whole directory is swept with the same
-        boundary; the main session file is checked twice at worst (redaction
-        is idempotent).
+        哪些路径需要收尾扫描是运行时自己的事实（``session_sweeps()``）：pi 的
+        会话日志在宿主的 session 目录里，可以重写；ACP 的状态根是 agent 自己
+        的会话存储，只读扫描并把凭据形状值并入本 run 边界（不改写文件，见
+        ``docs/acp-integration-notes.md`` §10.2/§14.1）。runner 只消费契约，
+        不再询问具体 runtime 类型的属性（原实现在 ACP 面因缺 ``session_dir``
+        逐次抛错、被外层 ``except`` 吞掉：整个会话面脱敏被跳过）。
         """
         if execution.runtime is None:
             return False
         record = self.store.get(execution.record.run_id)
         session_file = record.session_file if record is not None else None
+        redactor = self._run_redactor(execution)
         changed = False
-        if session_file:
-            changed = self._sanitize_session_file(
-                session_file,
-                root=execution.runtime.session_dir,
-                redactor=self._run_redactor(execution),
-            )
-        if self._sanitize_workspace(
-            execution.runtime.session_dir,
-            self._run_redactor(execution),
-            max_bytes=REPORT_MAX_BYTES,
-        ):
-            changed = True
+        for target in execution.runtime.session_sweeps():
+            if target.carries_session_file and session_file:
+                if self._sanitize_session_file(
+                    session_file, root=target.root, redactor=redactor
+                ):
+                    changed = True
+            if target.rewrite:
+                if self._sanitize_workspace(
+                    target.root, redactor, max_bytes=REPORT_MAX_BYTES
+                ):
+                    changed = True
+            elif self._absorb_session_secrets(target.root, redactor):
+                changed = True
         return changed
 
     def _sanitize_session_file(
@@ -1722,6 +1722,45 @@ class RunManager:
             return False
         logger.warning("session file contained credentials and was redacted: %s", session_file)
         return True
+
+    def _absorb_session_secrets(
+        self,
+        root: Path,
+        redactor: SecretRedactor,
+        *,
+        max_files: int = SWEEP_MAX_FILES,
+        max_bytes: int = REPORT_MAX_BYTES,
+    ) -> bool:
+        """Learn credentials from a state tree the host must not rewrite.
+
+        ACP 状态根是 agent 自己的会话存储：改写会破坏追问要续接的会话，所以
+        这里只读（同一套目录句柄与大小/数量上限），把文本里发现的凭据形状值
+        并入本 run 的脱敏边界——与回收/继承时同一规则——文件字节一个不动。
+        返回是否学到了新值（从而本 run 的后续产品输出会被多遮蔽一层）。
+        """
+        try:
+            tree = ArtifactTree(root)
+        except ArtifactError:
+            return False
+        changed = False
+        with tree:
+            for relative in tree.files(max_files=max_files):
+                try:
+                    raw = tree.read(relative, max_bytes=max_bytes)
+                except ArtifactError:
+                    continue
+                if b"\x00" in raw[:1024]:  # binary-ish
+                    continue
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                known = redactor.known_values
+                for value in credential_secrets_from_text(text):
+                    redactor.add(value)
+                if redactor.known_values != known:
+                    changed = True
+        return changed
 
     def _sanitize_workspace(
         self,

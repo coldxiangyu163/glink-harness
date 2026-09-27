@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ..config import ConfigError, HostConfig
+from .sweep import SessionSweep
 
 #: Provider id used inside the generated models.json.
 PROVIDER_ID = "frontier"
@@ -197,6 +198,18 @@ class AgentRuntime:
     @property
     def model_ref(self) -> str:
         return f"{self.provider_id}/{self.model_id}"
+
+    def session_sweeps(self) -> tuple[SessionSweep, ...]:
+        """pi 写出的会话路径：本 run 专属的 session 目录，允许重写。
+
+        pi owns its session log, so redaction cannot happen on the way in; the
+        host masks it on the way out. The whole directory is swept with the
+        same boundary because subagent forks and their artifacts share it on
+        the faces where it lives on the host (in-process, Docker); the main
+        session file is checked separately from the run record (its path is a
+        kernel-reported fact, refused if it leaves this root).
+        """
+        return (SessionSweep(root=self.session_dir, carries_session_file=True),)
 
 
 def prepare_agent_dir(

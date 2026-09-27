@@ -51,6 +51,7 @@ from ..config import ConfigError, HostConfig
 from ..redaction import MIN_SECRET_LENGTH, find_credential_shapes, is_placeholder_value
 from ..artifacts import ArtifactError, ArtifactTree
 from .agent_env import PASSTHROUGH_ENV
+from .sweep import SessionSweep
 
 #: Per-run ACP agent directory inside the run directory.
 ACP_RUNTIME_DIRNAME = "acp-agent"
@@ -132,6 +133,26 @@ class AcpRuntime:
     #: were injected. The container face uses these to mount each injected
     #: credential file read-only on top of the writable state root.
     credential_dests: tuple[str, ...] = ()
+
+    def session_sweeps(self) -> tuple[SessionSweep, ...]:
+        """ACP 写出的状态路径：本 run 的状态根，**只读扫描**不重写。
+
+        Both roots are declared; a face creates only one of them (in-process
+        and Docker write ``home``, the E2B face recovers the sandbox's root to
+        ``recovered`` beside it), and a missing root is simply nothing to scan.
+
+        ``rewrite=False`` is the documented obligation, not a shortcut: this
+        tree is the agent's own session store, so rewriting it would corrupt
+        the very session a follow-up resumes (``docs/acp-integration-notes.md``
+        §10.2/§14.1). The sweep reads the text through a directory handle and
+        folds any credential-shaped value into this run's redaction boundary —
+        the same rule recovery and inheritance follow — leaving every byte the
+        agent wrote untouched.
+        """
+        return (
+            SessionSweep(root=self.home, rewrite=False),
+            SessionSweep(root=self.directory / ACP_RECOVERED_DIRNAME, rewrite=False),
+        )
 
 
 def prepare_acp_runtime(
