@@ -50,9 +50,9 @@ trap cleanup EXIT INT TERM
 agent_dir="$scratch/pi-agent"
 mkdir -p "$agent_dir/extensions/subagent" "$agent_dir/agents" \
   "$scratch/home" "$scratch/tmp" "$scratch/sessions" "$scratch/workspace"
-cp "$repo_root/agent/extensions/subagent-foreground-guard.ts" "$agent_dir/extensions/"
-cp "$repo_root/agent/extensions/subagent/config.json" "$agent_dir/extensions/subagent/"
-cp "$repo_root/agent/agents/researcher.md" "$agent_dir/agents/"
+cp "$repo_root/harnesses/pi/extensions/subagent-foreground-guard.ts" "$agent_dir/extensions/"
+cp "$repo_root/harnesses/pi/extensions/subagent/config.json" "$agent_dir/extensions/subagent/"
+cp "$repo_root/harnesses/pi/agents/researcher.md" "$agent_dir/agents/"
 cp "$repo_root/tests/extensions/probe-tool-inventory.ts" "$agent_dir/extensions/"
 
 "$python" - "$agent_dir" "$subagents_root" <<'PY'

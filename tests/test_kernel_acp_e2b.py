@@ -33,6 +33,8 @@ from typing import Any
 import pytest
 
 from pi_glink.config import ConfigError, build_config
+
+from acp_pack import apply_acp_pack
 from pi_glink.events import EventBus
 from pi_glink.kernel.acp_env import prepare_acp_runtime
 from pi_glink.kernel.acp_execution import RESUME_METHOD, AcpSandboxExecutionAdapter
@@ -314,7 +316,7 @@ def make_config(tmp_path: Path, **overrides: str):
         "OPENAI_API_KEY": "sk-test",
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
-        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "agent"),
+        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_EXECUTOR": "e2b",
         "E2B_API_KEY": "e2b-secret-key",
@@ -323,6 +325,7 @@ def make_config(tmp_path: Path, **overrides: str):
         "PI_GLINK_ACP_COMMAND": "dsh --profile acp",
     }
     values.update(overrides)
+    apply_acp_pack(values, tmp_path)
     return build_config(values, REPO_ROOT)
 
 
@@ -464,7 +467,7 @@ def test_the_agent_command_is_the_frozen_argv_in_the_sandbox_workspace(tmp_path:
     sandbox = FakeSandbox(tmp_path)
     client = make_sandbox_client(config, runtime, tmp_path, sandbox)
     client.start()
-    assert client.argv == shlex.split(config.acp_command)
+    assert client.argv == list(config.acp_command)
     assert client.command() == f"cd {SANDBOX_WORKSPACE} && exec {shlex.join(client.argv)}"
     # HOME is the run's sandbox state root; extra entries are the explicit
     # process-environment channel (values never enter the command line).

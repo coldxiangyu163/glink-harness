@@ -34,7 +34,7 @@ def runtime_files(paths: list[Path]) -> list[str]:
     for path in paths:
         env_file = (path.name == ".env" or path.name.startswith(".env.")) and not path.name.endswith(".example")
         credential = path.name in {"auth.json", "web-search.json", "models-store.json"} and path.parts[0] != "tests"
-        runtime = path.parts[0] == "data" or path.parts[:2] == ("agent", "sessions")
+        runtime = path.parts[0] == "data" or path.parts[:3] == ("harnesses", "pi", "sessions")
         if env_file or credential or runtime:
             forbidden.append(path.as_posix())
     return forbidden
@@ -85,7 +85,7 @@ def forbidden_imports(path: Path, text: str) -> list[str]:
 def source_violations(root: Path) -> list[str]:
     violations = []
     for path in git_paths(root, include_untracked=True):
-        if path.parts[0] not in {"host", "web", "agent"} or path.suffix not in _SOURCE_SUFFIXES:
+        if path.parts[0] not in {"host", "web", "harnesses", "methodology"} or path.suffix not in _SOURCE_SUFFIXES:
             continue
         source = root / path
         if source.is_symlink():
@@ -187,7 +187,7 @@ def worker_versions(text: str) -> tuple[str, str]:
 def worker_package_versions(text: str) -> tuple[str, str]:
     """The exact versions of the prebaked pi packages (both worker images).
 
-    The repository declares both packages in ``agent/settings.json`` (the runtime
+    The repository declares both packages in ``harnesses/pi/settings.json`` (the runtime
     source for the in-process face) and both images install the same pins into
     ``/opt/pi-packages``. A floating or missing declaration is a failure, not a
     warning.
@@ -210,8 +210,8 @@ def guard_packages(text: str) -> list[str]:
 
 
 def template_package_pins() -> dict[str, str]:
-    """``agent/settings.json`` npm packages as ``name -> declared spec``."""
-    settings = json.loads((ROOT / "agent" / "settings.json").read_text(encoding="utf-8"))
+    """``harnesses/pi/settings.json`` npm packages as ``name -> declared spec``."""
+    settings = json.loads((ROOT / "harnesses" / "pi" / "settings.json").read_text(encoding="utf-8"))
     pins: dict[str, str] = {}
     for entry in settings["packages"]:
         source = entry if isinstance(entry, str) else entry["source"]
@@ -281,7 +281,7 @@ def test_worker_version_declarations_are_exact_and_equal() -> None:
     assert docker == e2b, "Docker/E2B version declarations diverged; this does not check deployed images"
 
 
-@pytest.mark.parametrize("name", [".env", ".env.backup", "agent/auth.json", "agent/web-search.json", "agent/models-store.json", "agent/sessions/a.jsonl", "data/runs/a/meta.json"])
+@pytest.mark.parametrize("name", [".env", ".env.backup", "harnesses/pi/auth.json", "harnesses/pi/web-search.json", "harnesses/pi/models-store.json", "harnesses/pi/sessions/a.jsonl", "data/runs/a/meta.json"])
 def test_runtime_file_rule_rejects_protected_paths(name: str) -> None:
     assert runtime_files([Path(name)]) == [name]
 
@@ -307,11 +307,11 @@ def test_python_import_rule_rejects_legacy_runtime(text: str) -> None:
     "import(`@earendil-works/pi-coding-agent/src/internal.ts`);",
 ])
 def test_js_import_rule_rejects_private_pi_paths(text: str) -> None:
-    assert forbidden_imports(Path("agent/extensions/example.ts"), text)
+    assert forbidden_imports(Path("harnesses/pi/extensions/example.ts"), text)
 
 
 def test_public_extensions_comments_and_local_python_imports_are_allowed() -> None:
-    assert forbidden_imports(Path("agent/extensions/example.ts"), """
+    assert forbidden_imports(Path("harnesses/pi/extensions/example.ts"), """
         // import X from '@earendil-works/pi-coding-agent/dist/internal.js';
         /* require('@earendil-works/pi-coding-agent/src/internal.ts'); */
         import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
@@ -340,6 +340,60 @@ def test_prebaked_package_versions_are_exact_and_equal() -> None:
     docker = worker_package_versions((ROOT / "docker/Dockerfile.worker").read_text())
     e2b = worker_package_versions((ROOT / "docker/e2b/Dockerfile.e2b").read_text())
     assert docker == e2b, "Docker/E2B prebaked package versions diverged"
+
+
+#: The ACP worker images' pinned upstream packages, per harness pack:
+#: ``pack -> (image ARG, npm package)``. The pack manifest carries the same
+#: pair; this mapping is the test's independent oracle, not a third source.
+ACP_PACK_PINS = {
+    "dsh": ("DSH_VERSION", "@deepseek-ai/dsh"),
+    "codex": ("CODEX_ACP_VERSION", "@agentclientprotocol/codex-acp"),
+    "opencode": ("OPENCODE_AI_VERSION", "opencode-ai"),
+}
+
+
+def acp_image_version(text: str, arg: str) -> str:
+    """One exact version ARG from an ACP Dockerfile (floating forms fail)."""
+    match = re.search(rf"^ARG\s+{arg}=(\S+)\s*$", text, re.MULTILINE)
+    if match is None:
+        raise ValueError(f"ACP Dockerfile needs an exact {arg}")
+    value = match.group(1)
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[\w.]+)?", value):
+        raise ValueError(f"{arg} must be an exact version; got {value!r}")
+    return value
+
+
+def harness_pack_manifest(name: str) -> dict:
+    import tomllib
+
+    path = ROOT / "harnesses" / name / "harness.toml"
+    return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def test_acp_pack_pins_match_both_image_build_arguments() -> None:
+    """每个 ACP 包的 package/version 与两个镜像的同名 ARG 逐字一致。
+
+    GLINK-ARCH-6 把命令与上游 pin 收进包清单；镜像 ARG 仍是构建事实，两者
+    漂移会让包声明的版本与镜像实际装的版本不一致（或反之）。
+    """
+    docker = (ROOT / "docker" / "Dockerfile.acp-worker").read_text(encoding="utf-8")
+    e2b = (ROOT / "docker" / "e2b" / "Dockerfile.acp-e2b").read_text(encoding="utf-8")
+    for pack, (arg, package) in ACP_PACK_PINS.items():
+        manifest = harness_pack_manifest(pack)
+        assert manifest["name"] == pack and manifest["family"] == "acp"
+        assert manifest["package"] == package, pack
+        assert manifest["version"] == acp_image_version(docker, arg), pack
+        assert manifest["version"] == acp_image_version(e2b, arg), pack
+        assert f'"{package}@${{{arg}}}"' in docker, pack
+        assert f'"{package}@${{{arg}}}"' in e2b, pack
+        assert manifest["command"], f"{pack} 清单必须声明 agent argv"
+
+
+def test_a_floating_acp_image_argument_fails_the_pin_rule() -> None:
+    with pytest.raises(ValueError, match="exact"):
+        acp_image_version("ARG DSH_VERSION=latest\n", "DSH_VERSION")
+    with pytest.raises(ValueError, match="exact"):
+        acp_image_version("ARG DSH_VERSION=0.1\n", "DSH_VERSION")
 
 
 def test_template_package_pin_matches_the_image_build_argument() -> None:

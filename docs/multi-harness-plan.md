@@ -245,7 +245,8 @@ run 生命周期、终帧即终态、提交先于发布等全部沿用架构 §3
 沙箱/无人场景没有人应答权限询问。默认 **fail-closed 全拒**；拒绝本身必须进入事件流
 （`kernel_status`），不允许静默。M2 实测：dsh 0.1.5-rc.3 与 codex-acp 0.16.0 在
 workspace-write 会话模式下跑完两个最小真实研究 run，均未发出权限请求，因此**保持默认、
-不启用白名单**；配置级门控 `PI_GLINK_ACP_PERMISSION_ALLOW`（option kind，可选 tool kind）
+不启用白名单**；配置级门控（当时是 `PI_GLINK_ACP_PERMISSION_ALLOW`，GLINK-ARCH-6 起
+是包清单的 `permission_allow`）（option kind，可选 tool kind）
 已实现并默认空集。M5 接入 opencode 时反向确认了"先实测再决定"：opencode 的真实 run 在
 `webfetch`/`apply_patch` 上 0 条请求，**不为它启用白名单**（默认 fail-closed 不变），
 源码里请求自带 `kind` 的形态与触发面记在集成笔记 §8.4。M4 曾为已移除的闭源适配器启用最小集合
@@ -343,6 +344,7 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 
 * **配置开关**：`PI_GLINK_HARNESS=pi|acp`（默认 `pi`）+ `PI_GLINK_ACP_COMMAND`；只在配置层，
   无 API/前端参数，`public_view()` 不暴露 harness。M1 落地时 ACP 只接 `inproc`；M3a 起
+  （GLINK-ARCH-6 起由包清单取代这两个变量，见 §3.2。）
   `docker` 组合可用（镜像走独立的 `LOCAL_WEB_ACP_WORKER_IMAGE`，见 §5），`e2b` 组合继续在
   启动即拒绝（M3b）；M3b 起三个执行面（inproc / docker / e2b）都可用。
 * **续接（§4.4）**：M1 不实现 ACP 的 `session/resume`；ACP run 不落会话文件，追问在准入层以

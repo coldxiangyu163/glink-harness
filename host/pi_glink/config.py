@@ -17,32 +17,26 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from .dotenv import parse_env_file
-
-#: ACP permission options the host may select when a run is explicitly given
-#: an allowlist (``PI_GLINK_ACP_PERMISSION_ALLOW``). The default host answer is
-#: fail-closed; see :data:`HostConfig.acp_permission_allow`.
-ACP_PERMISSION_OPTION_KINDS = ("allow_once", "allow_always")
-#: The ACP tool-kind vocabulary (schema ``ToolKind``); only these tokens may be
-#: named in the permission allowlist, so a typo cannot silently stop matching.
-ACP_PERMISSION_TOOL_KINDS = (
-    "read",
-    "edit",
-    "delete",
-    "move",
-    "search",
-    "execute",
-    "think",
-    "fetch",
-    "switch_mode",
-    "other",
+from .harnesses import (
+    ACP_PERMISSION_OPTION_KINDS,
+    ACP_PERMISSION_TOOL_KINDS,
+    FAMILIES,
+    HarnessPack,
+    HarnessPackError,
+    load_pack,
+    pack_names,
 )
+
+#: Re-exported from :mod:`pi_glink.harnesses`（清单解析器拥有这套词表）：ACP 权限白名单
+#: 只能命名这些取值，避免拼写错误静默失效。见 ``HarnessPack.permission_allow``。
+__all__ = ["ACP_PERMISSION_OPTION_KINDS", "ACP_PERMISSION_TOOL_KINDS"]
 _ACP_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 EXECUTORS = ("inproc", "docker", "e2b")
-#: Kernel adapter families the host can drive. ``pi`` is the existing kernel
-#: (all three execution faces); ``acp`` is the ACP client family, which in M1
-#: runs on ``inproc`` only (see docs/multi-harness-plan.md).
-HARNESSES = ("pi", "acp")
+#: Kernel adapter families a run record can name; the pack manifest's ``family``
+#: selects one. ``pi`` drives the pi kernel on all three faces; ``acp`` drives any
+#: ACP agent (dsh / codex-acp / opencode) through one stdio JSON-RPC client.
+HARNESS_FAMILIES = FAMILIES
 #: ``local`` keeps the single-user surface; ``multitenant`` requires the
 #: gateway-asserted identity material and a container/sandbox execution face.
 TENANCY_MODES = ("local", "multitenant")
@@ -108,15 +102,26 @@ class HostConfig:
     workspace_root: Path
     openai_base_url: str
     openai_model: str
-    #: Kernel adapter family for every run of this host: ``pi`` (default) or
-    #: ``acp``. A host-level, startup-frozen choice; M1 deliberately has no
-    #: per-run API/query parameter and no front-end surface for it.
+    #: Kernel adapter family for every run of this host: ``pi`` or ``acp``.
+    #: Derived from the selected harness pack's manifest and frozen at startup;
+    #: there is deliberately no per-run API/query parameter and no front-end
+    #: surface for it.
     harness: str = "pi"
-    #: Command line of the ACP agent process (``PI_GLINK_ACP_COMMAND``), e.g.
-    #: ``"dsh acp"``. Split with :func:`shlex.split` and executed without a
-    #: shell; frozen at startup so a run cannot be relabelled later. Only
-    #: consulted when ``harness`` is ``acp``.
-    acp_command: str = ""
+    #: The selected harness pack name (``PI_GLINK_HARNESS``): the deployment's
+    #: one harness choice. The pack directory under :attr:`harnesses_dir` holds
+    #: the manifest, the optional capability prompt and (ACP) the HOME overlay.
+    harness_pack: str = "pi"
+    #: Root of the pack directories (``PI_GLINK_HARNESSES_DIR``).
+    harnesses_dir: Path = Path("harnesses")
+    #: The ACP agent's argv (the pack manifest's ``command``), executed without
+    #: a shell. Empty for the pi family.
+    acp_command: tuple[str, ...] = ()
+    #: The selected pack's capability prompt (``capabilities.md``), composed into
+    #: the system prompt after the work agreement. Bytes-stable repository text.
+    pack_capabilities: str = ""
+    #: The ACP pack's ``home/`` overlay directory: repository content copied into
+    #: each run's HOME before the credential files are injected.
+    pack_home: Path | None = None
     #: Credential files to copy into each run's exclusive ``HOME``
     #: (``PI_GLINK_ACP_CREDENTIAL_FILES``): ``source=dest`` entries separated by
     #: ``;``. ``source`` is read only (a leading ``~/`` expands to the operator's
@@ -130,18 +135,18 @@ class HostConfig:
     #: the per-run state root stays the isolation boundary. A value whose name
     #: looks credential-shaped joins the run's redaction boundary.
     acp_env: tuple[tuple[str, str], ...] = ()
-    #: Explicit allowlist for ACP permission answers
-    #: (``PI_GLINK_ACP_PERMISSION_ALLOW``, comma/space separated). Empty (the
-    #: default) keeps the fail-closed answer. Tokens are ACP option kinds
+    #: Explicit allowlist for ACP permission answers, from the selected pack's
+    #: ``permission_allow`` (empty when the pack omits it). Empty keeps the
+    #: fail-closed answer. Tokens are ACP option kinds
     #: (:data:`ACP_PERMISSION_OPTION_KINDS`) and/or tool kinds
     #: (:data:`ACP_PERMISSION_TOOL_KINDS`). An allow answer needs a matching
     #: option kind; when any tool kind is configured the request's tool kind
     #: must match too (a request without a tool kind is refused).
     acp_permission_allow: tuple[str, ...] = ()
-    #: ACP session configuration applied right after ``session/new``
-    #: (``PI_GLINK_ACP_SESSION_CONFIG``, ``;``-separated ``id=value`` entries;
-    #: e.g. ``mode=auto``). An agent that does not advertise the option/value
-    #: fails the run: an explicitly configured value is never silently dropped.
+    #: ACP session configuration applied right after ``session/new``, from the
+    #: selected pack's ``session_config`` (empty when the pack omits it). An
+    #: agent that does not advertise the option/value fails the run: an
+    #: explicitly configured value is never silently dropped.
     acp_session_config: tuple[tuple[str, str], ...] = ()
     openai_api_key: str = field(repr=False, default="")
     context_window: int = _DEFAULT_CONTEXT_WINDOW
@@ -314,12 +319,10 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     host = _text(values, "LOCAL_WEB_HOST", "127.0.0.1")
     port = _port(values, "LOCAL_WEB_PORT", _DEFAULT_PORT)
     executor = _text(values, "LOCAL_WEB_EXECUTOR", "inproc").lower()
-    harness = _text(values, "PI_GLINK_HARNESS", "pi").lower()
-    acp_command = _text(values, "PI_GLINK_ACP_COMMAND", "")
+    harnesses_dir = _path(values, "PI_GLINK_HARNESSES_DIR", repo_root / "harnesses")
+    pack = _select_harness_pack(values, harnesses_dir)
     acp_credential_files = _acp_credential_files(values)
     acp_env = _acp_env_entries(values)
-    acp_permission_allow = _acp_permission_allow(values)
-    acp_session_config = _acp_session_config(values)
     tenancy_mode = _text(values, "PI_GLINK_TENANCY", "local").lower()
     auth_mode = _text(values, "PI_GLINK_AUTH_MODE", "gateway").lower()
     model_credentials = _text(values, "PI_GLINK_MODEL_CREDENTIALS", "tenant").lower()
@@ -327,16 +330,6 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     if executor not in EXECUTORS:
         raise ConfigError(
             f"LOCAL_WEB_EXECUTOR must be one of {', '.join(EXECUTORS)}; got {executor!r}"
-        )
-    if harness not in HARNESSES:
-        raise ConfigError(
-            f"PI_GLINK_HARNESS must be one of {', '.join(HARNESSES)}; got {harness!r}"
-        )
-    if harness == "acp" and not acp_command:
-        # Fail closed at startup: an ACP host with no agent command could only
-        # fail every run later, or (worse) fall back to pi and mislabel it.
-        raise ConfigError(
-            "PI_GLINK_HARNESS=acp 需要 PI_GLINK_ACP_COMMAND（ACP agent 的命令行）"
         )
     if tenancy_mode not in TENANCY_MODES:
         raise ConfigError(
@@ -398,7 +391,7 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     e2b_key = _text(values, "E2B_API_KEY", "")
     data_root = _path(values, "LOCAL_WEB_DATA_ROOT", Path.home() / ".pi-glink")
     agent_config_dir = _path(
-        values, "PI_CODING_AGENT_DIR", repo_root / "agent"
+        values, "PI_CODING_AGENT_DIR", harnesses_dir / pack.name
     )
     blueprints_dir = _path(
         values, "PI_GLINK_BLUEPRINTS_DIR", repo_root / "blueprints"
@@ -417,12 +410,16 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         host=host,
         port=port,
         executor=executor,
-        harness=harness,
-        acp_command=acp_command,
+        harness=pack.family,
+        harness_pack=pack.name,
+        harnesses_dir=harnesses_dir,
+        acp_command=pack.command,
         acp_credential_files=acp_credential_files,
         acp_env=acp_env,
-        acp_permission_allow=acp_permission_allow,
-        acp_session_config=acp_session_config,
+        acp_permission_allow=pack.permission_allow,
+        acp_session_config=pack.session_config,
+        pack_capabilities=pack.capabilities_text(),
+        pack_home=pack.home,
         pi_bin=_text(values, "PI_GLINK_PI_BIN", "pi"),
         agent_config_dir=agent_config_dir,
         blueprints_dir=blueprints_dir,
@@ -544,15 +541,14 @@ def validate_host_config(config: HostConfig) -> None:
         raise ConfigError(
             f"LOCAL_WEB_EXECUTOR must be one of {', '.join(EXECUTORS)}; got {config.executor!r}"
         )
-    if config.harness not in HARNESSES:
+    if config.harness not in HARNESS_FAMILIES:
         raise ConfigError(
-            f"PI_GLINK_HARNESS must be one of {', '.join(HARNESSES)}; got {config.harness!r}"
+            f"harness 族必须是 {' 或 '.join(HARNESS_FAMILIES)}；got {config.harness!r}"
         )
-    if config.harness == "acp":
-        if not config.acp_command:
-            raise ConfigError(
-                "PI_GLINK_HARNESS=acp 需要 PI_GLINK_ACP_COMMAND（ACP agent 的命令行）"
-            )
+    if config.harness == "acp" and not config.acp_command:
+        raise ConfigError(
+            f"harness 包 {config.harness_pack!r} 缺少 command（ACP 族需要 agent 的 argv）"
+        )
     if config.tenancy_mode not in TENANCY_MODES:
         raise ConfigError(
             f"PI_GLINK_TENANCY must be one of {', '.join(TENANCY_MODES)}; got {config.tenancy_mode!r}"
@@ -686,67 +682,56 @@ def _acp_env_entries(values: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
     return tuple(entries)
 
 
-def _acp_permission_allow(values: Mapping[str, str]) -> tuple[str, ...]:
-    """Parse ``PI_GLINK_ACP_PERMISSION_ALLOW``: option and/or tool kinds."""
-    raw = _text(values, "PI_GLINK_ACP_PERMISSION_ALLOW", "")
-    if not raw:
-        return ()
-    allowed = set(ACP_PERMISSION_OPTION_KINDS) | set(ACP_PERMISSION_TOOL_KINDS)
-    tokens: list[str] = []
-    for token in re.split(r"[,\s]+", raw):
-        if not token:
-            continue
-        if token not in allowed:
-            raise ConfigError(
-                "PI_GLINK_ACP_PERMISSION_ALLOW 只接受 ACP 的 allow 选项类型或工具类型；"
-                f"当前 {token!r}"
-            )
-        if token not in tokens:
-            tokens.append(token)
-    return tuple(tokens)
-
-
-def _acp_session_config(values: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
-    """Parse ``PI_GLINK_ACP_SESSION_CONFIG``: ``id=value`` entries."""
-    raw = _text(values, "PI_GLINK_ACP_SESSION_CONFIG", "")
-    if not raw:
-        return ()
-    entries: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for chunk in raw.split(";"):
-        item = chunk.strip()
-        if not item:
-            continue
-        config_id, separator, value = item.partition("=")
-        config_id, value = config_id.strip(), value.strip()
-        if not separator or not config_id or not value:
-            raise ConfigError(
-                f"PI_GLINK_ACP_SESSION_CONFIG 条目必须是 id=value；当前 {item!r}"
-            )
-        if config_id in seen:
-            raise ConfigError(f"PI_GLINK_ACP_SESSION_CONFIG 选项重复：{config_id}")
-        seen.add(config_id)
-        entries.append((config_id, value))
-    return tuple(entries)
-
-
 def _acp_knobs_are_acp_only(config: HostConfig) -> None:
-    """Refuse ACP-only knobs on a non-ACP host instead of ignoring them.
+    """Refuse ACP-only knobs on a non-ACP pack instead of ignoring them.
 
-    ``PI_GLINK_ACP_COMMAND`` keeps its M1 behaviour (inert under ``pi``); every
-    knob added in M2 changes what a run's process may see or do, so an operator
-    who set one while the host drives pi gets a startup error rather than a
-    silent no-op.
+    The command, session options and permission allowlist now live in the pack
+    manifest (and are validated by its parser). The credential and env channels
+    stay deployment configuration: an operator who sets them while the selected
+    pack drives pi gets a startup error rather than a silent no-op.
     """
     if config.harness == "acp":
         return
-    if config.acp_credential_files or config.acp_env or config.acp_permission_allow or config.acp_session_config:
+    if config.acp_credential_files or config.acp_env:
         raise ConfigError(
-            "PI_GLINK_ACP_CREDENTIAL_FILES / PI_GLINK_ACP_ENV / "
-            "PI_GLINK_ACP_PERMISSION_ALLOW / PI_GLINK_ACP_SESSION_CONFIG "
-            "只在 PI_GLINK_HARNESS=acp 下生效；当前 harness="
-            f"{config.harness!r}"
+            "PI_GLINK_ACP_CREDENTIAL_FILES / PI_GLINK_ACP_ENV 只在 ACP 族"
+            "（PI_GLINK_HARNESS=dsh|codex|opencode）下生效；当前 harness_pack="
+            f"{config.harness_pack!r}"
         )
+
+
+def _select_harness_pack(values: Mapping[str, str], harnesses_dir: Path) -> HarnessPack:
+    """The one harness pack this host runs, or the startup refusal.
+
+    ``PI_GLINK_HARNESS`` names a pack directory. The old ``acp`` value and the
+    old ACP knobs are refused outright (no compatibility mapping): the manifest
+    is the single place a harness's command, upstream pin and session options
+    live, and a half-migrated configuration must not boot into another harness.
+    """
+    requested = _text(values, "PI_GLINK_HARNESS", "pi").lower()
+    if requested == "acp":
+        raise ConfigError(
+            "PI_GLINK_HARNESS=acp 已由 harness 包清单取代：请改用 PI_GLINK_HARNESS=dsh"
+            "（或 codex/opencode），agent 命令见 harnesses/<包名>/harness.toml 的 command"
+        )
+    for key, field in (
+        ("PI_GLINK_ACP_COMMAND", "command"),
+        ("PI_GLINK_ACP_SESSION_CONFIG", "session_config"),
+        ("PI_GLINK_ACP_PERMISSION_ALLOW", "permission_allow"),
+    ):
+        if _text(values, key, ""):
+            raise ConfigError(
+                f"{key} 已由 harnesses/<包名>/harness.toml 的 {field} 取代；"
+                "请从环境移除该变量"
+            )
+    try:
+        return load_pack(harnesses_dir, requested)
+    except HarnessPackError as exc:
+        available = pack_names(harnesses_dir)
+        listing = "、".join(available) if available else "（无）"
+        raise ConfigError(
+            f"PI_GLINK_HARNESS={requested!r} 不可用：{exc}；可用包：{listing}"
+        ) from exc
 
 
 def _text(values: Mapping[str, str], key: str, default: str) -> str:

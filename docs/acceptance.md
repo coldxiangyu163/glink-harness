@@ -142,7 +142,7 @@ HTTPS_PROXY=socks5h://127.0.0.1:1080 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 
 | smoke 默认 prompt 硬编码本机绝对路径 | 改为与仓库无关的描述 | `scripts/smoke-local-run.py` |
 | 验收记录数字不准确（声称 73） | 用 `--collect-only` 实测重算：**78 项**（8 个测试文件） | 本文件 §2 |
 | Docker / E2B 完整命令与 prompt 未记录 | 本文件 §2 补齐三面完整命令与 prompt；两份证据文件同步补充 | `docs/evidence/docker-run.txt`、`e2b-run.txt` |
-| README 与 `agent/README.md` 仍称「task-1 骨架阶段」 | 更新为交付状态与内容清单 | README、`agent/README.md` |
+| README 与 `harnesses/pi/README.md` 仍称「task-1 骨架阶段」 | 更新为交付状态与内容清单 | README、`harnesses/pi/README.md` |
 | `styles.css` 保留大量 Glink 特有规则 | 保守裁剪：删除「选择器中所有类名均已无引用」的规则（565 条 / 254 个类），93 KB → 30 KB | 裁剪后重跑浏览器回归通过（思考折叠 / 工具卡片 / 报告预览 + 截图） |
 
 返工后的全量重跑：Python **78 项通过**、Node **11 项通过**、浏览器回归通过。
@@ -221,7 +221,7 @@ inproc `a6f67fde8e51` / docker `03be2909302e` / e2b `db6a9e83c0b7` 均为 **0**�
 |---|---|---|
 | `run-stream.mjs::updateTool` 把 `tool_execution_update.partialResult` 当增量拼接，重复展示前缀（真实 run `ebf75f590601`：`0 → 53 → 495`，前缀包含） | 改为替换语义：`const output = typeof payload.output === 'string' ? payload.output : item.output`；模块头与函数内注释注明 pi `docs/rpc.md` 的累计快照原文 | 新增 Node 回归 `cumulative tool snapshots replace the display instead of duplicating prefixes`（复刻 0→53→495 形状：替换 = 495 字符，拼接会得 548 字符且前缀重复）；原 `tool cards track streaming output and final status` 改为累计快照形状；证据 `docs/evidence/tool-stream-semantics.txt` |
 | `finishRun()` 把失败/取消时仍运行的工具统一标成 `done` | 新增 `INTERRUPTED_TOOL_STATUS`：finished→done、failed→interrupted、cancelled→cancelled；已拿到自身终态帧的工具保持原状态；`run-view.mjs` 新增 `TOOL_STATE_LABELS`（执行中/完成/失败/已取消/已中断）、`styles.css` 为 interrupted/cancelled 补配色 | 新增 Node 回归 `a failed or cancelled run never leaves a running tool looking done`（两种终态 + 已终态工具不受影响的对照） |
-| 文档陈旧：`agent/README.md` 称配置目录直接指向仓库、凭据「只经环境变量传入」；`README.md` 目录表同样表述 | `agent/README.md` 改为「本目录是模板，渲染到 `<data_root>/pi-agent/`」，凭据写明经 `auth.json`（0600，仓库外）交付；`models.json/auth.json/web-search.json` 的归属一并订正；README 目录表同步 | 全仓库 grep：`指向这里`、`只经环境变量传入` 无残留 |
+| 文档陈旧：`harnesses/pi/README.md` 称配置目录直接指向仓库、凭据「只经环境变量传入」；`README.md` 目录表同样表述 | `harnesses/pi/README.md` 改为「本目录是模板，渲染到 `<data_root>/pi-agent/`」，凭据写明经 `auth.json`（0600，仓库外）交付；`models.json/auth.json/web-search.json` 的归属一并订正；README 目录表同步 | 全仓库 grep：`指向这里`、`只经环境变量传入` 无残留 |
 | `docs/pi-integration-notes.md` §6 仍列 Docker/E2B 注入为「待补测」 | 改写为实测结论表（`PI_CODING_AGENT_DIR` / 会话目录 / 工作区 / 凭据载体 / `env` 计数），并新增 §7 工具流语义（含 `docs/rpc.md` 原文与 `ebf75f590601` 帧长） | 与 `docs/evidence/docker-run.txt`、`e2b-run.txt`、`credential-boundary.txt` 交叉核对一致 |
 
 回归：Python 97 项 + Node 14 项全绿；`scripts/check-no-secrets.py` 真实命中 0。

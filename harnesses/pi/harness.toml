@@ -1,0 +1,8 @@
+# pi 包：pi 族的配置模板与扩展本体。
+#
+# pi 的版本固定点不在本清单里：内核版本在 docker/Dockerfile.worker 与
+# docker/e2b/Dockerfile.e2b 的 `ARG PI_VERSION`，预装包版本在 settings.json，
+# 三者一致性由 tests/test_repository_boundaries.py 卡住。
+format = "pi-glink-harness/v1"
+name = "pi"
+family = "pi"

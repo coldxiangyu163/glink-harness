@@ -12,7 +12,7 @@
   configOptions）供集成笔记并排对照；
 * 记录每 run HOME 的落点（路径、权限位、文件大小；不含内容）、凭据源文件
   sha256 前后一致、子进程命令行（证明钉版入口）；
-* ``--session-config`` 可实测 ``PI_GLINK_ACP_SESSION_CONFIG``（M5 的 opencode
+* ``--session-config`` 可实测 session option（写入临时探针包清单；M5 的 opencode
   用 ``model=…`` 观测 option 变化与 ``effort`` 选项的联动）；
 * 不打印任何凭据值；凭据源始终只读。
 
@@ -36,6 +36,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "host"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "spikes"))
+from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 
 from pi_glink import __version__ as HOST_VERSION  # noqa: E402
 from pi_glink.config import build_config  # noqa: E402
@@ -94,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--session-config",
         default="",
-        help="PI_GLINK_ACP_SESSION_CONFIG（; 分隔的 id=value，应用在 session/new 之后）",
+        help="session_config（; 分隔的 id=value，写入临时探针包清单，应用在 session/new 之后）",
     )
     parser.add_argument(
         "--watch",
@@ -112,9 +114,15 @@ def main(argv: list[str] | None = None) -> int:
     workspace = workdir / "workspace"
     workspace.mkdir()
     credentials = list(args.credential)
+    packs = write_probe_pack(
+        workdir / "probe",
+        args.command,
+        session_config=args.session_config,
+        permission_allow=args.permission_allow,
+    )
     values = {
-        "PI_GLINK_HARNESS": "acp",
-        "PI_GLINK_ACP_COMMAND": args.command,
+        "PI_GLINK_HARNESS": PROBE_PACK_NAME,
+        "PI_GLINK_HARNESSES_DIR": str(packs),
         "LOCAL_WEB_DATA_ROOT": str(workdir / "data"),
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": str(args.timeout),
         "PI_GLINK_WEB_SEARCH_CONFIG": str(workdir / "absent-web-search.json"),
@@ -123,8 +131,6 @@ def main(argv: list[str] | None = None) -> int:
         values["PI_GLINK_ACP_CREDENTIAL_FILES"] = ";".join(credentials)
     if env_entries:
         values["PI_GLINK_ACP_ENV"] = ";".join(env_entries)
-    if args.session_config:
-        values["PI_GLINK_ACP_SESSION_CONFIG"] = args.session_config
 
     config = build_config(values, REPO_ROOT)
     runtime = prepare_acp_runtime(config, runtime_dir=workdir / "data" / "acp-agent")

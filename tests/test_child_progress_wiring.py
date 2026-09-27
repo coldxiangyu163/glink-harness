@@ -20,6 +20,8 @@ import pytest
 
 from pi_glink import events
 from pi_glink.config import HostConfig, build_config
+
+from acp_pack import apply_acp_pack
 from pi_glink.events import EventBus
 from pi_glink.kernel.acp_child_progress import AcpChildProgressSource
 from pi_glink.kernel.acp_child_progress import ProgressFact as AcpProgressFact
@@ -52,12 +54,13 @@ def make_config(tmp_path: Path, **overrides: str) -> HostConfig:
         "OPENAI_API_KEY": "sk-test",
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
-        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "agent"),
+        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         # Never fall back to the operator's own credential file in a test.
         "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
     }
     values.update(overrides)
+    apply_acp_pack(values, tmp_path)
     return build_config(values, REPO_ROOT)
 
 

@@ -275,7 +275,7 @@ def test_agents_directory_is_rendered_into_the_run_configuration(
 
 
 def test_prompt_template_names_come_from_the_template_directory(tmp_path: Path) -> None:
-    """准入层的 `/` 命令白名单从 `agent/prompts/` 推导，不硬编码。
+    """准入层的 `/` 命令白名单从 `harnesses/pi/prompts/` 推导，不硬编码。
 
     pi 只展开文件名（stem）精确匹配的模板命令（docs/prompt-templates.md），
     宿主因此把同一份模板目录当作唯一真源：新增命令 = 新增受审阅的模板文件；
@@ -291,7 +291,7 @@ def test_prompt_template_names_come_from_the_template_directory(tmp_path: Path) 
     # 模板目录缺失 = 不接受任何 `/` 命令（fail-closed）。
     assert prompt_template_names(tmp_path / "absent") == ()
     # 仓库当前只有 `/deepresearch`：加载的包注册的扩展命令不在其中。
-    assert prompt_template_names(REPO_ROOT / "agent") == ("deepresearch",)
+    assert prompt_template_names(REPO_ROOT / "harnesses" / "pi") == ("deepresearch",)
 
 
 def test_template_settings_declare_pinned_packages_and_quiet_subagent_surfaces() -> None:
@@ -303,7 +303,7 @@ def test_template_settings_declare_pinned_packages_and_quiet_subagent_surfaces()
     它由 pi-subagents 从 ``subagents.watchdog`` 读取（src/watchdog/settings.ts）。
     版本一致性与镜像 ARG 的对应由 test_repository_boundaries.py 卡住。
     """
-    settings = json.loads((REPO_ROOT / "agent" / "settings.json").read_text(encoding="utf-8"))
+    settings = json.loads((REPO_ROOT / "harnesses" / "pi" / "settings.json").read_text(encoding="utf-8"))
     assert settings["packages"] == ["npm:pi-web-access@0.31.0", "npm:pi-subagents@0.40.0"]
     assert settings["defaultThinkingLevel"] == "medium"
     watchdog = settings["subagents"]["watchdog"]
@@ -430,7 +430,7 @@ def test_repository_template_declares_only_prebaked_packages() -> None:
     否则容器面会退回运行期 npm install —— 这正是本次要消除的每 run 延迟。
     版本 pin 的跨文件一致性在 test_repository_boundaries.py。
     """
-    settings = json.loads((REPO_ROOT / "agent" / "settings.json").read_text(encoding="utf-8"))
+    settings = json.loads((REPO_ROOT / "harnesses" / "pi" / "settings.json").read_text(encoding="utf-8"))
     sources = []
     for entry in settings["packages"]:
         sources.append(entry if isinstance(entry, str) else entry["source"])

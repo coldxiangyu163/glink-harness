@@ -4,6 +4,12 @@
 
 本文记录 ACP（Agent Client Protocol）族接入的协议事实与实现口径。**每条标注来源**：
 
+> **GLINK-ARCH-6（2026-09-27）起的现行配置面**：harness 选择与 agent 命令/会话选项/权限白名单
+> 都在 harness 包清单（`harnesses/<pack>/harness.toml`）；本文以下历史章节里的
+> `PI_GLINK_HARNESS=acp`、`PI_GLINK_ACP_COMMAND`、`PI_GLINK_ACP_SESSION_CONFIG`、
+> `PI_GLINK_ACP_PERMISSION_ALLOW` 都是当时实测用的配置面，已由包清单取代（启动即拒绝旧变量）。
+> 逐 agent 的实测事实与证据不受影响。
+
 | 来源标记 | 含义 |
 |---|---|
 | `schema` | ACP v1 的 JSON Schema / 官方 schema 页（本机核对副本：`@agentclientprotocol/sdk` 1.4.0 的 `schema/schema.json`，`$defs` 中的 v1 定义） |
@@ -1413,7 +1419,7 @@ ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上
 |---|---|---|---|
 | 蓝图源文件 | 5,550 B | 32,768 B（32 KiB 上限） | `宿主代码` |
 | 蓝图渲染文本 | 5,535 B | 33,003 B | `合成实测` |
-| 工作约定 `agent/research-prompt.md` | 1,512 B | 1,512 B（不随蓝图变） | `宿主代码` |
+| 工作约定 `harnesses/pi/research-prompt.md` | 1,512 B | 1,512 B（不随蓝图变） | `宿主代码` |
 | system prompt 合计 | 7,049 B | 34,517 B | `合成实测` |
 | ACP 单条 `session/prompt` 帧 | 7,498 B | ≈98 KiB（32 KiB 蓝图 + 64 KiB 题面） | `合成实测` |
 | 同上，JSON 转义病态（全是 `"`/`\`） | — | ≈196 KiB | `推断`（转义上界） |

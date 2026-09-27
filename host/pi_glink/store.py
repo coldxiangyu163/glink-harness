@@ -161,6 +161,11 @@ class RunRecord:
     #: admission from the frozen config. ``None`` for records written before
     #: the fact was tracked; those records keep the legacy fallbacks.
     harness: str | None = None
+    #: Harness pack this run executed under (``harnesses/<pack>/``, e.g. ``dsh``),
+    #: recorded in the same atomic admission write as ``harness``. A follow-up
+    #: requires the same pack when the parent carries the field; ``None`` for
+    #: legacy records, which keep the existing proof path.
+    harness_pack: str | None = None
     #: Execution face this run used ("inproc" | "docker" | "e2b"), recorded at
     #: admission. ``None`` for legacy records.
     executor: str | None = None
@@ -390,6 +395,7 @@ class RunStore:
         blueprint: str | None = None,
         blueprint_stages: Sequence[Mapping[str, Any]] = (),
         harness: str | None = None,
+        harness_pack: str | None = None,
         executor: str | None = None,
     ) -> RunRecord:
         """Admit a run and write its assignment facts in one atomic meta write.
@@ -407,8 +413,9 @@ class RunStore:
         optional ``parent_run_id`` records the follow-up chain in the same write.
         ``blueprint`` / ``blueprint_stages`` record the session template the run
         was admitted with: facts decided before admission, never progression
-        state. ``harness`` / ``executor`` are frozen-config facts of the same
-        kind, written in this same atomic admission write; ``agent`` is not a
+        state. ``harness`` / ``harness_pack`` / ``executor`` are frozen-config
+        facts of the same kind, written in this same atomic admission write;
+        ``agent`` is not a
         create parameter because it is only known after the run starts (the
         ``session_id`` precedent: written back at the session_ready commit).
         """
@@ -431,6 +438,7 @@ class RunStore:
             blueprint=blueprint,
             blueprint_stages=tuple(blueprint_stages),
             harness=harness,
+            harness_pack=harness_pack,
             executor=executor,
         )
         return self._write(record)

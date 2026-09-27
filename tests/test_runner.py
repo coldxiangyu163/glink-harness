@@ -13,6 +13,8 @@ from typing import Any, Mapping
 import pytest
 
 from pi_glink.config import HostConfig, build_config
+
+from acp_pack import apply_acp_pack
 from pi_glink.events import EventBus
 from pi_glink.kernel.rpc import PiRpcClient
 
@@ -44,12 +46,13 @@ def make_config(tmp_path: Path, **overrides: str) -> HostConfig:
         "OPENAI_API_KEY": "sk-test",
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
-        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "agent"),
+        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         # Never fall back to the operator's own credential file in a test.
         "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
     }
     values.update(overrides)
+    apply_acp_pack(values, tmp_path)
     return build_config(values, REPO_ROOT)
 
 
@@ -386,11 +389,15 @@ def test_prompt_reaches_the_kernel_verbatim_and_never_through_argv(tmp_path: Pat
     assert prompt not in " ".join(argv), (
         "an instruction with shell metacharacters must never be argv"
     )
-    # The research contract travels as an appended system prompt, read from the
-    # repository template (offline smoke for the `--append-system-prompt` path).
+    # The research contract and the pack's capability prompt travel as one
+    # appended system prompt, read from repository files (offline smoke for the
+    # `--append-system-prompt` path).
     assert "--append-system-prompt" in argv
-    contract = (REPO_ROOT / "agent" / "research-prompt.md").read_text(encoding="utf-8").strip()
-    assert contract in argv, "the rendered research prompt must reach the kernel verbatim"
+    appended = argv[argv.index("--append-system-prompt") + 1]
+    contract = (REPO_ROOT / "harnesses" / "pi" / "research-prompt.md").read_text(encoding="utf-8").strip()
+    capabilities = (REPO_ROOT / "harnesses" / "pi" / "capabilities.md").read_text(encoding="utf-8").strip()
+    assert contract in appended, "the rendered research prompt must reach the kernel verbatim"
+    assert capabilities in appended, "the pack capability prompt must reach the kernel verbatim"
 
 
 # -- slash 命令门禁（GLINK-SUB-02 评审修复） ---------------------------------
@@ -418,7 +425,7 @@ def _run_dirs(config: HostConfig) -> list[str]:
 def test_the_command_gate_refuses_before_any_run_exists(tmp_path: Path, text: str) -> None:
     """载入 pi-subagents 后，`/run --bg` 等命令能绕过 tool_call 守卫。
 
-    准入层只放行从 `agent/prompts/` 推导出的模板命令（当前只有 deepresearch）；
+    准入层只放行从 `harnesses/pi/prompts/` 推导出的模板命令（当前只有 deepresearch）；
     拒绝必须发生在凭据解析、父会话读取、run 目录与执行面创建之前。
     """
     manager, _store = build_manager(tmp_path)

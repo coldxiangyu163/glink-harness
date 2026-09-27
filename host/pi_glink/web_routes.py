@@ -378,7 +378,7 @@ class RoutesMixin:
         except UnsupportedCommand as exc:
             # ``/``-prefix input is how pi reaches extension commands, including
             # pi-subagents' detaching ones. Only the prompt templates rendered
-            # from ``agent/prompts/`` are accepted; the refusal names the
+            # from ``harnesses/pi/prompts/`` are accepted; the refusal names the
             # allowlist and never echoes the rejected command or the prompt.
             self._send_json(
                 HTTPStatus.BAD_REQUEST,

@@ -93,7 +93,7 @@ class HarnessFamily(ABC):
     def allowed_prompt_commands(self) -> tuple[str, ...]:
         """The ``/`` commands admission accepts（自 runner L612-624 搬迁）。
 
-        pi：``agent/prompts/`` 渲染出的模板名；ACP：空表（其斜杠命令是
+        pi：``harnesses/pi/prompts/`` 渲染出的模板名；ACP：空表（其斜杠命令是
         agent 自己的面，宿主不路由，plan §4.3）。
         """
 
@@ -270,7 +270,13 @@ class HarnessFamily(ABC):
 def select_family(
     harness: str, *, config: HostConfig, store: RunStore
 ) -> HarnessFamily:
-    """The process-wide family, chosen once in ``RunManager.__init__``."""
+    """The process-wide family, chosen once in ``RunManager.__init__``.
+
+    ``harness`` is the selected pack's manifest ``family`` (``pi``/``acp``),
+    derived and validated by :func:`pi_glink.config.build_config`; the pack
+    itself travels on the frozen config (``harness_pack``,
+    ``pack_capabilities``, ``pack_home``, the ACP argv/options).
+    """
     from .harness_acp import AcpHarnessFamily
     from .harness_pi import PiHarnessFamily
 

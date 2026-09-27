@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import tempfile
 from pathlib import Path
 from typing import Mapping
 
 import pytest
 
+from acp_pack import apply_acp_pack
 from pi_glink.config import ConfigError, build_config
 from pi_glink.kernel.acp_env import (
     build_acp_env,
@@ -31,11 +34,12 @@ def config(values: Mapping[str, str]):
         "OPENAI_API_KEY": "sk-test",
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
-        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "agent"),
+        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "PI_GLINK_HARNESS": "acp",
         "PI_GLINK_ACP_COMMAND": "fake-agent --acp",
     }
     base.update(values)
+    apply_acp_pack(base, Path(tempfile.mkdtemp(prefix="glink-acp-pack-")))
     return build_config(base, REPO_ROOT)
 
 
@@ -100,7 +104,13 @@ def test_an_unreadable_credential_source_fails_instead_of_running_without_it(
         )
 
 
-def test_an_existing_destination_is_never_overwritten(tmp_path: Path) -> None:
+def test_a_rendered_destination_is_replaced_by_the_credential(tmp_path: Path) -> None:
+    """原义务（M1）：凭据目标已存在就拒绝写入（防重定向）。
+
+    新义务（GLINK-ARCH-6）：包 `home/` 覆盖层先渲染，凭据目标必须优先——同一路径的
+    覆盖层普通文件被凭据内容替换（每个 run 的 HOME 都是新渲染的，不存在宿主/操作员
+    的旧文件）。仍是 fail-closed 的另一半：链接与非普通文件在下面两个用例里继续被拒绝。
+    """
     source = tmp_path / "source.json"
     source.write_text('{"apiKey": "opaque-value-1234567890"}', encoding="utf-8")
     run_dir = tmp_path / "acp-agent"
@@ -108,12 +118,13 @@ def test_an_existing_destination_is_never_overwritten(tmp_path: Path) -> None:
     target.parent.mkdir(parents=True)
     target.write_text("preexisting", encoding="utf-8")
 
-    with pytest.raises(ConfigError):
-        prepare_acp_runtime(
-            config({"PI_GLINK_ACP_CREDENTIAL_FILES": f"{source}=.codex/auth.json"}),
-            runtime_dir=run_dir,
-        )
-    assert target.read_text(encoding="utf-8") == "preexisting"
+    runtime = prepare_acp_runtime(
+        config({"PI_GLINK_ACP_CREDENTIAL_FILES": f"{source}=.codex/auth.json"}),
+        runtime_dir=run_dir,
+    )
+    assert target.read_text(encoding="utf-8") == '{"apiKey": "opaque-value-1234567890"}'
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert runtime.credential_dests == (".codex/auth.json",)
 
 
 def test_a_symlinked_destination_is_refused(tmp_path: Path) -> None:

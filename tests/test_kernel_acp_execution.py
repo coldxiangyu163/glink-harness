@@ -30,6 +30,8 @@ from typing import Any, Mapping
 import pytest
 
 from pi_glink.config import build_config
+
+from acp_pack import apply_acp_pack
 from pi_glink.kernel.acp_e2b_env import AcpStateRecovery
 from pi_glink.kernel.acp_env import AcpRuntime
 from pi_glink.kernel.acp_execution import (
@@ -203,11 +205,12 @@ def make_config(tmp_path: Path, **overrides: str):
         "OPENAI_API_KEY": "sk-test",
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
-        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "agent"),
+        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
     }
     values.update(overrides)
+    apply_acp_pack(values, tmp_path)
     return build_config(values, REPO_ROOT)
 
 

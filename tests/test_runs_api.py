@@ -40,7 +40,7 @@ def make_config(tmp_path: Path, **overrides: str):
         "OPENAI_API_KEY": "sk-test",
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
-        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "agent"),
+        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_PORT": "0",
     }
@@ -114,7 +114,7 @@ def test_slash_commands_outside_the_template_allowlist_are_refused(
 
     pi 对以 `/` 开头的消息会先执行扩展命令（docs/rpc-commands.md），而载入的
     pi-subagents 注册了 `/run --bg`、`/subagents-detach` 等。准入层只接受从
-    `agent/prompts/` 推导的模板命令，并在任何 run 目录/执行面之前返回 400。
+    `harnesses/pi/prompts/` 推导的模板命令，并在任何 run 目录/执行面之前返回 400。
     """
     before = _run_dirs(server)
     status, _headers, raw = request(

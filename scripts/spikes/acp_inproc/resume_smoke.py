@@ -37,6 +37,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "host"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "spikes"))
+from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import smoke_host as base  # noqa: E402 - same-directory helper, no side effects
@@ -210,12 +212,18 @@ def main(argv: list[str] | None = None) -> int:
         if "=" in chunk and chunk.split("=", 1)[1].strip()
     }
 
+    packs = write_probe_pack(
+        data_root / "probe",
+        args.agent,
+        session_config=args.session_config,
+        permission_allow=args.permission_allow,
+    )
     env = dict(os.environ)
     env.update(
         {
             "PYTHONPATH": str(REPO_ROOT / "host"),
-            "PI_GLINK_HARNESS": "acp",
-            "PI_GLINK_ACP_COMMAND": args.agent,
+            "PI_GLINK_HARNESS": PROBE_PACK_NAME,
+            "PI_GLINK_HARNESSES_DIR": str(packs),
             "LOCAL_WEB_DATA_ROOT": str(data_root),
             "LOCAL_WEB_TASK_TIMEOUT_SECONDS": str(args.timeout),
             "PI_GLINK_RESOURCE_RECONCILE_SECONDS": "0",
@@ -225,10 +233,6 @@ def main(argv: list[str] | None = None) -> int:
         env["PI_GLINK_ACP_CREDENTIAL_FILES"] = ";".join(credentials)
     if env_entries:
         env["PI_GLINK_ACP_ENV"] = ";".join(env_entries)
-    if args.permission_allow:
-        env["PI_GLINK_ACP_PERMISSION_ALLOW"] = args.permission_allow
-    if args.session_config:
-        env["PI_GLINK_ACP_SESSION_CONFIG"] = args.session_config
     env.pop("PI_GLINK_WEB_SEARCH_CONFIG", None)
 
     code = args.codename or codename()

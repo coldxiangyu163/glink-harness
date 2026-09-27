@@ -35,6 +35,8 @@ from typing import Any, Mapping
 import pytest
 
 from pi_glink.config import HostConfig, build_config
+
+from acp_pack import apply_acp_pack, write_acp_pack
 from pi_glink.events import EventBus
 from pi_glink.kernel.acp_env import INHERIT_MAX_FILE_BYTES
 from pi_glink.kernel.acp_execution import (
@@ -78,13 +80,14 @@ def make_config(
         "OPENAI_API_KEY": "sk-test",
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
-        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "agent"),
+        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "PI_GLINK_HARNESS": "acp",
         "PI_GLINK_ACP_COMMAND": acp_command(tmp_path, settings or {}),
     }
     values.update(overrides)
+    apply_acp_pack(values, tmp_path)
     return build_config(values, REPO_ROOT)
 
 
@@ -190,7 +193,7 @@ def test_adapter_refuses_a_followup_the_agent_cannot_resume(tmp_path: Path) -> N
     )
     adapter = AcpExecutionAdapter(
         spec,
-        argv=shlex.split(config.acp_command),
+        argv=list(config.acp_command),
         env={},
         cwd=tmp_path,
         on_frame=lambda _frame: None,
@@ -531,7 +534,7 @@ def test_acp_followup_refuses_a_parent_owned_by_another_tenant(
         "OPENAI_API_KEY": "sk-host-global-00000000000000",
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
-        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "agent"),
+        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_PORT": "0",
         "LOCAL_WEB_EXECUTOR": "docker",
@@ -541,8 +544,8 @@ def test_acp_followup_refuses_a_parent_owned_by_another_tenant(
         "PI_GLINK_TENANCY_AUDIENCE": AUDIENCE,
         "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "60",
-        "PI_GLINK_HARNESS": "acp",
-        "PI_GLINK_ACP_COMMAND": acp_command(tmp_path, {}),
+        "PI_GLINK_HARNESS": "dsh",
+        "PI_GLINK_HARNESSES_DIR": str(write_acp_pack(tmp_path, acp_command(tmp_path, {}))),
     }
     config = build_config(values, REPO_ROOT)
     store = RunStore(config.data_root / "runs")

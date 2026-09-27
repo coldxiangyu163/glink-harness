@@ -72,6 +72,6 @@ HOME 共享一份 npx 缓存，避免冷下载超过 initialize 的 60s 上限�
   `auth.json`；`--watch opencode` 只影响子进程命令行采样关键字。
 * `--credential` 走 `PI_GLINK_ACP_CREDENTIAL_FILES`（只读复制进每 run HOME，
   父目录 0700、文件 0600，注入值并入该 run 的 redactor）。
-* `--session-config` 走 `PI_GLINK_ACP_SESSION_CONFIG`（`;` 分隔的 `id=value`，
-  应用在 `session/new` 之后；agent 未声明该选项或取值时 run 失败闭环）。
-* `--permission-allow` 是显式白名单门控；缺省留空保持 fail-closed 原行为。
+* `--session-config` / `--permission-allow` 写入临时探针包清单
+  （`harnesses/probe/harness.toml` 的 `session_config` / `permission_allow`）：
+  `session_config` 应用在 `session/new` 之后，agent 未声明该选项或取值时 run 失败闭环。

@@ -154,7 +154,7 @@ class UnsupportedCommand(RuntimeError):
     commands such as ``/run --bg`` or ``/subagents-detach`` would start a
     detached run that no longer follows this run's cancel/timeout/reclaim path,
     and the entry is client-controlled input. Admission therefore accepts only
-    the prompt-template names rendered from ``agent/prompts/``.
+    the prompt-template names rendered from ``harnesses/pi/prompts/``.
 
     ``allowed`` carries only the accepted names; the refused command itself is
     never echoed back to the caller (the HTTP layer reports the allowlist at
@@ -451,7 +451,7 @@ class RunManager:
         # extension-command dispatch before anything else, and the loaded
         # pi-subagents package registers detaching commands (``/run --bg``,
         # ``/subagents-detach``, …) that no run lifecycle here owns. Only the
-        # prompt templates rendered from ``agent/prompts/`` are accepted; the
+        # prompt templates rendered from ``harnesses/pi/prompts/`` are accepted; the
         # refusal happens before a credential is resolved, before the parent's
         # session is read and before any run directory or execution face exists,
         # and the same call serves first turns and follow-ups on every face.
@@ -525,9 +525,10 @@ class RunManager:
                     else ()
                 ),
                 # 准入时冻结的宿主事实，与 run id/owner 同一次原子写入：
-                # 追问门禁此后比父记录自己的族与执行面，不再用当前配置反推
+                # 追问门禁此后比父记录自己的族/包与执行面，不再用当前配置反推
                 # 历史 run。
-                harness=self.config.harness,
+                harness=self._family.name,
+                harness_pack=self.config.harness_pack,
                 executor=self.config.executor,
             )
             run_id = record.run_id
@@ -670,6 +671,13 @@ class RunManager:
         if parent is None:
             raise FollowupUnavailable("unknown_run")
         if parent.harness is not None and parent.harness != self._family.name:
+            raise FollowupUnavailable("session_unavailable")
+        if (
+            parent.harness_pack is not None
+            and parent.harness_pack != self.config.harness_pack
+        ):
+            # 同族不同包（例如 dsh → opencode）的会话不能续接：agent 自己的状态根
+            # 与续接能力都是按包声明的，fail-closed 胜过猜一个兼容映射。
             raise FollowupUnavailable("session_unavailable")
         if not parent.is_terminal:
             raise FollowupUnavailable("run_busy")
@@ -1431,13 +1439,19 @@ class RunManager:
     def _system_prompt_text(self, execution: _Execution) -> str:
         """The system prompt one run's kernel receives, on every face.
 
-        The working agreement (``agent/research-prompt.md``) plus, when the run
-        was admitted with one, the rendered session blueprint. pi gets the same
-        text through ``--append-system-prompt``; the ACP family gets it as the
-        leading text block of ``session/prompt``. The user's own prompt is a
-        different channel and is never part of this text.
+        All three layers, in one fixed order: the working agreement
+        (``methodology/work-agreement.md``), the selected pack's capability
+        prompt (``harnesses/<pack>/capabilities.md``, when it has one) and, when
+        the run was admitted with one, the rendered session blueprint. pi gets
+        the same text through ``--append-system-prompt``; the ACP family gets it
+        as the leading text block of ``session/prompt``. The user's own prompt is
+        a different channel and is never part of this text.
         """
-        parts = [self._research_prompt_text(), execution.blueprint_prompt]
+        parts = [
+            self._research_prompt_text(),
+            self.config.pack_capabilities,
+            execution.blueprint_prompt,
+        ]
         return "\n\n".join(part for part in parts if part)
 
     def _research_prompt_text(self) -> str:

@@ -25,6 +25,8 @@ from pathlib import Path
 import pytest
 
 from pi_glink.config import ConfigError, build_config
+
+from acp_pack import apply_acp_pack
 from pi_glink.events import EventBus
 from pi_glink.kernel import docker_env
 from pi_glink.kernel.acp_env import prepare_acp_runtime
@@ -44,7 +46,7 @@ def make_config(tmp_path: Path, **overrides: str):
         "OPENAI_API_KEY": "sk-test",
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
-        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "agent"),
+        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         # 测试绝不触碰操作员的真实数据根（~/.pi-glink）。
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
@@ -52,6 +54,7 @@ def make_config(tmp_path: Path, **overrides: str):
         "PI_GLINK_ACP_COMMAND": "dsh --profile acp",
     }
     values.update(overrides)
+    apply_acp_pack(values, tmp_path)
     return build_config(values, REPO_ROOT)
 
 
@@ -576,4 +579,4 @@ def test_the_command_is_split_without_a_shell(tmp_path: Path) -> None:
     plan = make_plan(config, runtime, tmp_path)
     tail = plan.argv[plan.argv.index(plan.image) :]
     assert tail[1:] == ["python", "-m", "fake", "--config", "/workspace/cfg.json"]
-    assert shlex.split(config.acp_command) == tail[1:]
+    assert list(config.acp_command) == tail[1:]

@@ -41,7 +41,7 @@ ARG_ITEM_LIMIT = 500
 #: Tool name that identifies a subagent dispatch (docs/architecture.md §3.5).
 #: pi-subagents registers its dispatch tool under exactly this name
 #: (pi-subagents 0.40.0, also pinned by the foreground guard's own constant in
-#: ``agent/extensions/subagent-foreground-guard.ts``); the ACP family (dsh)
+#: ``harnesses/pi/extensions/subagent-foreground-guard.ts``); the ACP family (dsh)
 #: exposes the same tool name. Both families recognise a dispatch by this name
 #: alone — no other harness or tool gets the typed treatment.
 SUBAGENT_TOOL_NAME = "subagent"

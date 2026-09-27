@@ -518,7 +518,7 @@ exit 78 失败（`kernel_exit`）——再 `cd` 工作区并 `exec` 整条 argv�
 无界读入宿主内存。双向 stdio 的可行性由 spike 实测钉死（get_state 握手、完整回合、运行中 abort、
 `close_stdin` 后退出码 0，15/15，证据 `docs/evidence/pi-e2b-rpc-stdin-spike.txt`）；宿主侧离线
 验证用 stdin 版 fake 沙箱（fake handle + 真实 fake pi 子进程）；**通道级 spike 已过，host 级真实
-E2B live 冒烟未做**。配置交付带有 `(相对路径, sha256)` 清单，`AGENTS.md`、`settings.json`、
+E2B live 冒烟未做**。配置交付带有 `(相对路径, sha256)` 清单，`harnesses/pi/` 的 `settings.json`、
 `extensions/`、`skills/`、`prompts/` 与生成文件都按同一路径语义送达。旧路径接口的误读与更正过程
 记录在 `docs/evidence/e2b-run.txt` 末尾（历史证据，描述的是已删除的机制）。
 
@@ -530,7 +530,7 @@ E2B live 冒烟未做**。配置交付带有 `(相对路径, sha256)` 清单，`
 ### 5.3 容器面预装 pi 包与 harness 包 pin
 
 `harnesses/pi/settings.json` 是 pi 包唯一的包声明真源（`packages` 里的 `npm:` 声明带精确版本）。三个面在渲染
-本 run 的 `pi-agent/settings.json` 时按面向分流：
+本 run 的运行期 `pi-agent/settings.json` 时按面向分流：
 
 * **inproc** 保留 `npm:<name>@<pin>`，pi 启动时把它装到本 run 的运行期目录（行为不变，只是不再漂版本）；
 * **docker / e2b** 把每个命中预装名单的 `npm:` 声明改写为镜像内**本地包路径**

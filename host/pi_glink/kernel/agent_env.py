@@ -35,7 +35,7 @@ copying". A container run therefore never runs ``npm install`` against the
 registry: the per-run cost and the dependency on registry reachability are gone,
 and the version pin is enforced where the image is built. The in-process face
 keeps the (now pinned) ``npm:`` declaration and installs into its own runtime
-directory. ``agent/settings.json`` is the repository template; only the per-run
+directory. ``harnesses/pi/settings.json`` is the repository template; only the per-run
 copy is rewritten.
 
 **The model credential lives in ``auth.json``, not in the process environment.**
@@ -105,7 +105,7 @@ IMAGE_PACKAGE_GUARD = f"{IMAGE_PACKAGE_ROOT}/check-packages.sh"
 #:
 #: ``pi-subagents`` is loaded since GLINK-SUB-02: the product forces foreground
 #: synchronous dispatch through its own ``tool_call`` guard
-#: (``agent/extensions/subagent-foreground-guard.ts``) plus a conservative
+#: (``harnesses/pi/extensions/subagent-foreground-guard.ts``) plus a conservative
 #: extension config, so the async/detached blocker GLINK-SUB-01 found is handled
 #: on the pi-glink side instead of by a package switch. See
 #: docs/pi-integration-notes.md (pi-subagents 0.40.0 dispatch surface).
@@ -317,7 +317,7 @@ def local_package_source(source: str) -> str | None:
     Only the documented npm spec form is recognized: ``npm:<name>`` with an
     optional ``@<range>`` (scoped names included). Ranges are accepted because
     the image copy *is* the pinned version (the repository pins it in the
-    Dockerfile and in ``agent/settings.json``, tied together by
+    Dockerfile and in ``harnesses/pi/settings.json``, tied together by
     ``tests/test_repository_boundaries.py``); the path itself carries no version
     so the mapping cannot drift when the pin moves.
     """

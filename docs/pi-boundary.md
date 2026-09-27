@@ -11,14 +11,14 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 
 | 扩展点 | 文档 | 本仓库的用法（实际文件） |
 |---|---|---|
-| `settings.json` | docs/settings.md | `agent/settings.json`：`defaultThinkingLevel: "medium"`、`packages: ["npm:pi-web-access@0.31.0", "npm:pi-subagents@0.40.0"]`（两个精确 pin；docker/e2b 面渲染时改写为镜像内本地包路径，见 §3）、`subagents.watchdog` 关闭（pi-subagents 从这个键读 watchdog，见 pi-integration-notes.md §10.2） |
+| `settings.json` | docs/settings.md | `harnesses/pi/settings.json`：`defaultThinkingLevel: "medium"`、`packages: ["npm:pi-web-access@0.31.0", "npm:pi-subagents@0.40.0"]`（两个精确 pin；docker/e2b 面渲染时改写为镜像内本地包路径，见 §3）、`subagents.watchdog` 关闭（pi-subagents 从这个键读 watchdog，见 pi-integration-notes.md §10.2） |
 | `models.json`（自定义 provider） | docs/models.md | 宿主渲染到每个 run 自己的运行期目录（`kernel/agent_env.py::_models_document`）：`baseUrl` 与模型 id 字面量、**不含 `apiKey`**（凭据写运行期 `auth.json`）、`compat.thinkingFormat: "openrouter"`；**不写 `cost` 价格表**，因为宿主不知道操作员费率，伪造价格会让 pi 报出假计费 |
 | packages | docs/packages.md | `npm:pi-web-access@0.31.0`（检索能力全部来自它；inproc 运行期安装，docker/e2b 从 `/opt/pi-packages` 本地加载）；`npm:pi-subagents@0.40.0`（自 GLINK-SUB-02 加载：前台强制靠本仓自有 `tool_call` 扩展，不靠包开关，见 pi-integration-notes.md §10） |
-| extensions | docs/extensions.md | `agent/extensions/subagent-foreground-guard.ts`：官方 `tool_call` 钩子把 pi-subagents 的派发改写为前台同步、其余后台/定时/控制入口阻止（含 fail-closed）；`agent/extensions/subagent/config.json` 是同包读取的最保守 extension config |
-| skills | docs/skills.md | 目录预留（`agent/skills/`） |
-| prompt templates | docs/prompt-templates.md | `agent/prompts/deepresearch.md`：`/deepresearch <题目>` 显式入口，强制深入流程并叠加更严格的覆盖声明、核查留痕与二次来源收紧；通用工作约定仍走 `--append-system-prompt` |
-| `AGENTS.md` | docs/quickstart.md 等 | 目录预留（`agent/AGENTS.md`），当前约定走 §下一条 |
-| `--append-system-prompt` | `pi --help` | `agent/research-prompt.md`（最小工作约定：产品契约 + 可选委派；方法论在 `/deepresearch`） → `runs/runner.py::_extra_argv`，内核系统提示词本身不改 |
+| extensions | docs/extensions.md | `harnesses/pi/extensions/subagent-foreground-guard.ts`：官方 `tool_call` 钩子把 pi-subagents 的派发改写为前台同步、其余后台/定时/控制入口阻止（含 fail-closed）；`harnesses/pi/extensions/subagent/config.json` 是同包读取的最保守 extension config |
+| skills | docs/skills.md | 目录预留（`harnesses/pi/skills/`） |
+| prompt templates | docs/prompt-templates.md | `harnesses/pi/prompts/deepresearch.md`：`/deepresearch <题目>` 显式入口，强制深入流程并叠加更严格的覆盖声明、核查留痕与二次来源收紧（GLINK-ARCH-6 阶段 3 将删除该模板，方法论改由蓝图承载）；通用工作约定仍走 `--append-system-prompt` |
+| `AGENTS.md` | docs/quickstart.md 等 | 目录预留（`harnesses/pi/AGENTS.md`），当前约定走 §下一条 |
+| `--append-system-prompt` | `pi --help` | `harnesses/pi/research-prompt.md`（最小工作约定：产品契约）+ `harnesses/pi/capabilities.md`（pi 包能力与可选委派） → `runs/runner.py::_extra_argv`，内核系统提示词本身不改 |
 | headless 协议 | docs/rpc.md | 三面均 `--mode rpc`（共享 `kernel/rpc.py::PiRpcClient`；本机直接 spawn，Docker 跨容器 stdio，E2B 经沙箱后台命令 `stdin=True` + `SandboxCommandProcess` 以 `popen=` 注入，GLINK-ARCH-3 收敛）；三面都只按 LF 分帧（`kernel/framing.py`，共享语料 `tests/fixtures/lf-framing.json`） |
 | 环境变量 | docs/environment-variables.md | `PI_CODING_AGENT_DIR`、`PI_CODING_AGENT_SESSION_DIR`、`PI_SKIP_VERSION_CHECK`、`PI_TELEMETRY`（模型凭据不经环境变量，写运行期 `auth.json`；两个目录都是每 run 独立） |
 | CLI 参数 | docs/cli.md、docs/sessions.md | `--provider`、`--model`、`--name`；追问用 `--session <path>` 打开上一轮会话的独立副本（`kernel/agent_env.py::build_pi_argv`、`runs/runner.py`、`kernel/e2b_env.py`） |
@@ -58,7 +58,7 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 1. **只读观察**：宿主从不写这些文件，也从不在内核控制路径（启动/协议/事件/终态/报告）
    依赖它们；run 生命周期与权威状态不以其为事实来源，观察者失败只损失子代理进度呈现，
    不回填 `child.json`。
-2. **精确 pin + pin 测试**：包/格式由 `agent/settings.json` 与 Dockerfile 精确 pin，pin
+2. **精确 pin + pin 测试**：包/格式由 `harnesses/pi/settings.json` 与 Dockerfile 精确 pin，pin
    测试钉住所读布局/格式；上游升级导致 pin 变红时观察者**诚实降级**（child 显示普通
    「进行中」，不伪造进度），修通后才允许滚动升级。
 3. **不承重正确性**：有 pin、有降级、权威路径不依赖；这条例外不放宽 §2 的禁止项本身，
@@ -72,7 +72,7 @@ pi 的版本在三处被固定，升级只改这三处 + 回归：
 |---|---|
 | `docker/Dockerfile.worker` | `ARG PI_VERSION=0.86.1`（镜像内 pi 版本）；`FROM node:24.21.0-bookworm-slim`（Node 精确 tag）；`ARG PI_WEB_ACCESS_VERSION` / `ARG PI_SUBAGENTS_VERSION` 把包装到 `/opt/pi-packages` |
 | `docker/e2b/Dockerfile.e2b` | 同一 `ARG PI_VERSION`；同一 Node 精确 tag（E2B 模板内 pi / Node 版本）；同一包 ARG 与 `/opt/pi-packages` 布局 |
-| `agent/settings.json` | 包声明的真源：`npm:pi-web-access@0.31.0` 与 `npm:pi-subagents@0.40.0`。容器面的 `npm:` 改写为 `/opt/pi-packages/node_modules/<name>` 本地包；两者一致性与 Dockerfile ARG 由 `tests/test_repository_boundaries.py` 卡住 |
+| `harnesses/pi/settings.json` | 包声明的真源：`npm:pi-web-access@0.31.0` 与 `npm:pi-subagents@0.40.0`。容器面的 `npm:` 改写为 `/opt/pi-packages/node_modules/<name>` 本地包；两者一致性与 Dockerfile ARG 由 `tests/test_repository_boundaries.py` 卡住 |
 | 本机 inproc 面 | 使用宿主安装的 pi；`PI_GLINK_PI_BIN` 可指向任意版本做隔离演练 |
 
 步骤：
@@ -110,7 +110,7 @@ find . -path ./.venv -prune -o -path ./node_modules -prune -o -name "*.ts" -prin
 grep -rn '"--mode"' host/pi_glink/kernel/ | sed 's/^/  /'
 
 # ③ 宿主/前端/扩展不 import pi 的内部模块（普通扩展和 .ts 也扫）
-grep -rn "earendil-works" host/ web/ agent/ --include="*.py" --include="*.mjs" --include="*.ts" | grep -v "^Binary" | sed 's/^/  /'
+grep -rn "earendil-works" host/ web/ harnesses/ --include="*.py" --include="*.mjs" --include="*.ts" | grep -v "^Binary" | sed 's/^/  /'
 
 # ④ 密钥不入库（应当是空输出）
 git grep -nE "(sk-|exa-)[A-Za-z0-9_-]{16,}" -- . ':!*.example' ':!*.txt'
@@ -135,11 +135,11 @@ ls web/node_modules 2>/dev/null || echo "无前端依赖树（原生 ESM）"
 
 GLINK-SUB-02（2026-09-24）复跑：
 
-* ① 现在会输出本仓自有的两个 `.ts`（`agent/extensions/subagent-foreground-guard.ts`、
+* ① 现在会输出本仓自有的两个 `.ts`（`harnesses/pi/extensions/subagent-foreground-guard.ts`、
   `tests/extensions/probe-tool-inventory.ts`）——它们是本仓的 pi 扩展与测试探针（pi 官方加载形态
   就是 TypeScript），不是 pi 源码副本；命令要排除 pi 自带产物时仍以仓库内没有 `dist/`/`src/`
   副本为准。
-* ③ 把扫描范围扩到 `agent/` 与 `.ts` 后只命中一条：`agent/extensions/subagent-foreground-guard.ts:34`
+* ③ 把扫描范围扩到 `harnesses/` 与 `.ts` 后只命中一条：`harnesses/pi/extensions/subagent-foreground-guard.ts:34`
   的 `import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"`——官方文档要求的公共包
   类型导入，没有 `src/`/`dist/` 私有路径（`tests/test_repository_boundaries.py` 另用反例卡住私有路径）。
 * ④ 的历史记录已过期：合成 fixture（`tests/fixtures/accounts_server.py`、若干 `tests/test_*.py`）
@@ -152,8 +152,8 @@ GLINK-SUB-02（2026-09-24）复跑：
 | 限制 | 影响 | 我们怎么做 |
 |---|---|---|
 | `models.json` 的 `baseUrl` / 模型 id 不支持 `$VAR` 插值 | 无法把 endpoint 交给 pi 自己解析 | 宿主渲染本 run 的运行期 `models.json`（`agent_env.py`） |
-| pi 会往配置目录写运行时状态（`auth.json` / `models-store.json`） | 仓库目录会被污染 | 仓库 `agent/` 只作模板；每次 run 渲染到 `runs/<id>/pi-agent/`（先删再拷，凭据缺失则删除旧文件）；`.gitignore` 兜底 |
+| pi 会往配置目录写运行时状态（`auth.json` / `models-store.json`） | 仓库目录会被污染 | 仓库 `harnesses/pi/` 只作模板；每次 run 渲染到 `runs/<id>/pi-agent/`（先删再拷，凭据缺失则删除旧文件）；`.gitignore` 兜底 |
 | E2B 后台命令的流式接口是 `CommandHandle`，不是 `commands.run()` 上的回调 | 沿用旧结论会让该面退化为结束后回放 | `spawn_rpc` 以 `background=True, stdin=True` 启动 `pi --mode rpc`，handle 经 `SandboxCommandProcess` 注入共享 `PiRpcClient` 实时投递；断流即 `execution_error`、不补发（`e2b_env.py`，见 architecture.md §5.2） |
 | E2B 会话文件不会自动留存 | 未回收则不能追问 | 销毁前回收单个有界 `.jsonl` 到本 run 专属目录并脱敏；失败时明确拒绝追问 |
 | 模型 key 以文件形式位于本 run 的运行期 `auth.json`（不在进程环境） | 工具可用 `read` 打开并回显 | `env` 类读取已不可行（三面实测 0）；回显被出站脱敏覆盖（含跨 delta 分割，见 architecture.md §3.3/§6.1）；更强隔离用 Docker / E2B 面 |
-| pi-subagents 的扩展命令（`/run --bg`、`/chain --bg`、`/subagents-detach` 等）由用户输入直接执行，且先于 pi 的 `input` 事件派发 | `tool_call` 钩子不可达；载入 pi-subagents 后，客户端可控的 prompt 一旦以 `/` 开头就会先执行这些命令，发起不随主 run 取消/超时收口的后台进程 | 模型工具面用 `agent/extensions/subagent-foreground-guard.ts` 强制前台（pi-integration-notes.md §10）；客户端输入面由宿主在**准入层**加 `/` 命令门禁：只接受 `agent/prompts/` 模板名，其余 `400 unsupported_command`（architecture.md §4，回归 `tests/test_runs_api.py` / `tests/test_runner.py`） |
+| pi-subagents 的扩展命令（`/run --bg`、`/chain --bg`、`/subagents-detach` 等）由用户输入直接执行，且先于 pi 的 `input` 事件派发 | `tool_call` 钩子不可达；载入 pi-subagents 后，客户端可控的 prompt 一旦以 `/` 开头就会先执行这些命令，发起不随主 run 取消/超时收口的后台进程 | 模型工具面用 `harnesses/pi/extensions/subagent-foreground-guard.ts` 强制前台（pi-integration-notes.md §10）；客户端输入面由宿主在**准入层**加 `/` 命令门禁：只接受 `harnesses/pi/prompts/` 模板名，其余 `400 unsupported_command`（architecture.md §4，回归 `tests/test_runs_api.py` / `tests/test_runner.py`） |

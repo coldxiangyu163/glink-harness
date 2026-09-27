@@ -33,13 +33,13 @@ node_modules/
 outputs/
 notes/
 
-# pi 会把运行时状态写进它的配置目录。仓库里的 agent/ 只是模板：
+# pi 会把运行时状态写进它的配置目录。仓库里的 harnesses/pi/ 只是模板：
 # 真正的配置目录由宿主渲染到数据根下（见 host/pi_glink/kernel/agent_env.py），
-# 这几条防线保证即使误把 agent/ 当成配置目录也不会把状态提交进去。
-agent/auth.json
-agent/models-store.json
-agent/sessions/
-agent/web-search.json
+# 这几条防线保证即使误把包目录当成配置目录也不会把状态提交进去。
+harnesses/pi/auth.json
+harnesses/pi/models-store.json
+harnesses/pi/sessions/
+harnesses/pi/web-search.json
 
 # 编辑器与系统
 .DS_Store

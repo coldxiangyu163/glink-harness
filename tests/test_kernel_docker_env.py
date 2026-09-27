@@ -35,7 +35,7 @@ def config(tmp_path: Path):
             "OPENAI_API_KEY": "sk-docker-secret",
             "OPENAI_BASE_URL": "https://example.invalid/v1",
             "OPENAI_MODEL": "openai/gpt-5.6-sol",
-            "PI_CODING_AGENT_DIR": str(REPO_ROOT / "agent"),
+            "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
             "LOCAL_WEB_EXECUTOR": "docker",
             "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),

@@ -19,6 +19,8 @@ from typing import Any, Mapping
 import pytest
 
 from pi_glink.config import ConfigError, HostConfig, build_config
+
+from acp_pack import apply_acp_pack
 from pi_glink.events import EventBus
 from pi_glink.kernel.acp_env import AcpRuntime
 from pi_glink.kernel.acp_execution import AcpExecutionAdapter
@@ -55,13 +57,14 @@ def make_config(tmp_path: Path, settings: Mapping[str, Any] | None = None, **ove
         "OPENAI_API_KEY": "sk-test",
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
-        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "agent"),
+        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "PI_GLINK_HARNESS": "acp",
         "PI_GLINK_ACP_COMMAND": acp_command(tmp_path, settings or {}),
     }
     values.update(overrides)
+    apply_acp_pack(values, tmp_path)
     return build_config(values, REPO_ROOT)
 
 
@@ -211,10 +214,10 @@ def test_acp_run_projects_the_whole_lifecycle_and_the_report(tmp_path: Path) -> 
     assert session_new["cwd"] == str(Path(final.workspace))
     assert session_new["mcpServers"] == []
     prompt = next(entry for entry in entries if entry["event"] == "prompt")
-    # The working agreement (agent/research-prompt.md) is delivered as the
+    # The working agreement (harnesses/pi/research-prompt.md) is delivered as the
     # leading block of the same text message; ACP has no system-role channel,
     # so the product cannot rely on one (see docs/acp-integration-notes.md M2).
-    system_text = (REPO_ROOT / "agent" / "research-prompt.md").read_text(encoding="utf-8").strip()
+    system_text = (REPO_ROOT / "harnesses" / "pi" / "research-prompt.md").read_text(encoding="utf-8").strip()
     assert prompt["text"].startswith("以下是宿主工作台注入的 system prompt")
     assert f"<system-prompt>\n{system_text}\n</system-prompt>" in prompt["text"]
     assert prompt["text"].endswith("--- 用户请求 ---\n\n用一句话说明这个仓库是做什么的")

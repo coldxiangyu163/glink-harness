@@ -24,7 +24,7 @@ import factory, {
   WORKSPACE_CHAIN_DIR_RELATIVE,
   guardSubagentCall,
   safeGuardSubagentCall,
-} from "../../agent/extensions/subagent-foreground-guard.ts";
+} from "../../harnesses/pi/extensions/subagent-foreground-guard.ts";
 
 const WORKSPACE = "/tmp/pi-glink-guard-workspace";
 const HOME = "/Users/example";

@@ -1,0 +1,17 @@
+# codex 包（codex-acp）。
+#
+# 版本与入口来自集成笔记：M2 用旧包 @zed-industries/codex-acp 实测入口 `codex-acp`；
+# M3a 起改用后继包 @agentclientprotocol/codex-acp，当前镜像 ARG 钉 1.13.1。
+# `package`/`version` 必须与两个 ACP 镜像的 `ARG CODEX_ACP_VERSION` 逐字一致
+# （tests/test_repository_boundaries.py 卡住）。
+#
+# 不声明 session_config：M2 的 `mode=auto` 是旧包取值；1.13.1 的会话模式词表已变为
+# read-only / agent / agent-full-access（默认 agent，集成笔记 §14.5），M8 的真实
+# 「首轮+追问」run 就是在不设 session_config 的默认模式下跑通的。声明一个钉版不认的
+# 取值会让包应用 session_config 时失败闭环。
+format = "pi-glink-harness/v1"
+name = "codex"
+family = "acp"
+command = ["codex-acp"]
+package = "@agentclientprotocol/codex-acp"
+version = "1.13.1"

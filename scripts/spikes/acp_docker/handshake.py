@@ -9,7 +9,7 @@
 * 记录 ``session/new`` 的 ``cwd``（容器路径 ``/workspace``）、能力矩阵与会话选项；
 * ``--credential`` 把源文件只读复制进 run HOME（容器内以嵌套只读挂载呈现，
   M5 用 opencode 的 ``auth.json`` 验证这条通道）；``--session-config`` 实测
-  ``PI_GLINK_ACP_SESSION_CONFIG``；
+  ``session_config``（写入临时探针包清单）；
 * 结束时按持久化容器名 force-remove，并确认无同名容器残留。
 
 容器内没有宿主凭据时，**这条探针不发 prompt**，因此不需要模型凭据；
@@ -28,6 +28,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "host"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "spikes"))
+from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 
 from pi_glink.config import build_config  # noqa: E402
 from pi_glink.kernel.acp_env import prepare_acp_runtime  # noqa: E402
@@ -52,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--session-config",
         default="",
-        help="PI_GLINK_ACP_SESSION_CONFIG（; 分隔的 id=value）",
+        help="session_config（; 分隔的 id=value，写入临时探针包清单）",
     )
     parser.add_argument("--timeout", type=int, default=180)
     args = parser.parse_args(argv)
@@ -60,9 +62,15 @@ def main(argv: list[str] | None = None) -> int:
     workdir = Path(tempfile.mkdtemp(prefix="glink-acp-docker-handshake-"))
     workspace = workdir / "workspace"
     workspace.mkdir()
+    packs = write_probe_pack(
+        workdir / "probe",
+        args.command,
+        session_config=args.session_config,
+        permission_allow=args.permission_allow,
+    )
     values = {
-        "PI_GLINK_HARNESS": "acp",
-        "PI_GLINK_ACP_COMMAND": args.command,
+        "PI_GLINK_HARNESS": PROBE_PACK_NAME,
+        "PI_GLINK_HARNESSES_DIR": str(packs),
         "LOCAL_WEB_EXECUTOR": "docker",
         "LOCAL_WEB_DATA_ROOT": str(workdir / "data"),
         "LOCAL_WEB_ACP_WORKER_IMAGE": args.image,
@@ -73,8 +81,6 @@ def main(argv: list[str] | None = None) -> int:
         values["PI_GLINK_ACP_ENV"] = ";".join(args.env)
     if args.credential:
         values["PI_GLINK_ACP_CREDENTIAL_FILES"] = ";".join(args.credential)
-    if args.session_config:
-        values["PI_GLINK_ACP_SESSION_CONFIG"] = args.session_config
     config = build_config(values, REPO_ROOT)
 
     run_id = "acp-handshake-" + args.command.split()[0].replace("/", "_")

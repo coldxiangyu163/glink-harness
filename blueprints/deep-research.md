@@ -1,5 +1,5 @@
 +++
-# 会话蓝图（GLINK-ACP-10 第一增量）。方法论与 agent/prompts/deepresearch.md 同源：
+# 会话蓝图（GLINK-ACP-10 第一增量）。方法论与 harnesses/pi/prompts/deepresearch.md 同源：
 # 同一个交付契约、来源分层与自我核查义务，换成 host 侧、harness 无关的结构化形式。
 format = "pi-glink-blueprint/v1"
 name = "deep-research"

@@ -43,6 +43,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "host"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "spikes"))
+from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 
 from pi_glink.config import build_config  # noqa: E402
 from pi_glink.kernel.acp_env import (  # noqa: E402
@@ -171,9 +173,10 @@ def listing_shape(sandbox: object) -> str:
 def run_axis(axis: str, args: argparse.Namespace, api_key: str, workdir: Path) -> dict:
     spec = AXES[axis]
     axis_dir = workdir / axis
+    packs = write_probe_pack(axis_dir / "probe", "dsh --profile acp")
     values = {
-        "PI_GLINK_HARNESS": "acp",
-        "PI_GLINK_ACP_COMMAND": "dsh --profile acp",
+        "PI_GLINK_HARNESS": PROBE_PACK_NAME,
+        "PI_GLINK_HARNESSES_DIR": str(packs),
         "LOCAL_WEB_EXECUTOR": "e2b",
         "LOCAL_WEB_DATA_ROOT": str(axis_dir / "data"),
         "LOCAL_WEB_E2B_ACP_TEMPLATE": args.template,

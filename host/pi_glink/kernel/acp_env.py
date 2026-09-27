@@ -71,6 +71,13 @@ ACP_RECOVERED_DIRNAME = "recovered"
 #: a bigger file is refused instead of silently consumed/stored.
 CREDENTIAL_FILE_MAX_BYTES = 1 << 20
 
+#: Bounds on the pack `home/` overlay (reviewed repository content): a bound
+#: keeps one bad pack from turning every run's configuration render into an
+#: unbounded copy.
+OVERLAY_MAX_ENTRIES = 512
+OVERLAY_MAX_FILE_BYTES = 100 * 1024
+OVERLAY_MAX_TOTAL_BYTES = 4 * 1024 * 1024
+
 #: Continuation state inherited from a parent run is bounded on all three axes
 #: (file count, one file, total bytes). A research agent's own state is small;
 #: the bounds keep one run's cache — or a hostile session file — from making the
@@ -156,9 +163,9 @@ def prepare_acp_runtime(
     Credential sources are read only: the operator's own files are never
     written, moved or chmodded by this function.
     """
-    if not config.acp_command.strip():
+    if not config.acp_command:
         raise ConfigError(
-            "PI_GLINK_HARNESS=acp 需要 PI_GLINK_ACP_COMMAND（ACP agent 的命令行）"
+            f"harness 包 {config.harness_pack!r} 缺少 command（ACP agent 的命令行）"
         )
     directory = Path(runtime_dir)
     home = directory / ACP_HOME_DIRNAME
@@ -167,6 +174,10 @@ def prepare_acp_runtime(
     os.chmod(directory, 0o700)
     os.chmod(home, 0o700)
     base_home = Path(operator_home) if operator_home is not None else Path.home()
+    # The pack overlay lands first, then the credential files: a credential
+    # destination must never lose to a same-path overlay entry (see
+    # :func:`_apply_home_overlay`).
+    _apply_home_overlay(config, home)
     secrets = list(_inject_credential_files(config, home, base_home))
     # ``PI_GLINK_ACP_ENV`` is the explicit env channel (an API-key style
     # credential that an agent reads from the environment). Its values join the
@@ -186,7 +197,7 @@ def prepare_acp_runtime(
     return AcpRuntime(
         directory=directory,
         home=home,
-        command=config.acp_command.strip(),
+        command=shlex.join(config.acp_command),
         secrets=_dedupe(secrets),
         credential_dests=credential_dests,
     )
@@ -283,11 +294,11 @@ def _normalise_relative(value: str) -> str:
 
 
 def build_acp_argv(config: HostConfig) -> list[str]:
-    """The agent's argv: the frozen command line, split, never shell-expanded."""
-    argv = shlex.split(config.acp_command)
+    """The agent's argv: the selected pack's frozen command, never shell-expanded."""
+    argv = list(config.acp_command)
     if not argv:
         raise ConfigError(
-            "PI_GLINK_ACP_COMMAND 解析后为空；需要给出 ACP agent 的可执行命令"
+            f"harness 包 {config.harness_pack!r} 的 command 为空；需要 ACP agent 的可执行命令"
         )
     return argv
 
@@ -371,6 +382,56 @@ def _env_credential_values(config: HostConfig) -> tuple[str, ...]:
     return _dedupe(values)
 
 
+def _apply_home_overlay(config: HostConfig, home: Path) -> None:
+    """Copy the selected pack's ``home/`` overlay into the run HOME, 0600.
+
+    The overlay is reviewed repository content (``harnesses/<pack>/home/``);
+    symlinks are skipped so it can never point outside the pack, and a missing
+    directory simply means this pack has no overlay. Files are written freshly
+    with 0600 and owner-only parents. Credential injection runs **after** this
+    function, so a credential destination always wins over an overlay entry with
+    the same path.
+    """
+    overlay = config.pack_home
+    if overlay is None:
+        return
+    entries = 0
+    total = 0
+    for source in sorted(overlay.rglob("*")):
+        if source.is_symlink():
+            continue
+        relative = source.relative_to(overlay)
+        if source.is_dir():
+            target = home / relative
+            target.mkdir(parents=True, exist_ok=True, mode=0o700)
+            _chmod_private(target)
+            continue
+        if not source.is_file():
+            continue
+        entries += 1
+        if entries > OVERLAY_MAX_ENTRIES:
+            raise ConfigError(f"harness 包 home/ 覆盖层条目过多：{overlay}")
+        data = source.read_bytes()
+        if len(data) > OVERLAY_MAX_FILE_BYTES:
+            raise ConfigError(f"harness 包 home/ 覆盖层单文件超过上限：{source}")
+        total += len(data)
+        if total > OVERLAY_MAX_TOTAL_BYTES:
+            raise ConfigError(f"harness 包 home/ 覆盖层总量超过上限：{overlay}")
+        target = home / relative
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        current = target.parent
+        while current != home and home in current.parents:
+            _chmod_private(current)
+            current = current.parent
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        handle = os.open(target, flags, 0o600)
+        try:
+            os.write(handle, data)
+        finally:
+            os.close(handle)
+        _chmod_file_private(target)
+
+
 def _inject_credential_files(
     config: HostConfig, home: Path, operator_home: Path
 ) -> tuple[str, ...]:
@@ -411,11 +472,15 @@ def _inject_credential_files(
         while current != home and home in current.parents:
             _chmod_private(current)
             current = current.parent
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        # The pack overlay was written first, so a same-path entry can only be
+        # repository content: the credential destination wins by replacing it.
+        # ``O_NOFOLLOW`` still refuses a symlink (nothing may redirect the write
+        # out of the run HOME), and the file is created 0600 either way.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
         try:
             descriptor = os.open(target, flags, 0o600)
-        except FileExistsError as exc:
-            raise ConfigError(f"ACP 凭据目标已存在，拒绝覆盖：{target}") from exc
+        except OSError as exc:
+            raise ConfigError(f"ACP 凭据目标不可安全写入：{target}（{exc}）") from exc
         try:
             os.fchmod(descriptor, 0o600)
             os.write(descriptor, data)
@@ -475,5 +540,13 @@ def _chmod_private(directory: Path) -> None:
     """Best-effort 0700 on a newly created parent chain element."""
     try:
         os.chmod(directory, 0o700)
+    except OSError:
+        pass
+
+
+def _chmod_file_private(path: Path) -> None:
+    """Best-effort 0600 on a newly written file."""
+    try:
+        os.chmod(path, 0o600)
     except OSError:
         pass

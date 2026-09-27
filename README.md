@@ -18,7 +18,7 @@
 | Python | ≥ 3.12 | 宿主与内核接入层只用标准库，无运行时依赖 |
 | Node.js | 宿主开发 **v24.16.0**（nvm 固定，本机实测）；Docker / E2B 镜像 **v24.21.0**（`node:24.21.0-bookworm-slim` 精确 tag，实测） | 前端与 pi 的运行时；宿主用 nvm：`nvm install 24.16.0 && nvm use 24.16.0`；镜像/模板的 Node 版本在各自 Dockerfile 里 pin 到精确 tag（不用浮动 `node:24-bookworm-slim`） |
 | pi | 0.86.1（已实测） | `npm install -g @earendil-works/pi-coding-agent@0.86.1`；Docker / E2B 面的版本固定在各自 Dockerfile 的 `ARG PI_VERSION` |
-| pi 包 | `pi-web-access@0.31.0`（检索，三面）；`pi-subagents@0.40.0`（委派，三面；前台强制，见「委派与子代理」） | `agent/settings.json` 是包声明真源（两个精确 pin）；Docker / E2B 从镜像内 `/opt/pi-packages` 本地加载，不在 run 里 `npm install`；一致性由 `tests/test_repository_boundaries.py` 卡住 |
+| pi 包 | `pi-web-access@0.31.0`（检索，三面）；`pi-subagents@0.40.0`（委派，三面；前台强制，见「委派与子代理」） | `harnesses/pi/settings.json` 是包声明真源（两个精确 pin）；Docker / E2B 从镜像内 `/opt/pi-packages` 本地加载，不在 run 里 `npm install`；一致性由 `tests/test_repository_boundaries.py` 卡住 |
 | pytest | ≥ 8（仅开发） | `uv pip install -e ".[dev]"` |
 | e2b SDK | ≥ 2（仅 E2B 执行面） | `uv pip install -e ".[e2b]"`（含代理网络需要的 `httpx[socks]`） |
 
@@ -99,7 +99,7 @@ cp .env.example .env         # 填写 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_
 scripts/run-local-web.sh     # 默认 http://127.0.0.1:7860
 ```
 
-脚本把所有依赖都铺好了：优先用仓库内的 `.venv`，否则回退 `uv run` 或系统 Python，并始终把 `host/` 放进导入路径。部署单位是**整个仓库目录**：宿主按仓库相对路径定位 `web/`（前端资源）、`agent/`（内核配置模板）与 `scripts/`；`pip install -e .` 只用于让 `pi_glink` 可导入（包声明含 `pi_glink.kernel` 与 `pi_glink.runs`），独立安装 wheel 不是受支持的形态。等价的手动方式：
+脚本把所有依赖都铺好了：优先用仓库内的 `.venv`，否则回退 `uv run` 或系统 Python，并始终把 `host/` 放进导入路径。部署单位是**整个仓库目录**：宿主按仓库相对路径定位 `web/`（前端资源）、`harnesses/<pack>/`（harness 包）与 `scripts/`；`pip install -e .` 只用于让 `pi_glink` 可导入（包声明含 `pi_glink.kernel` 与 `pi_glink.runs`），独立安装 wheel 不是受支持的形态。等价的手动方式：
 
 ```bash
 uv venv --python 3.12 .venv       # 首次
@@ -158,7 +158,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | POST | `/api/invitations/check` | 校验邀请可用性，body `{"token": "…"}`（限速；无效与已用同形返回 `{"valid":false}`；邀请码只走 JSON body，不进 URL/查询/日志） |
 | POST | `/api/admin/invitations` | 管理员为**本租户**签发一次性邀请（需要 CSRF；响应只在这一次返回邀请码原文） |
 
-本机（`local`）执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。以 `/` 开头的 prompt 只有命令名等于 `agent/prompts/` 下模板文件名的才被接受（当前仅 `/deepresearch`），其余返回 `400 unsupported_command`（错误体只给允许的命令列表，不回显被拒输入）——pi 对这类消息会先执行扩展命令，而 pi-subagents 注册了 `/run --bg`、`/subagents-detach` 等后台入口；拒绝在任何 run 目录/执行面创建之前，追问同样适用。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
+本机（`local`）执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。以 `/` 开头的 prompt 只有命令名等于 `harnesses/pi/prompts/` 下模板文件名的才被接受（当前仅 `/deepresearch`），其余返回 `400 unsupported_command`（错误体只给允许的命令列表，不回显被拒输入）——pi 对这类消息会先执行扩展命令，而 pi-subagents 注册了 `/run --bg`、`/subagents-detach` 等后台入口；拒绝在任何 run 目录/执行面创建之前，追问同样适用。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
 
 多租户模式（`PI_GLINK_TENANCY=multitenant`）下所有 `/api/*`（健康的存活性探测除外）都要求可信身份——网关断言或站内会话：未认证 `401`，权限不足 `403`，未知/异租户/legacy 记录统一 `404`，超过并发上限 `429 quota_exceeded`。下一节说明完整语义。`/api/blueprints` 是宿主级资源的只读目录：认证后各租户看到同一份列表（与 `/api/config` 同形）；空目录/缺失目录都返回 `200 {"blueprints": []}`，格式不合契约的文件不进列表（原因只进日志）。
 
@@ -277,7 +277,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 ## 搜索
 
-检索能力全部来自 [pi-web-access](https://github.com/nicobailon/pi-web-access) 扩展，声明在 `agent/settings.json` 的 `packages` 里（`npm:pi-web-access@0.31.0`，精确 pin）。本机 inproc 面 pi 启动时把它安装到本 run 的运行期配置目录；Docker / E2B 面宿主把该声明改写成镜像内本地包 `/opt/pi-packages/node_modules/pi-web-access`（pi 官方 local package，"Loaded from the resolved path without copying"），run 内不再访问 registry、不再每 run 生成 `npm/`；镜像守卫在包缺失时明确失败（exit 78），不让 `web_search` 静默消失。实测对照与发布/回滚见 [docs/evidence/prebaked-packages.txt](docs/evidence/prebaked-packages.txt)。
+检索能力全部来自 [pi-web-access](https://github.com/nicobailon/pi-web-access) 扩展，声明在 `harnesses/pi/settings.json` 的 `packages` 里（`npm:pi-web-access@0.31.0`，精确 pin）。本机 inproc 面 pi 启动时把它安装到本 run 的运行期配置目录；Docker / E2B 面宿主把该声明改写成镜像内本地包 `/opt/pi-packages/node_modules/pi-web-access`（pi 官方 local package，"Loaded from the resolved path without copying"），run 内不再访问 registry、不再每 run 生成 `npm/`；镜像守卫在包缺失时明确失败（exit 78），不让 `web_search` 静默消失。实测对照与发布/回滚见 [docs/evidence/prebaked-packages.txt](docs/evidence/prebaked-packages.txt)。
 
 凭据由宿主渲染到**本 run 的**运行期配置目录的 `web-search.json`（权限 600）：
 
@@ -293,23 +293,23 @@ key 检索）；显式 `shared` 策略只渲染宿主级 `PI_GLINK_WEB_SEARCH_KE
 ## 委派与子代理
 
 `pi-subagents@0.40.0` 已随模板加载，并配一个在本仓的取证子代理定义
-（[agent/agents/researcher.md](agent/agents/researcher.md)：自包含任务、一手来源优先、打开原文核对、
+（[harnesses/pi/agents/researcher.md](harnesses/pi/agents/researcher.md)：自包含任务、一手来源优先、打开原文核对、
 产物落工作区、只回报要点与来源）。默认工作约定只写一句委派原则：相互独立、可并行取证的子问题
 可以交给 `researcher`，主 agent 亲自核实回报的关键事实并自己写 `report.md`；何时派、派几个由
 模型按题目决定。
 
 **强制前台不靠包开关。** pi-subagents 0.40.0 没有禁用 async/detached 的配置或环境开关
 （[验证记录](docs/pi-integration-notes.md#8-pi-subagents-0400-验证spike-glink-sub-01)），
-产品改用本仓自有的 [前台守卫扩展](agent/extensions/subagent-foreground-guard.ts)：官方 `tool_call`
+产品改用本仓自有的 [前台守卫扩展](harnesses/pi/extensions/subagent-foreground-guard.ts)：官方 `tool_call`
 钩子把 `async` 一律改写为 `false`，无法安全改写的后台、定时、恢复、控制与定义管理入口直接阻止，
-`share`/`worktree`/工作区外路径也一并挡住；扩展配置（`agent/extensions/subagent/config.json`）
+`share`/`worktree`/工作区外路径也一并挡住；扩展配置（`harnesses/pi/extensions/subagent/config.json`）
 同时固定为最保守取值（`asyncByDefault:false`、定时关、watchdog 关、intercom 关、嵌套深度 1、
 并发 4、产物落工作区）。清单与逐项理由见
 [集成笔记 §10](docs/pi-integration-notes.md#10-pi-subagents-0400-的前台强制接入glink-sub-02离线验证)。
 
 未覆盖项如实记录：真实模型下的前台并行效果与子代理会话文件的收尾脱敏尚未验证；客户端输入面的
 `/` 命令（`/run --bg`、`/subagents-detach` 等）不在 `tool_call` 钩子可达范围，由宿主在准入层挡住
-（只接受 `agent/prompts/` 模板命令，其余 `400 unsupported_command`，见 architecture.md §4）。
+（只接受 `harnesses/pi/prompts/` 模板命令，其余 `400 unsupported_command`，见 architecture.md §4）。
 
 ## 安全边界
 
@@ -342,7 +342,7 @@ key 检索）；显式 `shared` 策略只渲染宿主级 `PI_GLINK_WEB_SEARCH_KE
 | `host/pi_glink/` | 宿主：配置解析、事件总线、HTTP/SSE 服务、静态资源 |
 | `host/pi_glink/runs/` | 编排层：run 准入、执行骨架与收尾顺序、终态提交、外部资源台账 |
 | `host/pi_glink/kernel/` | pi 接入层：headless 协议客户端（RPC / JSON）、事件投影、运行期配置渲染、三执行面适配；不得反向导入编排层或宿主编排模块 |
-| `agent/` | pi 侧配置模板：每次 run 先删再拷到 `runs/<id>/pi-agent/` 后作为 `PI_CODING_AGENT_DIR`，内核之外的定制只落在这里（含 `extensions/` 的前台守卫与 `agents/researcher.md`） |
+| `harnesses/<pack>/` | Harness 包：`harness.toml`（`family`；ACP 的 `command`/`session_config`/`permission_allow`/上游 `package`+`version`）、可选 `capabilities.md`（拼入系统提示）、ACP 的 `home/` 覆盖层；pi 包另含 `settings.json` 与 `extensions/`、`agents/`（前台守卫与 `researcher.md`），每次 run 先删再拷到 `runs/<id>/pi-agent/` |
 | `web/` | 前端：按百鉴 UI 标准库逐值对齐的静态 ESM 资源（token 层 + 组件层 + 外壳） |
 | `docs/` | `architecture.md`（进程拓扑、事件契约、执行器契约）、`pi-boundary.md`（扩展点与禁止项）、`multitenancy-plan.md`（下一阶段设计与决策点） |
 | `tests/` | 宿主与内核的回归 |
@@ -380,12 +380,10 @@ node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 26 个角�
 
 | 键 | 默认 | 何时需要改 |
 |---|---|---|
-| `PI_GLINK_HARNESS` | `pi` | 改用 ACP 族内核（dsh / codex / opencode 等）时设 `acp`；一次部署只跑一种，启动冻结 |
-| `PI_GLINK_ACP_COMMAND` | 空 | `PI_GLINK_HARNESS=acp` 时必填，缺失拒绝启动；宿主只做 shell 拆分、不经 shell 执行 |
-| `PI_GLINK_ACP_CREDENTIAL_FILES` | 空 | ACP agent 需要宿主只读凭据时，按 `source=dest`（`;` 分隔）注入每 run `HOME` |
+| `PI_GLINK_HARNESS` | `pi` | 选择 harness 包（`pi` / `dsh` / `codex` / `opencode`）；一次部署只跑一个，启动冻结 |
+| `PI_GLINK_HARNESSES_DIR` | `<repo>/harnesses` | 包根目录放在别处时；选中包缺失或清单不合法即拒绝启动 |
+| `PI_GLINK_ACP_CREDENTIAL_FILES` | 空 | ACP agent 需要宿主只读凭据时，按 `source=dest`（`;` 分隔）注入每 run `HOME`；非 ACP 包下设置即拒绝启动 |
 | `PI_GLINK_ACP_ENV` | 空 | 给 ACP agent 进程传环境变量时；`HOME` 不可覆盖（每 run 状态根是隔离边界） |
-| `PI_GLINK_ACP_PERMISSION_ALLOW` | 空（全拒） | agent 在 fail-closed 下跑不动（逐次询问编辑/抓取）时，按最小集合放开 |
-| `PI_GLINK_ACP_SESSION_CONFIG` | 空 | 需要用 `session/new` 后的会话选项（如 `mode=auto`）固定 agent 行为时；声明不合即 run 失败 |
 | `LOCAL_WEB_ACP_WORKER_IMAGE` | `pi-glink-acp-worker:latest` | ACP + `docker` 面换镜像时（与 pi 面镜像分开，二者装的 agent 不同） |
 | `LOCAL_WEB_E2B_ACP_TEMPLATE` | `glink-acp-worker` | ACP + `e2b` 面换模板时（与 pi 面模板分开，同上） |
 | `PI_GLINK_BLUEPRINTS_DIR` | `<repo>/blueprints` | 蓝图模板放在别处时；目录缺失不是启动错误，只表示可用蓝图集合为空 |

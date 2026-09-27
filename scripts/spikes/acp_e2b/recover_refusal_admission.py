@@ -37,6 +37,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "host"))
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "spikes"))
+from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 
 from pi_glink.kernel.acp_e2b_env import SANDBOX_ACP_HOME  # noqa: E402
 from pi_glink.kernel.acp_env import INHERIT_MAX_FILE_BYTES  # noqa: E402
@@ -173,12 +175,13 @@ def main(argv: list[str] | None = None) -> int:
     port = free_port()
     base = f"http://127.0.0.1:{port}"
 
+    packs = write_probe_pack(workdir / "probe", args.agent)
     env = dict(os.environ)
     env.update(
         {
             "PYTHONPATH": str(REPO_ROOT / "host"),
-            "PI_GLINK_HARNESS": "acp",
-            "PI_GLINK_ACP_COMMAND": args.agent,
+            "PI_GLINK_HARNESS": PROBE_PACK_NAME,
+            "PI_GLINK_HARNESSES_DIR": str(packs),
             "LOCAL_WEB_EXECUTOR": "e2b",
             "LOCAL_WEB_E2B_ACP_TEMPLATE": args.template,
             "LOCAL_WEB_DATA_ROOT": str(data_root),

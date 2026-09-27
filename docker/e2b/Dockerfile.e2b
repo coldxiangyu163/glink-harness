@@ -17,7 +17,7 @@
 FROM node:24.21.0-bookworm-slim
 
 ARG PI_VERSION=0.86.1
-# 与 agent/settings.json 的 pin 一致（tests/test_repository_boundaries.py 卡住）。
+# 与 harnesses/pi/settings.json 的 pin 一致（tests/test_repository_boundaries.py 卡住）。
 ARG PI_WEB_ACCESS_VERSION=0.31.0
 # 只预装、不默认加载：GLINK-SUB-01 判定 pi-subagents 无法禁用 async/detached。
 ARG PI_SUBAGENTS_VERSION=0.40.0

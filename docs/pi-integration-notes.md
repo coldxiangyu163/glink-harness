@@ -63,7 +63,7 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
 
 - **配置目录解析**：pi-web-access 的 `utils.ts` 中 `getWebSearchConfigDir()` **优先读 `process.env.PI_CODING_AGENT_DIR`**，且不检查该目录下是否已有 `web-search.json`。这与 pi 本身的重定向一致，但也意味着：一旦宿主重定向了配置目录，操作员本机 ``~/.pi/agent/web-search.json` 就不再被读到，检索会静默退化成无凭据模式。
 - **凭据装配**：宿主在本 run 的运行期目录渲染 `web-search.json`：优先用 `PI_GLINK_WEB_SEARCH_KEY`（渲染为 `{"exaApiKey": …}`），否则复制操作员本机的 `~/.pi/agent/web-search.json`（或 `~/.pi/web-search.json`）。无凭据不是错误：pi-web-access 仍可用无密钥的 Exa MCP 检索；每次渲染都会重建或删除该文件，所以上一 run 的凭据不会残留。
-- **插件安装**：在 `agent/settings.json` 的 `packages` 里声明 `npm:pi-web-access@0.31.0`（精确 pin）。inproc 面 pi 启动时把它装到 `<PI_CODING_AGENT_DIR>/npm/`；docker/e2b 面宿主把该声明改写成镜像内本地包 `/opt/pi-packages/node_modules/pi-web-access`，不在 run 里联网安装（实测与机制见 §9）。
+- **插件安装**：在 `harnesses/pi/settings.json` 的 `packages` 里声明 `npm:pi-web-access@0.31.0`（精确 pin）。inproc 面 pi 启动时把它装到 `<PI_CODING_AGENT_DIR>/npm/`；docker/e2b 面宿主把该声明改写成镜像内本地包 `/opt/pi-packages/node_modules/pi-web-access`，不在 run 里联网安装（实测与机制见 §9）。
 - **工具面**：实测一次检索 run 调用 `web_search`（1 次）+ `fetch_content`（3 次），事件流里以 `tool_started/tool_updated/tool_finished` 正常呈现，报告写入 10 个可核验 URL。见 `docs/evidence/local-web-search.txt`。
 
 ## 6. Docker / E2B 沙箱内的配置目录与凭据注入（已实测）
@@ -132,7 +132,7 @@ result 一次；两者不同的工具仍保留两份内容。校验：
 ## 8. pi-subagents 0.40.0 验证（spike GLINK-SUB-01）
 
 结论：**0.40.0 没有配置开关可以禁止 async/detached 子 agent**，也没有相关环境变量；按 spike 门禁
-就此停止，未做凭据继承、取消传播、事件投影/脱敏与产物落点的 live 验证（agent/settings.json 未改）。
+就此停止，未做凭据继承、取消传播、事件投影/脱敏与产物落点的 live 验证（harnesses/pi/settings.json 未改）。
 该结论仍然成立，也是 GLINK-SUB-02 改用 pi-glink 自有 `tool_call` 守卫的原因；前台强制方案、
 完整入口清单与配置取值见 §10。
 本节其余事实（配置面键集、行号、参考副本与发布包的差异）继续有效；
@@ -193,7 +193,7 @@ pi-web-access 的 `supportsDynamicTools()` 会 `import.meta.resolve` 这份副�
 从 eagerly available 切到动态激活路径。加 `--legacy-peer-deps` 后 `/opt/pi-packages` 下不再有
 `@earendil-works` 副本，扩展回到与运行期 npm 安装相同的 eager 回退（两边 stderr 提示一致）。
 
-**版本真源**：`agent/settings.json` 的 pin、两个 Dockerfile 的 `ARG PI_WEB_ACCESS_VERSION` /
+**版本真源**：`harnesses/pi/settings.json` 的 pin、两个 Dockerfile 的 `ARG PI_WEB_ACCESS_VERSION` /
 `ARG PI_SUBAGENTS_VERSION` 由 `tests/test_repository_boundaries.py` 卡住一致（与 §3 的 PI_VERSION
 同口径）。候选构建/自检/tag 移动/回滚与完整输出见 `docs/evidence/prebaked-packages.txt`。
 `pi-subagents@0.40.0` 在 GLINK-SUB-02 起写进 `packages` 并被真正加载（前台强制方案见 §10）；
@@ -203,7 +203,7 @@ pi-web-access 的 `supportsDynamicTools()` 会 `import.meta.resolve` 这份副�
 ## 10. pi-subagents 0.40.0 的前台强制接入（GLINK-SUB-02，离线验证）
 
 §8 的结论继续成立：0.40.0 没有“禁止 async/detached”的包开关。GLINK-SUB-02 因此不依赖包开关，
-而是在 pi-glink 侧用官方 `tool_call` 钩子（`agent/extensions/subagent-foreground-guard.ts`）
+而是在 pi-glink 侧用官方 `tool_call` 钩子（`harnesses/pi/extensions/subagent-foreground-guard.ts`）
 把派发收回到主 run 内的**前台同步**调用，并按“最保守取值”固定 pi-subagents 的 extension config。
 原则：**能安全改写就改写（`async:false`、`chainDir` 进工作区），改写了会改变语义／无法保证生命周期
 的就阻止并给出可理解的原因**，未知输入一律 fail-closed。
@@ -212,8 +212,8 @@ pi-web-access 的 `supportsDynamicTools()` 会 `import.meta.resolve` 这份副�
 GLINK-SUB-01 已记录它与 `~/.feynman/npm-global` 参考副本有 23 个 `src/` 文件不同）。以下行号都指向
 该发布包。离线验证证据：`docs/evidence/pi-subagents-foreground.txt`。
 
-**范围注**：本节只记录工具面的强制前台与子代理定义（`agent/agents/researcher.md`）。委派约定
-（2026-09-24 用户决定）写在最小化后的 `agent/research-prompt.md`：独立、可并行的子问题**可以**
+**范围注**：本节只记录工具面的强制前台与子代理定义（`harnesses/pi/agents/researcher.md`）。委派约定
+（2026-09-24 用户决定）写在最小化后的 `harnesses/pi/research-prompt.md`：独立、可并行的子问题**可以**
 交给 `researcher`，任务说明自包含，主 agent 亲自核实回报的关键事实并负责整合与 `report.md`；
 何时派、派几个由模型按题目决定，不设固定检索步骤。
 
@@ -239,12 +239,12 @@ GLINK-SUB-01 已记录它与 `~/.feynman/npm-global` 参考副本有 23 个 `src
 | 16 | `share: true`（`schemas.ts` 单 agent overrides；`src/runs/foreground/execution.ts` 的 `shareEnabled`） | 把子代理会话上传到 GitHub Gist | **阻止** | 会话内容离开本 run 目录，超出宿主的脱敏与目录边界 |
 | 17 | `worktree: true`（`schemas.ts:240/307`；`src/runs/shared/worktree.ts:173-175` 默认基目录 `os.tmpdir()`） | 在 run 目录外创建 git worktree | **阻止** | 生命周期不由本 run 回收路径保证，且落在工作区外 |
 | 18 | `cwd` / `sessionDir` / `output` / `chainDir` 路径参数（`schemas.ts:135/157/188/218/315`；chainDir 默认 `src/shared/settings.ts:174-176` = `CHAIN_RUNS_DIR`，即 OS 临时目录） | 把读写/产物放到工作区外 | **阻止**（工作区外）或 **改写**（`chainDir` 固定为 `<workspace>/.pi-subagents/chain-runs`） | 宿主只对本 run 工作区做收尾脱敏与目录边界保护（architecture.md §6.1） |
-| 19 | **不在工具面上的入口**：pi-subagents 注册的扩展命令（`src/slash/slash-commands.ts:1181-1340`：`/run [--bg]`、`/chain [--bg]`、`/parallel`、`/subagents-detach`、`/subagents-stop`、`/subagents-fleet`、…） | 用户输入（RPC `prompt`）直接执行的扩展命令 | **宿主准入层挡住**（GLINK-SUB-02 评审修复）：只接受 `agent/prompts/` 模板命令，其余 `400 unsupported_command` | pi 先派发扩展命令、后触发 `input` 事件（`docs/rpc-commands.md`：extension command “executes immediately”），`tool_call` 钩子拿不到 → 门禁放在 `runs/runner.py::start`（见 §10.4 与 architecture.md §4） |
+| 19 | **不在工具面上的入口**：pi-subagents 注册的扩展命令（`src/slash/slash-commands.ts:1181-1340`：`/run [--bg]`、`/chain [--bg]`、`/parallel`、`/subagents-detach`、`/subagents-stop`、`/subagents-fleet`、…） | 用户输入（RPC `prompt`）直接执行的扩展命令 | **宿主准入层挡住**（GLINK-SUB-02 评审修复）：只接受 `harnesses/pi/prompts/` 模板命令，其余 `400 unsupported_command` | pi 先派发扩展命令、后触发 `input` 事件（`docs/rpc-commands.md`：extension command “executes immediately”），`tool_call` 钩子拿不到 → 门禁放在 `runs/runner.py::start`（见 §10.4 与 architecture.md §4） |
 
-判定与常量都在 `agent/extensions/subagent-foreground-guard.ts`；单测
+判定与常量都在 `harnesses/pi/extensions/subagent-foreground-guard.ts`；单测
 `tests/extensions/subagent-foreground-guard.test.mjs` 对每一行都有正反例（含 handler 异常时阻止）。
 
-### 10.2 extension config 逐项取值（`agent/extensions/subagent/config.json`）
+### 10.2 extension config 逐项取值（`harnesses/pi/extensions/subagent/config.json`）
 
 pi-subagents 从 `<PI_CODING_AGENT_DIR>/extensions/subagent/config.json` 读扩展配置
 （`src/extension/config.ts:8-9`，`PI_CODING_AGENT_DIR` 解析见 `src/shared/utils.ts:95-100`）。
@@ -267,7 +267,7 @@ pi-subagents 从 `<PI_CODING_AGENT_DIR>/extensions/subagent/config.json` 读扩�
 | `control` | `{"enabled": false}` | 关掉后台注意力提示/通知面 |
 
 watchdog 不在这个文件里：它读 `<PI_CODING_AGENT_DIR>/settings.json` 的 `subagents.watchdog`
-（`src/watchdog/settings.ts:384-389/422-424`）。`agent/settings.json` 因此显式写
+（`src/watchdog/settings.ts:384-389/422-424`）。`harnesses/pi/settings.json` 因此显式写
 `subagents.watchdog.{enabled,main.enabled,children.enabled} = false`（默认本来关闭，
 见 `src/watchdog/settings.ts:71-72`；显式写入防止任何一处被打开）。同一份 settings.json 的
 `packages` 现在同时声明两个精确 pin（`npm:pi-web-access@0.31.0`、`npm:pi-subagents@0.40.0`），
@@ -277,7 +277,7 @@ watchdog 不在这个文件里：它读 `<PI_CODING_AGENT_DIR>/settings.json` �
 
 pi-subagents 从 `<PI_CODING_AGENT_DIR>/agents` 读 user 作用域定义（`src/agents/agents.ts:1646-1651`，
 `getAgentDir()` 优先 `PI_CODING_AGENT_DIR`）。渲染模板因此把 `agents` 加进 `TEMPLATE_ENTRIES`
-（`host/pi_glink/kernel/agent_env.py`），三个面都会拿到 `pi-agent/agents/researcher.md`。
+（`host/pi_glink/kernel/agent_env.py`），三个面都会拿到 `runs/<id>/pi-agent/agents/researcher.md`。
 
 发现范围与优先级（`discoverAgents` + `mergeAgentsForScope`，`src/agents/agent-selection.ts:12-24`）：
 
@@ -297,7 +297,7 @@ researcher 的 `tools` 白名单（`read,bash,write,edit,web_search,fetch_conten
 1. **扩展命令面的处置（GLINK-SUB-02 评审修复）**：`/run --bg`、`/chain --bg`、`/subagents-detach` 等
    由用户输入直接执行的 pi-subagents 命令，`tool_call` 钩子拿不到（pi 先派发扩展命令、后触发 `input`
    事件）。宿主现已在**准入层**加 `/` 命令门禁：去掉前导空白的 prompt 若以 `/` 开头，只接受命令名
-   等于 `agent/prompts/` 下模板 stem 的（当前仅 `deepresearch`），其余 `400 unsupported_command`，
+   等于 `harnesses/pi/prompts/` 下模板 stem 的（当前仅 `deepresearch`），其余 `400 unsupported_command`，
    不创建 run 目录；追问、三个执行面同一条判定（`runs/runner.py::start` +
    `kernel/agent_env.py::prompt_template_names`，回归见 `tests/test_runs_api.py` /
    `tests/test_runner.py`）。仍存在的边界：门禁只管宿主验收的 prompt 入口，不阻止内核启动后

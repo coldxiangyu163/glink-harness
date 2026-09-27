@@ -40,6 +40,8 @@ from pi_glink.blueprints import (
     render_blueprint,
 )
 from pi_glink.config import HostConfig, build_config
+
+from acp_pack import apply_acp_pack
 from pi_glink.events import EventBus
 from pi_glink.runs.runner import BlueprintUnavailable, RunManager
 from pi_glink.kernel.rpc import PiRpcClient
@@ -50,7 +52,23 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 BLUEPRINTS = REPO_ROOT / "blueprints"
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
 FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"
-CONTRACT_PATH = REPO_ROOT / "agent" / "research-prompt.md"
+CONTRACT_PATH = REPO_ROOT / "harnesses" / "pi" / "research-prompt.md"
+CAPABILITIES_PATH = REPO_ROOT / "harnesses" / "pi" / "capabilities.md"
+
+
+def agreement_text() -> str:
+    return CONTRACT_PATH.read_text(encoding="utf-8").strip()
+
+
+def pi_system_prompt(*parts: str) -> str:
+    """The pi system prompt: work agreement, pi pack capabilities, then the rest."""
+    capabilities = CAPABILITIES_PATH.read_text(encoding="utf-8").strip()
+    return "\n\n".join(part for part in (agreement_text(), capabilities, *parts) if part)
+
+
+def acp_system_prompt(*parts: str) -> str:
+    """The ACP test pack carries no capabilities.md: agreement, then the rest."""
+    return "\n\n".join(part for part in (agreement_text(), *parts) if part)
 AUDIENCE = "pi-glink-test"
 
 
@@ -98,13 +116,14 @@ def make_config(tmp_path: Path, **overrides: str) -> HostConfig:
         "OPENAI_API_KEY": "sk-test",
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
-        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "agent"),
+        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_PORT": "0",
         "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "PI_GLINK_BLUEPRINTS_DIR": str(tmp_path / "blueprints"),
     }
     values.update(overrides)
+    apply_acp_pack(values, tmp_path)
     return build_config(values, REPO_ROOT)
 
 
@@ -187,7 +206,7 @@ def test_blueprint_keeps_the_existing_deep_research_methodology() -> None:
     """The example reuses the reviewed methodology; it invents no new claims.
 
     Same obligation set as ``tests/test_agent_prompts.py`` pins for
-    ``agent/prompts/deepresearch.md``: the blueprint is the structured,
+    ``harnesses/pi/prompts/deepresearch.md``: the blueprint is the structured,
     harness-agnostic spelling of that same contract.
     """
     text = (BLUEPRINTS / "deep-research.md").read_text(encoding="utf-8")
@@ -373,9 +392,8 @@ def test_pi_blueprint_run_delivers_the_render_and_records_the_metadata(tmp_path:
     assert final is not None and final.status == "finished"
     # The user's prompt travels byte for byte on its own channel.
     assert captured["messages"] == ["普通的用户题目"]
-    contract = CONTRACT_PATH.read_text(encoding="utf-8").strip()
     rendered = render_blueprint(load_blueprint(config.blueprints_dir, "synthetic"))
-    assert appended_system_prompt(captured["argv"]) == f"{contract}\n\n{rendered}"
+    assert appended_system_prompt(captured["argv"]) == pi_system_prompt(rendered)
     assert "普通的用户题目" not in appended_system_prompt(captured["argv"])
     # The record carries the template's identity and its stage metadata, in order.
     stored = store.get(record.run_id)
@@ -413,8 +431,7 @@ def test_pi_run_without_a_blueprint_is_unchanged(tmp_path: Path) -> None:
     record = manager.start("不带蓝图的题目")
     assert manager.wait(record.run_id, timeout=30).status == "finished"
 
-    contract = CONTRACT_PATH.read_text(encoding="utf-8").strip()
-    assert appended_system_prompt(captured["argv"]) == contract
+    assert appended_system_prompt(captured["argv"]) == pi_system_prompt()
     assert "<blueprint" not in captured["argv"][captured["argv"].index("--append-system-prompt") + 1]
     stored = store.get(record.run_id)
     assert stored is not None and stored.blueprint is None and stored.blueprint_stages == ()
@@ -524,11 +541,11 @@ def test_acp_blueprint_run_delivers_the_render_in_the_leading_block(tmp_path: Pa
     final = manager.wait(record.run_id, timeout=30)
 
     assert final is not None and final.status == "finished"
-    contract = CONTRACT_PATH.read_text(encoding="utf-8").strip()
     rendered = render_blueprint(load_blueprint(config.blueprints_dir, "synthetic"))
     prompt = next(entry for entry in read_log(log) if entry["event"] == "prompt")
     assert prompt["text"].startswith("以下是宿主工作台注入的 system prompt")
-    assert f"<system-prompt>\n{contract}\n\n{rendered.strip()}\n</system-prompt>" in prompt["text"]
+    expected = f"<system-prompt>\n{acp_system_prompt(rendered.strip())}\n</system-prompt>"
+    assert expected in prompt["text"]
     assert prompt["text"].endswith("--- 用户请求 ---\n\n合成 ACP 题目")
     stored = store.get(record.run_id)
     assert stored is not None and stored.blueprint == "synthetic"
@@ -549,10 +566,9 @@ def test_acp_run_without_a_blueprint_delivers_only_the_working_agreement(tmp_pat
     record = manager.start("没有蓝图的 ACP 题目")
     assert manager.wait(record.run_id, timeout=30).status == "finished"
 
-    contract = CONTRACT_PATH.read_text(encoding="utf-8").strip()
     prompt = next(entry for entry in read_log(log) if entry["event"] == "prompt")
     block = re.search(r"<system-prompt>\n(.*?)\n</system-prompt>", prompt["text"], re.DOTALL)
-    assert block is not None and block.group(1) == contract
+    assert block is not None and block.group(1) == acp_system_prompt()
     assert "<blueprint" not in prompt["text"]
 
 
