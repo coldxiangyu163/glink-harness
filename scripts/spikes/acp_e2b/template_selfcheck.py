@@ -5,7 +5,7 @@
 东西确实可用（只看构建成功不够——历史事故是构建成功但镜像残缺）：
 
 * 沙箱默认用户/家目录/工作目录与宿主假设一致；
-* ``node -v``、``dsh --version``、``codex-acp --version``、``claude-agent-acp --version``
+* ``node -v``、``dsh --version``、``codex-acp --version``、``opencode --version``
   与 ARG 钉版一致；
 * 每 run 的 agent 状态根（``/home/user/acp/home``）可创建、可写；
 * 镜像内自检脚本 ``acp-self-check`` 能跑。
@@ -30,7 +30,7 @@ echo "home=$HOME pwd=$(pwd)"
 echo "node=$(node -v)"
 echo "dsh=$(dsh --version 2>&1)"
 echo "codex_acp=$(codex-acp --version 2>&1)"
-echo "claude_agent_acp=$(claude-agent-acp --version 2>&1)"
+echo "opencode=$(opencode --version 2>&1)"
 echo "acp_dir_writable=$(test -w /home/user/acp && echo yes || echo no)"
 echo "workspace_writable=$(test -w /home/user/workspace && echo yes || echo no)"
 echo "self_check=$(acp-self-check 2>&1 | tr '\n' ';')"
@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         and "per_run_home_write=ok" in out.get("stdout", "")
         and "dsh=0.1.5-rc.3" in out.get("stdout", "")
         and "codex_acp=@agentclientprotocol/codex-acp 1.13.1" in out.get("stdout", "")
-        and "claude_agent_acp=0.81.2" in out.get("stdout", "")
+        and "opencode=1.18.32" in out.get("stdout", "")
     )
     print(f"[{'PASS' if ok else 'FAIL'}] 模板自检")
     return 0 if ok else 1

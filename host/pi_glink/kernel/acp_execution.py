@@ -46,8 +46,8 @@ the refusal is emitted as a ``kernel_status`` frame, never silently swallowed.
 A run explicitly given ``PI_GLINK_ACP_PERMISSION_ALLOW`` (option kinds and
 optionally tool kinds) may instead select the narrowest matching ``allow_*``
 option; the decision is still recorded, with the policy that produced it. When
-the request omits ``toolCall.kind`` (the field is optional; claude-code-acp
-0.16.2 omits it), the kind the agent published for the same ``toolCallId`` in
+the request omits ``toolCall.kind`` (the field is optional and some agents omit
+it), the kind the agent published for the same ``toolCallId`` in
 its ``tool_call`` notification is used, so a tool-kind allowlist keeps working
 without matching on titles or raw input.
 
@@ -243,8 +243,8 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         self._cancel_sent = False
         #: Tool-call id -> ACP tool kind as last announced by a ``tool_call``
         #: notification. An agent may omit ``kind`` from
-        #: ``session/request_permission`` (claude-code-acp 0.16.2 does, measured
-        #: in M4) while having published it for the same ``toolCallId``; the
+        #: ``session/request_permission`` (measured in M4) while having published
+        #: it for the same ``toolCallId``; the
         #: allowlist resolves the request against the agent's own classification
         #: rather than guessing from a human-readable title. A kind never
         #: published stays unknown and the allowlist keeps refusing it.
@@ -299,10 +299,10 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
                     "protocolVersion": ACP_PROTOCOL_VERSION,
                     "clientCapabilities": CLIENT_CAPABILITIES,
                     # ACP's ``Implementation`` carries both ``name`` and
-                    # ``version``; claude-code-acp 0.16.2 validates the
-                    # initialize params strictly and rejects a clientInfo
-                    # without ``version`` with -32602 before any session
-                    # exists (measured, M4). The host's own version is the
+                    # ``version``; an ACP agent validated the initialize params
+                    # strictly in M4 and rejected a clientInfo without
+                    # ``version`` with -32602 before any session
+                    # exists. The host's own version is the
                     # truthful value for what is speaking.
                     "clientInfo": {"name": "pi-glink", "version": HOST_VERSION},
                 },
@@ -883,7 +883,7 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         tool_call = tool_call if isinstance(tool_call, Mapping) else {}
         tool_call_id = str(tool_call.get("toolCallId") or "")
         # The request may carry the kind itself (dsh, codex-acp and the fake
-        # agent do) or omit it (claude-code-acp 0.16.2, measured in M4); in the
+        # agent do) or omit it (measured in M4); in the
         # latter case the agent already published the same tool's kind in its
         # ``tool_call`` notification, so resolve it by ``toolCallId``. Neither
         # source giving a kind leaves the request unclassified and the

@@ -17,10 +17,9 @@
 # M9：docker 面真实续接（首轮 + 追问；消耗两次模型调用；dsh 凭据默认已选好）
 .venv/bin/python scripts/spikes/acp_docker/resume_smoke.py --label docker-dsh
 
-# 握手（claude-agent-acp 是 M6 起的后继包名；opencode 是 M5 新增；其余可复跑作回归）
-.venv/bin/python scripts/spikes/acp_docker/handshake.py --command claude-agent-acp
-.venv/bin/python scripts/spikes/acp_docker/handshake.py --command 'opencode acp'
+# 握手（三个 agent；其余可复跑作回归）
 .venv/bin/python scripts/spikes/acp_docker/handshake.py --command 'dsh --profile acp'
+.venv/bin/python scripts/spikes/acp_docker/handshake.py --command 'opencode acp'
 .venv/bin/python scripts/spikes/acp_docker/handshake.py --command codex-acp
 
 # M5：同时验证每 run HOME 的凭据与容器内嵌套只读挂载（不打印凭据值）
@@ -30,5 +29,5 @@
 ```
 
 前置：`docker build -t pi-glink-acp-worker:latest -f docker/Dockerfile.acp-worker .`
-（见 Dockerfile 头注释）。容器内没有 macOS Keychain，宿主 `.env` 也没有
-`ANTHROPIC_API_KEY`，因此 docker 面的真实模型 run 属预期阻塞；握手不需要凭据。
+（见 Dockerfile 头注释）。容器内没有宿主登录态；dsh / codex-acp 的 docker 面真实模型
+run 属预期阻塞，握手不需要凭据。

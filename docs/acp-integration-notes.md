@@ -651,6 +651,10 @@ pi 面模板 `pi-glink-worker` 也未动（`e2b 模板实测`）。
 
 ## 7. M4 实测（2026-09-25，claude-code-acp 接入）
 
+> **已于 GLINK-ARCH-6（2026-09-27）从产品移除**：本章保留为历史实测记录。claude 系列
+> 适配器不再是产品的可用 harness；对应的镜像层、自检、spike 分支与回归已在本任务删除，
+> 下文中的文件路径与命令只描述当时的实测过程。
+
 本节每条都标来源。证据文件：`docs/evidence/acp-m4-claude-handshake.txt`（inproc 握手与
 凭据/首启形态，不消耗模型）、`acp-m4-claude-smoke.txt`（一次最小真实 run）、
 `acp-m4-claude-docker-handshake.txt`（镜像重建与三个 agent 容器内握手）、
@@ -1009,6 +1013,10 @@ API key，否则属预期阻塞。
   宿主只按存在性/整体形状记录，不解析内部字段（`opencode 实测`）。
 
 ## 9. M6 实测（2026-09-25，claude 后继包迁移）
+
+> **已于 GLINK-ARCH-6（2026-09-27）从产品移除**：本章保留为历史实测记录。后继包
+> `claude-agent-acp` 仍是当时的迁移对象，但现在不再是产品的可用 harness；相关镜像层、
+> 自检与回归已删除。
 
 本节每条都标来源。证据文件：`docs/evidence/acp-m6-migration-handshake.txt`（inproc
 握手、入口/版本与凭据形态，不消耗模型）、`acp-m6-migration-smoke.txt`（两次最小真实

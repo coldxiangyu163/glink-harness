@@ -8,8 +8,7 @@ pi_glink.app``）→ ``POST /api/runs`` → 同时订阅 SSE 看流式 → 轮�
 清理只操作已知身份：宿主进程用本脚本持有的 PID（``terminate``）；冒烟期间
 采样的 agent 后代进程按 PID 记录，结束后只对这些已知 PID 发 ``TERM`` 并核对
 是否退出——没有 ``pkill -f``，没有名字或命令行通配删除。凭据值不打印、不落
-证据：``--derive-settings-from`` 只把宿主 claude CLI 设置里的 ``env`` 块抽成
-一份 0600 的运行期 settings 文件（放在临时数据根内），真实设置文件只读。
+证据：``--credential`` 只把源文件只读复制进每 run HOME。
 
 它**会消耗一次真实模型调用**，只在获得授权时使用。
 """
@@ -17,7 +16,6 @@ pi_glink.app``）→ ``POST /api/runs`` → 同时订阅 SSE 看流式 → 轮�
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import signal
@@ -45,28 +43,6 @@ def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
-
-
-def sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def derive_settings(source: Path, destination: Path) -> None:
-    """Write a run-only settings file holding just the source's ``env`` block.
-
-    The operator's real ``settings.json`` carries hooks, plugins and a status
-    line that must not run inside a research run (they act on the operator's
-    real state). The CLI only needs the ``env`` mapping to reach the configured
-    provider, so that is the part copied into the run.
-    """
-    document = json.loads(source.read_text(encoding="utf-8"))
-    env = document.get("env") if isinstance(document, dict) else None
-    if not isinstance(env, dict) or not env:
-        raise SystemExit(f"--derive-settings-from 的 {source} 没有可复制的 env 块")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(destination.parent, 0o700)
-    destination.write_text(json.dumps({"env": env}, indent=2), encoding="utf-8")
-    os.chmod(destination, 0o600)
 
 
 def process_table() -> dict[int, tuple[int, str]]:
@@ -151,14 +127,9 @@ def sse_collector(base: str, run_id: str, frames: list[dict], stop: threading.Ev
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="ACP inproc 最小真实冒烟")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
-    parser.add_argument("--agent", default="npx -y @agentclientprotocol/claude-agent-acp@0.81.2")
+    parser.add_argument("--agent", default="dsh --profile acp")
     parser.add_argument("--credential", action="append", default=[], help="source=dest，可重复")
     parser.add_argument("--env", action="append", default=[], help="NAME=value，可重复")
-    parser.add_argument(
-        "--derive-settings-from",
-        default="",
-        help="把该 claude settings.json 的 env 块抽成运行期 settings（0600，临时数据根内）",
-    )
     parser.add_argument("--npm-cache", default="")
     parser.add_argument(
         "--permission-allow",
@@ -195,16 +166,6 @@ def main(argv: list[str] | None = None) -> int:
     env_entries = list(args.env)
     if args.npm_cache:
         env_entries.append(f"npm_config_cache={args.npm_cache}")
-    source_settings = Path(args.derive_settings_from).expanduser() if args.derive_settings_from else None
-    source_digest = ""
-    if source_settings is not None:
-        if not source_settings.is_file():
-            print(f"--derive-settings-from 不存在: {source_settings}", file=sys.stderr)
-            return 2
-        source_digest = sha256_file(source_settings)
-        derived = data_root / "run-settings" / "settings.json"
-        derive_settings(source_settings, derived)
-        credentials.append(f"{derived}=.claude/settings.json")
 
     env = dict(os.environ)
     env.update(
@@ -248,8 +209,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"会话配置: {args.session_config or '（无）'}")
     print(f"数据根: {data_root}")
     print(f"任务超时: {args.timeout}s")
-    if source_settings is not None:
-        print(f"运行期 settings 派生自: {source_settings}（源仅读；sha256={source_digest[:16]}…）")
     print()
 
     with log_path.open("w", encoding="utf-8") as log_handle:
@@ -428,13 +387,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  cleanup={json.dumps(meta.get('cleanup'), ensure_ascii=False)}")
     print(f"  report_path={meta.get('report_path')}")
 
-    if source_settings is not None:
-        source_after = sha256_file(source_settings)
-        print()
-        print(
-            f"settings 源只读核对: {'unchanged' if source_after == source_digest else 'CHANGED'}"
-        )
-
     print()
     print(f"report.md（HTTP {report_status}，{len(report_body)} bytes）")
     print("-" * 60)
@@ -454,7 +406,6 @@ def main(argv: list[str] | None = None) -> int:
         and bool(meta.get("cleanup", {}).get("released"))
         and not residual
         and exit_code is not None
-        and (source_settings is None or sha256_file(source_settings) == source_digest)
     )
     print()
     print(f"[{'PASS' if ok else 'FAIL'}] 冒烟（流式/终态/report.md/清理只操作已知 PID）")

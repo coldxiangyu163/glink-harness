@@ -40,7 +40,7 @@ from pi_glink.kernel.docker_env import (  # noqa: E402
 )
 from pi_glink.kernel.execution import ExecutionSpec  # noqa: E402
 
-DEFAULT_COMMAND = "claude-agent-acp"
+DEFAULT_COMMAND = "dsh --profile acp"
 
 
 def main(argv: list[str] | None = None) -> int:

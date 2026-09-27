@@ -165,10 +165,9 @@ def state_facts(data_root: Path, run_id: str, skip: set[str]) -> tuple[list[str]
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="ACP inproc 真实续接冒烟")
     parser.add_argument("--label", default="acp")
-    parser.add_argument("--agent", default="npx -y @agentclientprotocol/claude-agent-acp@0.81.2")
+    parser.add_argument("--agent", default="dsh --profile acp")
     parser.add_argument("--credential", action="append", default=[], help="source=dest，可重复")
     parser.add_argument("--env", action="append", default=[], help="NAME=value，可重复")
-    parser.add_argument("--derive-settings-from", default="")
     parser.add_argument("--npm-cache", default="")
     parser.add_argument("--permission-allow", default="")
     parser.add_argument("--session-config", default="")
@@ -202,18 +201,6 @@ def main(argv: list[str] | None = None) -> int:
     env_entries = list(args.env)
     if args.npm_cache:
         env_entries.append(f"npm_config_cache={args.npm_cache}")
-    source_settings = (
-        Path(args.derive_settings_from).expanduser() if args.derive_settings_from else None
-    )
-    source_digest = ""
-    if source_settings is not None:
-        if not source_settings.is_file():
-            print(f"--derive-settings-from 不存在: {source_settings}", file=sys.stderr)
-            return 2
-        source_digest = base.sha256_file(source_settings)
-        derived = data_root / "run-settings" / "settings.json"
-        base.derive_settings(source_settings, derived)
-        credentials.append(f"{derived}=.claude/settings.json")
     # Every configured credential destination is excluded from the inheritance
     # comparison: the child re-renders those files fresh, so they prove nothing
     # about state inheritance (and their values must not enter the evidence).
@@ -263,8 +250,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"会话配置: {args.session_config or '（无）'}")
     print(f"数据根: $TMP/{data_root.name}")
     print(f"任务超时: {args.timeout}s")
-    if source_settings is not None:
-        print(f"运行期 settings 派生自: {source_settings}（源仅读；sha256={source_digest[:16]}…）")
     print("连续性判据: 首轮约定随机代号（不写入首轮 report.md），追问要求复述并写入新 report.md")
     if resume_only:
         print(f"模式: 只跑追问（复用首轮 run {args.parent_run_id}；代号由 --codename 提供）")
@@ -480,11 +465,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"    cleanup={json.dumps(meta.get('cleanup'), ensure_ascii=False)}")
     print(f"  parent report_status / child report_status: {results['parent']['reportStatus']} / {results['child']['reportStatus']}")
-
-    if source_settings is not None:
-        after = base.sha256_file(source_settings)
-        print()
-        print(f"settings 源只读核对: {'unchanged' if after == source_digest else 'CHANGED'}")
 
     print()
     print("child report.md（HTTP %s，%s bytes）" % (results["child"]["reportStatus"], len(results["child"]["report"])))

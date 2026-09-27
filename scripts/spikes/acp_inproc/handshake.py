@@ -6,7 +6,7 @@
 ``session/prompt``：
 
 * 记录被测 agent 的 ``initialize`` 能力矩阵与 ``session/new`` 响应原文
-  （dsh / codex-acp / claude-agent-acp / opencode 都用同一个探针）；
+  （dsh / codex-acp / opencode 都用同一个探针）；
 * 记录能力位来源（agentInfo / protocolVersion / loadSession /
   sessionCapabilities / promptCapabilities / authMethods / modes /
   configOptions）供集成笔记并排对照；
@@ -16,11 +16,10 @@
   用 ``model=…`` 观测 option 变化与 ``effort`` 选项的联动）；
 * 不打印任何凭据值；凭据源始终只读。
 
-CLI 入口只做钉版调用（默认 ``npx -y @agentclientprotocol/claude-agent-acp@0.81.2``；
-opencode 用 ``npx -y opencode-ai@1.18.32 acp``，本地已装 1.18.18 与它同族），
-不做全局安装。``--env`` 可注入 ``npm_config_cache``（npx 缓存）或
-``CLAUDE_CODE_EXECUTABLE``（宿主 claude CLI 路径）等命令级环境；``--watch``
-选择子进程采样关键字（claude / opencode）。
+CLI 入口只做钉版调用（默认 ``dsh --profile acp``；opencode 用
+``npx -y opencode-ai@1.18.32 acp``，本地已装 1.18.18 与它同族），
+不做全局安装。``--env`` 可注入 ``npm_config_cache``（npx 缓存）等命令级环境；
+``--watch`` 选择子进程采样关键字（dsh / codex-acp / opencode）。
 """
 
 from __future__ import annotations
@@ -28,7 +27,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -49,7 +47,7 @@ from pi_glink.kernel.acp_env import (  # noqa: E402
 from pi_glink.kernel.acp_execution import AcpExecutionAdapter  # noqa: E402
 from pi_glink.kernel.execution import ExecutionSpec  # noqa: E402
 
-DEFAULT_COMMAND = "npx -y @agentclientprotocol/claude-agent-acp@0.81.2"
+DEFAULT_COMMAND = "dsh --profile acp"
 
 #: Capability fields worth printing on their own line, in a stable order.
 CAPABILITY_FIELDS = (
@@ -70,26 +68,8 @@ def resolve_source(source_text: str) -> Path:
     return Path(source_text)
 
 
-def derive_settings(source: Path, destination: Path) -> None:
-    """Write a run-only settings file holding just the source's ``env`` block.
-
-    The operator's real ``settings.json`` carries hooks, plugins and a status
-    line that must not run inside a research run (they act on the operator's
-    real state). The CLI only needs the ``env`` mapping to reach the configured
-    provider, so that is the part copied into the run.
-    """
-    document = json.loads(source.read_text(encoding="utf-8"))
-    env = document.get("env") if isinstance(document, dict) else None
-    if not isinstance(env, dict) or not env:
-        raise SystemExit(f"--derive-settings-from 的 {source} 没有可复制的 env 块")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(destination.parent, 0o700)
-    destination.write_text(json.dumps({"env": env}, indent=2), encoding="utf-8")
-    os.chmod(destination, 0o600)
-
-
 def watch_processes(
-    dest: list[str], stop: threading.Event, *, pattern: str = "claude", timeout: float = 90.0
+    dest: list[str], stop: threading.Event, *, pattern: str = "dsh", timeout: float = 90.0
 ) -> None:
     deadline = time.monotonic() + timeout
     while not stop.is_set() and time.monotonic() < deadline:
@@ -110,11 +90,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--command", default=DEFAULT_COMMAND)
     parser.add_argument("--credential", action="append", default=[], help="source=dest，可重复")
     parser.add_argument("--env", action="append", default=[], help="NAME=value，可重复")
-    parser.add_argument(
-        "--derive-settings-from",
-        default="",
-        help="把该 claude settings.json 的 env 块抽成运行期 settings（0600，临时目录内）",
-    )
     parser.add_argument("--npm-cache", default="", help="注入 npm_config_cache 的便捷参数")
     parser.add_argument(
         "--session-config",
@@ -123,8 +98,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--watch",
-        default="claude",
-        help="子进程命令行采样关键字（默认 claude；opencode 用 opencode）",
+        default="dsh",
+        help="子进程命令行采样关键字（默认 dsh；opencode 用 opencode）",
     )
     parser.add_argument("--timeout", type=int, default=180)
     args = parser.parse_args(argv)
@@ -137,16 +112,6 @@ def main(argv: list[str] | None = None) -> int:
     workspace = workdir / "workspace"
     workspace.mkdir()
     credentials = list(args.credential)
-    derive_source = Path(args.derive_settings_from).expanduser() if args.derive_settings_from else None
-    derive_digest = ""
-    if derive_source is not None:
-        if not derive_source.is_file():
-            print(f"--derive-settings-from 不存在: {derive_source}", file=sys.stderr)
-            return 2
-        derive_digest = sha256_file(derive_source)
-        derived = workdir / "run-settings" / "settings.json"
-        derive_settings(derive_source, derived)
-        credentials.append(f"{derived}=.claude/settings.json")
     values = {
         "PI_GLINK_HARNESS": "acp",
         "PI_GLINK_ACP_COMMAND": args.command,
@@ -176,11 +141,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"会话配置: {session_config or '（无）'}")
     print(f"运行期 HOME: {runtime.home}")
     print(f"redactor 并入值: {len(runtime.secrets)} 条（不打印值）")
-    if derive_source is not None:
-        print(
-            f"运行期 settings 派生自: {derive_source}"
-            f"（源仅读；sha256={derive_digest[:16]}…；只取 env 块）"
-        )
     credential_rows: list[tuple[str, Path, str, str]] = []
     for source_text, dest in config.acp_credential_files:
         source = resolve_source(source_text)
@@ -278,11 +238,6 @@ def main(argv: list[str] | None = None) -> int:
         state = "unchanged" if after == before else "CHANGED"
         print(f"  {source_text}: sha256 {state}")
         if after != before:
-            exit_code = 1
-    if derive_source is not None:
-        state = "unchanged" if sha256_file(derive_source) == derive_digest else "CHANGED"
-        print(f"  {derive_source}（派生源）: sha256 {state}")
-        if state == "CHANGED":
             exit_code = 1
 
     print(f"\n临时目录: {workdir}（按本脚本创建的路径清理；未做模式匹配删除）")

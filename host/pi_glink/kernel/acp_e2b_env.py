@@ -66,7 +66,7 @@ logger = logging.getLogger("pi_glink.kernel.acp_e2b_env")
 #: ``~/.codex`` and every cache stay inside this run's sandbox.
 SANDBOX_ACP_HOME = f"{SANDBOX_HOME}/acp/home"
 #: How deep the sandbox's ACP state root is walked when it is recovered to the
-#: host. The measured state roots (dsh / codex / claude / opencode) are a handful
+#: host. The measured state roots (dsh / codex / opencode) are a handful
 #: of levels deep; a deeper tree is refused instead of walked without a bound.
 ACP_STATE_MAX_DEPTH = 12
 

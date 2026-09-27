@@ -13,7 +13,7 @@
 
 具体接口与迁移在对应任务中决定，不预建无消费者的租户抽象；修改这些承诺遵循 [工程约束](engineering.md)。现有单 run 测试继续保护当前行为，将来的多租户变更在取得决定后同步替换相关断言，而不是把当前串行测试当作永久需求。
 
-另一个既定方向是**多 harness 平台化**：宿主保持 harness 无关，`kernel/` 泛化为 harness 适配层，候选内核包括 deepseek-harness、Claude Code、Codex 及一切 ACP 兼容 agent。方向、架构与里程碑见 [多 harness 方案](multi-harness-plan.md)；当前仓库已落地两个 harness 族——pi 族（三个执行面均 `--mode rpc`，GLINK-ARCH-3 起 e2b 面也已收敛）与 ACP 族（一切 ACP 兼容 agent 经 stdio JSON-RPC 双向桥接，dsh 0.1.7+ 为首个实测 agent）；本文的进程拓扑、事件契约与追问门禁对两族统一描述，pi 特有的协议细节仍以 pi 为参照系，ACP 族的协议事实见 [ACP 集成笔记](acp-integration-notes.md)。
+另一个既定方向是**多 harness 平台化**：宿主保持 harness 无关，`kernel/` 泛化为 harness 适配层，云端保留 pi、deepseek-harness（dsh）、Codex 及一切开源 ACP 兼容 agent（2026-09-27 决定移除闭源 CLI；见 [多 harness 方案](multi-harness-plan.md) §1）。方向、架构与里程碑见 [多 harness 方案](multi-harness-plan.md)；当前仓库已落地两个 harness 族——pi 族（三个执行面均 `--mode rpc`，GLINK-ARCH-3 起 e2b 面也已收敛）与 ACP 族（dsh/codex/opencode 经 stdio JSON-RPC 双向桥接，dsh 0.1.7+ 为最快验证的 agent）；本文的进程拓扑、事件契约与追问门禁对两族统一描述，pi 特有的协议细节仍以 pi 为参照系，ACP 族的协议事实见 [ACP 集成笔记](acp-integration-notes.md)。
 
 ## 1. 分层结构
 
@@ -547,8 +547,8 @@ E2B live 冒烟未做**。配置交付带有 `(相对路径, sha256)` 清单，`
 
 **harness 包 pin（GLINK-ARCH-6）**：ACP 包（dsh/codex/opencode）的 `package` + `version` 写在各自的
 `harnesses/<pack>/harness.toml`，同一测试另卡住它们与 `docker/Dockerfile.acp-worker`、
-`docker/e2b/Dockerfile.acp-e2b` 的同名 ARG 逐字一致（与 `PI_VERSION` 同一口径）；claude 的两个包
-及其自检层已随 GLINK-ARCH-6 从这两个镜像删除。pi 包的版本固定点不变（`ARG PI_VERSION` +
+`docker/e2b/Dockerfile.acp-e2b` 的同名 ARG 逐字一致（与 `PI_VERSION` 同一口径）；闭源适配器
+及其 CLI 层已随 GLINK-ARCH-6 从这两个镜像删除。pi 包的版本固定点不变（`ARG PI_VERSION` +
 `harnesses/pi/settings.json` 的两个包 pin）。
 
 **包缺失必须是明确失败。** pi 对不存在的本地包路径完全静默，所以两个镜像都带

@@ -77,7 +77,7 @@ pi、dsh、codex（codex-acp）、opencode（均开源），**Claude（claude-ag
   HTTP/SSE 与前端不随之改变。
 * **云端保留的 harness：pi、dsh（deepseek-harness，原生 ACP server）、codex（codex-acp）、
   opencode**，四者均开源。**Claude（claude-agent-acp + claude CLI）已从产品中移除**
-  （2026-09-27 用户决定）：闭源 CLI + 绑定登录态的适配器不适合作为云端可分发内核；
+  （2026-09-27 用户决定）：开源性差（闭源 CLI），云端只保留开源 harness；
   移除范围含镜像层、代码分支、测试与现行文档描述，M4/M6 章节只作历史实测证据保留。
 * **方法论以蓝图（blueprint）为唯一真源**：工作约定（`methodology/work-agreement.md`）与
   蓝图（`methodology/blueprints/*.md`）是 harness 无关的合同；pi 的 `/deepresearch` prompt
@@ -246,15 +246,13 @@ run 生命周期、终帧即终态、提交先于发布等全部沿用架构 §3
 （`kernel_status`），不允许静默。M2 实测：dsh 0.1.5-rc.3 与 codex-acp 0.16.0 在
 workspace-write 会话模式下跑完两个最小真实研究 run，均未发出权限请求，因此**保持默认、
 不启用白名单**；配置级门控 `PI_GLINK_ACP_PERMISSION_ALLOW`（option kind，可选 tool kind）
-已实现并默认空集。M4 首次真实启用：claude-code-acp 的研究 run 需要逐次放行 WebFetch 与
-Write/Edit（它的权限请求不带 tool kind，宿主按同一 `toolCallId` 的 `tool_call` 通知解析），
-最小集合为 `allow_once,read,search,fetch,edit`，execute/think/switch_mode/other 与未分类
-请求继续拒绝；决定、机制与真实 run 证据见
-[ACP 集成笔记](acp-integration-notes.md) §7.4。M5 接入 opencode 时反向确认了"先实测再决定"：
-opencode 的真实 run 在 `webfetch`/`apply_patch` 上 0 条请求，**不为它启用白名单**（默认
-fail-closed 不变），源码里请求自带 `kind` 的形态与触发面记在集成笔记 §8.4。M6 迁移后重测：
-claude-agent-acp 0.81.2 的权限请求**自带 `kind`**（两次冒烟 `toolKindSource=request`），
-M4 的“无 kind 请求 + 同 `toolCallId` 回查”兼容分支保留（集成笔记 §9.4）。
+已实现并默认空集。M5 接入 opencode 时反向确认了"先实测再决定"：opencode 的真实 run 在
+`webfetch`/`apply_patch` 上 0 条请求，**不为它启用白名单**（默认 fail-closed 不变），
+源码里请求自带 `kind` 的形态与触发面记在集成笔记 §8.4。M4 曾为已移除的闭源适配器启用最小集合
+`allow_once,read,search,fetch,edit`（决定与证据见集成笔记 §7.4）；该 agent 已随
+GLINK-ARCH-6 从产品移除，**现有包的 `permission_allow` 全部为空**。“请求不带 `kind` 时按
+同一 `toolCallId` 的 `tool_call` 通知解析”的兼容分支保留（集成笔记 §9.4 的重测：该 agent 后来
+的版本已自带 `kind`，`toolKindSource` 记录来源），对任何省略 `kind` 的 ACP agent 都成立。
 
 ### 4.3 准入与门禁
 
@@ -272,7 +270,7 @@ ACP prompt 是结构化 ContentBlock，不存在 pi 那样的「`/` 前缀先派
 * ACP 族（M7 已实现，实测见集成笔记 §10）：`session/resume`（能力位
   `sessionCapabilities.resume`，不回放）优先；只有 `resume` 缺失而顶层 `loadSession` 为
   true 时用 `session/load`，并把它回放的历史帧计数后丢弃（父 run 已记录的历史不重复投影）。
-  resume 依赖 agent 自身状态目录（`~/.claude`、`~/.codex`、`~/.local/share/opencode`、
+  resume 依赖 agent 自身状态目录（`~/.codex`、`~/.local/share/opencode`、
   dsh sessions）——每 run HOME 独立渲染，追问时**从父 run 的状态根有界继承**（拒绝链接、
   凭据目标排除后重新渲染、继承值并入子 run 的 redactor），启动新 agent 进程后续接。
 * 会话工作区：agent 会话记录自己的 `cwd`，同一会话的每轮共用该工作区（追问 run 复用父
@@ -305,24 +303,20 @@ system prompt 的通道也已在 M2 定下：
 该通道现在也承载宿主侧、harness 无关的**会话蓝图**：同一份渲染文本对 pi 面走
 `--append-system-prompt`、对 ACP 面进同一首块，用户 prompt 始终走自己的通道、不被替代；
 格式契约、记录字段与后续增量挂账见 [会话蓝图模板](blueprint-templates.md)。
-M4 补上 claude-code-acp 的凭据形态：它的登录态在本机来自 `~/.claude/settings.json` 的
-`env` 块（不是 Keychain 里的 OAuth），需把该 env 块抽成运行期 settings 经 CREDENTIAL_FILES
-复制进每 run HOME；真实 settings.json 含 hooks/plugins，不得整文件复制。细节与证据见
-[ACP 集成笔记](acp-integration-notes.md) §7.3。M5 补上 opencode：凭据就是文件
+M5 补上 opencode：凭据就是文件
 `~/.local/share/opencode/auth.json`（OAuth `access`/`refresh`，按精确字段名并入 redactor），
 每 run 落在 `HOME/.local/share/opencode/auth.json`（0600），docker 面再叠一层嵌套只读挂载、
-e2b 面在沙箱内 0600 加固——同一套机制，没有为它新增通道；见集成笔记 §8.3。M6 迁移
-claude 适配器到后继包 `@agentclientprotocol/claude-agent-acp@0.81.2` 后重测：settings env
-派生在新版仍成立（原生 cli 2.1.280 认它），`CLAUDE_CODE_EXECUTABLE` 不再是必选项但
-仍受支持；见集成笔记 §9.3。
+e2b 面在沙箱内 0600 加固——同一套机制，没有为它新增通道；见集成笔记 §8.3。已移除的
+闭源适配器的凭据形态（由 `settings.json` 的 `env` 块派生运行期 settings 再经
+CREDENTIAL_FILES 复制）见集成笔记 §7.3/§9.3（历史实测）。
 
 ## 5. 开源复用策略
 
 | 项目 | 复用方式 | 约束 |
 |---|---|---|
-| ACP 适配器（claude-agent-acp、@agentclientprotocol/codex-acp、dsh acp） | 作为**钉版外部依赖**接入（npm 包/二进制），记录版本、来源、license | 版本钉死 + 冒烟 + 每 harness 一份集成笔记（沿用 pi-boundary 纪律）；适配器缺陷不改对方源码，反馈上游或换版本 |
+| ACP 适配器（dsh 原生 acp server、 `@agentclientprotocol/codex-acp`、opencode） | 作为**钉版外部依赖**接入（npm 包/二进制），记录版本、来源、license | 版本钉死 + 冒烟 + 每 harness 一份集成笔记（沿用 pi-boundary 纪律）；适配器缺陷不改对方源码，反馈上游或换版本 |
 | vibe-kanban（BloopAI，已停摆转社区维护） | **只读借鉴**：`crates/executors` 的 per-agent normalize 实现是事件归一化字典 | 不引入运行时依赖 |
-| 官方 SDK（claude-agent-sdk Python、@openai/codex-sdk TS） | SDK 直连族的候选（暂不建）；其事件定义作为投影语义参照 | Python SDK 才可进程内；TS SDK 仅参考 |
+| 官方 SDK（@openai/codex-sdk TS 等） | SDK 直连族的候选（暂不建）；其事件定义作为投影语义参照 | TS SDK 仅参考（Python SDK 才可进程内；随 harness 名单同步维护） |
 | VibeKit / OpenHands / terminal-bench / gate4agent | 形态与传输矩阵的参照证据 | 不引入 |
 | coder/agentapi | **排除**：PTY 屏幕解析机制违背本仓库事件契约底线 | — |
 

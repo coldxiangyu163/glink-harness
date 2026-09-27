@@ -380,7 +380,7 @@ node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 26 个角�
 
 | 键 | 默认 | 何时需要改 |
 |---|---|---|
-| `PI_GLINK_HARNESS` | `pi` | 改用 ACP 族内核（dsh / claude / codex / opencode 等）时设 `acp`；一次部署只跑一种，启动冻结 |
+| `PI_GLINK_HARNESS` | `pi` | 改用 ACP 族内核（dsh / codex / opencode 等）时设 `acp`；一次部署只跑一种，启动冻结 |
 | `PI_GLINK_ACP_COMMAND` | 空 | `PI_GLINK_HARNESS=acp` 时必填，缺失拒绝启动；宿主只做 shell 拆分、不经 shell 执行 |
 | `PI_GLINK_ACP_CREDENTIAL_FILES` | 空 | ACP agent 需要宿主只读凭据时，按 `source=dest`（`;` 分隔）注入每 run `HOME` |
 | `PI_GLINK_ACP_ENV` | 空 | 给 ACP agent 进程传环境变量时；`HOME` 不可覆盖（每 run 状态根是隔离边界） |

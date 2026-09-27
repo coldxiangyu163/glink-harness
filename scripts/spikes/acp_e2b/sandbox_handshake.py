@@ -36,12 +36,7 @@ from pi_glink.kernel.acp_e2b_env import E2BAcpSandboxClient  # noqa: E402
 from pi_glink.kernel.execution import ExecutionSpec, build_adapter  # noqa: E402
 from pi_glink.kernel.rpc import PiRpcClient  # noqa: E402
 
-#: The agents and the credential location each one reads (M2/M4/M6 measurement).
-#: ``claude-agent-acp``（M6 起为 claude-code-acp 的后继包）runs from the
-#: SDK-bundled or image-local claude CLI and needs no credential for
-#: initialize/session/new on a fresh HOME; a real model run needs
-#: ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN supplied by the host (the sandbox
-#: has no macOS Keychain).
+#: The agents and the credential location each one reads (M2/M4/M5 measurement).
 AGENTS = {
     "dsh": {
         "command": "dsh --profile acp",
@@ -50,10 +45,6 @@ AGENTS = {
     "codex-acp": {
         "command": "codex-acp",
         "credential": "~/.codex/auth.json=.codex/auth.json",
-    },
-    "claude-agent-acp": {
-        "command": "claude-agent-acp",
-        "credential": "",
     },
     # opencode（M5）：凭据是单个 auth.json；initialize/session/new 不依赖它，
     # 带上是为了同时实测每 run HOME 在沙箱内的上传与 0600 加固。

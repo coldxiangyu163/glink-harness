@@ -47,7 +47,7 @@ def test_the_harness_is_not_part_of_the_browser_visible_configuration() -> None:
 @pytest.mark.parametrize(
     "values, fragment",
     [
-        ({"PI_GLINK_HARNESS": "claude"}, "PI_GLINK_HARNESS must be one of"),
+        ({"PI_GLINK_HARNESS": "gemini"}, "PI_GLINK_HARNESS must be one of"),
         ({"PI_GLINK_HARNESS": "acp"}, "PI_GLINK_ACP_COMMAND"),
     ],
 )

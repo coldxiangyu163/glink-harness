@@ -57,7 +57,7 @@ Prompt markers select the terminal result:
 The permission-request order is selectable because real agents differ:
 ``FAKE_ACP_PERMISSION`` asks before the ``tool_call`` notification for
 ``call_1`` (the M1 order), while ``FAKE_ACP_PERMISSION_AFTER_TOOL_CALL`` asks
-after it -- the order claude-code-acp 0.16.2 uses (measured in M4), where the
+after it -- the order an ACP agent used in the M4 measurement, where the
 request omits ``toolCall.kind`` but the notification already published it.
 ``FAKE_ACP_TOOL_CALL_KIND`` overrides the kind of that notification (default
 ``execute``).

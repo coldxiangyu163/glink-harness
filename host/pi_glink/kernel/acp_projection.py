@@ -225,7 +225,7 @@ class AcpProjector:
         # notification the agent sent for the same ``toolCallId``. The
         # distinction is recorded because it is the fact that makes a
         # kind-based allowlist usable for agents that omit ``kind`` in the
-        # permission request (claude-code-acp 0.16.2, M4).
+        # permission request (measured in M4).
         tool_kind_source = str(
             frame.get("toolKindSource") or ("request" if tool_kind else "")
         )

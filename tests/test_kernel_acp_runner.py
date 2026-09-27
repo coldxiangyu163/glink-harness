@@ -236,10 +236,10 @@ def test_acp_initialize_identifies_the_client_with_a_version(tmp_path: Path) -> 
 
     Original obligation (M1): the client introduced itself by name; ``version``
     was informational and omitted. New obligation (M4): ACP's ``Implementation``
-    declares both fields, and claude-code-acp 0.16.2 validates the initialize
-    params strictly -- a ``clientInfo`` without ``version`` is answered with
-    ``-32602 Invalid params`` before any session exists (measured in M4), so
-    the host sends its own version and this regression pins it.
+    declares both fields, and the M4 measurement of an ACP agent showed it
+    validating the initialize params strictly -- a ``clientInfo`` without
+    ``version`` is answered with ``-32602 Invalid params`` before any session
+    exists, so the host sends its own version and this regression pins it.
     """
     from pi_glink import __version__ as host_version
 
@@ -600,8 +600,8 @@ def test_acp_permission_allowlist_resolves_the_kind_published_by_the_agent(
     """The kind from the agent's own ``tool_call`` notice classifies the request.
 
     Original obligation (M2): a tool-kind allowlist refused a permission request
-    that carried no ``kind`` of its own. New obligation (M4): claude-code-acp
-    0.16.2 omits ``kind`` from the request but publishes it for the same
+    that carried no ``kind`` of its own. New obligation (M4): the measured ACP
+    agent omitted ``kind`` from the request but published it for the same
     ``toolCallId`` in the preceding ``tool_call`` notification, so the adapter
     resolves the request against that published classification instead of
     guessing from the title. A request whose kind is unknown in both places is
@@ -610,7 +610,7 @@ def test_acp_permission_allowlist_resolves_the_kind_published_by_the_agent(
     log = tmp_path / "agent.jsonl"
     settings = {
         "FAKE_ACP_PERMISSION": True,
-        # claude-code-acp's measured order: tool_call notification first, then
+        # the measured M4 order: tool_call notification first, then
         # the permission request without a kind of its own.
         "FAKE_ACP_PERMISSION_AFTER_TOOL_CALL": True,
         "FAKE_ACP_TOOL_CALL_KIND": "read",

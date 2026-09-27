@@ -281,55 +281,37 @@ def test_the_acp_worker_dockerfile_pins_exactly_what_the_notes_measured() -> Non
     assert acp_worker_version(text, "CODEX_ACP_VERSION") == notes_package_pin(
         notes, "@agentclientprotocol/codex-acp"
     )
-    # M4 adds the claude pair: the ACP adapter and the CLI it drives. Both are
-    # pinned exactly, and the notes record the measured versions.
-    # 原义务（M4）：适配器 ARG `CLAUDE_CODE_ACP_VERSION` 等于 @zed-industries/
-    # claude-code-acp 的实测版本。
-    # 新义务（M6 / GLINK-ACP-08）：改用后继包 @agentclientprotocol/claude-agent-acp
-    # （入口 claude-agent-acp），ARG 随之改名 `CLAUDE_AGENT_ACP_VERSION`；钉版与
-    # 集成笔记一致性义务不变。
-    assert acp_worker_version(text, "CLAUDE_AGENT_ACP_VERSION") == notes_package_pin(
-        notes, "@agentclientprotocol/claude-agent-acp"
-    )
-    assert acp_worker_version(text, "CLAUDE_CODE_VERSION") == notes_package_pin(
-        notes, "@anthropic-ai/claude-code"
-    )
     # M5 adds opencode; its notes entry is the single measured version the
     # in-process handshake, the image and the e2b template all agree on.
     assert acp_worker_version(text, "OPENCODE_AI_VERSION") == notes_package_pin(
         notes, "opencode-ai"
     )
+    # The M4/M6 claude pair was removed from the product (GLINK-ARCH-6): the
+    # image must not carry that closed-source adapter or the CLI it drove. The
+    # absence assertion below keeps the removal from silently regressing.
+    assert "claude" not in text.lower(), "claude 层已随 GLINK-ARCH-6 移除，不得重新出现在镜像里"
     # The install line consumes the pins instead of repeating a literal.
     assert '"@deepseek-ai/dsh@${DSH_VERSION}"' in text
     assert '"@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}"' in text
-    assert '"@agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_VERSION}"' in text
-    assert '"@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"' in text
     assert '"opencode-ai@${OPENCODE_AI_VERSION}"' in text
 
 
 def test_the_acp_worker_dockerfile_self_checks_every_agent() -> None:
-    """构建期自检：五个组件的版本都能跑，且与 ARG 精确一致。
+    """构建期自检：三个组件的版本都能跑，且与 ARG 精确一致。
 
     原义务（M3a）：默认 CMD 直接跑 `dsh --version && codex-acp --version`。
-    新义务（M4）：默认 CMD 指向镜像内自检脚本 `acp-self-check`（与 e2b 模板同形），
-    覆盖 dsh、codex-acp、claude 与 claude-code-acp；当时 claude-code-acp 没有
-    --version，用安装包的 package.json 复验。
+    新义务（M4）：默认 CMD 指向镜像内自检脚本 `acp-self-check`（与 e2b 模板同形）；
+    当时自检还覆盖 M4 的 claude 适配器（已于 GLINK-ARCH-6 从产品移除，见上一个测试）。
     新义务（M5）：自检再覆盖 opencode（`opencode --version`，钉版与 ARG 比对），
     它同样靠 postinstall 从平台可选包放置二进制。
-    新义务（M6）：claude 适配器换成后继包 claude-agent-acp（入口自带 --version），
-    自检改用 `claude-agent-acp --version`，不再读 package.json。
     """
     text = ACP_DOCKERFILE.read_text(encoding="utf-8")
     assert "dsh --version" in text
     assert "codex-acp --version" in text
-    assert "claude --version" in text
     assert "opencode --version" in text
     assert 'grep -qx "${DSH_VERSION}"' in text
     assert 'grep -qx "@agentclientprotocol/codex-acp ${CODEX_ACP_VERSION}"' in text
-    assert 'grep -qx "${CLAUDE_CODE_VERSION} (Claude Code)"' in text
-    assert 'grep -qx "${CLAUDE_AGENT_ACP_VERSION}"' in text
     assert 'grep -qx "${OPENCODE_AI_VERSION}"' in text
-    assert "claude-agent-acp --version" in text
     assert "$(npm root -g)/opencode-ai/postinstall.mjs" in text
     # The default command is the same self-check, so an existing image can be
     # verified without knowing the pins.
@@ -359,8 +341,6 @@ def test_the_acp_worker_shares_the_pi_node_tag_and_stays_self_contained() -> Non
         "ARG DSH_VERSION=0.1\n",
         "ARG CODEX_ACP_VERSION=1.13\n",
         "ARG CODEX_ACP_VERSION=${SOMETHING_ELSE}\n",
-        "ARG CLAUDE_CODE_VERSION=2.1\n",
-        "ARG CLAUDE_AGENT_ACP_VERSION=latest\n",
         "ARG OPENCODE_AI_VERSION=latest\n",
         "ARG OPENCODE_AI_VERSION=1.18\n",
         "",

@@ -1,16 +1,16 @@
 """Per-run configuration for an ACP agent process.
 
 The ACP family is one client protocol over several agents (dsh, codex-acp,
-claude-agent-acp — M6 起 claude-code-acp 的后继包名，…), so this module renders
+opencode, …), so this module renders
 only what every one of them needs from the host:
 
 * **An exclusive state root.** ``runs/<id>/acp-agent`` is created owner-only and
-  exposed to the child as ``HOME``: the in-process ACP agent writes ``~/.claude``,
-  ``~/.codex``, dsh sessions and any npm state inside this run's directory
+  exposed to the child as ``HOME``: the in-process ACP agent writes ``~/.dsh``,
+  ``~/.codex``, opencode state and any npm state inside this run's directory
   instead of the operator's home, so two runs cannot share agent state and a
   destroyed run leaves nothing behind. This is the ACP analogue of the pi face's
   per-run ``PI_CODING_AGENT_DIR``. Which agents additionally honour an
-  agent-specific variable (``CODEX_HOME``, ``CLAUDE_CONFIG_DIR``, …) is measured
+  agent-specific variable (``DSH_HOME``, ``CODEX_HOME``, …) is measured
   in M2 and recorded in ``docs/acp-integration-notes.md``.
 * **A filtered environment.** The child gets the same minimal passthrough list
   the pi face gets (:data:`~pi_glink.kernel.agent_env.PASSTHROUGH_ENV`) plus the
