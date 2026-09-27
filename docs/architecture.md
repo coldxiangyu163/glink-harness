@@ -481,8 +481,8 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 U+2028/U+2029 不拆帧，与 RPC 面共用 `tests/fixtures/lf-framing.json` 语料）；prompt 本体走 stdin
 的 `prompt` 帧，不再出现在命令行（旧的 base64 prompt/system 编码机制已随 `--mode json` 路径整体废除）。
 
-**断流即失败（与旧 tee 路径的取舍，如实记录）**：RPC 通道没有第二份事件副本——旧路径把 stdout
-`tee` 进 `/home/user/events.jsonl` 作「exactly-once 完整性权威」，断流可按已交付行数补发剩余帧；
+**断流即失败（与旧 tee 路径的取舍，如实记录）**：RPC 通道没有第二份事件副本。
+旧路径把 stdout `tee` 进 `/home/user/events.jsonl` 作「exactly-once 完整性权威」，断流可按已交付行数补发剩余帧；
 新通道**流即权威**，沙箱流断开（拿不到退出码）时 run 判 `failed` / `execution_error`：已交付的帧
 保留在事件日志（它们真实到达过），缺失的尾巴不存在于任何权威副本——**不补发、不伪造完整性、
 不做 `get_state` 对账**（其响应帧走同一条已断的 stdout；SDK 重连是否重放已消费输出未规定，
@@ -491,7 +491,7 @@ U+2028/U+2029 不拆帧，与 RPC 面共用 `tests/fixtures/lf-framing.json` 语
 `kill()` 才是释放权威，一次已判定失败的断流不再被谎报为资源未释放。这套取舍换来的是双向通道：
 **运行中 abort**（取消是协议级动作，沙箱存活到收尾，被取消的 run 也能回收 `report.md` 与主会话，
 见 §5.1）与 **`session_ready` 前即知会话身份**（追问身份不符在回合前拒收，见本节「多轮续接」）。
-整套 tee/marker/补读机制（事件文件、stderr/退出码落盘、`LFLineFramer`、`EventCatchUpFailed`）
+旧机制的整套 tee/marker/补读机制（事件文件、stderr/退出码落盘、`LFLineFramer`、`EventCatchUpFailed`）
 已随旧 `E2BSandboxExecutionAdapter` 删除。
 
 命令链由 `spawn_rpc` 组合（ACP `command()` 先例）：先 `test -x` 验包守卫——模板早于宿主时以

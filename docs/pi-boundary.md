@@ -125,7 +125,7 @@ ls web/node_modules 2>/dev/null || echo "无前端依赖树（原生 ESM）"
 核验结果（2026-09-22 实测）：
 
 * ① 空输出 —— 仓库内没有 pi（或任何）TypeScript 源码副本；
-* ② 只出现 `--mode rpc`（`agent_env.py`、`docker_env.py`）与 `--mode json`（`e2b_env.py`）；
+* ② 只出现 `--mode rpc`（`agent_env.py`、`harness_pi.py`、`docker_env.py`）——三面同一套 RPC 双向通道，argv 不再有任何单面分支；
 * ③ 空输出 —— 宿主与前端连包名都不引用（注释里也不用它作为标识）；
 * ④ 空输出 —— 无密钥入库（`docs/evidence/` 已排除，因为日志里可能出现用户级别的占位字符串）；
 * ⑤ `-rw-------`（600）—— 每个 run 的运行期凭据文件权限正确；（⑥ 无前端依赖树。（①③④ 的空输出是预期结果。

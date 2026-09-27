@@ -30,7 +30,7 @@
 |---|---|---|
 | 本机进程 | `inproc` | pi 以子进程运行在宿主机器上，工作区在 `<数据根>/workspaces/<runId>` |
 | 容器 | `docker` | pi 与工作区都在一次性容器内，宿主只做编排与事件投影 |
-| 云沙箱 | `e2b` | pi 与工作区都在 E2B 沙箱内（`--mode json` 单向事件流）；模型凭据随运行期 `auth.json` 上传到沙箱（不进沙箱进程环境） |
+| 云沙箱 | `e2b` | pi 与工作区都在 E2B 沙箱内（沙箱后台命令 `stdin=True` 的 RPC 双向 stdio，与另两面同一套 `--mode rpc`）；模型凭据随运行期 `auth.json` 上传到沙箱（不进沙箱进程环境） |
 
 三面共享同一套输入/事件/收尾契约（`kernel/execution.py` 的 `ExecutionAdapter`）：每个 run 拥有
 自己的运行期配置（`runs/<id>/pi-agent/`）、session 目录（会话根基目录下的 `<id>/`，默认 `<数据根>/sessions/<id>/`）与工作区；
@@ -63,9 +63,10 @@ CLI 的 Node fetch 不认 socks5，构建走 Python SDK + `httpx[socks]`）。
 `/home/user/config/`；不进沙箱进程环境（沙箱内 `env | grep -c OPENAI_API_KEY` 实测 0），随沙箱销毁
 而消失。pi-web-access 凭据随运行期 `web-search.json` 一并上传。交付内容不只几个 JSON：整个运行期目录
 （含 `AGENTS.md`、`extensions/`、`skills/`、`prompts/` 等模板条目）按同一路径语义上传，并记录
-`(相对路径, sha256)` 清单供核验；沙箱内 JSONL 按 LF 分帧（U+2028 不得拆帧）。事件在命令运行期间
-实时投递（宿主迭代 SDK `CommandHandle` 的 stdout 流，同时 `tee` 到沙箱内 JSONL；流中断时按文件补齐，
-不漏不重；真实 E2B live 实时性尚未验收），报告会先拉回宿主工作区再校验/脱敏。
+`(相对路径, sha256)` 清单供核验；沙箱内 JSONL 按 LF 分帧（U+2028 不得拆帧）。沙箱命令以
+`background=True, stdin=True` 启动，宿主用共享 `PiRpcClient` 走同一条 stdio 通道收发帧（stdout 块
+不保证帧对齐，仍按 LF 拆帧）；流断开即 `execution_error`，已交付帧保留、不补发、不伪造完整性
+（断流取舍、取消与追问的身份验证时点见 [架构](docs/architecture.md) §5.2）。报告会先拉回宿主工作区再校验/脱敏。
 证据：[docs/evidence/e2b-run.txt](docs/evidence/e2b-run.txt)。
 
 ### Docker 执行面
