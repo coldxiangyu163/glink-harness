@@ -15,11 +15,25 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts/check.sh"
 
 def check_fixture(tmp_path: Path, *, python_status: int = 0, node_status: int = 0, preflight_status: int = 0):
     repo = tmp_path / "checkout with spaces"
-    for directory in ("scripts", ".venv/bin", "tests/web", "tests/extensions", "host", "tools"):
+    for directory in (
+        "scripts",
+        ".venv/bin",
+        "tests/web",
+        "tests/extensions",
+        "harnesses/dsh/bundles/dsh-web-fetch-jina/tests/support",
+        "host",
+        "tools",
+    ):
         (repo / directory).mkdir(parents=True)
     shutil.copyfile(SCRIPT, repo / "scripts/check.sh")
     (repo / "tests/web/example.test.mjs").write_text("// discovered but not executed by the stub\n")
     (repo / "tests/extensions/example.test.mjs").write_text(
+        "// discovered but not executed by the stub\n"
+    )
+    (repo / "harnesses/dsh/bundles/dsh-web-fetch-jina/tests/example.test.mjs").write_text(
+        "// discovered but not executed by the stub\n"
+    )
+    (repo / "harnesses/dsh/bundles/dsh-web-fetch-jina/tests/support/register-stubs.mjs").write_text(
         "// discovered but not executed by the stub\n"
     )
     python = repo / ".venv/bin/python"
@@ -36,7 +50,7 @@ def check_fixture(tmp_path: Path, *, python_status: int = 0, node_status: int = 
         "#!/bin/sh\n"
         'if [ "$1" = "-e" ]; then exit 0; fi\n'
         f'/usr/bin/env > {quote(str(repo / "node-env.txt"))}\n'
-        f'printf "%s\\n" "$@" > {quote(str(repo / "node-args.txt"))}\n'
+        f'printf "%s\\n" "$@" >> {quote(str(repo / "node-args.txt"))}\n'
         f"exit {node_status}\n"
     )
     node.chmod(0o755)
@@ -94,12 +108,17 @@ def test_checks_use_disposable_environment_and_report_optional_scope(tmp_path: P
     assert args[:3] == ["-m", "pytest", "tests"]
     assert "--deselect=tests/test_ui_tokens.py::test_ui_tokens_match_standard_library" in args
     assert "no:cacheprovider" in args
-    # 两个收集范围：前端事件模型（tests/web）与 agent 扩展单元测试
-    # （tests/extensions，GLINK-SUB-02 强制前台守卫）。
+    # 两个 node 收集/执行范围：前端事件模型（tests/web）与 agent 扩展单元测试
+    # （tests/extensions，GLINK-SUB-02 强制前台守卫），再加 dsh bundle 单测
+    # （GLINK-DSH-02，--import 注册 dsh seam 替身）；stub 以追加方式记录两次调用。
     assert (repo / "node-args.txt").read_text().splitlines() == [
         "--test",
         "tests/web/example.test.mjs",
         "tests/extensions/example.test.mjs",
+        "--import",
+        "./harnesses/dsh/bundles/dsh-web-fetch-jina/tests/support/register-stubs.mjs",
+        "--test",
+        "harnesses/dsh/bundles/dsh-web-fetch-jina/tests/example.test.mjs",
     ]
     assert list(temp.iterdir()) == []
 
@@ -138,6 +157,26 @@ def test_missing_node_tests_is_a_failure_not_a_green_empty_run(tmp_path: Path) -
     repo, env, temp = check_fixture(tmp_path)
     (repo / "tests/web/example.test.mjs").unlink()
     (repo / "tests/extensions/example.test.mjs").unlink()
+    result = invoke(repo, env)
+    assert result.returncode == 2
+    assert "空测试集" in result.stderr
+    assert not (repo / "python-env.txt").exists()
+    assert list(temp.iterdir()) == []
+
+
+def test_missing_bundle_tests_is_a_failure_not_a_green_empty_run(tmp_path: Path) -> None:
+    repo, env, temp = check_fixture(tmp_path)
+    (repo / "harnesses/dsh/bundles/dsh-web-fetch-jina/tests/example.test.mjs").unlink()
+    result = invoke(repo, env)
+    assert result.returncode == 2
+    assert "空测试集" in result.stderr
+    assert not (repo / "python-env.txt").exists()
+    assert list(temp.iterdir()) == []
+
+
+def test_missing_bundle_stub_registration_is_a_failure_not_a_green_empty_run(tmp_path: Path) -> None:
+    repo, env, temp = check_fixture(tmp_path)
+    (repo / "harnesses/dsh/bundles/dsh-web-fetch-jina/tests/support/register-stubs.mjs").unlink()
     result = invoke(repo, env)
     assert result.returncode == 2
     assert "空测试集" in result.stderr
