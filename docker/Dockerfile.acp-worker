@@ -63,14 +63,22 @@ RUN if [ "${DEBIAN_MIRROR}" != "deb.debian.org" ]; then \
     && rm -f /tmp/dsh-version /tmp/codex-acp-version /tmp/opencode-version \
     && npm cache clean --force
 
+# GLINK-DSH-02：Jina fetch bundle（out-of-tree，源码 harnesses/dsh/bundles/
+# dsh-web-fetch-jina/）。装进 dsh 安装自身的 node_modules，使每 run 的 ACP profile
+# （由 harnesses/dsh/home/ 覆盖层提供）能按 dsh.profile.bundles 解析它；bundle 内容
+# 随本 COPY 钉死在镜像里，重建即更新。宿主每 run 只铺一个小 profile 清单。
+COPY harnesses/dsh/bundles/dsh-web-fetch-jina /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@pi-glink/dsh-web-fetch-jina
+
 # 镜像内自检脚本：构建期最后一步、运行时默认 CMD、以及 docker run --rm 复验都用它。
-# 三个组件都要能跑出声明版本。
+# 三个组件都要能跑出声明版本，且 Jina bundle 必须在镜像内可见。
 RUN { \
       echo '#!/bin/sh'; \
       echo 'set -eu'; \
       echo 'dsh --version'; \
       echo 'codex-acp --version'; \
       echo 'opencode --version'; \
+      echo 'test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@pi-glink/dsh-web-fetch-jina/package.json'; \
+      echo 'echo jina-bundle=present'; \
     } > /usr/local/bin/acp-self-check \
     && chmod 0755 /usr/local/bin/acp-self-check \
     && /usr/local/bin/acp-self-check

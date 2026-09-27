@@ -1,0 +1,8 @@
+# Per-run ACP profile user layer (harnesses/dsh/home/ overlay).
+#
+# The Jina fetch bundle carries its own configuration in
+# harnesses/dsh/bundles/dsh-web-fetch-jina/cordis.patch.yml, and this file stays an
+# empty list so per-run choices keep one home. It exists because the profile
+# directory is seeded from this overlay before dsh boots: the launcher writes its
+# root config beside it and never overwrites the manifest.
+[]

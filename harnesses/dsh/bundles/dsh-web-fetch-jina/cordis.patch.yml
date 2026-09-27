@@ -1,0 +1,43 @@
+# GLINK-DSH-02 bundle layer: route web_fetch through Jina Reader (r.jina.ai).
+#
+# Why: the shipped local provider (@deepseek-ai/dsh-web-fetch-http, id `http`)
+# pins the connection to the first resolved address and lets a late socket
+# 'error' escape as an uncaught exception. On an IPv4-only sandbox, a target
+# whose only record is AAAA kills the whole dsh process (GLINK-DSH-01, root
+# cause in .herdr/reports/pids-glink-dsh-01.md).
+#
+# Bundle composition (see docs/acp-integration-notes.md §18):
+#   * the provider row is inserted with a patch-relative path, so it resolves
+#     beside this file inside the installed bundle package;
+#   * `web` selects the Jina provider explicitly (selection is never
+#     registration-order driven);
+#   * the local HTTP provider stays mounted but disabled, so a misconfiguration
+#     fails closed (WEB_PROVIDER_CONFIGURED_UNAVAILABLE) instead of silently
+#     reverting to the crash-prone backend;
+#   * the model-facing fetch budget is raised because Jina reads (PDF, JS
+#     pages) routinely exceed the 30 s default.
+
+- insert:
+    - id: web-fetch-jina
+      name: './lib/index.js'
+      config:
+        apiKeyEnv: JINA_API_KEY
+        baseURL: https://r.jina.ai
+        timeoutMs: 60000
+        maxResponseBytes: 5000000
+        maxBodyChars: 100000
+        userAgent: pi-glink-dsh-web-fetch-jina/0.1.0
+
+- id: web-fetch-http
+  disabled: true
+
+- id: web
+  config:
+    searchProvider: deepseek-official
+    fetchProvider: jina
+
+- id: tool-web
+  config:
+    fetch: true
+    searchTimeoutMs: 60000
+    fetchTimeoutMs: 60000

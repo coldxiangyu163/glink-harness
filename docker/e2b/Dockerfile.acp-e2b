@@ -59,6 +59,13 @@ RUN if [ "${DEBIAN_MIRROR}" != "deb.debian.org" ]; then \
     && rm -f /tmp/dsh-version /tmp/codex-acp-version /tmp/opencode-version \
     && npm cache clean --force
 
+# GLINK-DSH-02：Jina fetch bundle（out-of-tree，源码 harnesses/dsh/bundles/
+# dsh-web-fetch-jina/）。与 docker/Dockerfile.acp-worker 同一份内容、同一落点：
+# 装进 dsh 安装自身的 node_modules，每 run 的 ACP profile 覆盖层只提供一个小清单。
+# 该 COPY 要求构建上下文是仓库根目录（E2B CLI 默认用命令执行目录作上下文；
+# 模板构建示例在 README/notes 中固定为仓库根执行）。
+COPY harnesses/dsh/bundles/dsh-web-fetch-jina /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@pi-glink/dsh-web-fetch-jina
+
 # 模板自检脚本：构建期（E2B finalize 的 start command）与运行期都用它复验组件可执行。
 # 两个坑都踩过，写在这里：
 #   * 不能把自检写成 CMD ["sh", "-c", "dsh --version && …"]——E2B 构建流程会把
@@ -69,13 +76,15 @@ RUN if [ "${DEBIAN_MIRROR}" != "deb.debian.org" ]; then \
 #     文本里的 `\n` 吃成 `n`（实测构建日志与产物都如此），脚本会变成没有换行的
 #     一行，execve 报 “cannot execute: required file not found”。
 # 所以：CMD 指向镜像内脚本，脚本用逐行 echo 生成（不出现转义符）；各组件直接跑 `--version`
-# （不引入引号/转义）。
+# （不引入引号/转义）；再加一行 bundle 存在性检查。
 RUN { \
       echo '#!/bin/sh'; \
       echo 'set -eu'; \
       echo 'dsh --version'; \
       echo 'codex-acp --version'; \
       echo 'opencode --version'; \
+      echo 'test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@pi-glink/dsh-web-fetch-jina/package.json'; \
+      echo 'echo jina-bundle=present'; \
     } > /usr/local/bin/acp-self-check \
     && chmod 0755 /usr/local/bin/acp-self-check \
     && /usr/local/bin/acp-self-check
