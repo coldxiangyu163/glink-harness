@@ -1732,9 +1732,9 @@ p4 方案（GLINK-SUB 可见性）遗留的未验证项：ACP 面是否暴露子
   pi 的会话目录仍整体重写；ACP 的两个状态根（`home`、E2B 回收的 `recovered`）声明为**只读
   扫描**——凭据形状值并入本 run 的脱敏边界，文件字节不改写（与 §10.2/§14.1 的「agent 会话
   存储不重写」同一义务）；缺失的根按「无可扫之物」处理。
-* 未决（待 Lead 决定，本任务未擅自动）：宿主注入凭据副本（`PI_GLINK_ACP_CREDENTIAL_FILES` 的
-  dest，如 `.dsh/.credentials.yaml`）在 run 结束后的处置。文档只记录它随 run 目录生命周期保留
-  （§6.6），没有收尾保留/脱敏/删除的义务；收尾扫描读到它们的值并并入边界，但不改写。
+* 注入凭据副本（`PI_GLINK_ACP_CREDENTIAL_FILES` 的 dest，如 `.dsh/.credentials.yaml`）的
+  收尾处置已定：扫描之后删除（用户决定 C，见 §18.4；pi 面的 `auth.json` / `web-search.json`
+  同一口径，见 §18.5）。
 * 回归：`tests/test_kernel_sweep.py`（旧机制直接变红、状态文件字节不变、pi 声明与行为不变）。
 
 ### 18.2 kernel_exit 报告带 agent stderr 尾部
