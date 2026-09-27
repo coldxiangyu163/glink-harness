@@ -136,6 +136,16 @@ _CONFIG_OPTIONS_LIMIT = 20
 _CONFIG_VALUES_LIMIT = 100
 _CONFIG_TEXT_LIMIT = 300
 
+#: Bounds on the agent's stderr tail attached to a ``kernel_exit`` report. The
+#: tail is the only place an agent's own crash message (a stack trace, a missing
+#: credential, a protocol mismatch) appears: the ACP wire carries JSON-RPC only.
+#: Three ceilings keep the report bounded — lines kept, characters per line, and
+#: the whole block — and the run's redactor is applied to the resulting text
+#: before it reaches a log or an event.
+ACP_STDERR_TAIL_LINES = 20
+ACP_STDERR_TAIL_LINE_CHARS = 500
+ACP_STDERR_TAIL_CHARS = 4000
+
 #: The host-side system prompt is delivered as a leading text block of the
 #: ``session/prompt`` message. ACP v1 has no system-role channel: ``session/new``
 #: carries no prompt field, ``_meta`` is explicitly "implementations MUST NOT
@@ -666,29 +676,41 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
             self._outcome.stop_reason = "kernel_exit"
             self._outcome.error = self._kernel_exit_message(None)
 
-    def _kernel_exit_message(self, exit_code: int | None) -> str:
-        """The ``kernel_exit`` report, with the agent's status once it is known."""
+    def _kernel_exit_message(self, exit_code: int | None, *, stderr_tail: str = "") -> str:
+        """The ``kernel_exit`` report: status, cause and the agent's stderr tail.
+
+        The stderr tail is the agent's own explanation of its death (ACP itself
+        carries JSON-RPC only, so nothing else on the wire has it). It is
+        already bounded by :func:`_bounded_stderr_tail`; the caller's redaction
+        boundary is applied when this text is logged or committed (the runner
+        redacts both the terminal frame's ``error`` and its failure log).
+        """
         suffix = f"（exit code {exit_code}）" if exit_code is not None else ""
         cause = self._kernel_exit_cause or ""
-        return f"ACP agent 进程在应答 session/prompt 前退出/失联{suffix}: {cause}"
+        message = f"ACP agent 进程在应答 session/prompt 前退出/失联{suffix}: {cause}"
+        if stderr_tail:
+            message += f"\nagent stderr 尾部（有界 {ACP_STDERR_TAIL_LINES} 行）:\n{stderr_tail}"
+        return message
 
     def _complete_kernel_exit(
         self, client: AcpRpcClient, exit_code: int | None
     ) -> None:
-        """Attach the agent's own status to a pending ``kernel_exit`` report.
+        """Attach the agent's own status and stderr to a pending ``kernel_exit``.
 
         The stream ending is not the process exiting. ``close()`` has just
         reaped the child, so its exit status is available now; it is attributed
         to the agent only when the teardown did not have to stop it -- a status
         produced by terminate/kill is the host's doing, not the agent's own.
+        The same window is the only one where the agent's stderr has drained
+        (the reader finishes when the pipe closes), so the bounded tail is
+        collected here too, status or no status: a crash that cannot be reaped
+        still deserves its message in the report.
 
         The completion serves a decision that *is* the ``kernel_exit`` report:
         when the driver's stream loss only surfaced during the teardown of an
         already-decided timeout (or cancellation), the report is late and the
         decided error text stays untouched.
         """
-        if exit_code is None:
-            return
         with self._outcome_lock:
             if self._kernel_exit_cause is None:
                 return
@@ -705,7 +727,8 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
                 return
             if client.stopped_process:
                 return
-            self._outcome.error = self._kernel_exit_message(exit_code)
+            stderr_tail = _bounded_stderr_tail(client.stderr_tail(ACP_STDERR_TAIL_LINES))
+            self._outcome.error = self._kernel_exit_message(exit_code, stderr_tail=stderr_tail)
 
     def wait(self, *, cancel: Callable[[], bool], deadline: float) -> ExecutionOutcome:
         while True:
@@ -1108,6 +1131,28 @@ class AcpSandboxExecutionAdapter(AcpExecutionAdapter):
 
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _bounded_stderr_tail(lines: list[str]) -> str:
+    """The tail of an agent's stderr, bounded for one failure report.
+
+    Empty lines are dropped (a crash often prints a run of them), the block is
+    cut to the last :data:`ACP_STDERR_TAIL_LINES` lines, each line is clipped,
+    and the whole block keeps its **last** characters: the end of a crash output
+    is what names the failure. The bounds hold here even though the caller's
+    ``stderr_tail(limit)`` already asks for a bounded history.
+    """
+    if not lines:
+        return ""
+    clipped = [
+        _clip(line, ACP_STDERR_TAIL_LINE_CHARS)
+        for line in lines[-ACP_STDERR_TAIL_LINES:]
+        if line.strip()
+    ]
+    if not clipped:
+        return ""
+    block = "\n".join(clipped)
+    return block[-ACP_STDERR_TAIL_CHARS:]
 
 
 def _project_config_options(options: Any) -> list[dict[str, Any]]:

@@ -117,6 +117,11 @@ SWEEP_MAX_BYTES = 2 * 1024 * 1024
 #: turn run teardown into an unbounded walk).
 SWEEP_MAX_FILES = 2000
 
+#: Bound on the failure detail one log line may carry. The terminal frame keeps
+#: the full (redacted) text; the log line is truncated to the same order as the
+#: ACP stderr tail it may embed.
+LOG_ERROR_MAX_CHARS = 4000
+
 #: Run phases. ``open`` accepts frames and cancellation; the verdict commit
 #: moves it to ``committed``, or to ``uncommitted`` when the durable terminal
 #: append failed (the run then keeps its slot until a restart reconciles it).
@@ -1081,6 +1086,17 @@ class RunManager:
         verdict = execution.verdict
         assert verdict is not None  # _commit_verdict always decides one
         cleanup = execution.resource_facts.cleanup
+        if verdict.error:
+            # 失败详情进宿主日志：终帧的 ``error`` 已带 run 边界（ACP 的
+            # ``kernel_exit`` 文本含经有界的 agent stderr 尾部），日志这里是
+            # 同一份文本、同一边界，只另有界截断（不把未脱敏文本写出去）。
+            logger.warning(
+                "run failed run=%s status=%s stop=%s error=%s",
+                run_id,
+                verdict.status,
+                verdict.stop_reason,
+                self._run_redactor(execution).redact(verdict.error)[:LOG_ERROR_MAX_CHARS],
+            )
         logger.info(
             "run finalized run=%s status=%s stop=%s committed=%s report=%s released=%s",
             run_id,

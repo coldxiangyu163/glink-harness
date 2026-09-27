@@ -559,7 +559,11 @@ E2B live 冒烟未做**。配置交付带有 `(相对路径, sha256)` 清单，`
 `kernel_exit`；E2B 面守卫失败时 pi 从未启动，RPC 客户端的首个请求无处应答，run 以
 `execution_error` 收场（错误文本为 `PiRpcClosed` 或「pi exited with code 78」，竞态相关）。
 两面守卫写出的中文原因都只留在 stderr（Docker 面容器日志、E2B 面 RPC 客户端的
-`stderr_tail` 历史），不拼进 outcome 错误文本。构建、候选 tag、回滚句柄、实测耗时与研究记录的实测事实见
+`stderr_tail` 历史），不拼进 outcome 错误文本。ACP 面不同：协议只走 JSON-RPC，agent 自己
+的崩溃信息只在 stderr，所以 ACP 的 `kernel_exit` 报告会把有界（行数/每行/整块三层上限）的
+agent stderr 尾部拼进失败详情；终帧 `error` 与宿主失败日志是同一份文本，都先过本 run 的
+`SecretRedactor`，宿主自己 terminate/kill 导致的退出不归因给 agent（`kernel/acp_execution.py`
+的 `_kernel_exit_message`/`_complete_kernel_exit`、`acp_rpc.py::stderr_tail`）。构建、候选 tag、回滚句柄、实测耗时与研究记录的实测事实见
 `docs/evidence/prebaked-packages.txt` 与 `docs/pi-integration-notes.md` §9。
 
 **子代理包（GLINK-SUB-02）**：`pi-subagents` 自本任务起真正加载，并且仍受第 5.3 节的同一套

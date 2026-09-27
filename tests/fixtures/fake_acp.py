@@ -46,7 +46,9 @@ Prompt markers select the terminal result:
                        keep running, so only the host's teardown ends it
 ``CRASH``              exits (code 3) after accepting the prompt, no answer;
                        ``FAKE_ACP_CRASH_EXIT_DELAY`` closes stdout first and
-                       then waits that long, widening the exit window
+                       then waits that long, widening the exit window;
+                       ``FAKE_ACP_STDERR`` writes one line to stderr before the
+                       crash (the host's kernel_exit report must carry it)
 ``FAILPROMPT``         answers with a JSON-RPC error instead of a stop reason
 ``UNKNOWNSTOP``        answers with a stop reason outside the v1 set
 ``USAGE_TWICE``        two ``usage_update`` notifications (replace semantics)
@@ -434,6 +436,12 @@ def run_prompt(request: dict, params: dict) -> None:
     remember(text)
     if "CRASH" in text:
         sys.stdout.flush()
+        crash_stderr = str(setting("FAKE_ACP_STDERR") or "")
+        if crash_stderr:
+            # The agent's own explanation of the crash: ACP speaks JSON-RPC on
+            # stdout, so stderr is the only channel that carries it.
+            sys.stderr.write(crash_stderr + "\n")
+            sys.stderr.flush()
         delay = float(setting("FAKE_ACP_CRASH_EXIT_DELAY", 0) or 0)
         if delay > 0:
             # The crash's event order, widened: the protocol stream ends (the

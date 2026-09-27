@@ -37,6 +37,10 @@ logger = logging.getLogger("pi_glink.kernel.acp_rpc")
 
 _STDERR_HISTORY = 200
 _READ_CHUNK = 65536
+#: How long :meth:`AcpRpcClient.stderr_tail` waits for the reader thread after
+#: the child was reaped. The pipe's last bytes can still be in flight; the wait
+#: is bounded so a report never blocks on a pipe that stays open.
+_STDERR_DRAIN_TIMEOUT = 0.5
 
 #: JSON-RPC error codes this client produces (the spec's reserved codes).
 METHOD_NOT_FOUND = -32601
@@ -299,6 +303,15 @@ class AcpRpcClient:
                 self._pending.pop(str(request_id), None)
 
     def stderr_tail(self, limit: int = 20) -> list[str]:
+        """The last ``limit`` stderr lines, after a bounded drain of the pipe.
+
+        Called after ``close()`` reaped the child: the reader thread may still
+        be flushing the pipe's final bytes, and a crash report without them is
+        the very diagnostic gap this tail exists for.
+        """
+        reader = self._stderr_reader
+        if reader is not None and reader.is_alive():
+            reader.join(timeout=_STDERR_DRAIN_TIMEOUT)
         with self._stderr_lock:
             return self._stderr_history[-limit:]
 

@@ -22,6 +22,7 @@ A real sandbox run is covered separately by the task's live evidence.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 import subprocess
@@ -723,6 +724,43 @@ def _assistant_text(store: RunStore, run_id: str) -> str:
         str(payload.get("text") or "")
         for payload in _payloads(store, run_id, "assistant_delta")
     )
+
+
+def test_the_sandbox_face_reports_the_agent_stderr_tail_on_a_kernel_exit(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """E2B 面同样把 agent stderr 尾部带进 kernel_exit 失败详情与宿主日志（GLINK-OBS-01 项2）。
+
+    The ACP client is shared by the three faces; what this pins is that the
+    sandbox carrier's stderr queue really reaches the client's history before
+    ``close()`` completes the report — the gap the dsh r2 failure exposed.
+    """
+    secret = "sk-host-boundary-0123456789abcdef"
+    settings = {"FAKE_ACP_STDERR": f"dsh: 沙箱内崩溃 OPENAI_API_KEY={secret}"}
+    config = make_config(
+        tmp_path,
+        PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings),
+        OPENAI_API_KEY=secret,
+    )
+    sandbox = FakeSandbox(tmp_path, report=None)
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store=store, sandbox_factory=lambda **_: sandbox)
+
+    with caplog.at_level(logging.WARNING, logger="pi_glink.runs.runner"):
+        record = manager.start("CRASH 掉这个 agent")
+        final = manager.wait(record.run_id, timeout=120)
+
+    assert final is not None
+    assert final.status == FAILED and final.stop_reason == "kernel_exit"
+    error = final.error or ""
+    assert "dsh: 沙箱内崩溃" in error, "the sandbox agent's stderr must reach the report"
+    assert secret not in error
+    assert "exit code 3" in error
+    assert sandbox.killed is True
+
+    logs = "\n".join(entry.getMessage() for entry in caplog.records)
+    assert "dsh: 沙箱内崩溃" in logs
+    assert secret not in logs
 
 
 def test_acp_followup_resumes_the_parent_session_across_sandboxes(tmp_path: Path) -> None:

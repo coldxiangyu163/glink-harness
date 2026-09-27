@@ -10,6 +10,7 @@ execution adapter is the production one; only the agent process is synthetic.
 from __future__ import annotations
 
 import json
+import logging
 import shlex
 import sys
 import time
@@ -30,6 +31,7 @@ from pi_glink.kernel.execution import (
     build_adapter,
 )
 from pi_glink.kernel.rpc import PiRpcClient
+from pi_glink.redaction import REPLACEMENT
 from pi_glink.runs.runner import (
     FollowupUnavailable,
     RunManager,
@@ -323,6 +325,36 @@ def test_acp_agent_crash_before_the_prompt_answer_is_kernel_exit(tmp_path: Path)
     assert final is not None
     assert final.status == FAILED and final.stop_reason == "kernel_exit"
     assert "exit code 3" in (final.error or "")
+
+
+def test_acp_kernel_exit_carries_the_redacted_agent_stderr_tail(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """GLINK-OBS-01 项2：异常退出时 agent stderr 尾部进失败详情与宿主日志，先过 run 脱敏。"""
+    secret = "sk-host-boundary-0123456789abcdef"
+    settings = {"FAKE_ACP_STDERR": f"agent: 启动失败 OPENAI_API_KEY={secret}"}
+    _config, store, manager = build_manager(tmp_path, settings, OPENAI_API_KEY=secret)
+
+    with caplog.at_level(logging.WARNING, logger="pi_glink.runs.runner"):
+        record = manager.start("CRASH 掉这个 agent")
+        final = manager.wait(record.run_id, timeout=30)
+
+    assert final is not None
+    assert final.status == FAILED and final.stop_reason == "kernel_exit"
+    error = final.error or ""
+    assert "agent: 启动失败" in error, "the agent's own stderr must reach the failure detail"
+    assert secret not in error
+    assert REPLACEMENT in error, "the stderr text crosses the run boundary like any other text"
+
+    failed = [event for event in read_events(store, record.run_id) if event["type"] == "run_failed"]
+    assert failed, "a kernel_exit run commits run_failed"
+    detail = failed[-1]["payload"].get("error") or ""
+    assert "agent: 启动失败" in detail
+    assert secret not in detail
+
+    logs = "\n".join(entry.getMessage() for entry in caplog.records)
+    assert "agent: 启动失败" in logs, "the failure detail must also reach the host log"
+    assert secret not in logs
 
 
 def test_acp_crash_after_the_stream_ends_still_reports_the_exit_code(tmp_path: Path) -> None:

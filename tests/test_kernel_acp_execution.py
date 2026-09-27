@@ -35,8 +35,12 @@ from acp_pack import apply_acp_pack
 from pi_glink.kernel.acp_e2b_env import AcpStateRecovery
 from pi_glink.kernel.acp_env import AcpRuntime
 from pi_glink.kernel.acp_execution import (
+    ACP_STDERR_TAIL_CHARS,
+    ACP_STDERR_TAIL_LINE_CHARS,
+    ACP_STDERR_TAIL_LINES,
     AcpExecutionAdapter,
     AcpSandboxExecutionAdapter,
+    _bounded_stderr_tail,
     compose_prompt,
 )
 from pi_glink.kernel.acp_rpc import (
@@ -72,6 +76,7 @@ class ScriptedAcpClient:
     ``exit_code``           what ``close()`` returns (default 0)
     ``stopped_process``     the client's ``stopped_process`` flag
     ``close_raises``        ``close()`` raises instead of returning a status
+    ``stderr_tail``         the lines ``stderr_tail()`` answers (default [])
     """
 
     def __init__(
@@ -152,6 +157,9 @@ class ScriptedAcpClient:
         if self.script.get("close_raises"):
             raise RuntimeError("close boom")
         return self.script.get("exit_code", 0)
+
+    def stderr_tail(self, limit: int = 20) -> list[str]:
+        return list(self.script.get("stderr_tail", []))[-limit:]
 
 
 class FakeSandboxClient:
@@ -575,6 +583,89 @@ def test_a_host_stopped_process_status_is_not_attributed_to_the_agent(
     assert outcome.exit_code == 9
     assert outcome.stop_reason == "kernel_exit"
     assert "exit code" not in (outcome.error or "")
+
+
+def test_kernel_exit_report_carries_the_agent_stderr_tail(tmp_path: Path) -> None:
+    """ACP 异常退出时 agent stderr 尾部进入失败详情（有界）。"""
+    adapter, _created, _log, _frames = make_adapter(
+        tmp_path,
+        script={
+            "prompt": "closed",
+            "exit_code": 3,
+            "stderr_tail": ["agent: 无法启动", "missing credential file"],
+        },
+    )
+    adapter.start()
+    adapter.deliver_input()
+    outcome = adapter.wait(cancel=lambda: False, deadline=time.monotonic() + 30)
+    join_driver(adapter)
+    adapter.close()
+
+    assert outcome.stop_reason == "kernel_exit"
+    assert "exit code 3" in (outcome.error or "")
+    assert "agent: 无法启动" in (outcome.error or "")
+    assert "missing credential file" in (outcome.error or "")
+
+
+def test_kernel_exit_without_a_reaped_status_still_carries_stderr(tmp_path: Path) -> None:
+    """无退出码可用时，stderr 尾部仍进报告（只能拿到退出码不是放弃诊断的理由）。"""
+    adapter, _created, _log, _frames = make_adapter(
+        tmp_path,
+        script={"prompt": "closed", "exit_code": None, "stderr_tail": ["fatal: panic"]},
+    )
+    adapter.start()
+    adapter.deliver_input()
+    outcome = adapter.wait(cancel=lambda: False, deadline=time.monotonic() + 30)
+    join_driver(adapter)
+    adapter.close()
+
+    assert outcome.stop_reason == "kernel_exit"
+    assert "exit code" not in (outcome.error or "")
+    assert "fatal: panic" in (outcome.error or "")
+
+
+def test_a_host_stopped_process_gains_no_stderr_attribution(tmp_path: Path) -> None:
+    """宿主自己 terminate/kill 的进程不算 agent 自己的报告，stderr 也不归它。"""
+    adapter, _created, _log, _frames = make_adapter(
+        tmp_path,
+        script={
+            "prompt": "closed",
+            "exit_code": 9,
+            "stopped_process": True,
+            "stderr_tail": ["host teardown noise"],
+        },
+    )
+    adapter.start()
+    adapter.deliver_input()
+    outcome = adapter.wait(cancel=lambda: False, deadline=time.monotonic() + 30)
+    join_driver(adapter)
+    adapter.close()
+
+    assert outcome.stop_reason == "kernel_exit"
+    assert "host teardown noise" not in (outcome.error or "")
+
+
+def test_bounded_stderr_tail_enforces_all_three_ceilings() -> None:
+    """行数 / 每行字符 / 整块字符三个上限各自生效，且保留尾部。"""
+    # 行数界：30 行短行只保留最后 20 行。
+    kept = _bounded_stderr_tail([f"short-{index:02d}" for index in range(30)]).splitlines()
+    assert len(kept) == ACP_STDERR_TAIL_LINES
+    assert kept[0] == "short-10" and kept[-1] == "short-29"
+
+    # 单行界。
+    clipped = _bounded_stderr_tail(["y" * 900]).splitlines()
+    assert clipped == ["y" * (ACP_STDERR_TAIL_LINE_CHARS - 1) + "…"]
+
+    # 整块界：总量超限时丢掉头部、留下尾部（crash 的结尾才点名失败）。
+    block = _bounded_stderr_tail([f"{index:03d}-" + "z" * 300 for index in range(40)])
+    assert 0 < len(block) <= ACP_STDERR_TAIL_CHARS
+    assert block.endswith("z" * 300)
+    assert "039" in block
+    assert not block.startswith("000-")
+
+    # 空白行不成行；空列表得到空串。
+    assert _bounded_stderr_tail(["", "   "]) == ""
+    assert _bounded_stderr_tail([]) == ""
 
 
 def test_kernel_exit_completion_never_rewrites_a_decided_cancellation(

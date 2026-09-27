@@ -1714,3 +1714,36 @@ p4 方案（GLINK-SUB 可见性）遗留的未验证项：ACP 面是否暴露子
 子会话头带 `parentSession`/`origin:"subagent"`/`delegationDepth`，子会话内 step/tool 进度帧
 完整——**dsh 0.1.7 的子代理观察者可行，能力位可由 coarse 升级为 steps**（整份重读 +
 大小上限 + 布局 pin 为前提；增量读取不可行，文件持续重写）。
+
+## 18. GLINK-OBS-01：收尾扫描契约与 agent stderr 诊断（2026-09-27）
+
+背景：GLINK-AB-01 的 E2B 对照（dsh vs pi）暴露两处宿主缺陷。本节记录合成回归钉住的口径；
+真实 dsh/E2B live 未在本任务重跑。
+
+### 18.1 收尾脱敏改为运行时契约（原缺陷：ACP 面整体跳过）
+
+* 原缺陷：`runner._sanitize_session` 无条件读 `runtime.session_dir`，ACP 运行时没有该属性
+  → 每次 ACP run 收尾抛 `AttributeError` 被外层 `except` 吞掉（日志
+  `session credential sweep failed`），ACP 面的收尾脱敏从未执行。
+* 新义务：收尾扫描范围与处置是每个 harness 运行时自己的声明（`kernel/sweep.py::SessionSweep`、
+  `AgentRuntime.session_sweeps()` / `AcpRuntime.session_sweeps()`），runner 只消费契约。
+  pi 的会话目录仍整体重写；ACP 的两个状态根（`home`、E2B 回收的 `recovered`）声明为**只读
+  扫描**——凭据形状值并入本 run 的脱敏边界，文件字节不改写（与 §10.2/§14.1 的「agent 会话
+  存储不重写」同一义务）；缺失的根按「无可扫之物」处理。
+* 未决（待 Lead 决定，本任务未擅自动）：宿主注入凭据副本（`PI_GLINK_ACP_CREDENTIAL_FILES` 的
+  dest，如 `.dsh/.credentials.yaml`）在 run 结束后的处置。文档只记录它随 run 目录生命周期保留
+  （§6.6），没有收尾保留/脱敏/删除的义务；收尾扫描读到它们的值并并入边界，但不改写。
+* 回归：`tests/test_kernel_sweep.py`（旧机制直接变红、状态文件字节不变、pi 声明与行为不变）。
+
+### 18.2 kernel_exit 报告带 agent stderr 尾部
+
+* 原缺陷：`AcpRpcClient` 一直在收 stderr（`_stderr_history`），但没有消费者；dsh 以
+  `kernel_exit`（`ACP agent stdout closed`, exit 1）失败时，失败详情与日志里没有 agent 自己的
+  输出，无法定位。
+* 新义务：`close()` reap 后，pending 的 `kernel_exit` 报告附带**有界**（20 行 / 每行 500 字符 /
+  整块 4000 字符，保留尾端）的 agent stderr 尾部；终帧 `error` 与宿主失败日志是同一份文本，
+  都先过本 run 的 `SecretRedactor`；宿主自己 terminate/kill 的进程不归因（原守卫不变）；
+  `stderr_tail()` 在返回前有界等待 reader 线程收尾。
+* 覆盖：`tests/test_kernel_acp_execution.py`（三层上限、无退出码时仍带 stderr、宿主 kill 不
+  归因）、`tests/test_kernel_acp_runner.py`（inproc fake agent 的失败详情/日志/脱敏）、
+  `tests/test_kernel_acp_e2b.py`（fake SDK 面同链路）。
