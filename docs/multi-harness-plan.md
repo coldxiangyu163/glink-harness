@@ -151,8 +151,9 @@ harnesses/<pack>/
 | `version` | ACP 包 | 精确版本，与两个 ACP 镜像的同名 ARG 逐字一致（回归卡住） |
 | `session_config` | ACP 包（可选） | `id → value` 表（如 codex 的 `mode = "auto"`），`session/new` 后应用；agent 未声明该选项/取值时 run 失败闭环 |
 | `permission_allow` | ACP 包（可选） | ACP option/tool kind 的子集；缺省空 = fail-closed 全拒 |
+| `subagent_dispatch` | ACP 包（可选） | `sync`（缺省：派发调用的终态即子代理结果）或 `async`（派发被接受即 completed，子代理继续运行，由 run 终帧收口；dsh 声明）；投影据此判定，不识别 agent 回复措辞 |
 
-* pi 包不声明 `command`/`package`/`version`/`session_config`/`permission_allow`——出现即拒绝
+* pi 包不声明 `command`/`package`/`version`/`session_config`/`permission_allow`/`subagent_dispatch`——出现即拒绝
   （这些键对 pi 族没有消费者）。pi 的版本固定点仍是 `docker/Dockerfile.worker` /
   `docker/e2b/Dockerfile.e2b` 的 `ARG PI_VERSION` 与 `harnesses/pi/settings.json` 的包 pin。
 * `capabilities.md` 只写**已知成立**的事实（例如 pi 包的子代理工具面）；不确定的 agent 可以

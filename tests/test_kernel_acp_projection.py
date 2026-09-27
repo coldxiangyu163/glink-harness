@@ -947,13 +947,15 @@ def test_subagent_updates_are_suppressed_and_the_terminal_update_finishes() -> N
     ]
 
 
-def test_dsh_async_dispatch_ack_does_not_finish_the_child() -> None:
-    """dsh 的 ``started subagent <id>`` 只是派发确认，不是子代理完成（GLINK-OBS-01）。
+def test_async_pack_dispatch_acceptance_does_not_finish_the_child() -> None:
+    """声明 ``subagent_dispatch="async"`` 的包（dsh）：completed 只是派发被接受。
 
-    真实 dsh r1：工具终态与子代理会话创建相差 17ms，子代理会话随后继续运行
-    约 5 分钟；若在这里发 ``subagent_finished``，产品事件就与会话事实不一致。
+    真实 dsh r1（GLINK-OBS-01）：工具终态与子代理会话创建相差 17ms，子代理会话随后
+    继续运行约 5 分钟；若在这里发 ``subagent_finished``，产品事件就与会话事实不一致。
+    原义务（OBS-01 初版）：宿主用正则识别 dsh 的 ``started subagent <id>`` 回复文本；
+    新义务：由包清单声明派发语义，投影不读 agent 的措辞。
     """
-    projector = AcpProjector(SecretRedactor())
+    projector = AcpProjector(SecretRedactor(), subagent_dispatch="async")
     _project(projector, _subagent_call())
     ack = _project(
         projector,
@@ -988,9 +990,9 @@ def test_dsh_async_dispatch_ack_does_not_finish_the_child() -> None:
     assert late == []
 
 
-def test_dsh_async_dispatch_ack_on_arrival_emits_started_only() -> None:
+def test_async_pack_dispatch_completed_on_arrival_emits_started_only() -> None:
     """同一次通知里就已完成的异步派发也只发 started。"""
-    projector = AcpProjector(SecretRedactor())
+    projector = AcpProjector(SecretRedactor(), subagent_dispatch="async")
     produced = _project(
         projector,
         _subagent_call(
@@ -1009,8 +1011,48 @@ def test_dsh_async_dispatch_ack_on_arrival_emits_started_only() -> None:
     assert [kind for kind, _ in produced] == [events.SUBAGENT_STARTED]
 
 
+def test_a_sync_pack_is_not_fooled_by_dispatch_wording() -> None:
+    """未声明 async 的包：即使回复文本长得像 dsh 的派发确认，终态仍是完成。
+
+    证明判定来自包声明而不是回复措辞（措辞变化不能改变语义，反之亦然）。
+    """
+    projector = AcpProjector(SecretRedactor())
+    _project(projector, _subagent_call())
+    produced = _project(
+        projector,
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "sub-1",
+            "status": "completed",
+            "content": [
+                {"type": "content", "content": {"type": "text", "text": "started subagent x"}}
+            ],
+        },
+    )
+    assert [kind for kind, _ in produced] == [events.SUBAGENT_FINISHED]
+
+
+def test_async_pack_failed_dispatch_still_ends_the_child_as_failed() -> None:
+    """async 包的派发被拒（failed）不是「已接受」：child 以失败收口。"""
+    projector = AcpProjector(SecretRedactor(), subagent_dispatch="async")
+    _project(projector, _subagent_call())
+    produced = _project(
+        projector,
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "sub-1",
+            "status": "failed",
+            "content": [
+                {"type": "content", "content": {"type": "text", "text": "dispatch refused"}}
+            ],
+        },
+    )
+    assert [kind for kind, _ in produced] == [events.SUBAGENT_FINISHED]
+    assert produced[0][1]["status"] == "failed"
+
+
 def test_synchronous_acp_subagent_completion_still_finishes() -> None:
-    """非 dsh 形状的终态（其他 ACP agent 的同步派发）保持原义务：收口该 call。"""
+    """同步派发包（未声明 async，其他 ACP agent）的终态保持原义务：收口该 call。"""
     projector = AcpProjector(SecretRedactor())
     _project(projector, _subagent_call())
     produced = _project(

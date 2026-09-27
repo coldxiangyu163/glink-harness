@@ -218,10 +218,11 @@ pi 族另有 `_meta.json` 增强（R2，见下「R2 增强与关联」）。
   （防御，不伪造类型事件）。
 * `subagent_finished {toolCallId, ns: [...], status, isError, resultPreview}`：一次
   `tool_finished` 收口该 call 的全部子代理；`resultPreview` 不切分，每个 child 文档记同一份
-  限幅摘要。**ACP/dsh 的异步派发是例外**：dsh 的 `subagent` 工具完成时只回
-  `started subagent <childId>`（派发已接受），子代理随后独立运行（真实数据里工具终态与子代理
-  会话创建相差 17ms，子代理会话继续跑了约 5 分钟）；这个确认形状的工具终态**不产生**
-  `subagent_finished`，child 保持 `running`，由 run 终帧按下面的跟随规则收口
+  限幅摘要。**异步派发的 ACP 包是例外**：包清单声明
+  `subagent_dispatch = "async"`（dsh：`subagent` 工具在派发被接受时就以 completed 结束，只回
+  `started subagent <childId>`，子代理随后独立运行；真实数据里工具终态与子代理会话创建相差
+  17ms，子代理会话继续跑了约 5 分钟）时，completed 的派发调用**不产生**
+  `subagent_finished`（failed 的派发仍以失败收口），child 保持 `running`，由 run 终帧按下面的跟随规则收口
   （clean→finished、failed→interrupted、cancelled→cancelled）——宁可不报完成，也不误报完成。
   其他 ACP agent 的同步工具终态仍照常收口。
 * subagent 调用的 `tool_updated` 一律抑制（`"(running...)"` 占位无信息）；通用

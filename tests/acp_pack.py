@@ -31,6 +31,7 @@ def write_acp_pack(
     name: str = "dsh",
     session_config: tuple[tuple[str, str], ...] = (),
     permission_allow: tuple[str, ...] = (),
+    subagent_dispatch: str = "",
 ) -> Path:
     """Write ``root/harnesses/<name>/harness.toml``; return the harnesses root.
 
@@ -51,6 +52,8 @@ def write_acp_pack(
         f"package = {json.dumps(TEST_PACKAGE)}",
         f"version = {json.dumps(TEST_VERSION)}",
     ]
+    if subagent_dispatch:
+        lines.append(f"subagent_dispatch = {json.dumps(subagent_dispatch)}")
     if session_config:
         lines.append("")
         lines.append("[session_config]")
@@ -76,6 +79,8 @@ def apply_acp_pack(values: dict, tmp_path: Path) -> dict:
     command = values.pop("PI_GLINK_ACP_COMMAND", "")
     session = values.pop("PI_GLINK_ACP_SESSION_CONFIG", "")
     allow = values.pop("PI_GLINK_ACP_PERMISSION_ALLOW", "")
+    #: Test-only knob (never a host variable): the pack's declared dispatch mode.
+    dispatch = values.pop("TEST_ACP_SUBAGENT_DISPATCH", "")
     if not command:
         return values
     packs = write_acp_pack(
@@ -83,6 +88,7 @@ def apply_acp_pack(values: dict, tmp_path: Path) -> dict:
         command,
         session_config=parse_session_config(session),
         permission_allow=parse_permission_allow(allow),
+        subagent_dispatch=dispatch,
     )
     values["PI_GLINK_HARNESS"] = "dsh"
     values["PI_GLINK_HARNESSES_DIR"] = str(packs)

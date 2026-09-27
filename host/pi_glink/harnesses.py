@@ -62,6 +62,13 @@ ACP_PERMISSION_TOOL_KINDS = (
     "other",
 )
 
+#: How an ACP agent's ``subagent`` tool reports dispatch (manifest
+#: ``subagent_dispatch``). ``sync``: the tool call ends when the child ends, so
+#: its terminal status is the child's outcome. ``async``: the tool call ends as
+#: soon as the dispatch is accepted and the child keeps running (dsh), so a
+#: ``completed`` status is only the acceptance, never the child's completion.
+SUBAGENT_DISPATCH_MODES = ("sync", "async")
+
 _PACK_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$")
 _TOP_LEVEL_KEYS = frozenset(
@@ -74,6 +81,7 @@ _TOP_LEVEL_KEYS = frozenset(
         "version",
         "session_config",
         "permission_allow",
+        "subagent_dispatch",
     }
 )
 
@@ -94,6 +102,7 @@ class HarnessPack:
     version: str = ""
     session_config: tuple[tuple[str, str], ...] = ()
     permission_allow: tuple[str, ...] = ()
+    subagent_dispatch: str = "sync"
     capabilities: Path | None = None
     home: Path | None = None
 
@@ -175,13 +184,22 @@ def load_pack(harnesses_dir: Path, name: str) -> HarnessPack:
     version = ""
     session_config: tuple[tuple[str, str], ...] = ()
     permission_allow: tuple[str, ...] = ()
+    subagent_dispatch = "sync"
     if family == "acp":
         package = _non_empty_text(document, "package", manifest)
         version = _parse_version(document, manifest)
         session_config = _parse_session_config(document, manifest)
         permission_allow = _parse_permission_allow(document, manifest)
+        subagent_dispatch = _parse_subagent_dispatch(document, manifest)
     else:
-        for key in ("command", "package", "version", "session_config", "permission_allow"):
+        for key in (
+            "command",
+            "package",
+            "version",
+            "session_config",
+            "permission_allow",
+            "subagent_dispatch",
+        ):
             if key in document:
                 raise HarnessPackError(
                     f"harness 清单 {key} 只对 family=\"acp\" 生效：{manifest}"
@@ -214,6 +232,7 @@ def load_pack(harnesses_dir: Path, name: str) -> HarnessPack:
         version=version,
         session_config=session_config,
         permission_allow=permission_allow,
+        subagent_dispatch=subagent_dispatch,
         capabilities=capabilities if capabilities.exists() else None,
         home=home_path,
     )
@@ -282,3 +301,13 @@ def _parse_permission_allow(document: dict, manifest: Path) -> tuple[str, ...]:
         if item not in tokens:
             tokens.append(item)
     return tuple(tokens)
+
+
+def _parse_subagent_dispatch(document: dict, manifest: Path) -> str:
+    raw = document.get("subagent_dispatch", "sync")
+    if raw not in SUBAGENT_DISPATCH_MODES:
+        raise HarnessPackError(
+            f"harness 清单 subagent_dispatch 只能是 {' 或 '.join(SUBAGENT_DISPATCH_MODES)}："
+            f"{manifest}（{raw!r}）"
+        )
+    return raw

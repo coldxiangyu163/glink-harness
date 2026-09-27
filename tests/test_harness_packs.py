@@ -66,6 +66,8 @@ def test_the_repository_packs_declare_the_expected_families_and_commands() -> No
     assert dsh.family == "acp" and dsh.command == ("dsh", "--profile", "acp")
     assert (dsh.package, dsh.version) == ("@deepseek-ai/dsh", "0.1.5-rc.3")
     assert dsh.session_config == () and dsh.permission_allow == ()
+    # dsh 的 subagent 工具异步派发（GLINK-OBS-01 实测），由包声明而非宿主识别回复文本。
+    assert dsh.subagent_dispatch == "async"
 
     codex = load_pack(REPO_PACKS, "codex")
     assert codex.command == ("codex-acp",)
@@ -76,6 +78,8 @@ def test_the_repository_packs_declare_the_expected_families_and_commands() -> No
     opencode = load_pack(REPO_PACKS, "opencode")
     assert opencode.command == ("opencode", "acp")
     assert (opencode.package, opencode.version) == ("opencode-ai", "1.18.32")
+    # 未声明即同步：子代理工具调用的终态就是子代理的结果。
+    assert codex.subagent_dispatch == "sync" and opencode.subagent_dispatch == "sync"
 
 
 def test_a_missing_harnesses_directory_offers_no_names(tmp_path: Path) -> None:
@@ -132,6 +136,17 @@ def test_capability_prompt_is_read_verbatim(tmp_path: Path) -> None:
             'command = ["fake"]\npackage = "p"\nversion = "1.0.0"\n'
             'permission_allow = ["everything"]\n',
             "permission_allow",
+        ),
+        (
+            'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "acp"\n'
+            'command = ["fake"]\npackage = "p"\nversion = "1.0.0"\n'
+            'subagent_dispatch = "background"\n',
+            "subagent_dispatch",
+        ),
+        (
+            'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "pi"\n'
+            'subagent_dispatch = "async"\n',
+            "只对 family=\"acp\"",
         ),
     ],
 )
@@ -191,6 +206,22 @@ def test_an_acp_pack_may_carry_session_config_and_permission_allow(tmp_path: Pat
     pack = load_pack(tmp_path / "harnesses", "demo")
     assert pack.session_config == (("mode", "agent"),)
     assert pack.permission_allow == ("allow_once", "read")
+
+
+def test_an_acp_pack_declares_its_subagent_dispatch_mode(tmp_path: Path) -> None:
+    write_manifest(
+        tmp_path,
+        "demo",
+        'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "acp"\n'
+        'command = ["fake"]\npackage = "demo-package"\nversion = "1.2.3"\n'
+        'subagent_dispatch = "async"\n',
+    )
+    pack = load_pack(tmp_path / "harnesses", "demo")
+    assert pack.subagent_dispatch == "async"
+    config = build_config(
+        build_values(tmp_path, tmp_path / "harnesses", PI_GLINK_HARNESS="demo"), REPO_ROOT
+    )
+    assert config.acp_subagent_dispatch == "async"
 
 
 def test_an_empty_home_overlay_directory_is_a_directory_not_a_failure(tmp_path: Path) -> None:

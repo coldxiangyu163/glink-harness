@@ -275,7 +275,9 @@ class AcpHarnessFamily(HarnessFamily):
         return PreparedRuntime(runtime=runtime, secret_values=tuple(runtime.secrets))
 
     def make_projector(self, redactor: "SecretRedactor") -> AcpProjector:
-        return AcpProjector(redactor)
+        return AcpProjector(
+            redactor, subagent_dispatch=self._config.acp_subagent_dispatch
+        )
 
     # -- (d) adapter 组装 --------------------------------------------------------
 

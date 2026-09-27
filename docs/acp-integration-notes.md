@@ -1765,13 +1765,18 @@ p4 方案（GLINK-SUB 可见性）遗留的未验证项：ACP 面是否暴露子
     `subagent_finished` 相隔 17ms，而子代理会话继续运行约 5 分钟，主会话靠
     `agent/inbox/spliced` 收子代理回报。宿主当时把工具终态当完成，产品事件因此误报完成。
 * 原义务：`subagent_finished` 由一次 `tool_finished` 收口该 call 的全部子代理（§3.5）。
-* 新义务（收窄，只对 dsh 的派发确认形状）：工具终态文本匹配
-  `^\s*started\s+subagent\s+\S+` 时不产生 `subagent_finished`，也不释放 call 状态（后续占位
+* 新义务：`completed` 的派发调用不产生 `subagent_finished`，也不释放 call 状态（后续占位
   更新继续抑制）；child 文档保持 `running`，由 run 终帧按 §3.4/§3.5 收口
-  （clean→finished、failed→interrupted、cancelled→cancelled）。其他 ACP agent 的同步工具终态
-  行为不变。
-* 回归：`tests/test_kernel_acp_projection.py`（ack 形状不发 finished、迟到的占位更新仍抑制、
-  非 ack 终态照常收口）、`tests/test_kernel_acp_runner.py`（fake agent 异步派发：clean run
+  （clean→finished、failed→interrupted、cancelled→cancelled）。`failed` 的派发调用（派发被拒）
+  仍以失败收口。同步派发的 ACP agent 行为不变。
+* 判定来源（2026-09-27 follow-up 修订）：初版在 ACP 公共投影里用正则识别 dsh 的回复文本
+  `^\s*started\s+subagent\s+\S+`，把 dsh 特有语义写进了公共层、且依赖上游措辞。现改为
+  **包清单声明**：`harnesses/dsh/harness.toml` 的 `subagent_dispatch = "async"`（ACP 包可选键，
+  缺省 `sync`；pi 包出现即拒绝），经 `HostConfig.acp_subagent_dispatch` 交给 `AcpProjector`；
+  投影不再读任何 agent 的回复措辞。
+* 回归：`tests/test_kernel_acp_projection.py`（async 包 completed 不发 finished、迟到的占位
+  更新仍抑制、async 包 failed 仍以失败收口、sync 包即使回复长得像派发确认也照常收口）、
+  `tests/test_harness_packs.py`（清单解析、非法取值与 pi 包拒绝、仓库 dsh 包声明 async）、`tests/test_kernel_acp_runner.py`（fake agent 异步派发：clean run
   只到 started 且终帧收口 finished；派发后崩溃 → child interrupted）；fake_acp 新增
   `SUBAGENT` marker（可组合 `CRASH`）。
 * 未覆盖：真实 dsh/E2B live 未复跑；`resultPreview` 在派发确认场景为空（诚实，不拿确认文本

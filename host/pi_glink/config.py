@@ -153,6 +153,10 @@ class HostConfig:
     #: agent that does not advertise the option/value fails the run: an
     #: explicitly configured value is never silently dropped.
     acp_session_config: tuple[tuple[str, str], ...] = ()
+    #: How the selected ACP pack's ``subagent`` tool reports dispatch (the
+    #: manifest's ``subagent_dispatch``: ``sync`` default, ``async`` for dsh).
+    #: The projector reads it instead of recognising any agent's reply text.
+    acp_subagent_dispatch: str = "sync"
     openai_api_key: str = field(repr=False, default="")
     context_window: int = _DEFAULT_CONTEXT_WINDOW
     max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS
@@ -431,6 +435,7 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         acp_env=acp_env,
         acp_permission_allow=pack.permission_allow,
         acp_session_config=pack.session_config,
+        acp_subagent_dispatch=pack.subagent_dispatch,
         pack_capabilities=pack.capabilities_text(),
         pack_home=pack.home,
         pi_bin=_text(values, "PI_GLINK_PI_BIN", "pi"),

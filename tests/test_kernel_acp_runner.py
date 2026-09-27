@@ -383,7 +383,9 @@ def test_dsh_async_subagent_ack_leaves_the_child_running_until_the_run_ends(tmp_
     ``started subagent <childId>``；宿主不能拿它当完成。
     """
     settings = {"FAKE_ACP_LOG": str(tmp_path / "agent.jsonl")}
-    _config, store, manager = build_manager(tmp_path, settings)
+    _config, store, manager = build_manager(
+        tmp_path, settings, TEST_ACP_SUBAGENT_DISPATCH="async"
+    )
     record = manager.start("SUBAGENT 派发一个子代理")
     final = manager.wait(record.run_id, timeout=30)
 
@@ -407,7 +409,9 @@ def test_dsh_async_subagent_ack_leaves_the_child_running_until_the_run_ends(tmp_
 def test_dsh_async_subagent_child_follows_a_failed_run_as_interrupted(tmp_path: Path) -> None:
     """派发后崩溃：child 保持 running，run 失败时收口为 interrupted（与真实 dsh r2 同形）。"""
     settings = {"FAKE_ACP_LOG": str(tmp_path / "agent.jsonl")}
-    _config, store, manager = build_manager(tmp_path, settings)
+    _config, store, manager = build_manager(
+        tmp_path, settings, TEST_ACP_SUBAGENT_DISPATCH="async"
+    )
     record = manager.start("SUBAGENT 派发然后 CRASH 掉这个 agent")
     final = manager.wait(record.run_id, timeout=30)
 
