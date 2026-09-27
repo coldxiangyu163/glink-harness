@@ -340,7 +340,7 @@ child 在前端显示为普通「进行中」，不伪造进度。
 (b) 追问准入与续接种子——族追加门禁、工作区复用、会话种子与 `resume_session` 值、会话身份
 的校验时机；(c) runtime 渲染与 projector 工厂（渲染中新知的秘密经 `PreparedRuntime` 交出，
 由 runner 按原序并入本 run 脱敏边界后才构造 projector；渲染出的 runtime 同时自带
-`session_sweeps()` 声明收尾扫描哪些会话/状态路径以及能否重写，见 §6.1）；(d) adapter 组装——各族持有自己的
+`session_sweeps()` 声明收尾扫描哪些会话/状态路径、能否重写、哪些注入凭据副本要删除，见 §6.1）；(d) adapter 组装——各族持有自己的
 plan 方法（pi 的 rpc/docker/e2b_rpc plan，ACP 的 inproc/docker/e2b plan），内部委托
 `execution.build_adapter`；docker 容器名预持久化是资源台账身份（面关切），留在 runner；
 (e) 终态词汇归一化——`model_stop_verdict` 把各族自己的 stop 词汇（pi 的
@@ -608,7 +608,7 @@ Dockerfile 的边界约束，缺 `pi-subagents` 只会退化成“没有子代�
 | 事件总线 / `events.jsonl` | 提交（先落盘）前再脱敏一次 | `runs/runner.py::_emit` |
 | 报告文件 | 经工作区目录句柄读取、脱敏、在 run 目录句柄内原子写入 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `runs/runner.py::_recover_report` |
 | 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源；子代理分支会话与 `subagent-artifacts/` 同目录被同一边界清扫 | `runs/runner.py::_sanitize_session_file`、`docker_env.host_session_path` |
-| ACP 状态根 | 收尾扫描范围与处置由运行时契约声明：agent 自己的会话存储（`acp-agent/home`，E2B 回收后 `acp-agent/recovered`）**只读扫描**——凭据形状值并入本 run 边界，文件字节不改写（改写会破坏追问要续接的会话，与 §10.2 继承口径同一义务）；缺失的根按「无可扫之物」处理 | `kernel/sweep.py::SessionSweep`、`kernel/acp_env.py::AcpRuntime.session_sweeps`、`runs/runner.py::_sanitize_session`、`_absorb_session_secrets` |
+| ACP 状态根 | 收尾扫描范围与处置由运行时契约声明：agent 自己的会话存储（`acp-agent/home`，E2B 回收后 `acp-agent/recovered`）**只读扫描**——凭据形状值并入本 run 边界，文件字节不改写（改写会破坏追问要续接的会话，与 §10.2 继承口径同一义务）；**注入凭据副本**（`PI_GLINK_ACP_CREDENTIAL_FILES` 的 dest）在扫描之后逐个删除（只删已知相对路径：不按模式匹配、不跟随链接、必须在根内；追问会从源重新注入，继承已 skip 这些目标）；删除失败记入终帧 `artifactFailures` 并告警，不改变终态；缺失的根按「无可扫之物」处理 | `kernel/sweep.py::SessionSweep`、`kernel/acp_env.py::AcpRuntime.session_sweeps`、`runs/runner.py::_sanitize_session`、`_absorb_session_secrets`、`_remove_credential_copies`、`artifacts.py::ArtifactTree.remove` |
 | 子代理镜像 | E2B 面回收的 `runs/<id>/subagents/`（分支会话 + 产物）收尾时经目录句柄清扫，与 §5.2 同一条边界 | `runs/runner.py::_sanitize_workspace`、`kernel/e2b_env.py::recover_subagent_files` |
 | 子代理文档 | `runs/<id>/children/<n>/child.json` 只由已过两道脱敏的事件载荷构造（投影 → 提交前再脱敏），`GET /api/runs/{id}/children` 按存储原样下发，不引入新秘密；`children/<n>/<file>` 产物下载按报告下载同一套规则（服务前再脱敏、`X-Redacted`） | `runs/runner.py::_emit`、`store.py::read_children`、`web_routes.py` |
 | 报告下载 | `report_path` 不是下载能力：只认两个固定位置——宿主产物 `runs/<id>/artifacts/report.md`，以及旧版本写下的本 run 工作区 `workspaces/<id>/report.md`（只读，从不改写历史）；其他路径一律视为无报告。服务前再脱敏，响应头 `X-Redacted` 标明是否发生；`hasReport` 用同一位置规则与同一拒绝条件计算 | `store.py::report_location`、`web_routes.py::_send_report`、`artifacts.py` |
@@ -669,7 +669,9 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 `models-store.json`。仓库里的 `harnesses/pi/` 只是模板，永远不作为运行目录使用；`pi-agent/` 不共享，
 所以并发 run 不会互写凭据或扩展。ACP 族的对应物是 `runs/<id>/acp-agent/home`（子进程的
 `HOME`）：先铺 `harnesses/<pack>/home/` 覆盖层、再只读复制注入凭据（凭据目标优先，不被覆盖层
-覆盖）且值并入该 run 脱敏边界；e2b 面在沙箱销毁前有界回收为
+覆盖）且值并入该 run 脱敏边界；**run 收尾在只读扫描之后按 `credential_dests` 删除宿主
+一侧的注入凭据副本**（`home` 与 `recovered` 两处；原义务是随 run 目录生命周期保留，
+新义务见 [ACP 集成笔记](acp-integration-notes.md) §18.4）；e2b 面在沙箱销毁前有界回收为
 `acp-agent/recovered`，追问时灌回新沙箱。追问继承哪一个状态根按父 run 记录的 `executor`
 推导（e2b→`recovered`，其余→`home`），不随宿主当前执行面配置漂移；无 `executor` 字段的
 旧记录回退为按当前配置推导（详见 [ACP 集成笔记](acp-integration-notes.md)）。

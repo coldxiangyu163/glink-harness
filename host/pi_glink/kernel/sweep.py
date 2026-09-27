@@ -16,6 +16,11 @@ runner 里的类型分支。
   文件字节不动。ACP 状态根是 **agent 自己的会话存储**：改写会破坏追问要
   续接的会话，因此既有义务是「不重写，边界靠 redactor 知道这些值保持」
   （``docs/acp-integration-notes.md`` §10.2、§14.1）。
+* ``credential_copies``：宿主注入的凭据副本在该根下的**已知相对路径**，只读
+  扫描完成之后逐个删除（GLINK-OBS-01：原义务「副本随 run 目录生命周期保留」
+  → 新义务「收尾删除」，见 ``docs/acp-integration-notes.md`` §18.4）。只删
+  列出的路径本身（不按模式匹配、不跟随链接、路径必须在根内）；删除失败记入
+  收尾事实并告警，不改变 run 终态。
 
 runner 只按契约遍历：主会话文件是否属于某个根、根能否重写都由运行时声明，
 runner 不再询问具体 runtime 类型的属性。
@@ -37,3 +42,6 @@ class SessionSweep:
     rewrite: bool = True
     #: ``RunRecord.session_file`` 记录的主会话文件是否属于这个根（pi）。
     carries_session_file: bool = False
+    #: 宿主注入的凭据副本在该根下的已知相对路径；扫描之后收尾删除，
+    #: 每个路径只删其本身（不做模式匹配、不跟随链接、必须在根内）。
+    credential_copies: tuple[str, ...] = ()

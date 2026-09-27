@@ -29,7 +29,10 @@ from it with ``openat``-style calls:
 * writes create a fresh temporary file inside the verified parent directory
   and publish it with ``renameat``: a link at the destination is replaced
   (its target untouched), a hard link is broken, and the write can never land
-  in a directory outside the tree.
+  in a directory outside the tree;
+* a removal unlinks one named regular file through its verified parent
+  directory; a link is refused without touching its target, and the directory
+  chain is re-verified first.
 
 Paths given to a tree are relative, or absolute but lexically inside the root;
 ``..`` components are refused. Callers never fall back to path-based I/O when
@@ -170,6 +173,32 @@ class ArtifactTree:
         return found
 
     # -- writes ---------------------------------------------------------------
+
+    def remove(self, path: str | Path) -> bool:
+        """Delete one regular file inside the tree without following any link.
+
+        ``False`` means the leaf was already absent (nothing to delete). A
+        symbolic link, a non-regular file, an outside path and an unusable
+        directory chain all raise :class:`ArtifactError` — the same boundary
+        the reads and writes use, so a link is never followed (its target is
+        untouched) and only the named leaf is unlinked. Directories are never
+        removed.
+        """
+        parts = self._parts(path)
+        chain = self._walk(parts[:-1], create=False)
+        try:
+            try:
+                self._leaf_stat(chain[-1], parts[-1], path)
+            except ArtifactMissing:
+                return False
+            self._verify(chain, parts[:-1])
+            try:
+                os.unlink(parts[-1], dir_fd=chain[-1])
+            except OSError as exc:
+                raise ArtifactError(f"无法删除文件: {path}") from exc
+            return True
+        finally:
+            _close_all(chain)
 
     def replace(
         self,

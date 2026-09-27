@@ -241,6 +241,41 @@ def test_replace_breaks_a_hard_link_and_is_bounded(tmp_path: Path) -> None:
     assert (root / "alias.md").read_text(encoding="utf-8") == "replaced\n"
 
 
+def test_remove_unlinks_only_the_named_regular_file(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "nested").mkdir(parents=True)
+    leaf = root / "nested" / "credentials.json"
+    leaf.write_text("secret\n", encoding="utf-8")
+    keep = root / "nested" / "settings.json"
+    keep.write_text("keep\n", encoding="utf-8")
+
+    with ArtifactTree(root) as tree:
+        assert tree.remove("nested/credentials.json") is True
+        assert tree.remove("nested/credentials.json") is False, "已不存在不是错误"
+        with pytest.raises(ArtifactError):
+            tree.remove("nested")  # 目录不是可删对象
+        with pytest.raises(ArtifactError):
+            tree.remove("../outside")  # 越界路径一律拒绝
+
+    assert not leaf.exists()
+    assert keep.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_remove_refuses_a_link_without_touching_the_target(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text("outside\n", encoding="utf-8")
+    (root / "credentials.json").symlink_to(outside)
+
+    with ArtifactTree(root) as tree:
+        with pytest.raises(ArtifactError, match="链接"):
+            tree.remove("credentials.json")
+
+    assert outside.read_text(encoding="utf-8") == "outside\n", "链接目标不得被删"
+    assert (root / "credentials.json").is_symlink()
+
+
 # -- the run pipeline ---------------------------------------------------------
 
 

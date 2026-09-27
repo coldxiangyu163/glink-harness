@@ -4,11 +4,13 @@
 运行时没有该属性，于是每次 ACP run 收尾都抛 ``AttributeError`` 并被外层
 ``except`` 吞掉（``session credential sweep failed``）——整个会话面脱敏被跳过。
 
-修复后「哪些路径需要扫描、能否重写」是运行时自己的声明（``session_sweeps``），
-runner 只消费契约。这里钉住三件事：
+修复后「哪些路径需要扫描、能否重写、哪些注入凭据副本要删除」是运行时自己的
+声明（``session_sweeps``），runner 只消费契约。这里钉住四件事：
 
 * ACP 状态根声明为只读扫描：凭据形状值并入本 run 的脱敏边界，但 agent 自己
   的会话存储一个字节都不改写（追问要续接的就是这些文件）；
+* 注入凭据副本（``credential_copies``）在扫描**之后**从两个状态根逐个删除，
+  且只删已知相对路径（链接/越界不跟随也不删）；
 * pi 面的声明与行为不变（会话目录允许重写，主会话文件来自 run 记录）；
 * 整个 ``_sanitize_session`` 路径在 ACP 运行时上不再抛错。
 """
@@ -57,20 +59,28 @@ def build_context(tmp_path: Path, run_id: str) -> tuple[RunManager, RunStore, Ru
 
 
 def test_acp_runtime_declares_read_only_state_roots(tmp_path: Path) -> None:
-    """ACP 的两个状态根都声明为「扫描值、不重写」。"""
+    """ACP 的两个状态根都声明为「扫描值、不重写」，并带上注入凭据副本。"""
     directory = tmp_path / "data" / "runs" / "r1" / "acp-agent"
-    runtime = AcpRuntime(directory=directory, home=directory / ACP_HOME_DIRNAME, command="dsh")
+    runtime = AcpRuntime(
+        directory=directory,
+        home=directory / ACP_HOME_DIRNAME,
+        command="dsh",
+        credential_dests=(".dsh/.credentials.yaml",),
+    )
 
     sweeps = runtime.session_sweeps()
 
-    assert [(sweep.root, sweep.rewrite, sweep.carries_session_file) for sweep in sweeps] == [
-        (directory / ACP_HOME_DIRNAME, False, False),
-        (directory / ACP_RECOVERED_DIRNAME, False, False),
+    assert [
+        (sweep.root, sweep.rewrite, sweep.carries_session_file, sweep.credential_copies)
+        for sweep in sweeps
+    ] == [
+        (directory / ACP_HOME_DIRNAME, False, False, (".dsh/.credentials.yaml",)),
+        (directory / ACP_RECOVERED_DIRNAME, False, False, (".dsh/.credentials.yaml",)),
     ]
 
 
 def test_acp_session_sweep_learns_credentials_without_rewriting_state(tmp_path: Path) -> None:
-    """原失败机制的直接回归：ACP 运行时进入收尾扫描不抛错、不破坏会话存储。"""
+    """原失败机制的直接回归：不抛错；会话存储不被改写；已知凭据副本被删除。"""
     manager, store, record, workspace = build_context(tmp_path, "acp-sweep")
     directory = tmp_path / "data" / "runs" / "acp-sweep" / "acp-agent"
     home = directory / ACP_HOME_DIRNAME
@@ -84,7 +94,12 @@ def test_acp_session_sweep_learns_credentials_without_rewriting_state(tmp_path: 
     )
     # 二进制会话存储（zstd）也必须原样保留：不能因为含 \x00 以外的原因被改写。
     session_bytes = session.read_bytes()
-    runtime = AcpRuntime(directory=directory, home=home, command="dsh")
+    runtime = AcpRuntime(
+        directory=directory,
+        home=home,
+        command="dsh",
+        credential_dests=(".dsh/.credentials.yaml",),
+    )
     execution = _Execution(record=record, workspace=workspace)
     execution.runtime = runtime
     # 非空边界（生产里总是含 host 秘密与本 run 凭据）：避开 "空则回退 host" 分支，
@@ -96,11 +111,75 @@ def test_acp_session_sweep_learns_credentials_without_rewriting_state(tmp_path: 
 
     assert changed is True, "扫描出的凭据形状值必须并入本 run 的边界"
     assert YAML_SECRET in boundary.known_values
-    assert JSON_SECRET in boundary.known_values
+    assert JSON_SECRET in boundary.known_values, "副本必须在删除之前被读到"
+    # 已知相对路径的注入副本收尾删除。
+    assert not credentials.exists(), "注入凭据副本必须在收尾时删除"
     # agent 自己的会话存储一个字节都不动（续接依赖它）。
-    assert credentials.read_text(encoding="utf-8") == f"apiKey: {YAML_SECRET}\n"
     assert session.read_bytes() == session_bytes
     assert store.get(record.run_id) is not None
+
+
+def test_acp_session_sweep_deletes_copies_from_both_state_roots(tmp_path: Path) -> None:
+    """home 与 E2B 回收的 recovered 两处副本都删，非凭据文件保留。"""
+    manager, _store, record, workspace = build_context(tmp_path, "acp-both")
+    directory = tmp_path / "data" / "runs" / "acp-both" / "acp-agent"
+    home = directory / ACP_HOME_DIRNAME
+    recovered = directory / ACP_RECOVERED_DIRNAME
+    for root, marker in ((home, "home"), (recovered, "recovered")):
+        (root / ".dsh").mkdir(parents=True)
+        (root / ".dsh" / ".credentials.yaml").write_text(
+            f"apiKey: {YAML_SECRET}\n", encoding="utf-8"
+        )
+        (root / ".dsh" / "settings.yaml").write_text(f"profile: {marker}\n", encoding="utf-8")
+        (root / ".dsh" / "sessions").mkdir()
+        (root / ".dsh" / "sessions" / "session.v3.jsonl").write_text(
+            "{\"type\": \"message\"}\n", encoding="utf-8"
+        )
+    runtime = AcpRuntime(
+        directory=directory,
+        home=home,
+        command="dsh",
+        credential_dests=(".dsh/.credentials.yaml",),
+    )
+    execution = _Execution(record=record, workspace=workspace)
+    execution.runtime = runtime
+    execution.redactor = SecretRedactor(["bootstrap-secret-0123456789"])
+
+    manager._sanitize_session(execution)  # noqa: SLF001
+
+    for root in (home, recovered):
+        assert not (root / ".dsh" / ".credentials.yaml").exists()
+        assert (root / ".dsh" / "settings.yaml").is_file(), "非凭据状态文件必须保留"
+        assert (root / ".dsh" / "sessions" / "session.v3.jsonl").is_file(), "会话文件必须保留"
+    assert execution.artifact_facts.artifact_failures == []
+
+
+def test_acp_session_sweep_never_follows_a_linked_or_escaping_dest(tmp_path: Path) -> None:
+    """链接 dest 与越界 dest 不被跟随：外部目标保留，失败记入收尾事实。"""
+    manager, _store, record, workspace = build_context(tmp_path, "acp-hostile")
+    directory = tmp_path / "data" / "runs" / "acp-hostile" / "acp-agent"
+    home = directory / ACP_HOME_DIRNAME
+    (home / ".dsh").mkdir(parents=True)
+    outside = tmp_path / "outside-credentials.yaml"
+    outside.write_text(f"apiKey: {YAML_SECRET}\n", encoding="utf-8")
+    (home / ".dsh" / ".credentials.yaml").symlink_to(outside)
+    runtime = AcpRuntime(
+        directory=directory,
+        home=home,
+        command="dsh",
+        credential_dests=(".dsh/.credentials.yaml", "../../outside-credentials.yaml"),
+    )
+    execution = _Execution(record=record, workspace=workspace)
+    execution.runtime = runtime
+    execution.redactor = SecretRedactor(["bootstrap-secret-0123456789"])
+
+    manager._sanitize_session(execution)  # noqa: SLF001
+
+    assert outside.read_text(encoding="utf-8") == f"apiKey: {YAML_SECRET}\n", "不跟随链接"
+    assert (home / ".dsh" / ".credentials.yaml").is_symlink(), "链接本身也不删（拒绝处理）"
+    details = "\n".join(execution.artifact_facts.artifact_failures)
+    assert ".dsh/.credentials.yaml" in details
+    assert "outside-credentials.yaml" in details
 
 
 def test_acp_session_sweep_ignores_a_missing_recovered_root(tmp_path: Path) -> None:

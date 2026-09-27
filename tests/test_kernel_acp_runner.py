@@ -888,9 +888,10 @@ def test_injected_credential_values_are_redacted_from_the_run(tmp_path: Path) ->
     assert final is not None and final.status == FINISHED
     run_home = store.run_dir(record.run_id) / "acp-agent" / "home"
     copied = run_home / "state" / "credentials.json"
-    assert copied.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
-    assert (copied.stat().st_mode & 0o777) == 0o600
-    assert (copied.parent.stat().st_mode & 0o777) == 0o700
+    assert not copied.exists(), (
+        "注入凭据副本必须在收尾时删除（GLINK-OBS-01 决定 C）"
+    )
+    assert (run_home / "state").stat().st_mode & 0o777 == 0o700
     assert source.read_text(encoding="utf-8") == json.dumps({"seedToken": secret})
     raw = store.events_path(record.run_id).read_text(encoding="utf-8")
     assert secret not in raw
@@ -898,6 +899,35 @@ def test_injected_credential_values_are_redacted_from_the_run(tmp_path: Path) ->
     # The host config did not carry the secret: only the copied file could
     # have taught this run's redactor the value.
     assert secret not in json.dumps(config.public_view())
+
+
+def test_a_failed_credential_copy_removal_is_reported_and_keeps_the_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """删除失败进终帧 artifactFailures 并告警，但不改变 run 终态（决定 C）。"""
+    secret = "opaque-shared-value-1234567890"
+    source = tmp_path / "credentials.json"
+    source.write_text(json.dumps({"seedToken": secret}), encoding="utf-8")
+    settings = {"FAKE_ACP_LOG": str(tmp_path / "agent.jsonl"), "FAKE_ACP_WRITE_REPORT": True}
+    _config, store, manager = build_manager(
+        tmp_path, settings, PI_GLINK_ACP_CREDENTIAL_FILES=f"{source}=state/credentials.json"
+    )
+
+    from pi_glink.artifacts import ArtifactTree
+
+    def refuse(self, path):
+        raise OSError("simulated removal failure")
+
+    monkeypatch.setattr(ArtifactTree, "remove", refuse)
+    record = manager.start("普通问题")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final is not None and final.status == FINISHED
+    terminal = read_events(store, record.run_id)[-1]
+    details = "\n".join(terminal["payload"]["artifactFailures"])
+    assert "注入凭据副本删除失败" in details
+    copied = store.run_dir(record.run_id) / "acp-agent" / "home" / "state" / "credentials.json"
+    assert copied.exists(), "删除失败时副本如实保留"
 
 
 def test_acp_env_entries_reach_the_agent_process(tmp_path: Path) -> None:

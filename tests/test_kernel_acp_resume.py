@@ -616,6 +616,55 @@ def test_inherited_state_secrets_join_the_child_redaction_boundary(tmp_path: Pat
     assert inherited_secret not in assistant_text(read_events(store, child.run_id))
 
 
+def test_followup_reinjects_a_credential_copy_the_parent_teardown_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """父 run 收尾删除注入副本后，追问 run 从源重新注入（GLINK-OBS-01 决定 C）。
+
+    删除不破坏续接的依据：凭据目标由 ``prepare_acp_runtime`` 每次重新渲染，
+    继承时又已 skip ``credential_dests``；副本收尾后无用途。
+    """
+    source = tmp_path / "operator-credentials.json"
+    source.write_text(
+        json.dumps({"seedToken": "opaque-shared-value-1234567890"}), encoding="utf-8"
+    )
+    settings = {"FAKE_ACP_LOG": str(tmp_path / "agent.jsonl"), "FAKE_ACP_WRITE_REPORT": True}
+    _config, store, manager = build_manager(
+        tmp_path,
+        settings,
+        PI_GLINK_ACP_CREDENTIAL_FILES=f"{source}=state/credentials.json",
+    )
+    parent = run_first_turn(manager, "第一轮：先看一下工作区")
+    parent_copy = state_home(store, parent.run_id) / "state" / "credentials.json"
+    assert not parent_copy.exists(), "父 run 的注入副本已在收尾删除"
+
+    # 子 run 的收尾删除前确认副本存在（即已从源重新注入），同时记录它被删。
+    from pi_glink.artifacts import ArtifactTree
+
+    removals: list[tuple[str, str, bool]] = []
+    original_remove = ArtifactTree.remove
+
+    def watching_remove(self, path):
+        existed = (self.root / path).exists()
+        result = original_remove(self, path)
+        removals.append((str(self.root), str(path), existed))
+        return result
+
+    monkeypatch.setattr(ArtifactTree, "remove", watching_remove)
+    child = manager.start("追问：继续", parent_run_id=parent.run_id)
+    child_final = manager.wait(child.run_id, timeout=30)
+    assert child_final is not None and child_final.status == FINISHED
+
+    child_home = str(state_home(store, child.run_id))
+    assert (
+        child_home,
+        "state/credentials.json",
+        True,
+    ) in removals, "追问必须从源重新注入凭据副本，并在收尾删除"
+    child_copy = state_home(store, child.run_id) / "state" / "credentials.json"
+    assert not child_copy.exists()
+
+
 # -- run 记录落 harness/executor/agent 事实 + 追问门禁比字段 ----------------------
 
 

@@ -1709,6 +1709,12 @@ class RunManager:
                     changed = True
             elif self._absorb_session_secrets(target.root, redactor):
                 changed = True
+            if target.credential_copies:
+                # 删除必须在只读扫描之后：先让本 run 的边界记住这些值，再从
+                # 盘上拿掉副本（否则删除后就没有值可学）。
+                self._remove_credential_copies(
+                    execution, target.root, target.credential_copies
+                )
         return changed
 
     def _sanitize_session_file(
@@ -1777,6 +1783,46 @@ class RunManager:
                 if redactor.known_values != known:
                     changed = True
         return changed
+
+    def _remove_credential_copies(
+        self,
+        execution: _Execution,
+        root: Path,
+        relatives: tuple[str, ...],
+    ) -> None:
+        """Delete the host-injected credential copies from one state root.
+
+        原义务：注入的凭据副本随 run 目录生命周期保留（``acp-integration-notes``
+        §6.6）。新义务（GLINK-OBS-01 用户决定 C）：run 收尾在只读扫描之后删除这些
+        **已知相对路径**的副本——追问由 ``prepare_acp_runtime`` 从源重新注入、
+        继承已 skip ``credential_dests``，副本收尾后没有用途。只删列出的路径本身：
+        不做模式匹配、不跟随链接（链接或越界路径只记失败，不碰目标）、不删目录。
+        删除失败记入收尾事实并告警，**不改变 run 终态**。
+        """
+        try:
+            tree = ArtifactTree(root)
+        except ArtifactError:
+            # 该状态根不存在（例如 inproc 面没有 recovered）：没有副本可删。
+            return
+        with tree:
+            for relative in relatives:
+                try:
+                    removed = tree.remove(relative)
+                except (ArtifactError, OSError) as exc:
+                    detail = (
+                        f"注入凭据副本删除失败: {relative}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    logger.warning("run=%s %s", execution.record.run_id, detail)
+                    execution.artifact_facts.artifact_failures.append(detail)
+                    continue
+                if removed:
+                    logger.info(
+                        "removed injected credential copy run=%s path=%s/%s",
+                        execution.record.run_id,
+                        root,
+                        relative,
+                    )
 
     def _sanitize_workspace(
         self,

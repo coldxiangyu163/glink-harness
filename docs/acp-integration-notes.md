@@ -644,7 +644,9 @@ pi 面模板 `pi-glink-worker` 也未动（`e2b 模板实测`）。
 ### 6.6 与 M2/M3a 的差异与风险
 
 * **承载面差异只在传输**：e2b 面没有容器挂载，所以每 run HOME 靠“上传 + 沙箱内 chmod”，
-  凭据副本在上传后仍留在宿主 run 目录（0600，随 run 目录生命周期），不是只读挂载；
+  凭据副本在上传后仍留在宿主 run 目录（0600），不是只读挂载；**原义务**：副本随 run 目录
+  生命周期保留；**新义务（GLINK-OBS-01 用户决定 C）**：run 收尾在只读扫描之后按
+  `credential_dests` 删除宿主一侧的副本（`home` 与 `recovered` 两处，见 §18.4）。
   `files.write` 没有 mode 参数，0600 由紧随其后的 `chmod` 施加（已先把状态根 0700，且沙箱
   本身是单 run 单用户），因此没有容器面的嵌套只读挂载这一层——沙箱内无法验证“凭据文件不可
   改写/删除”的容器级只读语义（`宿主代码`/`e2b 实测`）。
@@ -1774,3 +1776,28 @@ p4 方案（GLINK-SUB 可见性）遗留的未验证项：ACP 面是否暴露子
   `SUBAGENT` marker（可组合 `CRASH`）。
 * 未覆盖：真实 dsh/E2B live 未复跑；`resultPreview` 在派发确认场景为空（诚实，不拿确认文本
   冒充结论）。
+
+### 18.4 注入凭据副本收尾删除（GLINK-OBS-01 决定 C）
+
+* 原义务：注入的凭据副本随 run 目录生命周期保留（§6.6 原文），收尾只扫描其值并入本 run
+  脱敏边界、不改写文件（§18.1）。
+* 新义务（用户决定 C）：run 收尾在只读扫描之后，按 `credential_dests`
+  （`PI_GLINK_ACP_CREDENTIAL_FILES` 的 dest）**删除**宿主注入的凭据副本，`home` 与 E2B
+  回收的 `recovered` 两处都删。理由：追问由 `prepare_acp_runtime` 从源重新渲染
+  （§10.2/§14.2），继承时 `inherit_acp_state` 已 skip `credential_dests`，副本收尾后没有
+  用途；删除缩小 0600 明文在宿主磁盘上的驻留面。
+* 机制：运行时契约 `kernel/sweep.py::SessionSweep.credential_copies`（ACP runtime 从
+  `credential_dests` 声明），runner 在 `_sanitize_session` 内对每个状态根先
+  `_absorb_session_secrets`（只读扫描、值并入本 run 边界）再 `_remove_credential_copies`。
+  删除经 `ArtifactTree.remove`（目录句柄锚定、逐级 `O_NOFOLLOW`、打开后复核）：只删列出的
+  已知相对路径本身——不做模式匹配、不跟随链接（链接或越界只报错，目标不动）、不删目录、
+  文件不存在不算失败。
+* 失败口径：删除失败记入 run 的收尾事实（终帧 `artifactFailures`）并写宿主日志告警，
+  **不改变 run 终态**。
+* 回归：`tests/test_kernel_sweep.py`（两个状态根都删、非凭据状态文件与会话文件保留、扫描
+  先于删除（值仍在 redactor 中）、链接/越界 dest 不跟随且外部目标保留）、
+  `tests/test_artifacts.py`（`ArtifactTree.remove` 的普通文件/缺失/目录/越界/链接语义）、
+  `tests/test_kernel_acp_runner.py`（端到端删除 + 删除失败不改终态）、
+  `tests/test_kernel_acp_resume.py`（父 run 副本删除后追问重新注入并在子 run 收尾再删）。
+* 未覆盖：真实 E2B live 未复跑；e2b 面沙箱内副本随沙箱销毁，宿主一侧的 `home`/`recovered`
+  删除只由 fake SDK 面覆盖。

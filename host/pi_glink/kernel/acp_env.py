@@ -148,10 +148,22 @@ class AcpRuntime:
         folds any credential-shaped value into this run's redaction boundary —
         the same rule recovery and inheritance follow — leaving every byte the
         agent wrote untouched.
+
+        注入凭据副本（:attr:`credential_dests`）在只读扫描之后由收尾删除：
+        追问会从源重新注入（``prepare_acp_runtime``），继承也已 skip 这些目标，
+        副本收尾后没有用途（GLINK-OBS-01 用户决定 C，§18.4）。本 run 的边界
+        已经包含这些值，所以扫描先于删除。
         """
+        copies = self.credential_dests
         return (
-            SessionSweep(root=self.home, rewrite=False),
-            SessionSweep(root=self.directory / ACP_RECOVERED_DIRNAME, rewrite=False),
+            SessionSweep(
+                root=self.home, rewrite=False, credential_copies=copies
+            ),
+            SessionSweep(
+                root=self.directory / ACP_RECOVERED_DIRNAME,
+                rewrite=False,
+                credential_copies=copies,
+            ),
         )
 
 
