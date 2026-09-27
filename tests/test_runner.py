@@ -25,7 +25,7 @@ from pi_glink.kernel.execution import (
     SessionInfo,
 )
 from pi_glink.kernel.harness import Verdict
-from pi_glink.kernel.runner import (
+from pi_glink.runs.runner import (
     FollowupUnavailable,
     RunBusy,
     RunManager,
@@ -530,7 +530,7 @@ def test_process_death_after_the_prompt_converges_quickly(tmp_path: Path) -> Non
 def test_usage_is_summed_across_requests_and_not_double_counted(tmp_path: Path) -> None:
     """100 + 200 tokens must add up to 300; a repeated identity counts once."""
     from pi_glink.kernel.projection import Projector  # noqa: PLC0415
-    from pi_glink.kernel.runner import _Execution  # noqa: PLC0415 - private unit under test
+    from pi_glink.runs.runner import _Execution  # noqa: PLC0415 - private unit under test
 
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
@@ -1109,7 +1109,7 @@ def test_run_data_directories_are_created_private(tmp_path: Path) -> None:
 
 def open_execution(manager: RunManager, store: RunStore, workspace: Path, run_id: str):
     """An open execution without a kernel: the typed-event commit seam."""
-    from pi_glink.kernel.runner import _Execution  # noqa: PLC0415
+    from pi_glink.runs.runner import _Execution  # noqa: PLC0415
 
     record = store.create("子代理", run_id=run_id, workspace=workspace)
     execution = _Execution(record=record, workspace=workspace)
@@ -1684,7 +1684,7 @@ def test_finalize_drives_its_steps_in_the_contract_order(
     record = store.create("顺序探针", run_id="orderprobe01")
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    from pi_glink.kernel.runner import _Execution  # noqa: PLC0415, SLF001
+    from pi_glink.runs.runner import _Execution  # noqa: PLC0415, SLF001
 
     execution = _Execution(record=record, workspace=workspace)
 

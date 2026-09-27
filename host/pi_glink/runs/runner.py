@@ -27,7 +27,7 @@ exclusive ownership of the data root (:mod:`pi_glink.ownership`); a committed
 terminal frame whose settled copy is missing is settled, never overwritten.
 Restart reconciliation, operator adjudication and the online identity-probe
 sweep are implemented by the resource-ledger collaborator
-(:mod:`pi_glink.kernel.resource_ledger`); the manager keeps thin forwards under
+(:mod:`pi_glink.runs.resource_ledger`); the manager keeps thin forwards under
 its existing names.
 
 Everything that reads as "the pi family does X, the ACP family does Y" lives
@@ -73,13 +73,13 @@ from ..store import (
     RunRecord,
     RunStore,
 )
-from .acp_env import AcpRuntime
-from .agent_env import AgentRuntime, RunCredentials
-from .docker_env import (
+from ..kernel.acp_env import AcpRuntime
+from ..kernel.agent_env import AgentRuntime, RunCredentials
+from ..kernel.docker_env import (
     container_name_for as docker_container_name,
     host_session_path as docker_host_session_path,
 )
-from .execution import (
+from ..kernel.execution import (
     CleanupReport,
     ExecutionAdapter,
     ExecutionOutcome,
@@ -89,20 +89,20 @@ from .execution import (
 
 # ``FollowupUnavailable`` is defined in the family module (family gates raise
 # it) and re-exported here: ``web_routes`` and existing importers keep their
-# ``kernel.runner`` import unchanged.
-from .harness import FollowupUnavailable, HarnessFamily, Verdict, select_family
-from .projection import Projector
+# ``runs.runner`` import unchanged.
+from ..kernel.harness import FollowupUnavailable, HarnessFamily, Verdict, select_family
+from ..kernel.projection import Projector
 # ``RunBusy`` is defined next to the ledger because both the admission gate and
 # the ledger's adjudication raise it; re-exported here for existing importers.
-from .resource_ledger import ResourceLedger, RunBusy
-from .rpc import PiRpcClient
+from ..kernel.rpc import PiRpcClient
 from ..tenancy import (
     TenantContext,
     TenantCredentialStore,
     TenantNotConfigured,
 )
+from .resource_ledger import ResourceLedger, RunBusy
 
-logger = logging.getLogger("pi_glink.kernel.runner")
+logger = logging.getLogger("pi_glink.runs.runner")
 
 #: System prompt appended to every run (pi's own prompt stays untouched).
 RESEARCH_PROMPT_FILENAME = "research-prompt.md"
@@ -926,7 +926,7 @@ class RunManager:
 
     # -- restart reconciliation and resource adjudication ---------------------
     #
-    # The implementations live in :class:`pi_glink.kernel.resource_ledger.ResourceLedger`
+    # The implementations live in :class:`pi_glink.runs.resource_ledger.ResourceLedger`
     # (the external-resource ledger collaborator built in ``__init__``); these
     # forwards keep the manager's existing surface for ``app.py``, ``cli.py``
     # and callers that predate the split.

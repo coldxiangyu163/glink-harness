@@ -41,7 +41,7 @@ from pi_glink.blueprints import (
 )
 from pi_glink.config import HostConfig, build_config
 from pi_glink.events import EventBus
-from pi_glink.kernel.runner import BlueprintUnavailable, RunManager
+from pi_glink.runs.runner import BlueprintUnavailable, RunManager
 from pi_glink.kernel.rpc import PiRpcClient
 from pi_glink.store import RunStore
 from pi_glink.tenancy import TenantContext, TenantCredentialStore

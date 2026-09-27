@@ -15,16 +15,21 @@
 
 另一个既定方向是**多 harness 平台化**：宿主保持 harness 无关，`kernel/` 泛化为 harness 适配层，候选内核包括 deepseek-harness、Claude Code、Codex 及一切 ACP 兼容 agent。方向、架构与里程碑见 [多 harness 方案](multi-harness-plan.md)；当前仓库已落地两个 harness 族——pi 族（三个执行面均 `--mode rpc`，GLINK-ARCH-3 起 e2b 面也已收敛）与 ACP 族（一切 ACP 兼容 agent 经 stdio JSON-RPC 双向桥接，dsh 0.1.7+ 为首个实测 agent）；本文的进程拓扑、事件契约与追问门禁对两族统一描述，pi 特有的协议细节仍以 pi 为参照系，ACP 族的协议事实见 [ACP 集成笔记](acp-integration-notes.md)。
 
-## 1. 三层结构
+## 1. 分层结构
 
 | 层 | 位置 | 职责 | 不做什么 |
 |---|---|---|---|
 | 前端 | `web/` | 工作台外壳、运行时间线、报告预览 | 不解析终端文本，不做业务编排 |
-| 宿主 | `host/pi_glink/` | 配置冻结、run 编排、事件总线、HTTP/SSE、存储 | 不导入 pi，不实现研究方法论 |
-| 内核接入 | `host/pi_glink/kernel/` | 启动 pi、消费官方 headless 协议、事件归一化 | 不定制内核，不依赖未文档化接口 |
+| 宿主 | `host/pi_glink/` | 配置冻结、事件总线、HTTP/SSE、存储 | 不导入 pi，不实现研究方法论 |
+| 编排层 | `host/pi_glink/runs/` | run 准入、执行骨架与收尾顺序、终态提交、外部资源台账 | 不解析内核协议帧，不定制内核 |
+| 内核接入 | `host/pi_glink/kernel/` | 启动 pi、消费官方 headless 协议、事件归一化 | 不导入编排层或宿主编排模块，不定制内核 |
 | 内核配置与扩展 | `agent/` | pi 的可版本化配置：settings、工作约定、扩展 | 不放密钥，不放宿主实现 |
 
-依赖方向单向：`前端 → 宿主 HTTP → kernel → pi 进程`；`agent/` 只被 pi 读取。
+依赖方向单向：`前端 → 宿主 HTTP → 编排层 → kernel → pi 进程`；`agent/` 只被 pi 读取。
+`host/pi_glink/kernel/` 不得反向导入 `runs/`、`tenancy`、`ownership`、`blueprints`、
+`web_*`、`app`、`cli`；`store` 只在三个 harness 族模块
+（`harness.py` / `harness_pi.py` / `harness_acp.py`）中导入（族策略读 RunRecord 与会话种子），
+由 `tests/test_repository_boundaries.py` 的导入方向规则卡住。
 内核包（node_modules 里的 pi）始终是外部依赖，仓库不持有它的源码。
 
 ## 2. 进程拓扑
@@ -35,7 +40,8 @@
                        ├─ DataRootOwnership（data_root/host.lock 独占；先证明所有权再对账）
                        ├─ EventBus（每 run 单调 seq；先落盘再发布；有界实时队列）
                        ├─ RunStore（meta.json / events.jsonl / artifacts；终帧即终态提交）
-                       └─ KernelRunner ── harness 选择（配置级 PI_GLINK_HARNESS，默认 pi）
+                       └─ RunManager（`runs/`：准入 / 执行 / 收尾 / 终态提交）
+                          └─ harness 选择（配置级 PI_GLINK_HARNESS，默认 pi）
                               ├─ pi 族：  inproc（stdio RPC）/ docker（docker run -i，stdio RPC）/ e2b（沙箱后台命令
                               │          stdin=True + send_stdin，同一套 stdio RPC）
                               └─ ACP 族： inproc / docker / e2b 均为 stdio JSON-RPC 双向桥接
@@ -47,7 +53,7 @@
 `agent_env.py`；ACP 族：`acp_rpc.py` / `acp_projection.py` / `acp_env.py`；执行面传输：
 `execution.py` + `docker_env.py` / `e2b_env.py` / `acp_e2b_env.py`；两族各自的 run 生命周期
 策略：`harness.py` 的 `HarnessFamily` 接口与 `harness_pi.py` / `harness_acp.py` 两个实现，
-见 §4「族接口」），Run 管理不承担任何单面的收尾逻辑（§5.1）。
+见 §4「族接口」），`runs/runner.py` 的 RunManager 不承担任何单面的收尾逻辑（§5.1）。
 ACP 族的协议事实、能力矩阵与冒烟证据见 [ACP 集成笔记](acp-integration-notes.md) 与
 [多 harness 方案](multi-harness-plan.md)。
 
@@ -288,7 +294,7 @@ child 在前端显示为普通「进行中」，不伪造进度。
    按 `LOCAL_WEB_EXECUTOR` 选择执行面（见 §5）；
 3. 事件投影 → `EventBus.commit`：先落 `events.jsonl`，再实时给 SSE（见 §3.1）；
 4. 执行面把冻结输入交给内核，等待「落定」或超时/取消/进程退出；
-5. 收尾把四类事实分开，各有唯一 owner 与提交点（`kernel/runner.py`）：
+5. 收尾把四类事实分开，各有唯一 owner 与提交点（`runs/runner.py`）：
 
    1. **执行事实**：执行面 outcome、最终模型结果、事件日志健康度，run 处于 open 阶段时收集；
    2. **产物事实**：先向执行面回收产物（E2B 从沙箱拉到工作区），再 `close()` 执行面；随后经
@@ -378,7 +384,7 @@ Docker/E2B，也不删除任何资源。
 「已不存在」只认执行面的契约（inspect 的 no-such、SDK 的 `False` 返回或 `SandboxNotFoundException`
 类型）：探测失败、超时、鉴权错误或无法判定的返回一律保持持有。对账不在准入锁内执行，关闭宿主时
 停止该线程；`inproc` 宿主不启用它（不取得外部资源；遗留的外部身份仍走离线人工裁决）。
-台账、重启对账、人工裁决与在线扫描的实现归属 `kernel/resource_ledger.py`（`RunManager` 上的同名方法
+台账、重启对账、人工裁决与在线扫描的实现归属 `runs/resource_ledger.py`（`RunManager` 上的同名方法
 只是转发，探针组装——含 E2B 冻结凭据——也在该模块内完成）。
 
 **所有权、重启对账与关闭**：宿主先取得 `data_root/host.lock` 的独占 `flock`（进程存活期间
@@ -568,11 +574,11 @@ Dockerfile 的边界约束，缺 `pi-subagents` 只会退化成“没有子代�
 | 出口 | 处理 | 代码 |
 |---|---|---|
 | 事件投影 | 载荷里每个字符串递归脱敏；delta 走尾部暂存（§3.3） | `kernel/projection.py::project_event(frame, redactor)`、`redaction.py::StreamRedactor` |
-| 事件总线 / `events.jsonl` | 提交（先落盘）前再脱敏一次 | `kernel/runner.py::_emit` |
-| 报告文件 | 经工作区目录句柄读取、脱敏、在 run 目录句柄内原子写入 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `kernel/runner.py::_recover_report` |
-| 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源；子代理分支会话与 `subagent-artifacts/` 同目录被同一边界清扫 | `kernel/runner.py::_sanitize_session_file`、`docker_env.host_session_path` |
-| 子代理镜像 | E2B 面回收的 `runs/<id>/subagents/`（分支会话 + 产物）收尾时经目录句柄清扫，与 §5.2 同一条边界 | `kernel/runner.py::_sanitize_workspace`、`kernel/e2b_env.py::recover_subagent_files` |
-| 子代理文档 | `runs/<id>/children/<n>/child.json` 只由已过两道脱敏的事件载荷构造（投影 → 提交前再脱敏），`GET /api/runs/{id}/children` 按存储原样下发，不引入新秘密；`children/<n>/<file>` 产物下载按报告下载同一套规则（服务前再脱敏、`X-Redacted`） | `kernel/runner.py::_emit`、`store.py::read_children`、`web_routes.py` |
+| 事件总线 / `events.jsonl` | 提交（先落盘）前再脱敏一次 | `runs/runner.py::_emit` |
+| 报告文件 | 经工作区目录句柄读取、脱敏、在 run 目录句柄内原子写入 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `runs/runner.py::_recover_report` |
+| 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源；子代理分支会话与 `subagent-artifacts/` 同目录被同一边界清扫 | `runs/runner.py::_sanitize_session_file`、`docker_env.host_session_path` |
+| 子代理镜像 | E2B 面回收的 `runs/<id>/subagents/`（分支会话 + 产物）收尾时经目录句柄清扫，与 §5.2 同一条边界 | `runs/runner.py::_sanitize_workspace`、`kernel/e2b_env.py::recover_subagent_files` |
+| 子代理文档 | `runs/<id>/children/<n>/child.json` 只由已过两道脱敏的事件载荷构造（投影 → 提交前再脱敏），`GET /api/runs/{id}/children` 按存储原样下发，不引入新秘密；`children/<n>/<file>` 产物下载按报告下载同一套规则（服务前再脱敏、`X-Redacted`） | `runs/runner.py::_emit`、`store.py::read_children`、`web_routes.py` |
 | 报告下载 | `report_path` 不是下载能力：只认两个固定位置——宿主产物 `runs/<id>/artifacts/report.md`，以及旧版本写下的本 run 工作区 `workspaces/<id>/report.md`（只读，从不改写历史）；其他路径一律视为无报告。服务前再脱敏，响应头 `X-Redacted` 标明是否发生；`hasReport` 用同一位置规则与同一拒绝条件计算 | `store.py::report_location`、`web_routes.py::_send_report`、`artifacts.py` |
 
 **产物路径安全**（`artifacts.py::ArtifactTree`）：宿主从不「先 realpath 校验、再按路径打开」。
@@ -614,7 +620,8 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `redaction`（出站脱敏）/ `accounts`（站内账号）/ `auth`（身份断言与会话）/ `dotenv`（.env 解析）/ `blueprints`（蓝图目录推导与解析渲染）；组成根 `app`（服务器与 `create_server`） |
 | `host/pi_glink/web_*.py` | 宿主 HTTP 层 | `web_routes`（路由与 run/health/报告 API）/ `web_sse`（事件流与连接额度）/ `web_security`（身份、会话与请求防护）/ `web_http`（请求体、响应、静态资源、脱敏访问日志）；一个 `HostRequestHandler` 由它们组合而成 |
 | `host/pi_glink/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
-| `host/pi_glink/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env` / `subagent_artifacts`（pi-subagents 产物布局解析与关联，R2）；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面与编排：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）/ `runner` / `resource_ledger`（外部资源台账、重启对账、人工裁决与在线身份探测扫描） |
+| `host/pi_glink/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env` / `subagent_artifacts`（pi-subagents 产物布局解析与关联，R2）；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）；两族的 run 生命周期策略：`harness` / `harness_pi` / `harness_acp`。不导入 `runs/` 或宿主编排模块 |
+| `host/pi_glink/runs/` | 编排层 | run 准入与执行骨架、收尾顺序、终态提交与资源台账：`runner`（RunManager）/ `resource_ledger`（外部资源台账、重启对账、人工裁决与在线身份探测扫描） |
 | `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
 | `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`（最小工作约定）、`prompts/deepresearch.md`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
 | `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |
@@ -640,7 +647,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 离线运维子命令在 `cli.py`。拆分是纯结构调整：路由、状态码、载荷与既有导入路径（含
 `pi_glink.app.main` / `load_config` / `_resource_command` 再导出）保持不变。
 
-`/` 命令门禁本身在**准入层**（`kernel/runner.py::RunManager.start`，命令名单从
+`/` 命令门禁本身在**准入层**（`runs/runner.py::RunManager.start`，命令名单从
 `kernel/agent_env.py::prompt_template_names(config.agent_config_dir)` 推导），路由只负责把
 `UnsupportedCommand` 映射成 `400 unsupported_command`：这样任何调用者（HTTP、脚本、未来的适配器）
 都逃不过，且追问与三个执行面走同一条判定。拒绝发生在读父会话、写 run 目录、拉起执行面之前。

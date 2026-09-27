@@ -43,7 +43,7 @@ pi 读取的是这份配置，而不是用户 `~/.pi/agent` 的个人配置，�
 
 ### 工作约定与 `/deepresearch` 的关系
 
-- `research-prompt.md` 每次 run 都由宿主追加到系统提示（本机/Docker 面 `kernel/runner.py::_extra_argv`，E2B 面 `kernel/e2b_env.py`）。它是**产品契约**而不是研究流程（2026-09-24 用户决定，参照 dsh 的最小提示词）：计划、检索策略、是否委派、如何修订交给模型自主决定；检索与委派的用法由 pi-web-access / pi-subagents 自己的工具说明提供。原先的任务分级、来源分层、覆盖声明、自我核查与「来源与核查」PASS/BLOCKED 不再默认追加，统一移到 `/deepresearch`；默认报告只要求就近引注与末尾来源清单。
+- `research-prompt.md` 每次 run 都由宿主追加到系统提示（本机/Docker 面 `runs/runner.py::_extra_argv`，E2B 面 `kernel/e2b_env.py`）。它是**产品契约**而不是研究流程（2026-09-24 用户决定，参照 dsh 的最小提示词）：计划、检索策略、是否委派、如何修订交给模型自主决定；检索与委派的用法由 pi-web-access / pi-subagents 自己的工具说明提供。原先的任务分级、来源分层、覆盖声明、自我核查与「来源与核查」PASS/BLOCKED 不再默认追加，统一移到 `/deepresearch`；默认报告只要求就近引注与末尾来源清单。
 - `prompts/deepresearch.md` 是 pi 的 prompt template：**文件名就是命令名**（pi 官方 `docs/prompt-templates.md`），用户在工作台提问框以 `/deepresearch <题目>` 开头发送时，pi 在把消息交给模型之前展开模板，`$@` 替换为题目内容。它是显式的严格模式：必须交付报告，并叠加完整的研究方法论（来源分层、一个命题对一个来源、三类内容区分、断言强度、覆盖声明、自我核查、「来源与核查」一节）；没有"等用户确认"的确认门，展开后直接执行。
 - 两者都随模板渲染进每个 run 的 `runs/<runId>/pi-agent/`：`TEMPLATE_ENTRIES`（`kernel/agent_env.py`）包含 `prompts`，pi 从 `PI_CODING_AGENT_DIR` 这个个人配置目录加载模板与追加提示。
 

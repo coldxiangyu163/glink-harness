@@ -99,7 +99,7 @@ cp .env.example .env         # 填写 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_
 scripts/run-local-web.sh     # 默认 http://127.0.0.1:7860
 ```
 
-脚本把所有依赖都铺好了：优先用仓库内的 `.venv`，否则回退 `uv run` 或系统 Python，并始终把 `host/` 放进导入路径。部署单位是**整个仓库目录**：宿主按仓库相对路径定位 `web/`（前端资源）、`agent/`（内核配置模板）与 `scripts/`；`pip install -e .` 只用于让 `pi_glink` 可导入（包声明含 `pi_glink.kernel`），独立安装 wheel 不是受支持的形态。等价的手动方式：
+脚本把所有依赖都铺好了：优先用仓库内的 `.venv`，否则回退 `uv run` 或系统 Python，并始终把 `host/` 放进导入路径。部署单位是**整个仓库目录**：宿主按仓库相对路径定位 `web/`（前端资源）、`agent/`（内核配置模板）与 `scripts/`；`pip install -e .` 只用于让 `pi_glink` 可导入（包声明含 `pi_glink.kernel` 与 `pi_glink.runs`），独立安装 wheel 不是受支持的形态。等价的手动方式：
 
 ```bash
 uv venv --python 3.12 .venv       # 首次
@@ -340,7 +340,8 @@ key 检索）；显式 `shared` 策略只渲染宿主级 `PI_GLINK_WEB_SEARCH_KE
 | 路径 | 职责 |
 |---|---|
 | `host/pi_glink/` | 宿主：配置解析、事件总线、HTTP/SSE 服务、静态资源 |
-| `host/pi_glink/kernel/` | pi 接入层：headless 协议客户端（RPC / JSON）、事件投影、运行期配置渲染、三执行面适配 |
+| `host/pi_glink/runs/` | 编排层：run 准入、执行骨架与收尾顺序、终态提交、外部资源台账 |
+| `host/pi_glink/kernel/` | pi 接入层：headless 协议客户端（RPC / JSON）、事件投影、运行期配置渲染、三执行面适配；不得反向导入编排层或宿主编排模块 |
 | `agent/` | pi 侧配置模板：每次 run 先删再拷到 `runs/<id>/pi-agent/` 后作为 `PI_CODING_AGENT_DIR`，内核之外的定制只落在这里（含 `extensions/` 的前台守卫与 `agents/researcher.md`） |
 | `web/` | 前端：按百鉴 UI 标准库逐值对齐的静态 ESM 资源（token 层 + 组件层 + 外壳） |
 | `docs/` | `architecture.md`（进程拓扑、事件契约、执行器契约）、`pi-boundary.md`（扩展点与禁止项）、`multitenancy-plan.md`（下一阶段设计与决策点） |

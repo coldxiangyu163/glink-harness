@@ -39,10 +39,10 @@ from ..config import HostConfig
 from ..ownership import DataRootOwnership, OwnershipRequired
 from ..redaction import SecretRedactor
 from ..store import FAILED, RunRecord, RunStore
-from .docker_env import confirm_absent as docker_confirm_absent
-from .e2b_env import confirm_sandbox_absent as e2b_confirm_sandbox_absent
+from ..kernel.docker_env import confirm_absent as docker_confirm_absent
+from ..kernel.e2b_env import confirm_sandbox_absent as e2b_confirm_sandbox_absent
 
-logger = logging.getLogger("pi_glink.kernel.resource_ledger")
+logger = logging.getLogger("pi_glink.runs.resource_ledger")
 
 
 class RunBusy(RuntimeError):

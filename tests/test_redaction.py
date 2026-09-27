@@ -24,7 +24,7 @@ from pi_glink.config import build_config
 from pi_glink.events import EventBus
 from pi_glink.kernel.projection import project_event
 from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.kernel.runner import RunManager
+from pi_glink.runs.runner import RunManager
 from pi_glink.redaction import REPLACEMENT, SecretRedactor, redactor_from_config
 from pi_glink.store import RunStore
 

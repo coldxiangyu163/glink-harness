@@ -30,7 +30,7 @@ from pi_glink.kernel import docker_env
 from pi_glink.kernel.acp_env import prepare_acp_runtime
 from pi_glink.kernel.execution import ExecutionSpec, build_adapter
 from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.kernel.runner import RunManager
+from pi_glink.runs.runner import RunManager
 from pi_glink.store import FAILED, FINISHED, RunStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

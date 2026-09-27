@@ -38,7 +38,7 @@ from pi_glink.kernel.execution import (
     build_adapter,
 )
 from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.kernel.runner import RunManager
+from pi_glink.runs.runner import RunManager
 from pi_glink.store import FINISHED, RunStore
 
 from e2b_fake import FakeSandbox

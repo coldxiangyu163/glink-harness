@@ -44,7 +44,7 @@ from pi_glink.kernel.acp_e2b_env import (
 from pi_glink.kernel.e2b_env import SANDBOX_WORKSPACE
 from pi_glink.kernel.execution import ExecutionSpec, build_adapter
 from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.kernel.runner import FollowupUnavailable, RunManager
+from pi_glink.runs.runner import FollowupUnavailable, RunManager
 from pi_glink.store import FAILED, FINISHED, RunStore
 from pi_glink.tenancy import TenantContext, TenantCredentialStore
 

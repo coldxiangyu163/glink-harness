@@ -239,7 +239,7 @@ GLINK-SUB-01 已记录它与 `~/.feynman/npm-global` 参考副本有 23 个 `src
 | 16 | `share: true`（`schemas.ts` 单 agent overrides；`src/runs/foreground/execution.ts` 的 `shareEnabled`） | 把子代理会话上传到 GitHub Gist | **阻止** | 会话内容离开本 run 目录，超出宿主的脱敏与目录边界 |
 | 17 | `worktree: true`（`schemas.ts:240/307`；`src/runs/shared/worktree.ts:173-175` 默认基目录 `os.tmpdir()`） | 在 run 目录外创建 git worktree | **阻止** | 生命周期不由本 run 回收路径保证，且落在工作区外 |
 | 18 | `cwd` / `sessionDir` / `output` / `chainDir` 路径参数（`schemas.ts:135/157/188/218/315`；chainDir 默认 `src/shared/settings.ts:174-176` = `CHAIN_RUNS_DIR`，即 OS 临时目录） | 把读写/产物放到工作区外 | **阻止**（工作区外）或 **改写**（`chainDir` 固定为 `<workspace>/.pi-subagents/chain-runs`） | 宿主只对本 run 工作区做收尾脱敏与目录边界保护（architecture.md §6.1） |
-| 19 | **不在工具面上的入口**：pi-subagents 注册的扩展命令（`src/slash/slash-commands.ts:1181-1340`：`/run [--bg]`、`/chain [--bg]`、`/parallel`、`/subagents-detach`、`/subagents-stop`、`/subagents-fleet`、…） | 用户输入（RPC `prompt`）直接执行的扩展命令 | **宿主准入层挡住**（GLINK-SUB-02 评审修复）：只接受 `agent/prompts/` 模板命令，其余 `400 unsupported_command` | pi 先派发扩展命令、后触发 `input` 事件（`docs/rpc-commands.md`：extension command “executes immediately”），`tool_call` 钩子拿不到 → 门禁放在 `kernel/runner.py::start`（见 §10.4 与 architecture.md §4） |
+| 19 | **不在工具面上的入口**：pi-subagents 注册的扩展命令（`src/slash/slash-commands.ts:1181-1340`：`/run [--bg]`、`/chain [--bg]`、`/parallel`、`/subagents-detach`、`/subagents-stop`、`/subagents-fleet`、…） | 用户输入（RPC `prompt`）直接执行的扩展命令 | **宿主准入层挡住**（GLINK-SUB-02 评审修复）：只接受 `agent/prompts/` 模板命令，其余 `400 unsupported_command` | pi 先派发扩展命令、后触发 `input` 事件（`docs/rpc-commands.md`：extension command “executes immediately”），`tool_call` 钩子拿不到 → 门禁放在 `runs/runner.py::start`（见 §10.4 与 architecture.md §4） |
 
 判定与常量都在 `agent/extensions/subagent-foreground-guard.ts`；单测
 `tests/extensions/subagent-foreground-guard.test.mjs` 对每一行都有正反例（含 handler 异常时阻止）。
@@ -298,7 +298,7 @@ researcher 的 `tools` 白名单（`read,bash,write,edit,web_search,fetch_conten
    由用户输入直接执行的 pi-subagents 命令，`tool_call` 钩子拿不到（pi 先派发扩展命令、后触发 `input`
    事件）。宿主现已在**准入层**加 `/` 命令门禁：去掉前导空白的 prompt 若以 `/` 开头，只接受命令名
    等于 `agent/prompts/` 下模板 stem 的（当前仅 `deepresearch`），其余 `400 unsupported_command`，
-   不创建 run 目录；追问、三个执行面同一条判定（`kernel/runner.py::start` +
+   不创建 run 目录；追问、三个执行面同一条判定（`runs/runner.py::start` +
    `kernel/agent_env.py::prompt_template_names`，回归见 `tests/test_runs_api.py` /
    `tests/test_runner.py`）。仍存在的边界：门禁只管宿主验收的 prompt 入口，不阻止内核启动后
    由其他扩展经 `sendUserMessage` 注入命令（当前运行时没有第二份扩展）；命令名单随模板目录变化，
@@ -306,7 +306,7 @@ researcher 的 `tools` 白名单（`read,bash,write,edit,web_search,fetch_conten
 2. **子代理会话文件的收尾脱敏**：前台子进程默认把会话写到
    `<run 会话目录>/<父会话名>/run-N/session.jsonl`（`subagent-executor.ts:4233-4253`、`4267-4269`；
    基目录来自 `src/extension/index.ts:86-93`）。它在本 run 目录内，但宿主收尾只脱敏
-   **本 run 自己那个** `.jsonl`（`kernel/runner.py::_sanitize_session`），子代理会话文件不在覆盖范围。
+   **本 run 自己那个** `.jsonl`（`runs/runner.py::_sanitize_session`），子代理会话文件不在覆盖范围。
    工作区内的 `.pi-subagents/`（artifacts/chain-runs）会随工作区清扫被脱敏。
 3. **未做真实 run 效果验证**：本任务只有离线单测与无模型加载冒烟；真实模型/检索下的前台
    `tasks` 并行、取消传播、事件投影顺序与容器面（Docker/E2B）行为未验证。

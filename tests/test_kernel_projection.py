@@ -416,7 +416,7 @@ def test_assistant_message_embeds_usage_when_present() -> None:
 
 def _accumulate(runner: Any, execution: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
     """Drive one turn_end frame through projection then the runner's accumulator."""
-    from pi_glink.kernel.runner import RunManager  # noqa: PLC0415
+    from pi_glink.runs.runner import RunManager  # noqa: PLC0415
 
     payload = project_event(frame)[1][1]
     return RunManager._accumulate_usage(runner, execution, frame, payload)  # noqa: SLF001

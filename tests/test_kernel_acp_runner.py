@@ -28,7 +28,7 @@ from pi_glink.kernel.execution import (
     build_adapter,
 )
 from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.kernel.runner import (
+from pi_glink.runs.runner import (
     FollowupUnavailable,
     RunManager,
     UnsupportedCommand,

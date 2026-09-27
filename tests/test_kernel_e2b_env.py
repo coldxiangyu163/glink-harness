@@ -50,7 +50,7 @@ from pi_glink.kernel.e2b_env import (
 )
 from pi_glink.kernel.execution import E2BSandboxRpcExecutionAdapter, ExecutionSpec
 from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.kernel.runner import RunManager
+from pi_glink.runs.runner import RunManager
 from pi_glink.store import RunStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

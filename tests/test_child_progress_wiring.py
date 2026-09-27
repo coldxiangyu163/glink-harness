@@ -21,7 +21,7 @@ import pytest
 from pi_glink import events
 from pi_glink.config import HostConfig, build_config
 from pi_glink.events import EventBus
-from pi_glink.kernel import runner as runner_module
+from pi_glink.runs import runner as runner_module
 from pi_glink.kernel.acp_child_progress import AcpChildProgressSource
 from pi_glink.kernel.acp_child_progress import ProgressFact as AcpProgressFact
 from pi_glink.kernel.acp_execution import (
@@ -40,7 +40,7 @@ from pi_glink.kernel.execution import (
     RpcExecutionAdapter,
 )
 from pi_glink.kernel.child_progress import E2bChildProgressSource
-from pi_glink.kernel.runner import RunManager, _Execution
+from pi_glink.runs.runner import RunManager, _Execution
 from pi_glink.store import RunStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

@@ -14,9 +14,14 @@ subagent enrichment) lives behind the family interface in
 :mod:`pi_glink.kernel.harness`, with the two implementations in
 :mod:`pi_glink.kernel.harness_pi` and :mod:`pi_glink.kernel.harness_acp`.
 
-It deliberately owns no research logic, no prompts, and no file layout policy:
-those belong to the per-harness configuration (the pi template in ``agent/``,
-and the ACP agent's own configuration) and its official extension points.
+It deliberately owns no research logic, no prompts, no file layout policy and
+no run orchestration: run admission, the execution skeleton, the finalize
+commit and the external-resource ledger live in :mod:`pi_glink.runs`, above
+this layer. The kernel package keeps harness-specific protocol clients plus
+event projection, and must not import the orchestration layer or host
+orchestration modules (store/tenancy/ownership/blueprints/web_*/app/cli;
+``store`` is whitelisted for the three harness-family modules only —
+``harness``/``harness_pi``/``harness_acp`` read ``RunRecord`` and resume seeds).
 """
 
 from __future__ import annotations
@@ -53,7 +58,6 @@ from .harness import HarnessFamily, PreparedRuntime, Verdict, select_family
 from .harness_acp import AcpHarnessFamily
 from .harness_pi import PiHarnessFamily
 from .projection import extract_text, project_event, project_frames
-from .runner import REPORT_FILENAME, RESEARCH_PROMPT_FILENAME, RunBusy, RunManager
 from .rpc import (
     PiRpcClient,
     PiRpcClosed,
@@ -90,11 +94,7 @@ __all__ = [
     "PiRpcError",
     "PiRpcTimeout",
     "PreparedRuntime",
-    "REPORT_FILENAME",
-    "RESEARCH_PROMPT_FILENAME",
     "RpcResponse",
-    "RunBusy",
-    "RunManager",
     "SANDBOX_ACP_HOME",
     "SessionInfo",
     "Verdict",

@@ -24,7 +24,7 @@ from typing import Callable
 from .accounts import AccountsError
 from .config import ConfigError, HostConfig, load_config, validate_host_config
 from .events import EventBus
-from .kernel.runner import RunBusy, RunManager
+from .runs import RunBusy, RunManager
 from .ownership import DataRootBusy, DataRootOwnership
 from .store import RunStore
 from .tenancy import Tenancy, TenantNotConfigured, build_tenancy, load_identity_material

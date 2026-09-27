@@ -96,6 +96,86 @@ def source_violations(root: Path) -> list[str]:
     return violations
 
 
+#: 导入方向：``host/pi_glink/kernel/`` 是接入层，位于编排层之下，不得反向导入编排层
+#: 或宿主编排模块。``pi_glink.runs`` 承接 run 生命周期与资源台账（编排层）。
+_FORBIDDEN_KERNEL_MODULES = (
+    "pi_glink.runs",
+    "pi_glink.tenancy",
+    "pi_glink.auth",
+    "pi_glink.accounts",
+    "pi_glink.ownership",
+    "pi_glink.blueprints",
+    "pi_glink.app",
+    "pi_glink.cli",
+)
+_FORBIDDEN_KERNEL_PREFIXES = ("pi_glink.web_",)
+
+#: ``store`` 是显式白名单：三个 harness 族模块读 ``RunRecord`` 与会话种子（族策略的
+#: 事实来源），其余 kernel 模块不得读宿主持久化。
+_KERNEL_STORE_WHITELIST = frozenset(
+    {
+        "host/pi_glink/kernel/harness.py",
+        "host/pi_glink/kernel/harness_pi.py",
+        "host/pi_glink/kernel/harness_acp.py",
+    }
+)
+
+
+def kernel_forbidden_imports(relative: Path, text: str) -> list[str]:
+    """Imports of one kernel module that point back at the orchestration layer.
+
+    Relative imports are resolved against the module's own package, so
+    ``from ..store import RunRecord`` counts as ``pi_glink.store`` whether it is
+    written relative or absolute. Dynamic ``__import__``/``import_module``
+    string literals are inspected like the other import checks.
+    """
+    package = list(relative.with_suffix("").parts)[1:]  # drop the ``host/`` root
+    package = package[:-1]
+    modules: list[str] = []
+    for node in ast.walk(ast.parse(text, filename=str(relative))):
+        if isinstance(node, ast.Import):
+            modules.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = package[: len(package) - node.level + 1]
+                modules.append(".".join([*base, node.module] if node.module else base))
+            else:
+                modules.append(node.module or "")
+        elif isinstance(node, ast.Call) and node.args:
+            function = node.func
+            dynamic = isinstance(function, ast.Name) and function.id == "__import__"
+            dynamic |= (
+                isinstance(function, ast.Attribute)
+                and isinstance(function.value, ast.Name)
+                and function.value.id == "importlib"
+                and function.attr == "import_module"
+            )
+            if dynamic and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                modules.append(node.args[0].value)
+    violations = []
+    for module in modules:
+        if module == "pi_glink.store" or module.startswith("pi_glink.store."):
+            if relative.as_posix() not in _KERNEL_STORE_WHITELIST:
+                violations.append(f"{relative}: forbidden import {module}")
+            continue
+        if any(module == item or module.startswith(item + ".") for item in _FORBIDDEN_KERNEL_MODULES):
+            violations.append(f"{relative}: forbidden import {module}")
+        elif any(module.startswith(prefix) for prefix in _FORBIDDEN_KERNEL_PREFIXES):
+            violations.append(f"{relative}: forbidden import {module}")
+    return violations
+
+
+def kernel_import_violations(root: Path) -> list[str]:
+    """Run the direction rule over every module currently in the kernel package."""
+    violations = []
+    for path in sorted((root / "host" / "pi_glink" / "kernel").glob("*.py")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root)
+        violations.extend(kernel_forbidden_imports(relative, path.read_text(encoding="utf-8")))
+    return violations
+
+
 def worker_versions(text: str) -> tuple[str, str]:
     node = re.search(r"^FROM\s+(node:\d+\.\d+\.\d+-[\w.-]+)(?:@sha256:[a-f0-9]{64})?\s*$", text, re.MULTILINE)
     pi = re.search(r"^ARG\s+PI_VERSION=(\d+\.\d+\.\d+(?:-[\w.-]+)?)\s*$", text, re.MULTILINE)
@@ -151,6 +231,48 @@ def test_no_runtime_credentials_or_data_are_tracked() -> None:
 
 def test_production_sources_respect_external_kernel_boundaries() -> None:
     assert source_violations(ROOT) == []
+
+
+def test_kernel_layer_does_not_import_the_orchestration_layer() -> None:
+    assert kernel_import_violations(ROOT) == []
+
+
+def test_kernel_import_direction_rejects_orchestration_and_store() -> None:
+    """反例：kernel 反向导入编排层/宿主模块或绕过白名单读 store 必须变红。"""
+    kernel_module = Path("host/pi_glink/kernel/new_module.py")
+    assert kernel_forbidden_imports(kernel_module, "from ..runs import RunManager") == [
+        "host/pi_glink/kernel/new_module.py: forbidden import pi_glink.runs"
+    ]
+    assert kernel_forbidden_imports(kernel_module, "import pi_glink.runs.runner") != []
+    assert kernel_forbidden_imports(kernel_module, "from ..store import RunRecord") == [
+        "host/pi_glink/kernel/new_module.py: forbidden import pi_glink.store"
+    ]
+    assert kernel_forbidden_imports(kernel_module, "from pi_glink.tenancy import TenantContext") != []
+    assert kernel_forbidden_imports(kernel_module, "from ..web_routes import HostRequestHandler") != []
+    assert kernel_forbidden_imports(kernel_module, "__import__('pi_glink.blueprints')") != []
+    # 反例在编排层同范围成立：族模块也不能反向依赖编排层。
+    assert kernel_forbidden_imports(Path("host/pi_glink/kernel/harness.py"), "from ..runs import RunManager") != []
+
+
+def test_kernel_import_direction_allows_lower_layers_and_the_store_whitelist() -> None:
+    kernel_module = Path("host/pi_glink/kernel/new_module.py")
+    assert kernel_forbidden_imports(kernel_module, "from ..config import HostConfig") == []
+    assert kernel_forbidden_imports(kernel_module, "from ..redaction import SecretRedactor") == []
+    assert kernel_forbidden_imports(kernel_module, "from .harness import HarnessFamily") == []
+    for relative in sorted(_KERNEL_STORE_WHITELIST):
+        assert kernel_forbidden_imports(Path(relative), "from ..store import RunRecord") == [], relative
+
+
+def test_kernel_import_direction_covers_new_modules(tmp_path: Path) -> None:
+    kernel_dir = tmp_path / "host" / "pi_glink" / "kernel"
+    kernel_dir.mkdir(parents=True)
+    source = kernel_dir / "new.py"
+    source.write_text("from ..runs import RunManager\n")
+    assert kernel_import_violations(tmp_path) == [
+        "host/pi_glink/kernel/new.py: forbidden import pi_glink.runs"
+    ]
+    source.write_text("from ..kernel.harness import HarnessFamily\n")
+    assert kernel_import_violations(tmp_path) == []
 
 
 def test_worker_version_declarations_are_exact_and_equal() -> None:
@@ -289,13 +411,13 @@ def test_git_discovery_covers_tracked_secrets_and_new_sources(tmp_path: Path) ->
 
 
 def test_the_distribution_declares_the_kernel_subpackage() -> None:
-    """The packaging config must cover ``pi_glink.kernel``.
+    """The packaging config must cover ``pi_glink.kernel`` and ``pi_glink.runs``.
 
     The deployment unit is the repository directory (``web/``, ``agent/`` and
     ``scripts/`` are resolved relative to it); the package declaration only has
-    to make the host importable, and ``pi_glink.kernel`` is part of the host.
-    Checked without importing setuptools: the declared layout must match the
-    subpackage name.
+    to make the host importable, and both the kernel adapters and the run
+    orchestration package are part of the host. Checked without importing
+    setuptools: the declared layout must match the subpackage names.
     """
     import fnmatch  # noqa: PLC0415
     import tomllib  # noqa: PLC0415
@@ -304,9 +426,10 @@ def test_the_distribution_declares_the_kernel_subpackage() -> None:
     setuptools = config["tool"]["setuptools"]
     assert setuptools["package-dir"] == {"": "host"}, "包根必须指向 host/"
     declared = setuptools.get("packages")
-    if isinstance(declared, list):
-        assert "pi_glink.kernel" in declared
-        return
-    find = setuptools["packages"]["find"]
-    assert find["where"] == ["host"]
-    assert any(fnmatch.fnmatchcase("pi_glink.kernel", pattern) for pattern in find["include"])
+    for name in ("pi_glink.kernel", "pi_glink.runs"):
+        if isinstance(declared, list):
+            assert name in declared
+            continue
+        find = setuptools["packages"]["find"]
+        assert find["where"] == ["host"]
+        assert any(fnmatch.fnmatchcase(name, pattern) for pattern in find["include"]), name

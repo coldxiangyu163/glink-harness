@@ -17,7 +17,7 @@ the host dependency set.
 
 This module renders a document; it never decides a run's fate. Admission turns a
 :class:`BlueprintError` into the HTTP refusal and the run record carries the
-stage metadata (see :mod:`pi_glink.kernel.runner`).
+stage metadata (see :mod:`pi_glink.runs.runner`).
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ class BlueprintError(ValueError):
     is not in the directory, one of the validation failures otherwise. It never
     carries file content, so it stays safe to log; the HTTP layer reports only
     the derived name list (see
-    :class:`~pi_glink.kernel.runner.BlueprintUnavailable`).
+    :class:`~pi_glink.runs.runner.BlueprintUnavailable`).
     """
 
     def __init__(self, reason: str) -> None:

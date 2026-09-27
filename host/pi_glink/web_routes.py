@@ -19,7 +19,7 @@ from urllib.parse import unquote, urlsplit
 from .artifacts import ArtifactError, ArtifactTree
 from .blueprints import Blueprint, list_blueprints
 from .config import ConfigError
-from .kernel.runner import (
+from .runs import (
     REPORT_MAX_BYTES,
     BlueprintUnavailable,
     FollowupUnavailable,

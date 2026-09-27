@@ -148,7 +148,7 @@ def test_ownership_is_exclusive_across_processes(tmp_path: Path) -> None:
 
 def test_reconcile_without_ownership_is_refused_and_changes_nothing(tmp_path: Path) -> None:
     from pi_glink.events import EventBus  # noqa: PLC0415
-    from pi_glink.kernel.runner import RunManager  # noqa: PLC0415
+    from pi_glink.runs.runner import RunManager  # noqa: PLC0415
     from pi_glink.ownership import OwnershipRequired  # noqa: PLC0415
 
     config = make_config(tmp_path)

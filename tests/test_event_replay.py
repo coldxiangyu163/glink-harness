@@ -33,7 +33,7 @@ from pi_glink.app import PiGlinkServer, create_server
 from pi_glink.config import build_config
 from pi_glink.events import RUN_STARTED, EventBus
 from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.kernel.runner import RunManager
+from pi_glink.runs.runner import RunManager
 from pi_glink.static_files import WebAssets
 from pi_glink.store import FAILED, RUNNING, RunStore
 

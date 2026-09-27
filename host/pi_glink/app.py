@@ -28,7 +28,7 @@ from .accounts import AccountsStore
 from .auth import AccountsAuth
 from .config import ConfigError, HostConfig, load_config
 from .events import EventBus
-from .kernel.runner import ClientFactory, RunManager
+from .runs import ClientFactory, RunManager
 from .kernel.rpc import PiRpcClient
 from .ownership import DataRootOwnership
 from .static_files import WebAssets

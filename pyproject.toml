@@ -26,7 +26,7 @@ build-backend = "setuptools.build_meta"
 package-dir = {"" = "host"}
 
 # 部署单位是整个仓库目录（web/、agent/、scripts/ 都按仓库相对路径定位）；下面的包声明只保证
-# 宿主代码可导入，包含 pi_glink 与 pi_glink.kernel。独立安装 wheel 不是受支持形态。
+# 宿主代码可导入，包含 pi_glink、pi_glink.kernel 与 pi_glink.runs（编排层）。独立安装 wheel 不是受支持形态。
 [tool.setuptools.packages.find]
 where = ["host"]
 include = ["pi_glink*"]

@@ -65,7 +65,7 @@ def test_select_family_refuses_an_unknown_harness(tmp_path: Path) -> None:
 def test_run_manager_selects_the_family_once_at_init(tmp_path: Path) -> None:
     """``RunManager.__init__`` 是唯一选择点：族实例的 name 等于冻结配置。"""
     from pi_glink.events import EventBus  # noqa: PLC0415
-    from pi_glink.kernel.runner import RunManager  # noqa: PLC0415
+    from pi_glink.runs.runner import RunManager  # noqa: PLC0415
 
     for harness, family_type in (("pi", PiHarnessFamily), ("acp", AcpHarnessFamily)):
         config = make_config(tmp_path / harness, harness)

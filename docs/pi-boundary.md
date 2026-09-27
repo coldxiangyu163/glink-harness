@@ -18,10 +18,10 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | skills | docs/skills.md | 目录预留（`agent/skills/`） |
 | prompt templates | docs/prompt-templates.md | `agent/prompts/deepresearch.md`：`/deepresearch <题目>` 显式入口，强制深入流程并叠加更严格的覆盖声明、核查留痕与二次来源收紧；通用工作约定仍走 `--append-system-prompt` |
 | `AGENTS.md` | docs/quickstart.md 等 | 目录预留（`agent/AGENTS.md`），当前约定走 §下一条 |
-| `--append-system-prompt` | `pi --help` | `agent/research-prompt.md`（最小工作约定：产品契约 + 可选委派；方法论在 `/deepresearch`） → `kernel/runner.py::_extra_argv`，内核系统提示词本身不改 |
+| `--append-system-prompt` | `pi --help` | `agent/research-prompt.md`（最小工作约定：产品契约 + 可选委派；方法论在 `/deepresearch`） → `runs/runner.py::_extra_argv`，内核系统提示词本身不改 |
 | headless 协议 | docs/rpc.md | 三面均 `--mode rpc`（共享 `kernel/rpc.py::PiRpcClient`；本机直接 spawn，Docker 跨容器 stdio，E2B 经沙箱后台命令 `stdin=True` + `SandboxCommandProcess` 以 `popen=` 注入，GLINK-ARCH-3 收敛）；三面都只按 LF 分帧（`kernel/framing.py`，共享语料 `tests/fixtures/lf-framing.json`） |
 | 环境变量 | docs/environment-variables.md | `PI_CODING_AGENT_DIR`、`PI_CODING_AGENT_SESSION_DIR`、`PI_SKIP_VERSION_CHECK`、`PI_TELEMETRY`（模型凭据不经环境变量，写运行期 `auth.json`；两个目录都是每 run 独立） |
-| CLI 参数 | docs/cli.md、docs/sessions.md | `--provider`、`--model`、`--name`；追问用 `--session <path>` 打开上一轮会话的独立副本（`kernel/agent_env.py::build_pi_argv`、`kernel/runner.py`、`kernel/e2b_env.py`） |
+| CLI 参数 | docs/cli.md、docs/sessions.md | `--provider`、`--model`、`--name`；追问用 `--session <path>` 打开上一轮会话的独立副本（`kernel/agent_env.py::build_pi_argv`、`runs/runner.py`、`kernel/e2b_env.py`） |
 | MCP（可选） | docs/mcp 相关 | 尚未使用；接入方式与 extensions 同级，属允许范围 |
 
 **判断新需求是否越界的顺序**：先看有没有官方扩展点能表达 → 没有则在 `extensions/` 写扩展

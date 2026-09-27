@@ -274,7 +274,7 @@ def test_worker_image_is_frozen_at_configuration_time(
 
 def test_runner_refuses_docker_when_daemon_is_missing(config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from pi_glink.events import EventBus
-    from pi_glink.kernel.runner import RunManager
+    from pi_glink.runs.runner import RunManager
     from pi_glink.store import RunStore
 
     monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: False)

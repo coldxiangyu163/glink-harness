@@ -50,7 +50,7 @@ from pi_glink.kernel.execution import (
     ExecutionAdapter,
     ExecutionOutcome,
 )
-from pi_glink.kernel.runner import RunManager
+from pi_glink.runs.runner import RunManager
 from pi_glink.store import RunStore
 from pi_glink.tenancy import (
     TenantContext,

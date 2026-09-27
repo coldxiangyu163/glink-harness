@@ -1262,7 +1262,7 @@ HTTP API 创建 run，SSE 与终态从 HTTP 面核对（证据 `acp-m6-migration
   `session/load` 的回放帧计数丢弃；`session_ready` 增 `resumed`/`resumeMethod` 键。
 * `kernel/acp_env.py`：`inherit_acp_state()`（有界、拒绝链接、排除凭据目标、返回继承值供
   redactor）；`prepare_acp_runtime(..., inherit_from=…)`。
-* `kernel/runner.py`：`_acp_resumable_parent`（原 M1 无条件拒绝 → M7 条件受理）、
+* `runs/runner.py`：`_acp_resumable_parent`（原 M1 无条件拒绝 → M7 条件受理）、
   `_recorded_acp_capabilities`、`_prepare_runtime` 的继承与失败闭环、ACP 追问沿用父 run
   工作区、`_build_adapter` 的 harness 形态 `resume_session`。
 * `kernel/acp_projection.py`：`acp_session_resumed` 合成帧 → `kernel_status`（info）。
@@ -1554,7 +1554,7 @@ ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上
   增 `stateRootRecovered`；追问启动时灌回工作区。
 * `kernel/execution.py`：`ArtifactRecovery` 增 `state_recovered`/`secrets`（默认 `None`/`()`，
   其余执行面行为不变）。
-* `kernel/runner.py`：`_acp_state_home(run)` 按执行面返回宿主 HOME 或 recovered 根；
+* `runs/runner.py`：`_acp_state_home(run)` 按执行面返回宿主 HOME 或 recovered 根；
   `_acp_resumable_parent` 去掉 e2b 无条件拒绝（原义务/新义务注释）；e2b ACP 追问启动后核对
   sessionId；finalize 记录回收 verdict（第二条 `session_ready`）并把回收文本里的凭据形状值并入
   run redactor。

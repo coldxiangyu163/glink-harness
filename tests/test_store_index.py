@@ -27,7 +27,7 @@ from pi_glink import store as store_module
 from pi_glink.config import HostConfig, build_config
 from pi_glink.events import EventBus
 from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.kernel.runner import ResourcesUnreleased, RunManager
+from pi_glink.runs.runner import ResourcesUnreleased, RunManager
 from pi_glink.store import FINISHED, RUNNING, RunStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

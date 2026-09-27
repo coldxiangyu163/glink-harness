@@ -32,7 +32,7 @@ from pi_glink.kernel.execution import (
     ExecutionOutcome,
     SessionInfo,
 )
-from pi_glink.kernel.runner import ResourcesUnreleased, RunManager, RunQuotaExceeded
+from pi_glink.runs.runner import ResourcesUnreleased, RunManager, RunQuotaExceeded
 from pi_glink.ownership import DataRootOwnership
 from pi_glink.store import FAILED, FINISHED, RUNNING, RunStore
 from pi_glink.tenancy import TenantContext
@@ -337,7 +337,7 @@ def test_a_probe_never_guesses_a_missing_identity(
         store,
         sandbox_probe=lambda sandbox_id: (calls.append(sandbox_id) or True, "fake"),
     )
-    with caplog.at_level(logging.INFO, logger="pi_glink.kernel.resource_ledger"):
+    with caplog.at_level(logging.INFO, logger="pi_glink.runs.resource_ledger"):
         assert manager.reconcile_resources() == []
     assert calls == [], "没有持久化身份时不得猜测或批量操作"
     assert "缺少持久化的执行身份" in caplog.text
