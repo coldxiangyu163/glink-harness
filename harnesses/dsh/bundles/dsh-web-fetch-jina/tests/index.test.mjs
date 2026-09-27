@@ -3,9 +3,9 @@ import assert from 'node:assert/strict'
 
 import { name, inject, apply, Config } from '../lib/index.js'
 
-/** A resolved plugin config, standing in for the schemastery volatile fields. */
+/** A resolved plugin config, as dsh 0.1.5-rc.3 schemastery hands it to `apply`. */
 function config(overrides = {}) {
-  const values = {
+  return {
     apiKeyEnv: 'JINA_API_KEY',
     baseURL: 'https://r.jina.ai',
     timeoutMs: 5_000,
@@ -14,7 +14,6 @@ function config(overrides = {}) {
     userAgent: 'pi-glink-test/0.0.1',
     ...overrides,
   }
-  return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, { get: () => value }]))
 }
 
 function envelope(content = 'page body') {
@@ -37,7 +36,7 @@ async function withFakeFetch(fakeFetch, run) {
 }
 
 /** Build a plugin context and apply the plugin; returns the registered provider and session events. */
-function applyPlugin({ credentials, initiator } = {}) {
+function applyPlugin({ credentials, initiator, config: overrides } = {}) {
   const events = []
   let registered
   const ctx = {
@@ -52,7 +51,7 @@ function applyPlugin({ credentials, initiator } = {}) {
       },
     },
   }
-  apply(ctx, config())
+  apply(ctx, config(overrides))
   return { provider: registered, events }
 }
 
@@ -112,7 +111,7 @@ test('a missing credential fails the fetch explicitly with the configured refere
       dispatched += 1
       return new Response(envelope(), { status: 200, headers: { 'content-type': 'application/json' } })
     }, async () => {
-      const { provider } = applyPlugin({ credentials: { async resolve() { return undefined } } })
+      const { provider } = applyPlugin({ credentials: { async resolve() { return undefined } }, config: { apiKeyEnv: 'JINA_TEST_MISSING_KEY' } })
       return provider.fetch({ url: 'https://93.184.216.34/' }).then(
         () => undefined,
         caught => caught,
@@ -120,7 +119,7 @@ test('a missing credential fails the fetch explicitly with the configured refere
     })
     assert.equal(dispatched, 0)
     assert.equal(error.code, 'WEB_PROVIDER_CREDENTIAL_MISSING')
-    assert.match(error.message, /JINA_API_KEY/)
+    assert.match(error.message, /JINA_TEST_MISSING_KEY/)
   } finally {
     if (previous !== undefined) process.env.JINA_API_KEY = previous
   }
