@@ -947,6 +947,86 @@ def test_subagent_updates_are_suppressed_and_the_terminal_update_finishes() -> N
     ]
 
 
+def test_dsh_async_dispatch_ack_does_not_finish_the_child() -> None:
+    """dsh 的 ``started subagent <id>`` 只是派发确认，不是子代理完成（GLINK-OBS-01）。
+
+    真实 dsh r1：工具终态与子代理会话创建相差 17ms，子代理会话随后继续运行
+    约 5 分钟；若在这里发 ``subagent_finished``，产品事件就与会话事实不一致。
+    """
+    projector = AcpProjector(SecretRedactor())
+    _project(projector, _subagent_call())
+    ack = _project(
+        projector,
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "sub-1",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "content",
+                    "content": {
+                        "type": "text",
+                        "text": "started subagent 0c8309aa-9469-45f1-9d8f-6c47b58fe4b5",
+                    },
+                }
+            ],
+        },
+    )
+    assert ack == [], "派发确认不能冒充子代理完成"
+    # 确认之后迟到的占位更新继续抑制，不得回退成通用工具卡片。
+    late = _project(
+        projector,
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "sub-1",
+            "status": "in_progress",
+            "content": [
+                {"type": "content", "content": {"type": "text", "text": "(running...)"}}
+            ],
+        },
+    )
+    assert late == []
+
+
+def test_dsh_async_dispatch_ack_on_arrival_emits_started_only() -> None:
+    """同一次通知里就已完成的异步派发也只发 started。"""
+    projector = AcpProjector(SecretRedactor())
+    produced = _project(
+        projector,
+        _subagent_call(
+            status="completed",
+            content=[
+                {
+                    "type": "content",
+                    "content": {
+                        "type": "text",
+                        "text": "Started subagent child-1",
+                    },
+                }
+            ],
+        ),
+    )
+    assert [kind for kind, _ in produced] == [events.SUBAGENT_STARTED]
+
+
+def test_synchronous_acp_subagent_completion_still_finishes() -> None:
+    """非 dsh 形状的终态（其他 ACP agent 的同步派发）保持原义务：收口该 call。"""
+    projector = AcpProjector(SecretRedactor())
+    _project(projector, _subagent_call())
+    produced = _project(
+        projector,
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "sub-1",
+            "status": "completed",
+            "content": [
+                {"type": "content", "content": {"type": "text", "text": "子代理结论"}}
+            ],
+        },
+    )
+    assert [kind for kind, _ in produced] == [events.SUBAGENT_FINISHED]
+
+
 def test_subagent_failed_status_marks_the_finished_event() -> None:
     projector = AcpProjector(SecretRedactor())
     _project(projector, _subagent_call())

@@ -376,6 +376,55 @@ def test_acp_crash_after_the_stream_ends_still_reports_the_exit_code(tmp_path: P
     assert "exit code 3" in (final.error or "")
 
 
+def test_dsh_async_subagent_ack_leaves_the_child_running_until_the_run_ends(tmp_path: Path) -> None:
+    """dsh 异步派发：事件只到 started；clean run 由终帧把 child 收口为 finished（GLINK-OBS-01）。
+
+    真实 dsh r1 的会话里子代理在派发确认后继续运行约 5 分钟，工具终态只是
+    ``started subagent <childId>``；宿主不能拿它当完成。
+    """
+    settings = {"FAKE_ACP_LOG": str(tmp_path / "agent.jsonl")}
+    _config, store, manager = build_manager(tmp_path, settings)
+    record = manager.start("SUBAGENT 派发一个子代理")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final is not None and final.status == FINISHED
+    kinds = event_types(read_events(store, record.run_id))
+    assert "subagent_started" in kinds
+    assert "subagent_finished" not in kinds, "派发确认不能冒充子代理完成"
+    documents = store.read_children(record.run_id)
+    assert documents.skipped == 0 and len(documents.documents) == 1
+    child = documents.documents[0]
+    assert child["n"] == 0 and child["status"] == "finished"
+    assert child["task"] == "核实中国香港跨境架构"
+    assert child["resultPreview"] in (None, ""), "派发确认文本不是子代理结论"
+    terminal = read_events(store, record.run_id)[-1]
+    assert terminal["type"] == "run_finished"
+    assert terminal["payload"]["children"] == [
+        {"n": 0, "agent": "", "task": "核实中国香港跨境架构", "status": "finished"}
+    ]
+
+
+def test_dsh_async_subagent_child_follows_a_failed_run_as_interrupted(tmp_path: Path) -> None:
+    """派发后崩溃：child 保持 running，run 失败时收口为 interrupted（与真实 dsh r2 同形）。"""
+    settings = {"FAKE_ACP_LOG": str(tmp_path / "agent.jsonl")}
+    _config, store, manager = build_manager(tmp_path, settings)
+    record = manager.start("SUBAGENT 派发然后 CRASH 掉这个 agent")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final is not None
+    assert final.status == FAILED and final.stop_reason == "kernel_exit"
+    kinds = event_types(read_events(store, record.run_id))
+    assert "subagent_started" in kinds
+    assert "subagent_finished" not in kinds
+    documents = store.read_children(record.run_id)
+    assert documents.skipped == 0 and len(documents.documents) == 1
+    assert documents.documents[0]["status"] == "interrupted"
+    terminal = read_events(store, record.run_id)[-1]
+    assert terminal["payload"]["children"] == [
+        {"n": 0, "agent": "", "task": "核实中国香港跨境架构", "status": "interrupted"}
+    ]
+
+
 def test_acp_initialize_failure_fails_the_run(tmp_path: Path) -> None:
     settings = {"FAKE_ACP_INIT_ERROR": True, "FAKE_ACP_LOG": str(tmp_path / "agent.jsonl")}
     _config, store, manager = build_manager(tmp_path, settings)

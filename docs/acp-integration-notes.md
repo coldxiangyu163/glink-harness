@@ -1747,3 +1747,30 @@ p4 方案（GLINK-SUB 可见性）遗留的未验证项：ACP 面是否暴露子
 * 覆盖：`tests/test_kernel_acp_execution.py`（三层上限、无退出码时仍带 stderr、宿主 kill 不
   归因）、`tests/test_kernel_acp_runner.py`（inproc fake agent 的失败详情/日志/脱敏）、
   `tests/test_kernel_acp_e2b.py`（fake SDK 面同链路）。
+
+### 18.3 dsh 子代理派发：异步确认不当完成（GLINK-OBS-01 第 3 项）
+
+* 调查证据（只读真实数据 `/tmp/glink-ab-20260927/data-dsh/runs/`，不复制内容、不输出凭据）：
+  * GLINK-AB-01 报告第八节第 2 条的观察与数据不符：r1（`3641d7803039`）主会话 recovered
+    有 58 个 `tool/call`（含 2 个 `subagent`），宿主事件 56 个 `tool_started` + 2 个
+    `subagent_started`；r2（`2fc391884a97`）主会话 10 个 `tool/call`（含 3 个 `subagent`），
+    宿主 7 个 `tool_started` + 3 个 `subagent_started`。按 `callId` 比对两侧集合**完全相等**，
+    `task` 与 `subagent/catalog.label` 逐条一致，`children/<n>/child.json` 与之一一对应。
+  * 「宿主无投影」是分析脚本 `analyze-ab.py` 的统计盲点：它只数 `tool_started` 的类型名，
+    而 typed 投影把 subagent 调用记在 `subagent_*` 事件里（不再有同名 `tool_started`）。
+  * 真正的不一致在完成语义：dsh 的 `subagent` 工具是**异步派发**，调用完成只返回
+    `started subagent <childId>`（派发已接受）；真实 r1 里 `subagent_started` 与
+    `subagent_finished` 相隔 17ms，而子代理会话继续运行约 5 分钟，主会话靠
+    `agent/inbox/spliced` 收子代理回报。宿主当时把工具终态当完成，产品事件因此误报完成。
+* 原义务：`subagent_finished` 由一次 `tool_finished` 收口该 call 的全部子代理（§3.5）。
+* 新义务（收窄，只对 dsh 的派发确认形状）：工具终态文本匹配
+  `^\s*started\s+subagent\s+\S+` 时不产生 `subagent_finished`，也不释放 call 状态（后续占位
+  更新继续抑制）；child 文档保持 `running`，由 run 终帧按 §3.4/§3.5 收口
+  （clean→finished、failed→interrupted、cancelled→cancelled）。其他 ACP agent 的同步工具终态
+  行为不变。
+* 回归：`tests/test_kernel_acp_projection.py`（ack 形状不发 finished、迟到的占位更新仍抑制、
+  非 ack 终态照常收口）、`tests/test_kernel_acp_runner.py`（fake agent 异步派发：clean run
+  只到 started 且终帧收口 finished；派发后崩溃 → child interrupted）；fake_acp 新增
+  `SUBAGENT` marker（可组合 `CRASH`）。
+* 未覆盖：真实 dsh/E2B live 未复跑；`resultPreview` 在派发确认场景为空（诚实，不拿确认文本
+  冒充结论）。

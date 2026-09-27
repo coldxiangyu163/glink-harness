@@ -31,6 +31,7 @@ runner's event path stay harness-blind.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Callable, Mapping
 
 from .. import events
@@ -57,6 +58,21 @@ MESSAGE_CHUNK_UPDATES = {
 _STREAM_EVENTS = (events.THINKING_DELTA, events.ASSISTANT_DELTA)
 #: ``tool_call``/``tool_call_update`` statuses that end a tool call.
 _TERMINAL_TOOL_STATUS = frozenset({"completed", "failed"})
+
+#: dsh 的 ``subagent`` 工具是**异步派发**：调用完成时返回
+#: ``started subagent <childId>``（派发已被接受），子代理随后独立运行、通过主
+#: 代理的 inbox 回报。这个确认文本不能当作子代理完成：GLINK-OBS-01 的真实
+#: dsh 数据里工具终态与子代理会话创建只差 17ms，而子代理会话继续跑了约 5 分钟
+#: （r1：subagent_started 1790494297.94、finished 同秒、主 run 到 1790494604
+#: 才结束）。匹配到这个形状时宿主不发 ``subagent_finished``，子代理文档保持
+#: ``running``，由 run 终帧按 §3.4/§3.5 收口（clean→finished、failed→
+#: interrupted、cancelled→cancelled）——宁可不报完成，也不误报完成。
+_ASYNC_DISPATCH_ACK_RE = re.compile(r"^\s*started\s+subagent\s+\S+", re.IGNORECASE)
+
+
+def _is_async_dispatch_ack(text: str) -> bool:
+    """dsh 的异步派发确认（``started subagent <childId>``），不是完成事实。"""
+    return bool(_ASYNC_DISPATCH_ACK_RE.match(text or ""))
 
 TOOL_TEXT_LIMIT = 4000
 PLAN_ENTRY_LIMIT = 20
@@ -288,7 +304,9 @@ def _agent_tool_call(
             # ``agent`` only exists when the dispatch parameters give one.
             started = subagent_started_payload(n, tool_call_id, {"task": task})
             produced = [(events.SUBAGENT_STARTED, started)]
-            if update.get("status") in _TERMINAL_TOOL_STATUS:
+            if update.get("status") in _TERMINAL_TOOL_STATUS and not _is_async_dispatch_ack(
+                _tool_text(update)
+            ):
                 produced.append(
                     (events.SUBAGENT_FINISHED, _subagent_finished_payload(update, projector))
                 )
@@ -317,6 +335,10 @@ def _agent_tool_update(
     tool_call_id = str(update.get("toolCallId") or "")
     if tool_call_id in projector._subagent_calls:
         if update.get("status") in _TERMINAL_TOOL_STATUS:
+            if _is_async_dispatch_ack(_tool_text(update)):
+                # 异步派发确认：不是完成，也不释放 call 状态（后续占位更新
+                # 继续抑制）；child 由 run 终帧收口。
+                return []
             return [
                 (events.SUBAGENT_FINISHED, _subagent_finished_payload(update, projector))
             ]

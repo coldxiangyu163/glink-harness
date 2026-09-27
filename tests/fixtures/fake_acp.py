@@ -49,6 +49,9 @@ Prompt markers select the terminal result:
                        then waits that long, widening the exit window;
                        ``FAKE_ACP_STDERR`` writes one line to stderr before the
                        crash (the host's kernel_exit report must carry it)
+``SUBAGENT``           dispatches one ``subagent`` tool call and receives dsh's
+                       asynchronous acknowledgement (``started subagent
+                       <childId>``); the child runs on afterwards
 ``FAILPROMPT``         answers with a JSON-RPC error instead of a stop reason
 ``UNKNOWNSTOP``        answers with a stop reason outside the v1 set
 ``USAGE_TWICE``        two ``usage_update`` notifications (replace semantics)
@@ -288,6 +291,42 @@ def _text_chunk(kind: str, text: str) -> dict:
     return {"sessionUpdate": kind, "content": {"type": "text", "text": text}}
 
 
+def _subagent_ack_updates() -> list[dict]:
+    """dsh 的异步 ``subagent`` 派发：工具调用 + ``started subagent <id>`` 确认。
+
+    形状取自 GLINK-OBS-01 的真实 dsh 会话（工具终态文本就是
+    ``started subagent <childId>``），子代理在确认之后才继续运行。
+    """
+    child_id = str(
+        setting("FAKE_ACP_SUBAGENT_CHILD_ID") or "0c8309aa-9469-45f1-9d8f-6c47b58fe4b5"
+    )
+    return [
+        {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call_subagent",
+            "title": "subagent",
+            "name": "subagent",
+            "kind": "other",
+            "status": "pending",
+            "rawInput": {
+                "description": "核实中国香港跨境架构",
+                "prompt": "独立研究该法域的个人税收居民与股权转让口径。",
+            },
+        },
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call_subagent",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "content",
+                    "content": {"type": "text", "text": f"started subagent {child_id}"},
+                }
+            ],
+        },
+    ]
+
+
 def prompt_updates(text: str) -> list[dict]:
     """The notification sequence one prompt produces.
 
@@ -361,6 +400,8 @@ def prompt_updates(text: str) -> list[dict]:
             ],
         },
     ]
+    if "SUBAGENT" in text:
+        updates[0:0] = _subagent_ack_updates()
     if "USAGE_TWICE" in text:
         updates.append(
             {
@@ -436,6 +477,11 @@ def run_prompt(request: dict, params: dict) -> None:
     remember(text)
     if "CRASH" in text:
         sys.stdout.flush()
+        if "SUBAGENT" in text:
+            # 先派发、后崩溃：宿主已经看到 subagent_started，子代理仍在
+            # running（真实 dsh r2 就是这个顺序）。
+            for update in _subagent_ack_updates():
+                notify("session/update", {"sessionId": session_id(), "update": update})
         crash_stderr = str(setting("FAKE_ACP_STDERR") or "")
         if crash_stderr:
             # The agent's own explanation of the crash: ACP speaks JSON-RPC on
