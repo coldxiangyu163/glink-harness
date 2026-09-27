@@ -266,7 +266,11 @@ pi 族另有 `_meta.json` 增强（R2，见下「R2 增强与关联」）。
 对象、轮询线程、停止事件、closed 标志、节流/单调钳制与有界退避都在
 `runs/child_progress_observer.py`；`RunManager` 只在已提交的 started/finished 帧与
 finalize 第一步调用它，每 run 至多起**一个**轮询线程，finalize 时退出，连续失败按有界退避
-后即停，且**不在准入锁内**。关联规则按族区分：
+**继续重试**（不设「失败预算后停止」：真实 E2B run 里一次沙箱请求超时就能把当时的预算花完，
+临时故障不得变成 run 生命周期内的永久失明——GLINK-OBS-01），且**不在准入锁内**。E2B 面的
+单次 ``files.list`` / ``files.read`` 显式传 ``request_timeout``（不使用 SDK 默认 60s），
+让一次卡住的调用快速失败、退避后重试；失败仍只用一条 ``kernel_status`` 警告。
+关联规则按族区分：
 
 * **pi 族**：前台守卫保证同一时刻至多一个在飞派发 call；transcript 文件
   （`subagent-artifacts/<runId>_<agent>_<index>_transcript.jsonl`）的 `index` 等于该

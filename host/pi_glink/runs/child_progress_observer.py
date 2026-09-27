@@ -33,12 +33,10 @@ from .. import events
 logger = logging.getLogger("pi_glink.runs.child_progress_observer")
 
 #: R3a bounds: one polling thread per run at this cadence, at most one
-#: ``subagent_updated`` per child per throttle window, a bounded
-#: consecutive-failure budget before the observer stops, and a bounded join
-#: when the run finalizes.
+#: ``subagent_updated`` per child per throttle window, a bounded backoff
+#: between failed polls, and a bounded join when the run finalizes.
 _PROGRESS_POLL_SECONDS = 1.0
 _PROGRESS_THROTTLE_SECONDS = 2.0
-_PROGRESS_MAX_FAILURES = 5
 _PROGRESS_MAX_BACKOFF_SECONDS = 5.0
 _PROGRESS_JOIN_SECONDS = 5.0
 
@@ -197,27 +195,23 @@ class ChildProgressObserver:
 
         Latest-value-wins: a dropped intermediate frame changes nothing, so a
         poll cycle is cheap to repeat. A failing ``poll()`` backs off with a
-        bound and the observer stops after ``_PROGRESS_MAX_FAILURES``
-        consecutive failures; failures surface as at most one ``kernel_status``
-        warning, never as a verdict input.
+        bound and the loop keeps retrying: 原义务是连续失败达到预算后整个
+        run 不再有进度，但真实 E2B run 里一次沙箱请求超时（默认
+        request_timeout 60s）就能把那笔预算花完，临时故障变成 run 生命周期内
+        的永久失明（GLINK-OBS-01 第 4 项）。新义务：失败只降频（退避上限
+        ``_PROGRESS_MAX_BACKOFF_SECONDS``），观察线程只在 finalize 时停止；
+        失败仍只用一条 ``kernel_status`` 警告，永不参与 verdict。
         """
         failures = 0
         try:
             while not stop.wait(_PROGRESS_POLL_SECONDS):
                 try:
                     facts = source.poll()
-                except Exception as exc:  # noqa: BLE001 - bounded backoff, then stop
+                except Exception as exc:  # noqa: BLE001 - backoff, then retry
                     failures += 1
                     self._warn(
                         f"子代理进度观察失败: {type(exc).__name__}: {exc}"
                     )
-                    if failures >= _PROGRESS_MAX_FAILURES:
-                        logger.warning(
-                            "子代理进度观察连续失败 %d 次，停止 run=%s",
-                            failures,
-                            self.run_id,
-                        )
-                        return
                     stop.wait(
                         min(
                             _PROGRESS_POLL_SECONDS * failures,

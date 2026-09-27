@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from pi_glink.kernel.child_progress import (
+    E2B_PROGRESS_REQUEST_TIMEOUT_SECONDS,
     PROGRESS_MAX_FILES,
     TOOL_NAME_MAX_CHARS,
     TOOL_TARGET_MAX_CHARS,
@@ -370,9 +371,15 @@ class _FakeFiles:
         self.read_calls: list[str] = []
         self.read_errors: set[str] = set()
         self.list_depths: list[int] = []
+        #: SDK 请求超时参数（GLINK-OBS-01 第 4 项：单次调用必须显式有界）。
+        self.list_timeouts: list[float | None] = []
+        self.read_timeouts: list[float | None] = []
 
-    def list(self, root: str, depth: int = 1) -> list[_FakeEntry]:
+    def list(
+        self, root: str, depth: int = 1, request_timeout: float | None = None
+    ) -> list[_FakeEntry]:
         self.list_depths.append(depth)
+        self.list_timeouts.append(request_timeout)
         entries = []
         for path, data in sorted(self.contents.items()):
             kind = self.kinds.get(path, "file")
@@ -380,8 +387,9 @@ class _FakeFiles:
             entries.append(_FakeEntry(path, size if self.report_size else None, kind))
         return entries
 
-    def read(self, path: str) -> bytes | str:
+    def read(self, path: str, request_timeout: float | None = None) -> bytes | str:
         self.read_calls.append(path)
+        self.read_timeouts.append(request_timeout)
         if path in self.read_errors:
             raise RuntimeError("sandbox read failed")
         return self.contents[path]
@@ -431,6 +439,16 @@ def test_e2b_progress_facts_and_incremental_growth() -> None:
     )
     assert ("researcher", 1) not in facts, "未变化的文件不上报"
     assert sandbox.files.list_depths and all(depth >= 1 for depth in sandbox.files.list_depths)
+    # 单次调用有界：list/read 都显式传 request_timeout（E2B SDK 默认 60s 会让
+    # 一次卡住的调用拖垮整轮观察；GLINK-OBS-01 第 4 项）。
+    assert sandbox.files.list_timeouts and all(
+        timeout == E2B_PROGRESS_REQUEST_TIMEOUT_SECONDS
+        for timeout in sandbox.files.list_timeouts
+    )
+    assert sandbox.files.read_timeouts and all(
+        timeout == E2B_PROGRESS_REQUEST_TIMEOUT_SECONDS
+        for timeout in sandbox.files.read_timeouts
+    )
 
 
 def test_e2b_str_payload_is_decoded() -> None:
@@ -505,12 +523,47 @@ def test_e2b_read_error_keeps_last_snapshot_and_list_error_propagates() -> None:
     assert fact.steps == 2
 
     class _BrokenFiles:
-        def list(self, root: str, depth: int = 1) -> list[_FakeEntry]:
+        def list(
+            self, root: str, depth: int = 1, request_timeout: float | None = None
+        ) -> list[_FakeEntry]:
             raise RuntimeError("sandbox gone")
 
     sandbox.files = _BrokenFiles()  # type: ignore[assignment]
     with pytest.raises(RuntimeError):
         source.poll()
+    source.close()
+
+
+def test_e2b_list_timeouts_leave_the_source_reusable() -> None:
+    """fake SDK 连续超时：poll 如实抛出（由接线层退避重试），恢复后照常出 fact。
+
+    GLINK-OBS-01 第 4 项：真实 pi r2 里 5 次 60s 超时后观察者永久停止，
+    run 剩下 20 分钟无进度。任务要求「临时失败不导致永久失明」，所以源本身
+    不吞掉超时（否则接线层无法退避），也必须在超时之后仍可用。
+    """
+    sandbox = _FakeSandbox({P0: _tool_start("read", "a.md")})
+    source = E2bChildProgressSource(sandbox, ROOT)
+    assert source.poll() == [], "首轮只建基线"
+
+    original = sandbox.files.list
+    calls = {"n": 0}
+
+    def flaky_list(
+        root: str, depth: int = 1, request_timeout: float | None = None
+    ) -> list[_FakeEntry]:
+        calls["n"] += 1
+        if calls["n"] <= 6:
+            raise TimeoutError("Request timed out (fake SDK)")
+        return original(root, depth=depth, request_timeout=request_timeout)
+
+    sandbox.files.list = flaky_list  # type: ignore[method-assign]
+    for _ in range(6):
+        with pytest.raises(TimeoutError):
+            source.poll()
+
+    sandbox.files.contents[P0] = sandbox.files.contents[P0] + _tool_start("write", "b.md")  # type: ignore[operator]
+    (fact,) = source.poll()
+    assert fact.steps == 2
     source.close()
 
 

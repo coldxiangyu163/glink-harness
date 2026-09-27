@@ -92,8 +92,14 @@ class FakeFiles:
             return value if isinstance(value, bytes) else value.encode("utf-8")
         return self._real(path).read_bytes()
 
-    def read(self, path: str, format: str | None = None) -> Any:
+    def read(
+        self,
+        path: str,
+        format: str | None = None,
+        request_timeout: float | None = None,
+    ) -> Any:
         self._sandbox.reads.append(path)
+        self._sandbox.read_timeouts.append(request_timeout)
         data = self._bytes(path)
         if format == "stream":
             return _Stream([data])
@@ -110,7 +116,14 @@ class FakeFiles:
             return _Info(size)
         return _Info(self._real(path).stat().st_size)
 
-    def list(self, path: str, depth: int = 1, **_kwargs: Any) -> list[Any]:
+    def list(
+        self,
+        path: str,
+        depth: int = 1,
+        request_timeout: float | None = None,
+        **_kwargs: Any,
+    ) -> list[Any]:
+        self._sandbox.list_timeouts.append(request_timeout)
         readable = self._sandbox.readable
         sizes = self._sandbox.sizes
         types = self._sandbox.entry_types
@@ -348,6 +361,10 @@ class FakeSandbox:
         self.killed = False
         #: Paths the host asked to read (the bounded-read regressions).
         self.reads: list[str] = []
+        #: ``request_timeout`` values the host passed to ``files.list`` /
+        #: ``files.read`` (``None`` when the caller left the SDK default).
+        self.list_timeouts: list[float | None] = []
+        self.read_timeouts: list[float | None] = []
         #: Entry sizes the SDK reports instead of the real content length.
         self.sizes: dict[str, int] = {}
         #: Entry kinds the SDK reports (path -> "file"/"dir"/"symlink"/enum).

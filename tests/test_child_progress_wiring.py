@@ -2,9 +2,10 @@
 
 契约见 docs/architecture.md §3.5「运行中进度（R3a）」：观察者是瞬时事实的
 供给方——懒启动、每 run 至多一个轮询线程、每 child 节流、映射不上不伪造、
-finished 后不再发、finalize 时退出、连续失败有界退避后即停；它永远不改变
-verdict、不写 child.json、不在准入锁内执行。这里全部用合成源与无内核的
-execution（与 test_runner 的 typed-event seam 同一风格），不触真实内核。
+finished 后不再发、finalize 时退出、连续失败按有界退避后**继续重试**（临时故障
+不造成 run 生命周期内永久失明）；它永远不改变 verdict、不写 child.json、不在
+准入锁内执行。这里全部用合成源与无内核的 execution（与 test_runner 的 typed-event
+seam 同一风格），不触真实内核。
 """
 
 from __future__ import annotations
@@ -69,6 +70,7 @@ def fast_progress_clock(monkeypatch: pytest.MonkeyPatch):
     """Keep the observer's cadence test-sized; the bounds themselves stay real."""
     monkeypatch.setattr(observer_module, "_PROGRESS_POLL_SECONDS", 0.02)
     monkeypatch.setattr(observer_module, "_PROGRESS_THROTTLE_SECONDS", 0.12)
+    monkeypatch.setattr(observer_module, "_PROGRESS_MAX_BACKOFF_SECONDS", 0.05)
 
 
 def build_manager(tmp_path: Path, **overrides: str):
@@ -474,8 +476,12 @@ def test_finalize_stops_the_thread_and_closes_the_source(tmp_path: Path) -> None
     assert terminal["type"] == events.RUN_FINISHED, "观察者不参与终态判定"
 
 
-def test_repeated_poll_failures_back_off_and_stop(tmp_path: Path) -> None:
-    """连续失败有界退避后停止；kernel_status 警告最多一次，verdict 不受影响。"""
+def test_repeated_poll_failures_back_off_then_recover(tmp_path: Path) -> None:
+    """临时连续失败不导致永久失明：越过原停摆预算后仍存活，故障恢复后继续发进度。
+
+    GLINK-OBS-01 第 4 项：真实 pi r2 里 5 次 E2B 请求超时后观察者永久停止，
+    run 剩下 20 分钟无进度。原义务是「连续失败 5 次即停」，新义务是只降频重试。
+    """
     manager, store = build_manager(tmp_path)
     source = FakeSource(error=OSError("simulated unreadable directory"))
     execution = open_execution(manager, store, tmp_path / "ws", "prog07", adapter=FakeAdapter(source))
@@ -483,8 +489,9 @@ def test_repeated_poll_failures_back_off_and_stop(tmp_path: Path) -> None:
     thread = execution.progress.thread
     assert thread is not None
 
-    assert wait_for(lambda: not thread.is_alive(), timeout=5.0), "退避有界，线程须停止"
-    assert source.polls >= observer_module._PROGRESS_MAX_FAILURES  # noqa: SLF001
+    # 越过当初触发永久停止的阈值（5 次）后线程必须仍在轮询。
+    assert wait_for(lambda: source.polls >= 6, timeout=5.0)
+    assert thread.is_alive(), "临时失败不得让观察者永久停摆"
 
     warnings = [
         event
@@ -493,7 +500,14 @@ def test_repeated_poll_failures_back_off_and_stop(tmp_path: Path) -> None:
         and event["payload"].get("message") == "child_progress_failed"
     ]
     assert len(warnings) == 1, "观察者失败只发一次警告"
+
+    # 故障恢复后（成功计数把失败清零）进度照常发出。
+    source.error = None
+    source.facts = [PiProgressFact("researcher", 0, 1, "read", "a.md", 10)]
+    assert wait_for(lambda: len(progress_events(store, "prog07")) == 1), "故障恢复后必须继续发进度"
+
     finalize_ok(manager, execution)
+    assert wait_for(lambda: not thread.is_alive(), timeout=5.0)
     terminal = store.committed_terminal("prog07")
     assert terminal["type"] == events.RUN_FINISHED, "观察者失败不改变 verdict"
 

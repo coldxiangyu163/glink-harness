@@ -58,6 +58,12 @@ _PENDING_LINE_MAX_BYTES = 512 * 1024
 #: 每份文件每次 refresh 最多读取的新增字节数（增量读取的有界性）。
 _READ_CHUNK_BYTES = 1024 * 1024
 
+#: E2B 面单次 ``files.list`` / ``files.read`` 的请求超时（秒）。SDK 默认 60s
+#: 会把一次卡住的调用变成整整一分钟的停顿，且真实故障（沙箱繁忙）时每次
+#: poll 都撞满这个值；显式收窄后失败更快、退避后重试更密（GLINK-OBS-01
+#: 第 4 项：r2 里 5 次 60s 超时击穿了当时的重试预算）。
+E2B_PROGRESS_REQUEST_TIMEOUT_SECONDS = 15.0
+
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
@@ -374,7 +380,11 @@ class E2bChildProgressSource:
     def poll(self) -> list[ProgressFact]:
         if self._closed:
             raise ValueError("progress source is closed")
-        entries = self._sandbox.files.list(self._root, depth=self._list_depth)
+        entries = self._sandbox.files.list(
+            self._root,
+            depth=self._list_depth,
+            request_timeout=E2B_PROGRESS_REQUEST_TIMEOUT_SECONDS,
+        )
         items = []
         for entry in entries:
             if _entry_kind(entry) != "file":
@@ -426,7 +436,9 @@ class E2bChildProgressSource:
             state.size = size
             return state.fact(agent, index)
         try:
-            data = self._sandbox.files.read(path)
+            data = self._sandbox.files.read(
+                path, request_timeout=E2B_PROGRESS_REQUEST_TIMEOUT_SECONDS
+            )
         except Exception:  # noqa: BLE001 - 单文件失败不拖垮整轮，保留上次快照
             return state.fact(agent, index) if state.seen else None
         if isinstance(data, str):
