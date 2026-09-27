@@ -284,15 +284,20 @@ child 在前端显示为普通「进行中」，不伪造进度。
 
 ## 4. run 生命周期
 
-1. `POST /api/runs {prompt, parentRunId?}` → 准入（见下）→ 生成 `runId`（run 目录**排他**创建，
+1. `POST /api/runs {prompt, parentRunId?, blueprint?}` → 准入（见下）→ 生成 `runId`（run 目录**排他**创建，
    生成的 id 碰撞则有限重试重新生成；既有记录绝不被覆盖），写 `meta.json`（status=running）。准入先过
-   **`/` 命令门禁**：去掉前导空白的 prompt 若以 `/` 开头，只有命令名等于 `agent/prompts/` 下模板文件
-   stem 的（当前仅 `deepresearch`，从模板目录推导、不硬编码）才被接受，其他一律 `400 unsupported_command`
-   （错误体只给允许的命令列表，不回显被拒输入）；门禁在凭据解析、父会话读取、run 目录与执行面创建之前，
-   追问（`parentRunId`）与三个执行面同样适用。该门禁存在的原因：pi 对以 `/` 开头的消息先派发扩展命令
-   （docs/rpc-commands.md），载入 pi-subagents 后 `/run --bg`、`/subagents-detach` 这类客户端可控输入
-   能绕过 `tool_call` 守卫发起不随本 run 收口的后台进程（见 pi-integration-notes.md §10.4）。
-   `parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。追问门禁的同族判定比 run 记录自身的事实：准入时 `meta.json` 原子写入本 run 的 `harness`/`executor`（来自冻结配置，与 run id/owner 同一次写入），session_ready 提交时写回 `agent`（ACP 为协商到的 agentInfo.name；pi 协议不报 agent 身份，不伪造）；父记录带 `harness` 字段时，跨族追问一律 `session_unavailable`（fail-closed），父记录无该字段的旧数据维持原有证明路径。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
+   **宿主级 `/` 命令门禁**（与 harness 无关，GLINK-ARCH-6）：去掉前导空白的 prompt 若以 `/` 开头，
+   只有 `/<蓝图名> <题目>` 这一种形式被接受——宿主把它解释为 `blueprint=<蓝图名>` +
+   `prompt=<题目>`（与显式 `blueprint` 字段同一条解析；两者同时给出即拒绝，不猜优先级），
+   蓝图名从 `methodology/blueprints/` 目录推导、不硬编码；其他 `/` 开头输入一律
+   `400 unsupported_command`（错误体只给推导出的蓝图名列表，不回显被拒输入），题目本身仍以
+   `/` 开头时同样拒绝（重写后的 prompt 绝不能带着 `/` 进入内核）。门禁在凭据解析、父会话读取、
+   run 目录与执行面创建之前，追问（`parentRunId`）与三个执行面同样适用。该门禁存在的原因不变：
+   pi 对以 `/` 开头的消息先派发扩展命令（docs/rpc-commands.md），载入 pi-subagents 后
+   `/run --bg`、`/subagents-detach` 这类客户端可控输入能绕过 `tool_call` 守卫发起不随本 run
+   收口的后台进程（见 pi-integration-notes.md §10.4）；命令集合现在来自宿主自己的蓝图目录，
+   不再依赖 pi 的模板展开。
+   `parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。追问门禁的同族判定比 run 记录自身的事实：准入时 `meta.json` 原子写入本 run 的 `harness`（族：`pi`/`acp`）、`harness_pack`（`harnesses/<pack>/` 的包名）与 `executor`（来自冻结配置，与 run id/owner 同一次写入），session_ready 提交时写回 `agent`（ACP 为协商到的 agentInfo.name；pi 协议不报 agent 身份，不伪造）；父记录带 `harness` 字段时，跨族追问一律 `session_unavailable`（fail-closed），父记录还带 `harness_pack` 时要求与本包相同（不同即 `session_unavailable`），父记录无这些字段的旧数据维持原有证明路径。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
 2. 渲染**本 run 的**运行期配置目录与 session 目录（`runs/<id>/pi-agent`、会话根下的 `<id>/`），
    按 `LOCAL_WEB_EXECUTOR` 选择执行面（见 §5）；
 3. 事件投影 → `EventBus.commit`：先落 `events.jsonl`，再实时给 SSE（见 §3.1）；
@@ -319,7 +324,10 @@ child 在前端显示为普通「进行中」，不伪造进度。
 与 `harness_acp.py` 的 `AcpHarnessFamily`；族实例由 `select_family` 在 `RunManager.__init__`
 **唯一选出**（构造时注入冻结 config 与 store，此后 runner 不再读当前配置做族分支——准入时
 `harness=`/`executor=` 随记录原子写入是冻结点本身，留在 runner；历史 run 的族与执行面只比
-记录字段或 `family.name`）。族接口覆盖六面职责：(a) 准入——`/` 命令白名单与凭据要求；
+记录字段或 `family.name`；GLINK-ARCH-6 起 `select_family` 的输入是
+`harnesses/<pack>/harness.toml` 解析出的包清单：`family` 决定实现，包的能力提示与 ACP 包的
+`home/` 覆盖层由该包提供，包名随 `harness_pack` 写入 run 记录）。族接口覆盖六面职责：(a) 准入
+——凭据要求（`/` 命令门禁与斜杠解释自 GLINK-ARCH-6 起是宿主级、harness 无关，不再由族提供白名单）；
 (b) 追问准入与续接种子——族追加门禁、工作区复用、会话种子与 `resume_session` 值、会话身份
 的校验时机；(c) runtime 渲染与 projector 工厂（渲染中新知的秘密经 `PreparedRuntime` 交出，
 由 runner 按原序并入本 run 脱敏边界后才构造 projector）；(d) adapter 组装——各族持有自己的
@@ -519,9 +527,9 @@ E2B live 冒烟未做**。配置交付带有 `(相对路径, sha256)` 清单，`
 `TimeoutException`，报告与产物丢失）。命令上限与创建沙箱用的同一个计算值绑定，不会比沙箱寿命更长，
 也不会更短。
 
-### 5.3 容器面预装 pi 包
+### 5.3 容器面预装 pi 包与 harness 包 pin
 
-`agent/settings.json` 是唯一的包声明真源（`packages` 里的 `npm:` 声明带精确版本）。三个面在渲染
+`harnesses/pi/settings.json` 是 pi 包唯一的包声明真源（`packages` 里的 `npm:` 声明带精确版本）。三个面在渲染
 本 run 的 `pi-agent/settings.json` 时按面向分流：
 
 * **inproc** 保留 `npm:<name>@<pin>`，pi 启动时把它装到本 run 的运行期目录（行为不变，只是不再漂版本）；
@@ -537,6 +545,12 @@ E2B live 冒烟未做**。配置交付带有 `(相对路径, sha256)` 清单，`
 同一口径）。预装安装用 `--legacy-peer-deps`，与 pi 自己的 npm 托管安装一致：否则 npm 会自动装入
 一份版本可能不同的 `@earendil-works/pi-*` peer，扩展会从副本解析宿主 API 并改变工具的激活方式。
 
+**harness 包 pin（GLINK-ARCH-6）**：ACP 包（dsh/codex/opencode）的 `package` + `version` 写在各自的
+`harnesses/<pack>/harness.toml`，同一测试另卡住它们与 `docker/Dockerfile.acp-worker`、
+`docker/e2b/Dockerfile.acp-e2b` 的同名 ARG 逐字一致（与 `PI_VERSION` 同一口径）；claude 的两个包
+及其自检层已随 GLINK-ARCH-6 从这两个镜像删除。pi 包的版本固定点不变（`ARG PI_VERSION` +
+`harnesses/pi/settings.json` 的两个包 pin）。
+
 **包缺失必须是明确失败。** pi 对不存在的本地包路径完全静默，所以两个镜像都带
 `/opt/pi-packages/check-packages.sh`：Docker 面把它作为容器的 `--entrypoint`（镜像早于宿主时
 容器起不来，退出 127；包被删时 exit 78），E2B 面在 `spawn_rpc` 的命令链里先验证守卫存在（守卫脚本
@@ -549,7 +563,7 @@ E2B live 冒烟未做**。配置交付带有 `(相对路径, sha256)` 清单，`
 
 **子代理包（GLINK-SUB-02）**：`pi-subagents` 自本任务起真正加载，并且仍受第 5.3 节的同一套
 机制约束（模板 pin、容器面镜像内路径、版本一致性测试）。0.40.0 没有禁用 async/detached 的
-包开关，产品改用 `agent/extensions/subagent-foreground-guard.ts` 经官方 `tool_call` 钩子把派发
+包开关，产品改用 `harnesses/pi/extensions/subagent-foreground-guard.ts` 经官方 `tool_call` 钩子把派发
 强制为前台同步（可安全改写就改写，其余阻止；详单见 `docs/pi-integration-notes.md` §10），
 配合 extension config 的最保守取值，使子代理成为主 run 内的同步工具调用。镜像守卫脚本目前
 只检查 `pi-web-access`，这个已知缺口固定在 `tests/test_kernel_docker_env.py`（不受本任务修改
@@ -620,26 +634,27 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 
 | 路径 | 属于 | 说明 |
 |---|---|---|
-| `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `redaction`（出站脱敏）/ `accounts`（站内账号）/ `auth`（身份断言与会话）/ `dotenv`（.env 解析）/ `blueprints`（蓝图目录推导与解析渲染）；组成根 `app`（服务器与 `create_server`） |
+| `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `redaction`（出站脱敏）/ `accounts`（站内账号）/ `auth`（身份断言与会话）/ `dotenv`（.env 解析）/ `blueprints`（蓝图目录推导与解析渲染）、`harnesses`（harness 包清单的目录推导、fail-closed 解析与选择）；组成根 `app`（服务器与 `create_server`） |
 | `host/pi_glink/web_*.py` | 宿主 HTTP 层 | `web_routes`（路由与 run/health/报告 API）/ `web_sse`（事件流与连接额度）/ `web_security`（身份、会话与请求防护）/ `web_http`（请求体、响应、静态资源、脱敏访问日志）；一个 `HostRequestHandler` 由它们组合而成 |
 | `host/pi_glink/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
 | `host/pi_glink/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env` / `subagent_artifacts`（pi-subagents 产物布局解析与关联，R2）；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）；两族的 run 生命周期策略：`harness` / `harness_pi` / `harness_acp`。不导入 `runs/` 或宿主编排模块 |
 | `host/pi_glink/runs/` | 编排层 | run 准入与执行骨架、收尾顺序、终态提交与资源台账：`runner`（RunManager）/ `resource_ledger`（外部资源台账、重启对账、人工裁决与在线身份探测扫描）/ `child_progress_observer`（R3a 每 run 进度观察者） |
 | `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
-| `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`（最小工作约定）、`prompts/deepresearch.md`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
+| `harnesses/<pack>/` | Harness 包 | `harness.toml`（清单：`family`、ACP 的 `command` 与上游 `package`/`version`、可选 `session_config`/`permission_allow`）、可选 `capabilities.md`（能力提示，拼入系统提示）、ACP 包的 `home/`（每 run HOME 覆盖层，先于凭据注入）；pi 包另有 `settings.json`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
 | `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |
 | `docker/` | 执行面 | `Dockerfile.worker`（pi 容器）、`Dockerfile.acp-worker`（ACP 容器）、`e2b/Dockerfile.e2b`（pi 模板）、`e2b/Dockerfile.acp-e2b`（ACP dev 模板） |
-| `blueprints/` | 宿主会话模板 | harness 无关的蓝图定义（frontmatter 阶段/产出契约/检查点），格式契约见 `docs/blueprint-templates.md` |
+| `methodology/` | 方法论（harness 无关，唯一真源） | `work-agreement.md`（工作约定）、`blueprints/*.md`（蓝图：阶段/产出契约/检查点），格式契约见 `docs/blueprint-templates.md` |
 | `scripts/` | 运维 | 启动、测试、真实 run 冒烟、E2B 模板构建；`spikes/`（ACP 各面的 live 探针） |
 | `docs/` | 文档与证据 | 架构、边界、集成笔记、`evidence/` |
 | `tests/` | 回归 | `test_*.py`（宿主/内核）、`web/*.test.mjs`（前端模型）、`browser/`（真实浏览器） |
 | `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/<id>/{meta.json,events.jsonl,pi-agent/ 或 acp-agent/,artifacts/,subagents/,children/}`（按本 run 的 harness 渲染；`subagents/` 为 E2B 面回收的子代理镜像；`children/<n>/child.json` 为子代理权威文档，§3.5）、`sessions/<id>/`、`workspaces/<id>/`；目录由宿主以 0700 创建，已存在的符号链接或组/其他人可写目录拒绝启动（不自动 chmod） |
 
 运行期配置目录 `runs/<id>/pi-agent/` 是 pi 的 `PI_CODING_AGENT_DIR`：宿主在其中渲染
-`models.json` 与 `web-search.json`，复制 `agent/` 的可版本化配置，pi 自己往里写 `auth.json` /
-`models-store.json`。仓库里的 `agent/` 只是模板，永远不作为运行目录使用；`pi-agent/` 不共享，
+`models.json` 与 `web-search.json`，复制 `harnesses/pi/` 的可版本化配置，pi 自己往里写 `auth.json` /
+`models-store.json`。仓库里的 `harnesses/pi/` 只是模板，永远不作为运行目录使用；`pi-agent/` 不共享，
 所以并发 run 不会互写凭据或扩展。ACP 族的对应物是 `runs/<id>/acp-agent/home`（子进程的
-`HOME`）：凭据只读复制注入且值并入该 run 脱敏边界；e2b 面在沙箱销毁前有界回收为
+`HOME`）：先铺 `harnesses/<pack>/home/` 覆盖层、再只读复制注入凭据（凭据目标优先，不被覆盖层
+覆盖）且值并入该 run 脱敏边界；e2b 面在沙箱销毁前有界回收为
 `acp-agent/recovered`，追问时灌回新沙箱。追问继承哪一个状态根按父 run 记录的 `executor`
 推导（e2b→`recovered`，其余→`home`），不随宿主当前执行面配置漂移；无 `executor` 字段的
 旧记录回退为按当前配置推导（详见 [ACP 集成笔记](acp-integration-notes.md)）。
@@ -650,8 +665,8 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 离线运维子命令在 `cli.py`。拆分是纯结构调整：路由、状态码、载荷与既有导入路径（含
 `pi_glink.app.main` / `load_config` / `_resource_command` 再导出）保持不变。
 
-`/` 命令门禁本身在**准入层**（`runs/runner.py::RunManager.start`，命令名单从
-`kernel/agent_env.py::prompt_template_names(config.agent_config_dir)` 推导），路由只负责把
+`/` 命令门禁本身在**准入层**（`runs/runner.py::RunManager.start`，斜杠命令与蓝图名从
+`config.blueprints_dir` 推导，harness 无关），路由只负责把
 `UnsupportedCommand` 映射成 `400 unsupported_command`：这样任何调用者（HTTP、脚本、未来的适配器）
 都逃不过，且追问与三个执行面走同一条判定。拒绝发生在读父会话、写 run 目录、拉起执行面之前。
 

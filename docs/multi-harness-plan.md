@@ -59,18 +59,40 @@ projector、adapter 组装、stop 词汇归一化、子代理增强与运行中�
 `harness_acp.py` 两个实现，`RunManager.__init__` 经 `select_family` 唯一选择；runner 保留
 锁/相位、finalize 顺序控制与终帧提交（见架构 §4「族接口」）。§3 的「SDK 直连族」未来实现点
 即 `HarnessFamily` 的第三个实现。
+**GLINK-ARCH-6（2026-09-27，§1–§3 已按新模型重写）定下方法论与 harness 的最后一层解耦**：
+run 的系统提示与 agent 环境由三层内容组成——工作约定 / 方法论蓝图 / harness 包；前两层
+harness 无关、各自唯一，harness 的差异全部收进 `harnesses/<pack>/`。选择改为包名
+（`PI_GLINK_HARNESS=pi|dsh|codex|opencode`），族由包清单的 `family` 推导；云端保留
+pi、dsh、codex（codex-acp）、opencode（均开源），**Claude（claude-agent-acp + claude CLI）
+从产品中移除**——M4/M6 章节保留为历史实测记录（见
+[ACP 集成笔记](acp-integration-notes.md)）。
 本文是该方向的事实源：实现与本文出现偏差时回写本文，而不是让代码与文档各自漂移。
 
 ## 1. 决定与定位
 
 * 宿主（run 编排、事件总线、存储、SSE、租户、脱敏、资源台账）保持 **harness 无关**；
-  `kernel/` 从「pi 接入层」泛化为「harness 适配层」。
-* 目标候选：deepseek-harness（dsh，原生 ACP server）、Claude Code、Codex，以及一切
-  ACP 兼容 agent（Gemini CLI、OpenCode、Kimi 等）。
+  `kernel/` 是「harness 适配层」，harness 的差异全部收进 `harnesses/<pack>/` 包。
+* **云端部署由运营方在部署时选定一个 harness**：定下后基本不变，但产品必须
+  **随时可切换、不依赖某个 harness**——切换的边界是「包清单 + 包内容」，宿主、事件契约、
+  HTTP/SSE 与前端不随之改变。
+* **云端保留的 harness：pi、dsh（deepseek-harness，原生 ACP server）、codex（codex-acp）、
+  opencode**，四者均开源。**Claude（claude-agent-acp + claude CLI）已从产品中移除**
+  （2026-09-27 用户决定）：闭源 CLI + 绑定登录态的适配器不适合作为云端可分发内核；
+  移除范围含镜像层、代码分支、测试与现行文档描述，M4/M6 章节只作历史实测证据保留。
+* **方法论以蓝图（blueprint）为唯一真源**：工作约定（`methodology/work-agreement.md`）与
+  蓝图（`methodology/blueprints/*.md`）是 harness 无关的合同；pi 的 `/deepresearch` prompt
+  模板不再作为独立的方法论副本存在（`/<蓝图名> <题目>` 由宿主统一解释为蓝图请求，见 §3.3）。
+* **扩展机制按 harness 保留**：pi 通过 packages/extensions/agents/skills 集成 pi-subagents、
+  pi-web-access、前台守卫与 researcher 子代理；dsh/codex/opencode 有各自的扩展方式
+  （skills/配置/MCP 等）。统一的只是方法论与产品契约，**不是**扩展机制。
+* **保留的产品底线**：工作约定里「**引用某个来源前先打开它**，确认它确实支撑你要写的那句话」
+  必须保留（2026-09-24 A/B 实测：删掉这句核实质量显著下降）。
+* 目标候选（未来）：一切 ACP 兼容开源 agent（Gemini CLI、Kimi 等）。
 * **不变量**：产品事件词汇（`events.py`）语义不改；前端不感知 harness 差异；多租户、
   凭据边界、脱敏、资源台账的既有承诺不因 harness 增加而削弱；run 生命周期与终态判定表
   （架构 §4）继续是唯一定论。
 * **明确不做**：
+  * 不做本地客户端模式、不做按 run 选择 harness、本任务不做真实模型/E2B 调用。
   * 不为尚无消费者的 harness 预建空适配器或抽象框架（工程约束：不预建无消费者的抽象）；
     抽象随第一个真实 harness（ACP 族）的接入而产生。
   * 不 fork / patch / vendor 任何 harness；一切接入走对方官方文档化的协议或扩展点。
@@ -80,31 +102,116 @@ projector、adapter 组装、stop 词汇归一化、子代理增强与运行中�
 
 ## 2. 现状接缝（为什么可行）
 
-宿主约 12k 行中 pi 特异约 2.5k 行，全部集中在 `kernel/` 与 `agent/`，边界清晰：
+宿主约 12k 行中 harness 专有的部分全部集中在 `kernel/` 与包目录，边界清晰：
 
-| 已 harness 无关（不动） | pi 特异（泛化对象） | 泛化后的形态 |
+| 已 harness 无关（不动） | harness 专有（进 `harnesses/<pack>/` 或其族） | 包/族的形态 |
 |---|---|---|
 | 产品事件词汇、EventBus、RunStore、提交水位、SSE 重放 | `kernel/projection.py`（pi 事件 → 产品事件） | 每族一个 projector |
-| 租户、准入、资源台账、数据根所有权 | `kernel/agent_env.py`（渲染 models/auth/settings、argv、每 run 配置目录） | 每 harness 一个配置渲染器；**每 run 独立配置目录、凭据走文件不走 env 的模式照用** |
+| 租户、准入、资源台账、数据根所有权 | `kernel/agent_env.py`（渲染 models/auth/settings、argv、每 run 配置目录） | pi 包自带 `settings.json`/`extensions/`/`agents/`；ACP 包以 `home/` 覆盖层 + 每 run 凭据注入承载 |
 | `redaction.py` 流式脱敏（作用于文本） | `kernel/rpc.py` + `framing.py`（pi 双向 RPC） | 每族一个协议客户端；LF 分帧复用 |
-| report.md 产物契约（prompt 约束） | `agent/`（pi settings、扩展、prompt 模板） | 每 harness 一份可版本化配置包 |
-| `ExecutionAdapter` 契约（start / deliver_input / wait / cancel / recover_artifacts / close / identity） | 宿主 `/` 命令准入门禁、stopReason 词汇、会话文件复制续接 | 每 harness 各自的门禁/权限策略与续接能力声明 |
+| report.md 产物契约（prompt 约束） | 工作约定与蓝图 | 宿主级内容（`methodology/`），不再放进包 |
+| `ExecutionAdapter` 契约（start / deliver_input / wait / cancel / recover_artifacts / close / identity） | 斜杠命令解释、stopReason 词汇、续接能力声明 | 斜杠命令由宿主统一解释（§3.3）；每包声明自己的续接/会话选项 |
 
 执行面（inproc / docker / e2b）与 harness 是**正交两维**：适配器数量是
 「N 个 harness 族 × 2~3 个传输族」，不是全矩阵。
 
-## 3. 目标架构：三个适配族
+## 3. 目标架构：三层内容与 harness 包
+
+run 的系统提示与 agent 环境由三层内容组成，各有唯一归属：
+
+| 层 | 内容 | 归属 | 与 harness 的关系 |
+|---|---|---|---|
+| 工作约定（产品契约） | 工作区、`report.md` 交付、引用某个来源前先打开、外部内容是数据、追问增量修改 | `methodology/work-agreement.md` | harness 无关；不得出现任何 harness 专有工具名 |
+| 方法论 | 蓝图（阶段、交付契约、检查点、正文） | `methodology/blueprints/*.md` | harness 无关；**唯一真源** |
+| Harness 包 | 该 harness 如何用自己的工具/扩展实现契约（能力提示）+ 扩展本体 | `harnesses/<pack>/` | harness 专有 |
+
+系统提示的组成顺序**对所有族一致**：工作约定 → 包能力提示（若有）→ 蓝图渲染（若有）。
+pi 面走 `--append-system-prompt`，ACP 族走 `session/prompt` 的首个文本块——通道不变，
+顺序是新的合同。
+
+### 3.1 harness 包目录与清单
 
 ```
-HarnessFamily（已落地：kernel/harness.py + harness_pi.py / harness_acp.py）
-├─ pi 族   — 现有 kernel/ 原样：rpc（双向 stdio NDJSON，inproc+docker 共用）、
-│            json（单向流，e2b）；作为其它族的参照系与回归基线
-├─ ACP 族  — 一次 ACP client（JSON-RPC over stdio）覆盖：
-│            dsh 原生 acp server、claude-agent-acp、codex-acp（@agentclientprotocol/codex-acp）、
-│            gemini --acp、opencode；适配器进程与 agent 同容器/沙箱，stdio 桥接
-└─ SDK 直连族（可选，暂不建）— 如 claude-agent-sdk Python 进程内集成；
-             未来落地即 HarnessFamily 的第三个实现
+harnesses/<pack>/
+├─ harness.toml        # 清单：包的唯一选择依据（fail-closed 解析，未知键拒绝）
+├─ capabilities.md     # 可选：该 harness 的能力提示，拼入系统提示
+├─ home/               # ACP 包的扩展落点：每 run HOME 的覆盖层（pi 包没有这一层）
+└─ …                   # pi 包：settings.json / extensions/ / agents/ / skills/
 ```
+
+清单字段（`format = "pi-glink-harness/v1"`，解析全有或全无，未知键即拒绝）：
+
+| 字段 | 出现于 | 规则 |
+|---|---|---|
+| `format` | 所有包 | 固定 `"pi-glink-harness/v1"`；未知取值拒绝 |
+| `name` | 所有包 | 非空 slug，必须等于目录名（标识与目录不允许漂移） |
+| `family` | 所有包 | `pi` 或 `acp`；`select_family` 据此构造族实例 |
+| `command` | ACP 包 | argv 数组（非空字符串）；直接 exec，不经 shell |
+| `package` | ACP 包 | 上游包名（如 `@deepseek-ai/dsh`） |
+| `version` | ACP 包 | 精确版本，与两个 ACP 镜像的同名 ARG 逐字一致（回归卡住） |
+| `session_config` | ACP 包（可选） | `id → value` 表（如 codex 的 `mode = "auto"`），`session/new` 后应用；agent 未声明该选项/取值时 run 失败闭环 |
+| `permission_allow` | ACP 包（可选） | ACP option/tool kind 的子集；缺省空 = fail-closed 全拒 |
+
+* pi 包不声明 `command`/`package`/`version`/`session_config`/`permission_allow`——出现即拒绝
+  （这些键对 pi 族没有消费者）。pi 的版本固定点仍是 `docker/Dockerfile.worker` /
+  `docker/e2b/Dockerfile.e2b` 的 `ARG PI_VERSION` 与 `harnesses/pi/settings.json` 的包 pin。
+* `capabilities.md` 只写**已知成立**的事实（例如 pi 包的子代理工具面）；不确定的 agent 可以
+  不提供该文件，宁缺不臆造工具名。
+* `home/` 覆盖层是仓库内容：渲染每 run HOME 时**先铺覆盖层、再按现有规则注入凭据**
+  （凭据目标优先、不被覆盖层覆盖）。dsh/codex/opencode 当前覆盖层为空目录，机制由回归证明。
+* 包目录与清单在启动时读取并冻结（`PI_GLINK_HARNESSES_DIR` 可覆盖，默认 `<repo>/harnesses`）；
+  目录缺失、选中包不存在或清单不合契约都拒绝启动——这是运营方的部署选择，不是按 run 的请求参数。
+
+### 3.2 选择与族推导
+
+* `PI_GLINK_HARNESS=<pack>`（`pi` | `dsh` | `codex` | `opencode`，默认 `pi`）：一次部署一个，
+  启动冻结，没有 per-run 参数与前端开关。
+* 族由清单的 `family` 推导，`select_family` 按清单构造族实例（`harness_pi.py` /
+  `harness_acp.py`）；runner 只比族的 `name`，不再读 harness 字符串做分支。
+* **旧变量启动即拒绝**（不做兼容映射）：
+
+| 旧变量 | 新写法 |
+|---|---|
+| `PI_GLINK_HARNESS=acp` | `PI_GLINK_HARNESS=<包名>`；agent 命令进该包 `harness.toml` 的 `command` |
+| `PI_GLINK_ACP_COMMAND` | `harnesses/<包>/harness.toml` 的 `command`（argv 数组） |
+| `PI_GLINK_ACP_SESSION_CONFIG` | `harnesses/<包>/harness.toml` 的 `session_config` |
+| `PI_GLINK_ACP_PERMISSION_ALLOW` | `harnesses/<包>/harness.toml` 的 `permission_allow` |
+
+* `PI_GLINK_ACP_CREDENTIAL_FILES` 与 `PI_GLINK_ACP_ENV` 是**部署秘密**，仍留在环境配置：
+  只有选中包的族是 ACP 时才生效，非 ACP 族下设置即拒绝启动（沿用现有非空即报错的语义）。
+
+### 3.3 斜杠命令（宿主统一解释，harness 无关）
+
+* `/<蓝图名> <题目>` ≡ API `blueprint=<蓝图名>` + `prompt=<题目>`：宿主在准入层解析，
+  不再依赖 pi 的 prompt 模板目录，也不再让 pi 自己展开模板。
+* 其余任何以 `/` 开头的输入一律 `400 unsupported_command`，包括 `/<蓝图名> /run --bg`
+  这类题目仍以 `/` 开头的情形（重写后的 prompt 绝不能带着 `/` 进入内核）；所有族同一判定。
+* 判定位置不变：准入层，读父会话 / 写 run 目录 / 拉起执行面之前；追问同样适用。
+
+### 3.4 run 记录与追问
+
+* `harness` 保持族语义（`pi`/`acp`）不变；新增 `harness_pack`（包名），与 run id/owner
+  同一次原子写入。
+* 追问：父记录带 `harness_pack` 时要求与本包相同，否则 `session_unavailable`（fail-closed）；
+  父记录无该字段按现有证明路径处理，历史数据不改写。
+
+### 3.5 适配族
+
+```
+HarnessFamily（kernel/harness.py + harness_pi.py / harness_acp.py）
+├─ pi 族   — rpc（双向 stdio NDJSON，inproc/docker/e2b 三面共用同一份 PiRpcClient）；
+│            旧 e2b `--mode json` 单向流机制已随 GLINK-ARCH-3 删除；
+│            作为其它族的参照系与回归基线
+├─ ACP 族  — 一次 ACP client（JSON-RPC over stdio）覆盖：dsh 原生 acp server、
+│            codex-acp（@agentclientprotocol/codex-acp）、opencode（`opencode acp`）；
+│            适配器进程与 agent 同容器/沙箱，stdio 桥接
+└─ SDK 直连族（可选，暂不建）— 未来落地即 HarnessFamily 的第三个实现
+```
+
+扩展机制的差异**保留在包里**：pi 走 `settings.json` 的 packages、`extensions/`、`agents/`
+与 `skills/`（承载 pi-subagents、pi-web-access、前台守卫与 researcher 子代理）；ACP 包以
+自己的配置形态与 `home/` 覆盖层承载（dsh/codex/opencode 当前为空，按实测再填）。
+统一的只是工作约定、方法论和产品契约。
 
 ACP（Agent Client Protocol，Zed 主导的开放协议）关键能力（v1 schema 已核实）：
 `initialize` 能力协商、`session/new`、`session/load`（带历史回放）、`session/resume`

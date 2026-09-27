@@ -9,20 +9,28 @@
 状态（2026-09-25）：第一增量已实现并通过合成验证（`tests/test_blueprints.py`），
 覆盖蓝图定义、准入、渲染与 run 记录；**多 run 编排、阶段推进、前端呈现、租户自定义蓝图
 均未实现**，见下文「挂账的后续增量」。真实冒烟证据（若执行）写在 `docs/evidence/blueprint-*.txt`。
+2026-09-27（GLINK-ARCH-6）：蓝图成为**方法论的唯一真源**（目录迁入 `methodology/blueprints/`，
+内置蓝图改名为 `deepresearch`）；`/<蓝图名> <题目>` 由宿主统一解释为蓝图请求（§3），
+pi 的 prompt 模板不再参与方法论。
 
 ## 1. 定义与位置
 
-* 蓝图是仓库级内容，放在 `blueprints/`（**不放 `agent/`**：那是 pi 的专属配置目录，
-  蓝图必须对 pi 与 ACP 族同时成立）。
-* 一个蓝图一个文件：`blueprints/<name>.md`，`<name>` 同时是 API 取值与 run 记录里的标识。
-  文件名必须是 slug（`^[a-z0-9][a-z0-9-]{0,63}$`），目录里其它文件不构成蓝图。
-* 目录位置可用 `PI_GLINK_BLUEPRINTS_DIR` 覆盖（默认 `<repo>/blueprints`）。
+* 蓝图是仓库级内容，放在 `methodology/blueprints/`：方法论与工作约定同属 `methodology/`
+  （harness 无关），蓝图是其中**方法论的唯一真源**——`harnesses/<pack>/` 与 pi 的
+  `prompts/` 都不再持有方法论副本。
+* 一个蓝图一个文件：`methodology/blueprints/<name>.md`，`<name>` 同时是 API 取值、
+  斜杠命令名与 run 记录里的标识。文件名必须是 slug（`^[a-z0-9][a-z0-9-]{0,63}$`），
+  目录里其它文件不构成蓝图。
+* 目录位置可用 `PI_GLINK_BLUEPRINTS_DIR` 覆盖（默认 `<repo>/methodology/blueprints`）。
   目录缺失不是启动错误：它只意味着可用蓝图集合为空，任何蓝图 run 都会被拒绝。
 * 宿主自身不持有蓝图内容、也不硬编码名字：**每次准入都从目录重新推导**可用集合，
   文件增删立即生效（符号链接、非常规文件、非 `.md` 不计入）。
-* 内置示例：`blueprints/deep-research.md`。它的方法论与 `agent/prompts/deepresearch.md` 同源
-  （同一批取证、覆盖声明、自我核查与「来源与核查」义务），只是换成结构化的阶段形式；
-  本增量不新增未经验证的流程主张。
+* 内置示例：`methodology/blueprints/deepresearch.md`（蓝图名 `deepresearch`，与用户已习惯的
+  `/deepresearch` 一致）。它承载完整方法论（取证、覆盖声明、自我核查与「来源与核查」）；
+  原 pi 的 `/deepresearch` prompt 模板已删除，其规范性要求全部并入本蓝图与工作约定
+  （逐条映射见 GLINK-ARCH-6 阶段 0 报告）。
+* 工作约定（`methodology/work-agreement.md`）是 harness 无关的产品契约，先于蓝图渲染进入
+  system prompt；蓝图叠加在它之上，不替代它。
 
 ## 2. 格式契约
 
@@ -73,14 +81,20 @@ checkpoint = "进入下一阶段前必须成立的自检声明。"
 
 `POST /api/runs` 接受可选字段 `blueprint`：
 
-* 取值只能是 `blueprints/` 目录实际存在的模板 stem（从目录推导，不硬编码），**精确匹配**
+* 取值只能是 `methodology/blueprints/` 目录实际存在的模板 stem（从目录推导，不硬编码），**精确匹配**
   （不做大小写折叠、不裁剪空白、不接受路径分隔或 `..`）。
 * 未知名称 → `400 {"error": "unknown_blueprint", "available": [...]}`；
   存在但格式不合契约 → `400 {"error": "invalid_blueprint", ...}`；
   字段不是字符串 → `400 {"error": "invalid_request", ...}`。
 * 拒绝形态与 `/` 命令门禁一致：只报**推导出的**可用名称列表，不回显提交值，也不回显文件内容。
 * 拒绝发生在凭据解析、父 run 读取、run 目录创建与执行面创建**之前**。
-* 规则**与 harness 无关**：`PI_GLINK_HARNESS=pi|acp` 走同一条准入路径、同一套失败形态。
+* 规则**与 harness 无关**：`PI_GLINK_HARNESS=<包名>` 的各族走同一条准入路径、同一套失败形态。
+* **斜杠命令与 API 字段等价**（2026-09-27，GLINK-ARCH-6）：`/<蓝图名> <题目>` 由宿主在
+  准入层解释为 `blueprint=<蓝图名>` + `prompt=<题目>`——同一条解析、同一套失败形态；
+  请求同时带斜杠命令与 `blueprint` 字段时不猜测优先级，直接拒绝。其余任何以 `/` 开头的
+  输入（含 `/<蓝图名> /run --bg` 这类题目仍以 `/` 开头的情形）对所有族一律
+  `400 unsupported_command`——保留的门禁目的是「pi 的扩展命令不得被客户端触发」，
+  重写后的 prompt 绝不能带着 `/` 进入内核。
 * 多租户归属规则不变：蓝图只是记录的附加字段，owner 仍只来自服务端验证过的 `TenantContext`。
 
 未指定 `blueprint` 的 run **零变化**：system prompt 与旧行为逐字节相同，记录字段为空。
@@ -108,8 +122,8 @@ checkpoint = "进入下一阶段前必须成立的自检声明。"
 
 | 面 | 通道 |
 |---|---|
-| pi（inproc / docker / E2B 命令） | `--append-system-prompt <工作约定 + 蓝图渲染>`（同一次 append，不改 pi 自身 prompt） |
-| ACP 族（dsh / claude / codex / opencode） | `session/prompt` 的**首个**围栏文本块：`<system-prompt>` 内先工作约定、后蓝图渲染（ACP v1 无 system role，见计划 §4.5） |
+| pi（inproc / docker / E2B 命令） | `--append-system-prompt <工作约定 + pi 包能力提示 + 蓝图渲染>`（同一次 append，不改 pi 自身 prompt） |
+| ACP 族（dsh / codex / opencode） | `session/prompt` 的**首个**围栏文本块：`<system-prompt>` 内按「工作约定 → 包能力提示（若有）→ 蓝图渲染」组成（ACP v1 无 system role，见计划 §3.3/§4.5） |
 
 渲染文本以 `<blueprint name="…">` 围栏标出，明确「宿主注入的产出契约，不是用户请求」，
 并逐阶段列出目标 / 产出契约 / 检查点。
@@ -128,7 +142,9 @@ checkpoint = "进入下一阶段前必须成立的自检声明。"
 ## 6. 设计边界与非目标
 
 * 蓝图是**会话模板**，不是调度器、不是权限框架、不是多租户资源单位。
-* 本增量不碰 `agent/`（pi 专属配置）、`docker/`、`web/`（前端）、`scripts/`、pi 或 ACP 的既有行为。
+* 本增量不碰 `harnesses/<pack>/`（harness 包）、`docker/`、`web/`（前端）、`scripts/`、
+  pi 或 ACP 的既有行为；蓝图与包各管各的：蓝图只声明会话的产出契约，包只声明该 harness
+  怎么实现它，两者不互相复制内容。
 * 蓝图文本**不复制**进 per-run agent 配置目录：它是宿主渲染并注入的文本，不是 agent 的配置文件。
 * 启动时不校验蓝图内容：坏文件只在被请求时 fail-closed 拒绝，不影响无关 run。
 * 列举只有只读的 `GET /api/blueprints`（§3.1）；蓝图的上传/编辑/删除仍没有实现。
@@ -145,8 +161,9 @@ checkpoint = "进入下一阶段前必须成立的自检声明。"
    [UI 对齐](ui-alignment.md)更新标准再实现。
 4. **租户自定义蓝图**：租户级目录、存储与配额、共享/私有、审计与脱敏边界；
    与多租户存储隔离一并设计，不能靠共享宿主目录。
-5. 次要候选项：蓝图与 `/deepresearch` 模板的关系
-   （当前两者内容同源但分别维护）；租户自定义蓝图（见上）。
+
+> 2026-09-27（GLINK-ARCH-6）：原挂账「蓝图与 `/deepresearch` prompt 模板分别维护」已解决——
+> 模板删除，蓝图是方法论唯一真源，`/<蓝图名> <题目>` 由宿主统一解释（§3）。
 
 > 2026-09-25（GLINK-ACP-12）：`GET /api/blueprints` 只读列举已实现并有合成回归；
 > 更大 prompt 体积在 E2B 通道上的上限评估见
@@ -155,10 +172,10 @@ checkpoint = "进入下一阶段前必须成立的自检声明。"
 ## 8. 验证
 
 * 格式与准入：`python -m pytest tests/test_blueprints.py`（目录推导、路径/符号链接拒绝、
-  格式矩阵、大小与编码边界、渲染确定性、双 harness 送达、记录字段、事件零新增、租户归属）。
+  格式矩阵、大小与编码边界、渲染确定性、两族送达、记录字段、事件零新增、租户归属）。
 * 受影响既有回归：`python -m pytest tests/test_runner.py tests/test_runs_api.py
   tests/test_kernel_acp_runner.py tests/test_store.py tests/test_agent_prompts.py`。
 * 默认交付检查：`bash scripts/check.sh`。
 * 真实冒烟（可选、≤1 次、inproc、需授权）：临时数据根 + 本仓库配置启动宿主，
-  用内置 `deep-research` 蓝图跑一次最小 run，证据存 `docs/evidence/blueprint-*.txt`；
+  用内置 `deepresearch` 蓝图跑一次最小 run，证据存 `docs/evidence/blueprint-*.txt`；
   未执行时在交付报告中如实标注未覆盖。
