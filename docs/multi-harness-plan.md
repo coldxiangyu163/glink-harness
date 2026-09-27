@@ -158,7 +158,10 @@ harnesses/<pack>/
 * `capabilities.md` 只写**已知成立**的事实（例如 pi 包的子代理工具面）；不确定的 agent 可以
   不提供该文件，宁缺不臆造工具名。
 * `home/` 覆盖层是仓库内容：渲染每 run HOME 时**先铺覆盖层、再按现有规则注入凭据**
-  （凭据目标优先、不被覆盖层覆盖）。dsh/codex/opencode 当前覆盖层为空目录，机制由回归证明。
+  （凭据目标优先、不被覆盖层覆盖）。dsh 的覆盖层自 GLINK-DSH-02 起承载每 run 的 ACP
+  profile 清单（把 `web.fetchProvider` 指向 out-of-tree 的 Jina fetch bundle；bundle 代码
+  在镜像/模板构建期装进 dsh 安装，覆盖层只带清单），见
+  [ACP 集成笔记](acp-integration-notes.md) §19；codex/opencode 覆盖层仍为空，机制由回归证明。
 * 包目录与清单在启动时读取并冻结（`PI_GLINK_HARNESSES_DIR` 可覆盖，默认 `<repo>/harnesses`）；
   目录缺失、选中包不存在或清单不合契约都拒绝启动——这是运营方的部署选择，不是按 run 的请求参数。
 

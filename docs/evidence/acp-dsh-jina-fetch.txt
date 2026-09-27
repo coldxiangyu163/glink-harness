@@ -1,0 +1,145 @@
+GLINK-DSH-02：dsh 的 Jina fetch provider（out-of-tree bundle）真实面证据
+==============================================================================
+任务: GLINK-DSH-02；分支 feature/dsh-jina-fetch-20260927（rebase 到 main fe1d90b 后）
+约束: 只读输出；不含任何凭据值；清理只按已知 id/PID
+
+本机 Docker 镜像（docker/Dockerfile.acp-worker）
+------------------------------------------------------------------------------
+  构建命令（Dockerfile 注释中的受限网络路径，基础源覆盖仅影响下载来源）:
+    docker build -t pi-glink-acp-worker:latest -f docker/Dockerfile.acp-worker \
+      --build-arg DEBIAN_MIRROR=mirrors.aliyun.com \
+      --build-arg NPM_REGISTRY=https://registry.npmmirror.com .
+  构建日志事实（/tmp/glink-dsh-02/docker-build-3.log）:
+    #8 [4/5] RUN {       echo '#!/bin/sh';       echo 'set -eu';       echo 'dsh --version';       echo 'codex-acp --version';       echo 'opencode --version';       echo 'test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@pi-glink/dsh-web-fetch-jina/package.json';       echo 'echo jina-bundle=present';     } > /usr/local/bin/acp-self-check     && chmod 0755 /usr/local/bin/acp-self-check     && /usr/local/bin/acp-self-check
+    #8 1.034 jina-bundle=present
+    #10 exporting manifest list sha256:a09dc6e4a9f451b0cc6e49ca2bb9749eed0a02627a5fec9877634883172e2aed done
+    #10 naming to docker.io/library/pi-glink-acp-worker:latest done
+  docker run --rm pi-glink-acp-worker:latest（默认 CMD = 自检）:
+    0.1.5-rc.3
+    @agentclientprotocol/codex-acp 1.13.1
+    1.18.32
+    jina-bundle=present
+
+本机 Docker：每 run HOME（覆盖层 + 0600 凭据副本）内的 profile 组合
+------------------------------------------------------------------------------
+  dsh --profile acp --dump-config  exit=0  stderr=0 字节；每 run 选择配置节选：
+    # … - id: web
+    - id: web
+      name: '@deepseek-ai/dsh-web'
+      config:
+        searchProvider: deepseek-official
+        fetchProvider: jina
+    # … - id: web-fetch-http
+    - id: web-fetch-http
+      name: '@deepseek-ai/dsh-web-fetch-http'
+      disabled: true
+    # … - id: tool-web
+    - id: tool-web
+      name: '@deepseek-ai/dsh-tool-web'
+      config:
+        fetch: true
+        searchTimeoutMs: 60000
+        fetchTimeoutMs: 60000
+    # … - id: web-fetch-jina
+    - id: web-fetch-jina
+      name: >-
+        file:///usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@pi-glink/dsh-web-fetch-jina/lib/index.js
+      config:
+        apiKeyEnv: JINA_API_KEY
+        baseURL: https://r.jina.ai
+        timeoutMs: 60000
+        maxResponseBytes: 5000000
+        maxBodyChars: 100000
+        userAgent: pi-glink-dsh-web-fetch-jina/0.1.0
+  dsh --profile acp（空输入启动）  exit=0  stderr=0 字节（插件激活无错误）
+
+本机 Docker：容器内直接 provider 探针（真实 Jina key 仅经 --env-file 进容器进程环境）
+------------------------------------------------------------------------------
+  {"url":"https://example.com/","status":200,"truncated":false,"chars":149,…}
+  {"url":"https://fi.mofcom.gov.cn/…/751a935e…pdf…","status":200,"chars":13680,
+   "head":"— 1 — > Source ：Lawinfochina… # 外商投资准入特别管理措施（负面清单）（2024 年版）"}
+  {"url":"https://shenzhen.chinatax.gov.cn/…/7653b7b3….shtml","status":200,"chars":5916,
+   "head":"中华人民共和国国务院令 第707号 …《中华人民共和国个人所得税法实施条例》"}（GLINK-DSH-01 的原崩溃主机）
+
+E2B dev 模板 glink-acp-worker（docker/e2b/Dockerfile.acp-e2b）
+------------------------------------------------------------------------------
+  1.0s  | 08:37:26 PM INFO  Template created with ID: oen0rq47o2sizakry5v3, Build ID: 95014ccd-2cfe-4fb5-865a-b4073dc647ff
+  14.2s | 08:37:39 PM INFO  [builder 10/14] RUN { echo '#!/bin/sh'; echo 'set -eu'; echo 'dsh --version'; echo 'codex-acp --version'; echo 'opencode --version'; echo 'test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@pi-glink/dsh-web-fetch-jina/package.json'; echo 'echo jina-bundle=present'; } > /usr/local/bin/acp-self-check && chmod 0755 /usr/local/bin/acp-self-check && /usr/local/bin/acp-self-check [301097ea780d01656f385f50d7ce8bb9c9e3591375858663a598f020bdf4c89b]
+  27.4s | 08:37:52 PM INFO  [builder 10/14] [stdout]: jina-bundle=present
+  33.3s | 08:37:58 PM INFO  [start] [stdout]: jina-bundle=present
+  51.6s | 08:38:16 PM INFO  Template is ready
+  55.9s | 08:38:21 PM INFO  Build finished, took 52s
+  构建上下文: 仓库根（-p .，COPY harnesses/dsh/bundles/… 成功）
+  模板自检 scripts/spikes/acp_e2b/template_selfcheck.py（沙箱 iy967zlwf3jc5kvtdovu9，已按 id 终止）:
+    node=v24.21.0  dsh=0.1.5-rc.3  codex_acp=@agentclientprotocol/codex-acp 1.13.1  opencode=1.18.32
+    self_check=0.1.5-rc.3;@agentclientprotocol/codex-acp 1.13.1;1.18.32;jina-bundle=present;
+    jina_bundle=present  jina_bundle_lib=present  jina_bundle_patch=present
+    per_run_home_mkdir=ok  per_run_home_write=ok
+
+E2B 真实 run（宿主生产链路：python -m pi_glink.app + LOCAL_WEB_EXECUTOR=e2b）
+------------------------------------------------------------------------------
+  run run-4urls: run_id=3b9cbbc11ab1 status=finished stop=None elapsed=60.0s report=HTTP 200 1519 bytes sha256=3fde2028f4e491fa…
+    SSE 帧: 23；事件类型: {"run_started": 1, "session_ready": 2, "turn_started": 1, "usage_reported": 4, "tool_started": 6, "tool_finished": 6, "assistant_delta": 1, "turn_finished": 1, "run_finished": 1}
+    meta: sandbox_id=iiwr8jdzxjz4hejsc6uk1 cleanup={"released": true, "failures": [], "external": {"sandbox": "iiwr8jdzxjz4hejsc6uk1"}} artifact_failures=None
+    dsh recovered 会话: ['acp-agent/recovered/.dsh/sessions/--home-user-workspace--/7f5e4250-7c28-419c-b3db-8c4ccb6eb910/session.v3.jsonl.zstd']
+    会话帧类型: {"session": 1, "permission/preset": 1, "sandbox/mode": 1, "approval/policy": 1, "agent/inbox/spliced": 2, "turn/start": 1, "step/start": 4, "system/message": 1, "user/message": 2, "request/header": 1, "request/context": 1, "session/title": 1, "assistant/message": 4, "tool/call": 6, "web/jina-fetch-request": 4, "tool/result": 6, "step/end": 4, "turn/end": 1}
+    web/jina-fetch-request（provider 取证）:
+      - status=200 truncated=False chars=5916 endpoint=https://r.jina.ai/ url=https://shenzhen.chinatax.gov.cn/sztax/zcwj/zcfgk/zjzcfgk/grsdszj/201812/7653b7b3e0924aa8b737f9a9bb918a4a.shtml
+      - status=200 truncated=False chars=4119 endpoint=https://r.jina.ai/ url=https://www.chinatax.gov.cn/chinatax/n810341/n810765/n1465977/201502/c1676726/content.html
+      - status=200 truncated=False chars=13680 endpoint=https://r.jina.ai/ url=https://fi.mofcom.gov.cn/cms_files/filemanager/1162448699/attach/202411/751a935e56e34f9782a057bec8ba3339.pdf?fileName=Negtive%20list%20for%20foreign%20investment%282024%29.pdf
+      - status=200 truncated=False chars=2584 endpoint=https://r.jina.ai/ url=https://shanghai.chinatax.gov.cn/zcfw/zcfgk/ssxd/201802/t436563.html
+    判据: {"shenzhen_url_seen": true, "pdf_url_seen": true, "pdf_text_present": true, "jina_provider_recorded": true}
+    沙箱对账: absent=True detail=SDK 确认沙箱不存在 host_exit=-15
+
+  run run-research: run_id=10b50ee8f62b status=finished stop=None elapsed=111.6s report=HTTP 200 1571 bytes sha256=071cc09a8486cc7e…
+    SSE 帧: 44；事件类型: {"run_started": 1, "session_ready": 2, "turn_started": 1, "usage_reported": 11, "tool_started": 13, "tool_finished": 13, "assistant_delta": 1, "turn_finished": 1, "run_finished": 1}
+    meta: sandbox_id=isdrxovxriezmk26faxiw cleanup={"released": true, "failures": [], "external": {"sandbox": "isdrxovxriezmk26faxiw"}} artifact_failures=None
+    dsh recovered 会话: ['acp-agent/recovered/.dsh/sessions/--home-user-workspace--/9e83ea61-8b61-4fb7-ba22-abf8cca46a80/session.v3.jsonl.zstd']
+    会话帧类型: {"session": 1, "permission/preset": 1, "sandbox/mode": 1, "approval/policy": 1, "agent/inbox/spliced": 2, "turn/start": 1, "step/start": 11, "system/message": 1, "user/message": 2, "request/header": 1, "request/context": 1, "session/title": 1, "assistant/message": 11, "tool/call": 13, "web/deepseek-search-llm-request": 7, "tool/result": 13, "step/end": 11, "web/jina-fetch-request": 5, "turn/end": 1}
+    web/jina-fetch-request（provider 取证）:
+      - status=200 truncated=False chars=4373 endpoint=https://r.jina.ai/ url=https://fgk.chinatax.gov.cn/zcfgk/c100012/c5194515/content.html
+      - status=200 truncated=False chars=7635 endpoint=https://r.jina.ai/ url=https://www.chinatax.gov.cn/n810214/n810641/n2985871/n2985898/n2986028/c3279076/content.html
+      - status=200 truncated=False chars=2582 endpoint=https://r.jina.ai/ url=http://shanghai.chinatax.gov.cn/tax/zcfw/zcfgk/ssxd/201802/t436563.html
+      - status=200 truncated=False chars=1299 endpoint=https://r.jina.ai/ url=https://shanghai.chinatax.gov.cn/tax/zcfw/rdwd/202306/t467324.html
+      - status=200 truncated=False chars=10180 endpoint=https://r.jina.ai/ url=https://gtm-cn-uqm3dbhc20k.guangdong.chinatax.gov.cn/gdsw/ssfwyga_zcwj/2019-11/21/content_e5693b0352774f818eba90cec31cf53c.shtml
+    判据: {"shenzhen_url_seen": false, "pdf_url_seen": false, "pdf_text_present": false, "jina_provider_recorded": true}
+    沙箱对账: absent=True detail=SDK 确认沙箱不存在 host_exit=-15
+
+  run-research 引用核对（report.md 中的 URL 是否出现在 web/jina-fetch-request 中）:
+    [OPENED] http://shanghai.chinatax.gov.cn/tax/zcfw/zcfgk/ssxd/201802/t436563.html
+    [OPENED] https://fgk.chinatax.gov.cn/zcfgk/c100012/c5194515/content.html
+    [OPENED] https://gtm-cn-uqm3dbhc20k.guangdong.chinatax.gov.cn/gdsw/ssfwyga_zcwj/2019-11/21/content_e5693b0352774f818eba90cec31cf53c.shtml
+    [OPENED] https://shanghai.chinatax.gov.cn/tax/zcfw/rdwd/202306/t467324.html
+
+  run-4urls PDF 工具结果（recovered 会话语料节选，证明正文到达模型）:
+    {"turn":1,"step":1,"callId":"call_M93S0TAC50ubxQEGKRFLan7x","message":{"source":{"kind":"tool",…},
+     "content":[{… "text":"Fetched https://fi.mofcom.gov.cn/…751a935e….pdf (HTTP 200)\n\nExternal web content follows.…
+     — 1 — … # 外商投资准入特别管理措施（负面清单）（2024 年版） …"}]}}
+
+直接 Jina API 事实（无模型探针，key 只读自 /Users/coldxiangyu/.config/pi-glink-secrets/jina_api_key）
+------------------------------------------------------------------------------
+  GET  https://r.jina.ai/https://example.com/  → 200, text/plain, x-ratelimit-limit: 500, 500;w=60
+  GET  …/https://example.com/does-not-exist-xyz  → 200，正文 Warning: Target URL returned error 404: Not Found
+  POST https://r.jina.ai/  url=…（Accept: application/json）→ 200，data.httpStatus=200 / 404（目标状态）
+  POST url=…（hash 路由）→ 200，data.url 保留 #/route（GET 路径形式会丢 fragment）
+  POST url=https://fi.mofcom.gov.cn/…751a935e….pdf… → 200，data.content 13,680 字符（PDF 转文本）
+
+仓库默认检查（rebase 到 fe1d90b 后）
+------------------------------------------------------------------------------
+  [SKIP] 外部标准库逐值对齐：不读取个人标准库，不计入本次通过范围。
+  [RUN] Python（含仓库边界和检查入口回归）
+  1155 passed, 1 deselected in 140.82s (0:02:20)
+  [PASS] Python（含仓库边界和检查入口回归）（exit 0）
+  [RUN] Node（前端回归 + 扩展单元测试）
+  ℹ tests 137
+  ℹ pass 137
+  ℹ fail 0
+  [PASS] Node（前端回归 + 扩展单元测试）（exit 0）
+  [RUN] Node（dsh fetch bundle 单元测试）
+  ℹ tests 42
+  ℹ pass 42
+  ℹ fail 0
+  [PASS] Node（dsh fetch bundle 单元测试）（exit 0）
+  [PASS] 无模型必需检查完成；不包含浏览器、UI 对齐、真实 pi、Docker/E2B 或多租户验收。
+  check_exit=0
+  原始退出码: 0

@@ -1801,3 +1801,139 @@ p4 方案（GLINK-SUB 可见性）遗留的未验证项：ACP 面是否暴露子
   `tests/test_kernel_acp_resume.py`（父 run 副本删除后追问重新注入并在子 run 收尾再删）。
 * 未覆盖：真实 E2B live 未复跑；e2b 面沙箱内副本随沙箱销毁，宿主一侧的 `home`/`recovered`
   删除只由 fake SDK 面覆盖。
+
+## 19. GLINK-DSH-02：dsh 的 Jina fetch provider（out-of-tree bundle）与 E2B 验证（2026-09-27）
+
+背景：GLINK-DSH-01（§上一任务报告 `.herdr/reports/pids-glink-dsh-01.md`）把 AB-01 的 dsh r2
+`kernel_exit` 定位到默认 fetch provider `@deepseek-ai/dsh-web-fetch-http`（id `http`）：目标主机
+只有 AAAA、运行环境无 IPv6 出口时，地址钉定后的连接失败会让一次 socket `'error'` 升级为
+uncaught exception，dsh 进程 exit 1。0.1.5-rc.3 ~ 0.1.7-rc.2 未修复。本节记录用户决定后的实现
+（Jina Reader provider）、交付方式、凭据与数据外发，以及 E2B 上的真实复现结果。
+
+只读参考：`/Users/coldxiangyu/AI/git/deepseek-harness` @ `46a7f68b09`（0.1.7-rc.1 源码，未修改、
+未构建）。镜像钉版是 0.1.5-rc.3；凡 0.1.7 文档与 0.1.5-rc.3 实现冲突处，以镜像内实测为准并在
+下面逐条注明。
+
+### 19.1 设计与对 dsh 最佳实践的对照
+
+* **out-of-tree bundle 的形状**（dsh `docs/architecture.md`「Profiles and bundles」、
+  `docs/cookbook/adding-a-package.md`）：包在 `harnesses/dsh/bundles/dsh-web-fetch-jina/`，
+  `package.json` 用 `dsh.bundle.patch` 指向自身 `cordis.patch.yml`；peerDependencies 覆盖
+  镜像钉版（`@deepseek-ai/dsh-web`/`dsh-timeout`/`dsh-credentials`/`dsh-launch-environment`
+  = `^0.1.5-rc.3`，`@deepseek-ai/cordis` = `4.0.2`，与镜像内实测一致），app-boot 的
+  bundle 版本兼容检查据此放行。dsh 专有插件留在 dsh 包内，宿主公共层零改动。
+* **provider 与 `web-fetch-http` 契约对齐**（`docs/capability-seams.md` 的 `ctx.web` 行 +
+  `packages/web/web-fetch-http` 源码）：
+  * 成功返回同形 `WebFetchResult`；**所有**失败都是 `WebError`（`WEB_INVALID_URL` /
+    `WEB_BLOCKED_URL` / `WEB_PROVIDER_CREDENTIAL_MISSING` / `WEB_ABORTED` /
+    `WEB_FETCH_TIMEOUT` / `WEB_FETCH_TOO_LARGE` / `WEB_PROVIDER_ERROR`），不产生进程级异常；
+  * 取消与超时用 `@deepseek-ai/dsh-timeout` 的 `deadline(signal, timeoutMs, 'WEB_FETCH_TIMEOUT')`
+    + `timeoutOf`，与 http provider 同一分类（本 provider 超时 vs 调用方/外层取消）；
+  * `Content-Length` 或流式读取超过 `maxResponseBytes` → `WEB_FETCH_TOO_LARGE`；
+    `maxBodyChars` 截断并置 `truncated`；
+  * URL 校验：仅 http(s)、无反斜杠/内嵌凭据、长度 ≤2048；IP 字面量按范围、主机名按保留名
+    （`localhost`/`.local`/`.internal` 等）拒绝非公共目的地；另做 best-effort 本地 DNS
+    检查（任一解析地址非公共即拒绝，解析失败不拦截）。**拒绝发生在任何请求发给 Jina 之前**
+    （单测用 fake fetch 断言未被调用）——即使抓取是远端完成的，也不把内网 URL 交给第三方；
+  * 目标状态：Jina 对目标失败也回 HTTP 200，目标状态在 `data.httpStatus`（直接对 `r.jina.ai`
+    实测 200 与 404 目标各一次）；因此 `statusCode` 用目标状态，非 2xx 仍是结果，Jina 自身的
+    401/402/403/422/429/5xx 才是 provider 失败（`WEB_PROVIDER_ERROR`）。
+    PDF/Office/JS 页面由 Jina 转文本，provider 不区分内容类型（`kind: 'text'`）。
+* **凭据**（对照 `packages/web/web-search-deepseek/src/index.ts`）：`apiKeyEnv` 是
+  `z.string().role('credential-ref')`，每次 fetch 经 `ctx.credentials.resolve(credentialRef(...))`
+  解析；credentials 服务缺失时回退 launch environment；缺 key 明确报
+  `WEB_PROVIDER_CREDENTIAL_MISSING`。配置面**不提供**字面 key 字段，值不进日志、不进事件。
+* **每 run 取证**：provider 成功抓取后向当前 session 追加 `web/jina-fetch-request`
+  （`{url, endpoint, statusCode, truncated, chars}`，无密钥；与 web-search-deepseek 的
+  `recordRequest` 同一模式）。这是「这次 `web_fetch` 走了哪个 provider」的权威证据，也是
+  验收 #2 的判据。
+* **0.1.5-rc.3 的 API 差异（实测，覆盖 0.1.7 文档结论）**：镜像内 schemastery 3.18.2
+  **没有 `volatile()`**（0.1.7 才引入），第一版插件在 `dsh --profile acp` 启动时直接
+  `failed to import loader entry web-fetch-jina: ...volatile is not a function`。改为普通字段 +
+  默认值读取（`web-search-deepseek` 在 0.1.5-rc.3 也是普通 `Config` + `config.x ?? default`），
+  单测的 schemastery 替身同步移除 `.volatile()`，让同类不兼容在单测变红而不是镜像启动才暴露。
+
+### 19.2 交付方式与论证
+
+* **构造**：bundle patch（`harnesses/dsh/bundles/dsh-web-fetch-jina/cordis.patch.yml`）插入
+  `web-fetch-jina` 行（`name: './lib/index.js'`，patch 相对路径由 dsh 转成 file URL）、
+  `web.fetchProvider: jina`、禁用 `web-fetch-http`（只禁用不删除：误配时 fail closed 到
+  `WEB_PROVIDER_CONFIGURED_UNAVAILABLE`，不静默回退到崩溃面），并把 `tool-web.fetchTimeoutMs`
+  提到 60s（Jina 读 PDF/JS 页面常超过 30s 默认预算）。
+* **镜像构建期安装**：两个 ACP Dockerfile（`docker/Dockerfile.acp-worker`、
+  `docker/e2b/Dockerfile.acp-e2b`）新增
+  `COPY harnesses/dsh/bundles/dsh-web-fetch-jina <dsh 安装>/node_modules/@pi-glink/dsh-web-fetch-jina`，
+  即 `resolveBundleDir` 的**第一个解析锚点**；镜像自检脚本新增
+  `test -f <落点>/package.json` 与 `echo jina-bundle=present`（构建期、`CMD`、沙箱自检三处共用）。
+* **每 run 的 profile 清单**：`harnesses/dsh/home/.dsh/profiles/acp/`（宿主 `home/` 覆盖层）
+  提供 `package.json`（bundles = 钉版模板的 base/acp-app + 本 bundle）与空 `cordis.patch.yml`；
+  dsh 的 profile 初始化只在清单缺失时发生，因此覆盖层先落、launcher 随后只写根 `cordis.yml`。
+  每 run 的选择配置（`fetchProvider`、禁用面、预算）都在 `harnesses/dsh/`，宿主公共代码零改动。
+* **为什么不是把 bundle 代码放进覆盖层**（两种候选均评估）：
+  * 覆盖层携带代码需要在仓库里保存第二份拷贝，且追问继承父 run 状态时旧副本可能盖过镜像新
+    版本；镜像安装让「镜像重建即更新」成立，也避免 100 KiB/文件、4 MiB/总量、512 条目上限；
+  * 运行期 `dsh plugin ... add` 需要在镜像内装 pnpm 并在每次启动跑包管理，增加启动失败面。
+  * 覆盖层目录含 `settings.yaml`（模型对齐，实验用）时也一并渲染，机制不变。
+* **E2B 模板**：`glink-acp-worker`（Template ID `oen0rq47o2sizakry5v3`）用 E2B CLI 重建，
+  Build ID `95014ccd-2cfe-4fb5-865a-b4073dc647ff`；构建上下文为仓库根（`-p .`），COPY 成功。
+  生产模板 `glink-frontier-e2b`、pi 面模板 `pi-glink-worker` 未触碰。
+
+### 19.3 验证证据
+
+* **单元测试（无网络）**：`harnesses/dsh/bundles/dsh-web-fetch-jina/tests/*.test.mjs` 42 项，
+  覆盖成功、目标 404、PDF 文本、字符截断、字节超限（声明/流式）、非 JSON 信封、401/402/403/
+  422/429/5xx、超时、取消（预先/进行中）、无 key、非 http(s)/内网 URL（含十进制 IPv4 归一化）、
+  DNS 私网答案、传输异常、运行期非法配置、审计事件；`tests/support/` 用模块解析 hook 提供
+  dsh seam 替身。仓库边界回归 `tests/test_dsh_jina_bundle.py`（7 项）把 peer 范围、patch 结构、
+  覆盖层清单、两个 Dockerfile 的安装落点/自检、`scripts/check.sh` 入口钉住；
+  `scripts/check.sh` 新增「Node（dsh fetch bundle 单元测试）」一行，`tests/test_check_entrypoint.py`
+  同步覆盖「缺 bundle 测试集/替身注册」的空测试集失败面。
+* **本机 Docker**（`pi-glink-acp-worker:latest`，构建参数 `DEBIAN_MIRROR=mirrors.aliyun.com`
+  `NPM_REGISTRY=https://registry.npmmirror.com`，与 Dockerfile 注释的受限网络路径一致）：
+  * 自检输出 `0.1.5-rc.3 / @agentclientprotocol/codex-acp 1.13.1 / 1.18.32 / jina-bundle=present`；
+  * 用与宿主同形的每 run HOME（覆盖层 + 0600 凭据副本）跑 `dsh --profile acp --dump-config`：
+    `web` 行 `fetchProvider: jina`、`web-fetch-http` `disabled: true`、`tool-web.fetchTimeoutMs: 60000`、
+    `web-fetch-jina` 行指向镜像内 file URL，`dump_exit=0`、stderr 0 字节；
+  * `dsh --profile acp` 空输入启动 `acp_exit=0`、stderr 0 字节（插件激活无错误）；
+  * 容器内直接用真实 key（经 `--env-file` 传入，只进容器进程环境）跑 provider：`example.com`
+    200/149 字符、DSH-01 的 mofcom PDF 200/13,680 字符（正文「外商投资准入特别管理措施（负面
+    清单）（2024 年版）」）、`shenzhen.chinatax.gov.cn` 200/5,916 字符（原崩溃主机）。
+* **E2B 真实 run（AB-01/DSH-01 同 4 URL 并发题面）**：run `3b9cbbc11ab1`，模板
+  `glink-acp-worker`，状态 `finished`（**非** `kernel_exit`）、60.0s、`modelStopReason=end_turn`、
+  `report.md` HTTP 200 / 1,519 B、SSE 23 帧；同一 step 内 4 个 `web_fetch`（与 r2 step 7 同一批
+  URL）；recovered 会话里有 4 条 `web/jina-fetch-request`（`endpoint=https://r.jina.ai/`、
+  全部 `statusCode=200`：shenzhen 5,916 / chinatax 4,119 / PDF 13,680 / shanghai 2,584 字符），
+  4 条 `tool/call` 全部命中；PDF 的 `tool/result` 正文含提取文本；`cleanup.released=true`、
+  无 `artifact_failures`；沙箱 `iiwr8jdzxjz4hejsc6uk1` 按 id 对账不存在。
+* **E2B 缩减研究 run**：run `10b50ee8f62b`，同一模板/执行面，状态 `finished`、111.6s、
+  `end_turn`、`report.md` HTTP 200 / 1,571 B、SSE 44 帧；13 个工具调用（5 次 Jina fetch + 7 次
+  `web_search`(deepseek-official) + 写报告）；报告引用的 4 个来源 URL 全部出现在 Jina fetch
+  事件里（逐条核对「引用均打开过」）；沙箱 `isdrxovxriezmk26faxiw` 按 id 对账不存在，
+  `cleanup.released=true`。
+* **与 GLINK-OBS-01 的交叉**：两次 run 的终帧都可从 `kernel_exit` 详情看到 agent stderr 尾部
+  （本次未触发）；注入的 Jina 凭据副本在 `home`/`recovered` 两处都未残留（收尾删除生效）。
+* **默认检查**：rebase 到 `fe1d90b` 后 `bash scripts/check.sh` exit 0——Python 1155 passed
+  （1 deselected）、Node 前端+扩展 137 passed、bundle 42 passed。
+
+### 19.4 数据外发、凭据与授权边界
+
+* 每次 `web_fetch` 把**目标 URL** 与 `JINA_API_KEY` 发给 `r.jina.ai`；页面内容经 Jina 返回
+  dsh 进程。用户已接受该研究 URL 外发面；`baseURL` 可指向自建 Reader。
+* 凭据只在每 run 的宿主 0600 临时合并文件 → 注入的 `.dsh/.credentials.yaml` 内存在；不写
+  `~/.dsh`、`~/.config/pi-glink-secrets`、仓库或日志；key 的值在报告/证据里 0 命中。
+* 真实调用额度：模型 run 2 次（E2B，均在 6 次授权内）；Jina Reader 直接探针（无模型）共 10 次
+  （文档核对的 GET/POST 7 次 + 容器内真实 key 探针 3 次），远低于 30 次上限。
+
+### 19.5 未覆盖项与风险
+
+* **Jina 侧可达性/限流/费用**：4 个税务/商务站点从 E2B（美国）与容器内均可达；响应头实测
+  `x-ratelimit-limit: 500, 500;w=60`。429 只映射为 `WEB_PROVIDER_ERROR`，无自动重试；
+  费用与配额是 Jina 账户事实，本任务未做长期/批量压测。
+* **DNS 预检是 best-effort**：解析失败不拦截（交给 Jina），本地与 Jina 的解析差异可能漏判
+  或误拦；`data.url` 是请求 URL，不是重定向后的最终 URL。
+* **0.1.7 面未在 E2B 跑**：结论基于镜像钉版 0.1.5-rc.3 的实现与实测；升级 dsh 时需重跑
+  bundle 加载、配置兼容与 E2B 4-URL 复现。
+* **inproc 面未接入**：本机没有把 bundle 装进操作员全局 dsh；inproc 下 ACP profile 会跳过
+  解析不到的 bundle，`fetchProvider: jina` 因此 fail closed（工具级 `WEB_PROVIDER_CONFIGURED_MISSING`），
+  不会静默走 http provider。
+* **容器内 DNS 私网预检**与 E2B 网络策略的具体差异未单独测量；容器探针只验证了真实抓取链。
