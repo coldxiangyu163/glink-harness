@@ -640,8 +640,9 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 环境里（回归：`tests/test_redaction.py::test_minimal_child_environment_does_not_inherit_host_credentials`、
 `tests/test_kernel_agent_env.py::test_model_credential_goes_to_auth_json_not_the_environment`）。
 
-**残留风险（如实记录）**：key 仍以文件形式存在于运行期 `auth.json`（pi 官方凭据机制、权限 0600、
-仓库外），理论上可被工具用 `read` 打开并回显——这正是 §6.1 出站脱敏覆盖的场景（回归：
+**残留风险（如实记录）**：run 进行中 key 仍以文件形式存在于运行期 `auth.json`（pi 官方凭据机制、
+权限 0600、仓库外；run 收尾时连同 `web-search.json` 一起删除，见 acp-integration-notes §18.5），
+理论上可被工具用 `read` 打开并回显——这正是 §6.1 出站脱敏覆盖的场景（回归：
 `tests/test_redaction.py::test_runner_redacts_a_tool_echo_before_the_log_and_the_bus`）。需要更强
 隔离时应使用 Docker / E2B 执行面，并为内核配专用、限额的凭据。三面的凭据交付方式与已知差异见
 `docs/evidence/{credential-boundary,docker-run,e2b-run}.txt`。

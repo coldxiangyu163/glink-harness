@@ -537,19 +537,35 @@ def test_the_blueprint_command_names_come_from_the_blueprint_directory(tmp_path:
 
 
 def test_two_runs_do_not_share_runtime_configuration_or_credentials(tmp_path: Path) -> None:
-    """B2: each run renders its own config, session and credential files."""
+    """B2: each run renders its own config, session and credential files.
+
+    The rendered credential files only exist while the kernel runs: the run's
+    finalization deletes ``auth.json`` / ``web-search.json`` (acp-integration-notes
+    §18.5). Isolation is therefore checked on what each kernel saw at launch,
+    and the deletion on what is left afterwards.
+    """
     import json as json_module
 
     store = RunStore(tmp_path / "data" / "runs")
+    seen: dict[str, dict[str, str]] = {}
+
+    def capturing_factory(argv, *, cwd=None, env=None, on_event=None):
+        directory = Path((env or {})["PI_CODING_AGENT_DIR"])
+        seen[directory.parent.name] = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in directory.iterdir()
+            if path.name in ("auth.json", "web-search.json")
+        }
+        return fake_factory(write_report=True)(argv, cwd=cwd, env=env, on_event=on_event)
 
     with_key = make_config(tmp_path, PI_GLINK_WEB_SEARCH_KEY="exa-secret-key-1234567890")
-    manager_a = RunManager(with_key, EventBus(), store, client_factory=fake_factory(write_report=True))
+    manager_a = RunManager(with_key, EventBus(), store, client_factory=capturing_factory)
     run_a = manager_a.start("第一个 run 带搜索凭据")
     final_a = manager_a.wait(run_a.run_id, timeout=30)
     assert final_a.status == FINISHED
 
     without_key = make_config(tmp_path)
-    manager_b = RunManager(without_key, EventBus(), store, client_factory=fake_factory(write_report=True))
+    manager_b = RunManager(without_key, EventBus(), store, client_factory=capturing_factory)
     run_b = manager_b.start("第二个 run 不带搜索凭据")
     final_b = manager_b.wait(run_b.run_id, timeout=30)
     assert final_b.status == FINISHED
@@ -557,24 +573,24 @@ def test_two_runs_do_not_share_runtime_configuration_or_credentials(tmp_path: Pa
     runtime_a = store.run_dir(run_a.run_id) / "pi-agent"
     runtime_b = store.run_dir(run_b.run_id) / "pi-agent"
     assert runtime_a != runtime_b
-    assert (runtime_a / "web-search.json").is_file()
-    assert not (runtime_b / "web-search.json").exists(), (
+    assert "web-search.json" in seen[run_a.run_id]
+    assert "web-search.json" not in seen[run_b.run_id], (
         "a credential removed from the configuration must not survive in another run"
     )
-    # No file from run A leaks into run B's runtime directory.
-    names_a = {path.name for path in runtime_a.rglob("*")}
-    names_b = {path.name for path in runtime_b.rglob("*")}
-    assert "web-search.json" not in names_b
     # Session directories are per run too (subdirectory of the configured root).
     assert without_key.session_dir / run_a.run_id != without_key.session_dir / run_b.run_id
     assert (without_key.session_dir / run_a.run_id).is_dir()
     assert (without_key.session_dir / run_b.run_id).is_dir()
     # The generated model credential is per run and never shared.
     for run_id in (run_a.run_id, run_b.run_id):
-        auth = json_module.loads(
-            (store.run_dir(run_id) / "pi-agent" / "auth.json").read_text(encoding="utf-8")
-        )
+        auth = json_module.loads(seen[run_id]["auth.json"])
         assert "sk-test" in json_module.dumps(auth)
+    # Finalization removed every rendered credential file from both runs; the
+    # rest of the runtime directory stays.
+    for runtime in (runtime_a, runtime_b):
+        names = {path.name for path in runtime.rglob("*")}
+        assert not names & {"auth.json", "web-search.json"}
+        assert "models.json" in names
 
 
 def test_process_death_after_the_prompt_converges_quickly(tmp_path: Path) -> None:

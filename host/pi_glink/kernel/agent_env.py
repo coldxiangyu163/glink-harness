@@ -209,7 +209,18 @@ class AgentRuntime:
         session file is checked separately from the run record (its path is a
         kernel-reported fact, refused if it leaves this root).
         """
-        return (SessionSweep(root=self.session_dir, carries_session_file=True),)
+        return (
+            SessionSweep(root=self.session_dir, carries_session_file=True),
+            # 运行期配置目录里宿主渲染的凭据文件：run 收尾删除（与 ACP 注入副本
+            # 同一口径，GLINK-OBS-01 决定 C 的 pi 面延伸）。每次 run 都从凭据源
+            # 重新渲染自己的目录，追问也不读父 run 的配置目录，副本收尾后没有用途；
+            # 值在准入时已进本 run 边界，所以不扫描内容。
+            SessionSweep(
+                root=self.directory,
+                scan=False,
+                credential_copies=(AUTH_FILENAME, WEB_SEARCH_FILENAME),
+            ),
+        )
 
 
 def prepare_agent_dir(

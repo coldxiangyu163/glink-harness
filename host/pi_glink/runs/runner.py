@@ -95,6 +95,7 @@ from ..kernel.projection import Projector
 # ``RunBusy`` is defined next to the ledger because both the admission gate and
 # the ledger's adjudication raise it; re-exported here for existing importers.
 from ..kernel.rpc import PiRpcClient
+from ..kernel.sweep import SessionSweep
 from ..tenancy import (
     TenantContext,
     TenantCredentialStore,
@@ -1702,12 +1703,7 @@ class RunManager:
                     session_file, root=target.root, redactor=redactor
                 ):
                     changed = True
-            if target.rewrite:
-                if self._sanitize_workspace(
-                    target.root, redactor, max_bytes=REPORT_MAX_BYTES
-                ):
-                    changed = True
-            elif self._absorb_session_secrets(target.root, redactor):
+            if target.scan and self._scan_sweep_root(target, redactor):
                 changed = True
             if target.credential_copies:
                 # 删除必须在只读扫描之后：先让本 run 的边界记住这些值，再从
@@ -1716,6 +1712,12 @@ class RunManager:
                     execution, target.root, target.credential_copies
                 )
         return changed
+
+    def _scan_sweep_root(self, target: SessionSweep, redactor: SecretRedactor) -> bool:
+        """Scan one declared root: rewrite it, or only learn its values."""
+        if target.rewrite:
+            return self._sanitize_workspace(target.root, redactor, max_bytes=REPORT_MAX_BYTES)
+        return self._absorb_session_secrets(target.root, redactor)
 
     def _sanitize_session_file(
         self,

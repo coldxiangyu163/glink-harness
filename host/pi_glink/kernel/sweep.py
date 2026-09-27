@@ -21,6 +21,10 @@ runner 里的类型分支。
   → 新义务「收尾删除」，见 ``docs/acp-integration-notes.md`` §18.4）。只删
   列出的路径本身（不按模式匹配、不跟随链接、路径必须在根内）；删除失败记入
   收尾事实并告警，不改变 run 终态。
+* ``scan=False``：该根只做 ``credential_copies`` 删除，不扫描内容。pi 的运行期
+  配置目录适用——凭据是宿主亲手渲染的（``auth.json`` / ``web-search.json``），
+  本 run 边界在准入时就已知道这些值；目录里其余内容（模板副本、inproc 的
+  ``npm/``）不是内核写出的会话，逐文件扫描只有开销。
 
 runner 只按契约遍历：主会话文件是否属于某个根、根能否重写都由运行时声明，
 runner 不再询问具体 runtime 类型的属性。
@@ -45,3 +49,5 @@ class SessionSweep:
     #: 宿主注入的凭据副本在该根下的已知相对路径；扫描之后收尾删除，
     #: 每个路径只删其本身（不做模式匹配、不跟随链接、必须在根内）。
     credential_copies: tuple[str, ...] = ()
+    #: 是否扫描该根的内容（``rewrite`` 决定扫描方式）；``False`` 时只删副本。
+    scan: bool = True

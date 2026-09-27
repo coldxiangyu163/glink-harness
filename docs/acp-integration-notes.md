@@ -1807,6 +1807,22 @@ p4 方案（GLINK-SUB 可见性）遗留的未验证项：ACP 面是否暴露子
 * 未覆盖：真实 E2B live 未复跑；e2b 面沙箱内副本随沙箱销毁，宿主一侧的 `home`/`recovered`
   删除只由 fake SDK 面覆盖。
 
+### 18.5 pi 运行期凭据文件收尾删除（决定 C 的 pi 面延伸，2026-09-27）
+
+* 原义务：pi 的运行期 `auth.json`（模型凭据）与 `web-search.json`（检索凭据）随 run 目录
+  生命周期保留，列为残留风险（架构 §6.2）。
+* 新义务：run 收尾删除这两个文件。理由与 ACP 相同：每次 run 都从凭据源重新渲染自己的
+  `pi-agent/`，追问只复制父 run 的会话与 `report.md`、不读父 run 的配置目录，副本收尾后
+  没有用途。
+* 机制：`AgentRuntime.session_sweeps()` 追加一条 `SessionSweep(root=pi-agent,
+  scan=False, credential_copies=("auth.json", "web-search.json"))`；`scan=False` 表示只删
+  副本、不扫描该根（值在准入时已进本 run 边界，目录其余内容是模板副本与 inproc 的 `npm/`，
+  不是内核写出的会话）。删除沿用 §18.4 的 `ArtifactTree.remove` 与失败口径（记入
+  `artifactFailures`、不改终态）；未配置检索凭据时 `web-search.json` 本就不存在，不算失败。
+* 回归：`tests/test_kernel_sweep.py`（pi 声明、两文件删除、其余配置与会话保留、缺失不算失败）。
+* 未覆盖：Docker/E2B live 未复跑；运行中（内核仍在读）的文件仍以 0600 存在，这一段的
+  残留风险不变。
+
 ## 19. GLINK-DSH-02：dsh 的 Jina fetch provider（out-of-tree bundle）与 E2B 验证（2026-09-27）
 
 背景：GLINK-DSH-01（§上一任务报告 `.herdr/reports/pids-glink-dsh-01.md`）把 AB-01 的 dsh r2
