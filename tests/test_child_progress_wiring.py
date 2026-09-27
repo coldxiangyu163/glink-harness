@@ -21,7 +21,6 @@ import pytest
 from pi_glink import events
 from pi_glink.config import HostConfig, build_config
 from pi_glink.events import EventBus
-from pi_glink.runs import runner as runner_module
 from pi_glink.kernel.acp_child_progress import AcpChildProgressSource
 from pi_glink.kernel.acp_child_progress import ProgressFact as AcpProgressFact
 from pi_glink.kernel.acp_execution import (
@@ -40,6 +39,8 @@ from pi_glink.kernel.execution import (
     RpcExecutionAdapter,
 )
 from pi_glink.kernel.child_progress import E2bChildProgressSource
+from pi_glink.runs import child_progress_observer as observer_module
+from pi_glink.runs.child_progress_observer import ChildProgressObserver
 from pi_glink.runs.runner import RunManager, _Execution
 from pi_glink.store import RunStore
 
@@ -63,8 +64,8 @@ def make_config(tmp_path: Path, **overrides: str) -> HostConfig:
 @pytest.fixture(autouse=True)
 def fast_progress_clock(monkeypatch: pytest.MonkeyPatch):
     """Keep the observer's cadence test-sized; the bounds themselves stay real."""
-    monkeypatch.setattr(runner_module, "_PROGRESS_POLL_SECONDS", 0.02)
-    monkeypatch.setattr(runner_module, "_PROGRESS_THROTTLE_SECONDS", 0.12)
+    monkeypatch.setattr(observer_module, "_PROGRESS_POLL_SECONDS", 0.02)
+    monkeypatch.setattr(observer_module, "_PROGRESS_THROTTLE_SECONDS", 0.12)
 
 
 def build_manager(tmp_path: Path, **overrides: str):
@@ -191,7 +192,7 @@ def started(manager: RunManager, execution: _Execution, n: int, call_id: str, ag
 
 def finalize_ok(manager: RunManager, execution: _Execution) -> None:
     """Drive the real finalizer with a settled outcome (a clean finish)."""
-    execution.outcome = ExecutionOutcome(settled=True)
+    execution.execution_facts.outcome = ExecutionOutcome(settled=True)
     manager._finalize(execution)  # noqa: SLF001
 
 
@@ -302,8 +303,8 @@ def test_no_subagent_means_no_observer(tmp_path: Path) -> None:
 
     finalize_ok(manager, execution)
 
-    assert execution.progress_observer_started is False
-    assert execution.progress_thread is None
+    assert execution.progress.started is False
+    assert execution.progress.thread is None
     assert source.polls == 0 and source.closed is False
 
 
@@ -342,8 +343,8 @@ def test_an_adapter_inheriting_the_default_seam_gets_no_thread(tmp_path: Path) -
 
     started(manager, execution, 0, "call_1")
 
-    assert execution.progress_observer_started is True
-    assert execution.progress_thread is None
+    assert execution.progress.started is True
+    assert execution.progress.thread is None
     assert progress_events(store, "prog01") == []
     assert not [
         e for e in read_events(store, "prog01") if e["type"] == events.KERNEL_STATUS
@@ -396,7 +397,7 @@ def test_unchanged_facts_emit_once_and_throttle_bounds_the_rate(tmp_path: Path) 
     with execution.lock:
         # 重置该 child 的发射时刻为「现在」：窗口由此确定，与此前耗时无关。
         # facts 尚未变化，此刻不可能有新发射，顺序无竞态。
-        execution.progress_emit_ts[0] = time.monotonic()
+        execution.progress.emit_ts[0] = time.monotonic()
     source.facts = [PiProgressFact("researcher", 0, 2, "read", "a.md", 20)]
     time.sleep(0.06)  # 节流窗口内：变化可见但暂不发
     assert len(progress_events(store, "prog03")) == 1
@@ -455,7 +456,7 @@ def test_finalize_stops_the_thread_and_closes_the_source(tmp_path: Path) -> None
     execution = open_execution(manager, store, tmp_path / "ws", "prog06", adapter=FakeAdapter(source))
     started(manager, execution, 0, "call_1")
     assert wait_for(lambda: len(progress_events(store, "prog06")) == 1)
-    thread = execution.progress_thread
+    thread = execution.progress.thread
     assert thread is not None and thread.is_alive()
 
     finalize_ok(manager, execution)
@@ -476,11 +477,11 @@ def test_repeated_poll_failures_back_off_and_stop(tmp_path: Path) -> None:
     source = FakeSource(error=OSError("simulated unreadable directory"))
     execution = open_execution(manager, store, tmp_path / "ws", "prog07", adapter=FakeAdapter(source))
     started(manager, execution, 0, "call_1")
-    thread = execution.progress_thread
+    thread = execution.progress.thread
     assert thread is not None
 
     assert wait_for(lambda: not thread.is_alive(), timeout=5.0), "退避有界，线程须停止"
-    assert source.polls >= runner_module._PROGRESS_MAX_FAILURES  # noqa: SLF001
+    assert source.polls >= observer_module._PROGRESS_MAX_FAILURES  # noqa: SLF001
 
     warnings = [
         event
@@ -507,7 +508,7 @@ def test_a_failing_source_factory_is_one_warning_not_a_crash(tmp_path: Path) -> 
     )
     started(manager, execution, 0, "call_1")
 
-    assert execution.progress_thread is None
+    assert execution.progress.thread is None
     warnings = [
         event
         for event in read_events(store, "prog08")
@@ -554,7 +555,7 @@ def test_a_started_after_the_observer_stop_starts_no_thread(tmp_path: Path) -> N
     started(manager, execution, 0, "call_1")
     time.sleep(0.3)
 
-    assert execution.progress_thread is None, "closed 之后不得再起线程"
+    assert execution.progress.thread is None, "closed 之后不得再起线程"
     assert progress_events(store, "prog07") == []
     finalize_ok(manager, execution)
 
@@ -572,3 +573,102 @@ def test_steps_snapshot_never_moves_backwards(tmp_path: Path) -> None:
     assert wait_for(lambda: len(progress_events(store, "prog08")) == 2)
     assert progress_events(store, "prog08")[-1]["steps"] == 5
     finalize_ok(manager, execution)
+
+
+# -- observer unit tests: closed flag, throttle and monotonic clamp ------------
+
+
+def test_observer_closed_by_stop_never_starts_a_thread() -> None:
+    """对象级回归：stop() 置 closed 后，迟到的 started 帧不再创建源或线程。
+
+    在飞表仍按原语义记录（``_track_child_progress`` 原先也是先记表、后
+    检查 closed）；关键义务是不再起无人停止的线程。
+    """
+    lock = threading.RLock()
+    sources: list[FakeSource] = []
+
+    def source_factory() -> FakeSource:
+        source = FakeSource()
+        sources.append(source)
+        return source
+
+    observer = ChildProgressObserver(
+        run_id="unit01",
+        lock=lock,
+        is_open=lambda: True,
+        match_n=lambda fact, calls: 0,
+        source_factory=source_factory,
+        emit_frame=lambda event_type, payload: True,
+        emit_warning=lambda detail: None,
+    )
+
+    observer.stop()
+    with lock:
+        observer.track(
+            events.SUBAGENT_STARTED,
+            {"n": 0, "toolCallId": "call_1", "agent": "researcher"},
+        )
+
+    assert observer.closed is True
+    assert observer.started is False, "closed 之后连观察源都不创建"
+    assert observer.thread is None
+    assert sources == []
+
+
+def test_observer_throttles_changes_and_clamps_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """节流窗口与单调钳制：无变化不发、窗口内变化不发、回退按已报值钳制。"""
+    lock = threading.RLock()
+    frames: list[Mapping[str, Any]] = []
+
+    def record(event_type: str, payload: Mapping[str, Any]) -> bool:
+        frames.append(payload)
+        return True
+
+    observer = ChildProgressObserver(
+        run_id="unit02",
+        lock=lock,
+        is_open=lambda: True,
+        match_n=lambda fact, calls: 0,
+        source_factory=lambda: None,  # 无轮询线程：直接驱动一次发布
+        emit_frame=record,
+        emit_warning=lambda detail: None,
+    )
+    with lock:
+        observer.track(
+            events.SUBAGENT_STARTED,
+            {"n": 0, "toolCallId": "call_1", "agent": "researcher"},
+        )
+
+    monkeypatch.setattr(observer_module, "_PROGRESS_THROTTLE_SECONDS", 0.0)
+    first = PiProgressFact("researcher", 0, 5, "read", "a.md", 100)
+    observer._publish([first])  # noqa: SLF001 - 发布体是本次被测单元
+    assert frames == [
+        {
+            "n": 0,
+            "steps": 5,
+            "lastToolName": "read",
+            "lastToolTarget": "a.md",
+            "bytes": 100,
+        }
+    ]
+
+    observer._publish([first])  # noqa: SLF001
+    assert len(frames) == 1, "无变化不发，窗口为 0 也不发"
+
+    regressed = PiProgressFact("researcher", 0, 2, "write", "b.md", 40)
+    observer._publish([regressed])  # noqa: SLF001
+    assert len(frames) == 2
+    assert frames[-1]["steps"] == 5 and frames[-1]["bytes"] == 100, "快照不回退"
+    assert frames[-1]["lastToolName"] == "write", "变化的工具事实照常更新"
+
+    monkeypatch.setattr(observer_module, "_PROGRESS_THROTTLE_SECONDS", 60.0)
+    advanced = PiProgressFact("researcher", 0, 6, "read", "c.md", 200)
+    observer._publish([advanced])  # noqa: SLF001
+    assert len(frames) == 2, "节流窗口内即使有变化也暂不发"
+
+    monkeypatch.setattr(observer_module, "_PROGRESS_THROTTLE_SECONDS", 0.0)
+    observer._publish([advanced])  # noqa: SLF001
+    assert len(frames) == 3
+    assert frames[-1]["steps"] == 6 and frames[-1]["bytes"] == 200

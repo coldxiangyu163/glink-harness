@@ -1287,9 +1287,27 @@ def test_a_document_write_failure_is_a_warning_not_a_blocked_event(
 
 
 def finalize_with(manager: RunManager, execution, **facts) -> None:
-    """Drive the real finalizer on a kernel-less execution with chosen facts."""
+    """Drive the real finalizer on a kernel-less execution with chosen facts.
+
+    Fact names route to their owner group (execution / artifact / resource);
+    anything else (e.g. ``cancel_requested``) stays on the execution itself.
+    """
+    groups = {
+        "outcome": execution.execution_facts,
+        "failure": execution.execution_facts,
+        "event_log_error": execution.execution_facts,
+        "model_stop_reason": execution.execution_facts,
+        "model_error": execution.execution_facts,
+        "usage_total": execution.execution_facts,
+        "usage_keys": execution.execution_facts,
+        "redacted": execution.artifact_facts,
+        "report_path": execution.artifact_facts,
+        "report_status": execution.artifact_facts,
+        "artifact_failures": execution.artifact_facts,
+        "cleanup": execution.resource_facts,
+    }
     for name, value in facts.items():
-        setattr(execution, name, value)
+        setattr(groups.get(name, execution), name, value)
     manager._finalize(execution)  # noqa: SLF001 - the verdict path under test
 
 
@@ -1695,7 +1713,7 @@ def test_finalize_drives_its_steps_in_the_contract_order(
 
     def close(execution_, adapter):
         calls.append("close")
-        execution_.cleanup = CleanupReport(released=True)
+        execution_.resource_facts.cleanup = CleanupReport(released=True)
 
     def sweep(execution_):
         calls.append("sweep")

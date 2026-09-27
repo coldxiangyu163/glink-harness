@@ -100,6 +100,7 @@ from ..tenancy import (
     TenantCredentialStore,
     TenantNotConfigured,
 )
+from .child_progress_observer import ChildProgressObserver
 from .resource_ledger import ResourceLedger, RunBusy
 
 logger = logging.getLogger("pi_glink.runs.runner")
@@ -114,16 +115,6 @@ SWEEP_MAX_BYTES = 2 * 1024 * 1024
 #: Bound on how many files one sweep may visit (a runaway workspace must not
 #: turn run teardown into an unbounded walk).
 SWEEP_MAX_FILES = 2000
-
-#: R3a observer bounds (docs/architecture.md §3.5「运行中进度（R3a）」): one
-#: polling thread per run at this cadence, at most one ``subagent_updated``
-#: per child per throttle window, a bounded consecutive-failure budget before
-#: the observer stops, and a bounded join when the run finalizes.
-_PROGRESS_POLL_SECONDS = 1.0
-_PROGRESS_THROTTLE_SECONDS = 2.0
-_PROGRESS_MAX_FAILURES = 5
-_PROGRESS_MAX_BACKOFF_SECONDS = 5.0
-_PROGRESS_JOIN_SECONDS = 5.0
 
 #: Run phases. ``open`` accepts frames and cancellation; the verdict commit
 #: moves it to ``committed``, or to ``uncommitted`` when the durable terminal
@@ -230,6 +221,44 @@ class StopDecision:
 
 
 @dataclass
+class _ExecutionFacts:
+    """Execution facts: what the adapter and the model reported.
+
+    Collected while the run is *open*; owned by the executor thread and read by
+    the verdict. A fact never overwrites an artifact or resource fact.
+    """
+
+    outcome: ExecutionOutcome | None = None
+    failure: str | None = None
+    event_log_error: str | None = None
+    model_stop_reason: str | None = None
+    model_error: str | None = None
+    usage_total: dict[str, Any] = field(default_factory=dict)
+    usage_keys: set[str] = field(default_factory=set)
+
+
+@dataclass
+class _ArtifactFacts:
+    """Artifact facts: the recovered, validated, redacted report copy.
+
+    ``report_status`` (``none``/``ok``/``missing``/``rejected``) is the single
+    reason vocabulary the verdict reads; the path is host-owned.
+    """
+
+    redacted: bool = False
+    report_path: Path | None = None
+    report_status: str = "none"
+    artifact_failures: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _ResourceFacts:
+    """Resource facts: the adapter's ``CleanupReport`` (released or unknown)."""
+
+    cleanup: CleanupReport | None = None
+
+
+@dataclass
 class _Execution:
     """Mutable per-run state held from admission until the verdict is committed."""
 
@@ -266,43 +295,18 @@ class _Execution:
     #: Set once the finalizer finished (committed or not).
     finalized: threading.Event = field(default_factory=threading.Event)
     verdict: Verdict | None = None
-    # execution facts
-    outcome: ExecutionOutcome | None = None
-    failure: str | None = None
-    event_log_error: str | None = None
-    model_stop_reason: str | None = None
-    model_error: str | None = None
-    usage_total: dict[str, Any] = field(default_factory=dict)
-    usage_keys: set[str] = field(default_factory=set)
-    # artifact facts
-    redacted: bool = False
-    report_path: Path | None = None
-    report_status: str = "none"
-    artifact_failures: list[str] = field(default_factory=list)
-    # resource facts
-    cleanup: CleanupReport | None = None
-    # R3a child-progress observer (transient facts only — never a verdict
-    # input, never written to child.json, §3.5「运行中进度（R3a）」).
-    #: In-flight dispatch calls: toolCallId → children in task order
-    #: (``{"n", "agent"}``); a call leaves the table when its finished event
-    #: commits. Guarded by the run lock like every frame commit.
-    progress_calls: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
-    #: Children whose finished event committed: no more progress for them.
-    progress_finished_ns: set[int] = field(default_factory=set)
-    progress_observer_started: bool = False
-    #: Once finalize has stopped the observer no started event may start it
-    #: again — frames can still commit between the stop and the verdict, and a
-    #: thread started in that window would never be stopped (set under the run
-    #: lock, checked at start under the same lock).
-    progress_observer_closed: bool = False
-    progress_source: Any = None
-    progress_stop: threading.Event | None = None
-    progress_thread: threading.Thread | None = None
-    progress_warned: bool = False
-    #: Per-child latest emitted tuple ``(steps, lastToolName, lastToolTarget,
-    #: bytes)`` and its emit time — the throttle and the change detection.
-    progress_emitted: dict[int, tuple[Any, ...]] = field(default_factory=dict)
-    progress_emit_ts: dict[int, float] = field(default_factory=dict)
+    #: The three fact groups, each with its own owner and commit point (§4):
+    #: execution facts, artifact facts and resource facts. ``_decide`` reads
+    #: them in that order and never rewrites them.
+    execution_facts: _ExecutionFacts = field(default_factory=_ExecutionFacts)
+    artifact_facts: _ArtifactFacts = field(default_factory=_ArtifactFacts)
+    resource_facts: _ResourceFacts = field(default_factory=_ResourceFacts)
+    #: R3a child-progress observer (transient facts only — never a verdict
+    #: input, never written to child.json, §3.5「运行中进度（R3a）」). The
+    #: manager creates it on the first committed dispatch, or at finalize's
+    #: stop step when no dispatch happened; after that stop a late
+    #: ``subagent_started`` cannot launch a thread anymore.
+    progress: ChildProgressObserver | None = None
 
 
 ClientFactory = Callable[..., PiRpcClient]
@@ -997,12 +1001,12 @@ class RunManager:
             if not execution.cancel_requested:
                 adapter.deliver_input()
                 deadline = time.monotonic() + self.config.task_timeout_seconds
-                execution.outcome = adapter.wait(
+                execution.execution_facts.outcome = adapter.wait(
                     cancel=lambda: execution.cancel_requested, deadline=deadline
                 )
         except EventLogError as exc:
             logger.error("run failed run=%s: %s", run_id, exc)
-            execution.event_log_error = execution.event_log_error or str(exc)
+            execution.execution_facts.event_log_error = execution.execution_facts.event_log_error or str(exc)
         except Exception as exc:  # noqa: BLE001 - every run must end with a reason
             if execution.cancel_requested:
                 # Stopping a run closes the sandbox (or aborts pi); the error
@@ -1010,7 +1014,7 @@ class RunManager:
                 logger.info("run cancelled run=%s (%s)", run_id, type(exc).__name__)
             else:
                 logger.exception("run failed run=%s", run_id)
-            execution.failure = f"{type(exc).__name__}: {exc}"
+            execution.execution_facts.failure = f"{type(exc).__name__}: {exc}"
         finally:
             self._finalize(execution)
 
@@ -1050,20 +1054,20 @@ class RunManager:
             self._recover_report(execution)
         except Exception:  # noqa: BLE001 - reported as a rejected artifact
             logger.exception("report recovery failed run=%s", run_id)
-            execution.report_status = "rejected"
-            execution.report_path = None
+            execution.artifact_facts.report_status = "rejected"
+            execution.artifact_facts.report_path = None
 
         committed = self._commit_verdict(execution, projector)
         verdict = execution.verdict
         assert verdict is not None  # _commit_verdict always decides one
-        cleanup = execution.cleanup
+        cleanup = execution.resource_facts.cleanup
         logger.info(
             "run finalized run=%s status=%s stop=%s committed=%s report=%s released=%s",
             run_id,
             verdict.status,
             verdict.stop_reason,
             committed,
-            execution.report_path or "<none>",
+            execution.artifact_facts.report_path or "<none>",
             cleanup.released if cleanup is not None else None,
         )
         execution.finalized.set()
@@ -1079,7 +1083,7 @@ class RunManager:
         # cannot be read after it is destroyed.
         try:
             recovery = adapter.recover_artifacts(execution.workspace)
-            execution.artifact_failures.extend(recovery.failures)
+            execution.artifact_facts.artifact_failures.extend(recovery.failures)
             # Values the host only learned from recovered material (the E2B
             # face's state root) join this run's boundary exactly like an
             # injected credential: a later echo is masked, and the values
@@ -1101,9 +1105,9 @@ class RunManager:
             subagent_recovery = adapter.recover_subagents(
                 self.store.run_dir(run_id) / SUBAGENTS_DIRNAME
             )
-            execution.artifact_failures.extend(subagent_recovery.failures)
+            execution.artifact_facts.artifact_failures.extend(subagent_recovery.failures)
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-            execution.artifact_failures.append(
+            execution.artifact_facts.artifact_failures.append(
                 f"产物回收失败: {type(exc).__name__}: {exc}"
             )
 
@@ -1113,12 +1117,12 @@ class RunManager:
         """Tear the face down into a CleanupReport (synthesized on failure)."""
         if adapter is None:
             # Nothing was acquired: no process, container or sandbox exists.
-            execution.cleanup = CleanupReport(released=True)
+            execution.resource_facts.cleanup = CleanupReport(released=True)
             return
         try:
-            execution.cleanup = adapter.close()
+            execution.resource_facts.cleanup = adapter.close()
         except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-            execution.cleanup = CleanupReport(
+            execution.resource_facts.cleanup = CleanupReport(
                 released=False,
                 failures=(f"关闭执行面失败: {type(exc).__name__}: {exc}",),
                 external=dict(adapter.identity()),
@@ -1129,7 +1133,7 @@ class RunManager:
         run_id = execution.record.run_id
         try:
             if self._sanitize_workspace(execution.workspace, self._run_redactor(execution)):
-                execution.redacted = True
+                execution.artifact_facts.redacted = True
         except Exception:  # noqa: BLE001 - sweep is defence in depth
             logger.exception("workspace credential sweep failed run=%s", run_id)
         try:
@@ -1137,12 +1141,12 @@ class RunManager:
             if subagents_dir.is_dir() and self._sanitize_workspace(
                 subagents_dir, self._run_redactor(execution)
             ):
-                execution.redacted = True
+                execution.artifact_facts.redacted = True
         except Exception:  # noqa: BLE001 - sweep is defence in depth
             logger.exception("subagent artifact credential sweep failed run=%s", run_id)
         try:
             if self._sanitize_session(execution):
-                execution.redacted = True
+                execution.artifact_facts.redacted = True
         except Exception:  # noqa: BLE001
             logger.exception("session credential sweep failed run=%s", run_id)
 
@@ -1200,14 +1204,14 @@ class RunManager:
         defined here; the family only translates its own stop vocabulary into
         it (:meth:`HarnessFamily.model_stop_verdict`).
         """
-        log_error = execution.event_log_error
+        log_error = execution.execution_facts.event_log_error
         if execution.cancel_requested:
             return Verdict(CANCELLED, "abort", log_error)
         if log_error:
             return Verdict(FAILED, "event_log_failed", log_error)
-        if execution.failure:
-            return Verdict(FAILED, "execution_error", execution.failure)
-        outcome = execution.outcome
+        if execution.execution_facts.failure:
+            return Verdict(FAILED, "execution_error", execution.execution_facts.failure)
+        outcome = execution.execution_facts.outcome
         if outcome is None:
             return Verdict(FAILED, "execution_error", "执行面没有给出结果")
         if outcome.cancelled:
@@ -1216,15 +1220,15 @@ class RunManager:
             return Verdict(FAILED, "timeout", outcome.error or "run timed out")
         if outcome.error:
             return Verdict(FAILED, outcome.stop_reason or "execution_error", outcome.error)
-        stop = execution.model_stop_reason
+        stop = execution.execution_facts.model_stop_reason
         # 族把 harness 自己的 stop 词汇（pi 的 error/aborted/length，ACP 的
         # StopReason 集合）译成产品终态词汇；``None`` 落入下方的交付策略
         # （报告检查）。映射逐字节不变式见契约 §4 与族实现。
-        verdict = self._family.model_stop_verdict(stop, model_error=execution.model_error)
+        verdict = self._family.model_stop_verdict(stop, model_error=execution.execution_facts.model_error)
         if verdict is not None:
             return verdict
-        if execution.report_path is None:
-            reason = "report_rejected" if execution.report_status == "rejected" else "no_report"
+        if execution.artifact_facts.report_path is None:
+            reason = "report_rejected" if execution.artifact_facts.report_status == "rejected" else "no_report"
             return Verdict(FINISHED, reason, None)
         return Verdict(FINISHED, None, None)
 
@@ -1232,7 +1236,7 @@ class RunManager:
         """Durably append the terminal frame; True once it is committed."""
         run_id = execution.record.run_id
         current = self.store.get(run_id) or execution.record
-        cleanup = execution.cleanup or CleanupReport(released=True)
+        cleanup = execution.resource_facts.cleanup or CleanupReport(released=True)
         terminal_type = {
             FAILED: events.RUN_FAILED,
             CANCELLED: events.RUN_CANCELLED,
@@ -1243,20 +1247,20 @@ class RunManager:
             "error": self._run_redactor(execution).redact(verdict.error)
             if verdict.error
             else None,
-            "reportPath": str(execution.report_path) if execution.report_path else None,
-            "reportStatus": execution.report_status,
-            "modelStopReason": execution.model_stop_reason,
+            "reportPath": str(execution.artifact_facts.report_path) if execution.artifact_facts.report_path else None,
+            "reportStatus": execution.artifact_facts.report_status,
+            "modelStopReason": execution.execution_facts.model_stop_reason,
             "sessionId": current.session_id,
             "sessionFile": current.session_file,
-            "usage": execution.usage_total or None,
-            "redacted": execution.redacted,
+            "usage": execution.execution_facts.usage_total or None,
+            "redacted": execution.artifact_facts.redacted,
             "durationSeconds": round(time.time() - current.created_at, 3),
             "cleanup": {
                 "released": cleanup.released,
                 "failures": list(cleanup.failures),
                 "external": dict(cleanup.external),
             },
-            "artifactFailures": list(execution.artifact_failures),
+            "artifactFailures": list(execution.artifact_facts.artifact_failures),
             "children": self._children_summary(execution),
         }
         try:
@@ -1472,7 +1476,7 @@ class RunManager:
         try:
             self._emit(execution, event_type, payload)
         except EventLogError as exc:
-            execution.event_log_error = execution.event_log_error or str(exc)
+            execution.execution_facts.event_log_error = execution.execution_facts.event_log_error or str(exc)
             logger.error("event log failed run=%s: %s", execution.record.run_id, exc)
             return False
         return True
@@ -1495,21 +1499,21 @@ class RunManager:
             if isinstance(message, Mapping) and message.get("role") == "assistant":
                 stop = message.get("stopReason") or message.get("stop_reason")
                 if isinstance(stop, str) and stop:
-                    execution.model_stop_reason = stop
+                    execution.execution_facts.model_stop_reason = stop
                 error = message.get("errorMessage")
-                execution.model_error = (
+                execution.execution_facts.model_error = (
                     error if isinstance(error, str) and error.strip() else None
                 )
         elif frame_type == "auto_retry_end" and not frame.get("success"):
             final = frame.get("finalError")
             if isinstance(final, str) and final.strip():
-                execution.model_error = final
+                execution.execution_facts.model_error = final
         elif frame_type == "acp_prompt_result":
             # ``session/prompt``'s answer: the ACP adapter translates it into
             # this frame, and the stop reason is recorded verbatim (the ACP
             # vocabulary is mapped to the product verdict in ``_decide``).
             stop = frame.get("stopReason")
-            execution.model_stop_reason = stop if isinstance(stop, str) and stop else None
+            execution.execution_facts.model_stop_reason = stop if isinstance(stop, str) and stop else None
 
     def _accumulate_usage(
         self, execution: _Execution, frame: Mapping[str, Any], payload: Mapping[str, Any]
@@ -1522,7 +1526,7 @@ class RunManager:
         on the execution; the family only computes.
         """
         return self._family.accumulate_usage(
-            frame, payload, execution.usage_total, execution.usage_keys
+            frame, payload, execution.execution_facts.usage_total, execution.execution_facts.usage_keys
         )
 
     def _publish_session_ready(
@@ -1591,21 +1595,21 @@ class RunManager:
             with ArtifactTree(execution.workspace) as workspace:
                 data = workspace.read(REPORT_FILENAME, max_bytes=REPORT_MAX_BYTES)
         except ArtifactMissing:
-            execution.report_status = "missing"
+            execution.artifact_facts.report_status = "missing"
             return
         except ArtifactError as exc:
-            execution.report_status = "rejected"
-            execution.report_path = None
+            execution.artifact_facts.report_status = "rejected"
+            execution.artifact_facts.report_path = None
             self._report_warning(execution, f"report.md 未通过安全校验，已拒绝：{exc}")
             return
         if execution.seeded_report_digest is not None and execution.seeded_report_digest == hashlib.sha256(data).hexdigest():
             # The previous deliverable is context, not a newly generated file.
-            execution.report_status = "missing"
+            execution.artifact_facts.report_status = "missing"
             return
         original = data.decode("utf-8", errors="replace")
         redacted = self._run_redactor(execution).redact(original)
         if redacted != original:
-            execution.redacted = True
+            execution.artifact_facts.redacted = True
         try:
             with ArtifactTree(self.store.run_dir(run_id)) as run_tree:
                 run_tree.replace(
@@ -1615,12 +1619,12 @@ class RunManager:
                     create_parents=True,
                 )
         except (ArtifactError, OSError) as exc:
-            execution.report_status = "rejected"
-            execution.report_path = None
+            execution.artifact_facts.report_status = "rejected"
+            execution.artifact_facts.report_path = None
             self._report_warning(execution, f"report.md 无法写入宿主产物目录，已拒绝：{exc}")
             return
-        execution.report_path = self.store.report_artifact_path(run_id)
-        execution.report_status = "ok"
+        execution.artifact_facts.report_path = self.store.report_artifact_path(run_id)
+        execution.artifact_facts.report_status = "ok"
 
     def _report_warning(self, execution: _Execution, detail: str) -> None:
         run_id = execution.record.run_id
@@ -1789,242 +1793,64 @@ class RunManager:
 
     # -- running child progress (R3a, §3.5「运行中进度（R3a）」) -----------------
     #
-    # The observer is a pure add-on over the committed typed events: it emits
-    # throttled ``subagent_updated`` frames (latest value wins), never touches
-    # the verdict, never writes child.json, and runs outside the admission
-    # lock. Its whole state lives on the ``_Execution`` and dies in finalize.
+    # The observer object (``runs/child_progress_observer.py``) is a pure
+    # add-on over the committed typed events: it emits throttled
+    # ``subagent_updated`` frames (latest value wins), never touches the
+    # verdict, never writes child.json, and runs outside the admission lock.
+    # The runner only reaches it at the two original call sites — the
+    # committed started/finished frames and the first finalize step — plus the
+    # thin callbacks below that keep the frame commit and warning in the host.
+
+    def _progress(self, execution: _Execution) -> ChildProgressObserver:
+        """The run's observer, created once under the run lock."""
+        with execution.lock:
+            observer = execution.progress
+            if observer is None:
+                observer = ChildProgressObserver(
+                    run_id=execution.record.run_id,
+                    lock=execution.lock,
+                    is_open=lambda: execution.phase == _OPEN,
+                    match_n=self._family.match_progress_n,
+                    source_factory=lambda: self._child_progress_source(execution),
+                    emit_frame=lambda event_type, payload: self._emit_frame(
+                        execution, event_type, payload
+                    ),
+                    emit_warning=lambda detail: self._progress_warning(
+                        execution, detail
+                    ),
+                )
+                execution.progress = observer
+            return observer
+
+    def _child_progress_source(self, execution: _Execution) -> Any | None:
+        """The adapter's ``child_progress_source()``, or ``None`` for no seam.
+
+        The seam is an ABC 默认空实现 like ``recovered_session`` /
+        ``recover_subagents``; a face whose answer is ``None`` honestly has no
+        progress and gets no thread. The factory is called at first committed
+        dispatch, exactly as before the split.
+        """
+        adapter = execution.adapter
+        factory = adapter.child_progress_source if adapter is not None else None
+        return factory() if factory is not None else None
 
     def _track_child_progress(
         self, execution: _Execution, event_type: str, payload: Mapping[str, Any]
     ) -> None:
-        """Maintain the in-flight dispatch table (caller holds the run lock).
-
-        A pi ``tool_call`` dispatches several tasks; their ``subagent_started``
-        events commit in task order, so an entry's position in the call's list
-        is the task index that the transcript filename's ``index`` carries.
-        ACP dispatches one child per call, hit exactly by ``toolCallId``. A
-        committed ``subagent_finished`` removes the call and seals its
-        children against further progress.
-        """
-        call_id = str(payload.get("toolCallId") or "")
-        if event_type == events.SUBAGENT_STARTED:
-            n = payload.get("n")
-            if call_id and isinstance(n, int) and not isinstance(n, bool):
-                execution.progress_calls.setdefault(call_id, []).append(
-                    {"n": n, "agent": str(payload.get("agent") or "")}
-                )
-            self._ensure_progress_observer(execution)
-            return
-        if call_id:
-            execution.progress_calls.pop(call_id, None)
-        ns = payload.get("ns")
-        if isinstance(ns, list):
-            for n in ns:
-                if isinstance(n, int) and not isinstance(n, bool):
-                    execution.progress_finished_ns.add(n)
-
-    def _ensure_progress_observer(self, execution: _Execution) -> None:
-        """Start the one polling thread on the first committed dispatch.
-
-        Caller holds the run lock. The seam is the adapter's
-        ``child_progress_source()`` — an ABC 默认空实现 like
-        ``recovered_session``/``recover_subagents``; a face whose answer is
-        ``None`` honestly has no progress and gets no thread. A run
-        that never dispatches a subagent never reaches here, so it pays
-        nothing.
-        """
-        if execution.progress_observer_started or execution.progress_observer_closed:
-            return
-        execution.progress_observer_started = True
-        adapter = execution.adapter
-        factory = adapter.child_progress_source if adapter is not None else None
-        if factory is None:
-            return
-        try:
-            source = factory()
-        except Exception as exc:  # noqa: BLE001 - observer failure is a warning only
-            self._progress_warning(
-                execution, f"子代理进度观察源创建失败: {type(exc).__name__}: {exc}"
-            )
-            return
-        if source is None:
-            return
-        stop = threading.Event()
-        execution.progress_source = source
-        execution.progress_stop = stop
-        thread = threading.Thread(
-            target=self._progress_loop,
-            args=(execution, source, stop),
-            name=f"child-progress-{execution.record.run_id}",
-            daemon=True,
-        )
-        execution.progress_thread = thread
-        thread.start()
-
-    def _progress_loop(
-        self, execution: _Execution, source: Any, stop: threading.Event
-    ) -> None:
-        """Poll the face's progress source until finalize stops the thread.
-
-        Latest-value-wins: a dropped intermediate frame changes nothing, so a
-        poll cycle is cheap to repeat. A failing ``poll()`` backs off with a
-        bound and the observer stops after ``_PROGRESS_MAX_FAILURES``
-        consecutive failures; failures surface as at most one ``kernel_status``
-        warning, never as a verdict input.
-        """
-        run_id = execution.record.run_id
-        failures = 0
-        try:
-            while not stop.wait(_PROGRESS_POLL_SECONDS):
-                try:
-                    facts = source.poll()
-                except Exception as exc:  # noqa: BLE001 - bounded backoff, then stop
-                    failures += 1
-                    self._progress_warning(
-                        execution, f"子代理进度观察失败: {type(exc).__name__}: {exc}"
-                    )
-                    if failures >= _PROGRESS_MAX_FAILURES:
-                        logger.warning(
-                            "子代理进度观察连续失败 %d 次，停止 run=%s", failures, run_id
-                        )
-                        return
-                    stop.wait(
-                        min(
-                            _PROGRESS_POLL_SECONDS * failures,
-                            _PROGRESS_MAX_BACKOFF_SECONDS,
-                        )
-                    )
-                    continue
-                failures = 0
-                self._publish_progress(execution, facts)
-        except Exception:  # noqa: BLE001 - the observer must never kill the run
-            logger.exception("子代理进度观察线程异常退出 run=%s", run_id)
-            self._progress_warning(execution, "子代理进度观察线程异常退出")
-
-    def _publish_progress(self, execution: _Execution, facts: Sequence[Any]) -> None:
-        """Map one poll's facts onto children and emit the throttled updates.
-
-        Unmappable facts are dropped (no fabricated progress); a child whose
-        finished event committed — or a run that left the open phase — gets
-        nothing more. ``bytes`` is a cumulative snapshot kept monotonic across
-        polls (a replaced transcript re-parses from zero but must not move the
-        reported value backwards).
-        """
-        if not facts:
-            return
-        now = time.monotonic()
-        with execution.lock:
-            if execution.phase != _OPEN:
-                return
-            for fact in facts:
-                mapped = self._map_progress_fact(execution, fact)
-                if mapped is None:
-                    continue
-                n, steps, name, target, byte_count = mapped
-                if n in execution.progress_finished_ns:
-                    continue
-                previous = execution.progress_emitted.get(n)
-                if previous is not None:
-                    # 快照语义：steps 与 bytes 都是累计值，transcript 被替换
-                    # 重解析后事件流也不许回退（前端另有一层 Math.max 兜底，
-                    # 事件本身先保证单调）。
-                    byte_count = max(byte_count, previous[3])
-                    steps = max(steps, previous[0])
-                current = (steps, name, target, byte_count)
-                if previous == current:
-                    continue
-                last_emit = execution.progress_emit_ts.get(n)
-                if (
-                    last_emit is not None
-                    and now - last_emit < _PROGRESS_THROTTLE_SECONDS
-                ):
-                    continue
-                payload = {
-                    "n": n,
-                    "steps": steps,
-                    "lastToolName": name,
-                    "lastToolTarget": target,
-                    "bytes": byte_count,
-                }
-                if not self._emit_frame(execution, events.SUBAGENT_UPDATED, payload):
-                    # The durable log is failing; the run converges on that
-                    # verdict, so stop pushing transient frames into it.
-                    return
-                execution.progress_emitted[n] = current
-                execution.progress_emit_ts[n] = now
-
-    def _map_progress_fact(
-        self, execution: _Execution, fact: Any
-    ) -> tuple[Any, ...] | None:
-        """Pair one polled fact with its child ``n``; ``None`` fabricates nothing.
-
-        通用字段校验（steps/bytes/name/target）留在这里；配对规则是族方法
-        （pi：transcript ``index`` + ``agent`` 同名；ACP：``call_id`` 精确
-        命中）。对不上即该 child 无进度。
-        """
-        steps = getattr(fact, "steps", None)
-        byte_count = getattr(fact, "bytes", None)
-        if (
-            not isinstance(steps, int)
-            or isinstance(steps, bool)
-            or steps < 0
-            or not isinstance(byte_count, int)
-            or isinstance(byte_count, bool)
-            or byte_count < 0
-        ):
-            return None
-        name = getattr(fact, "last_tool_name", None)
-        target = getattr(fact, "last_tool_target", None)
-        name = name if isinstance(name, str) and name else None
-        target = target if isinstance(target, str) and target else None
-        n = self._family.match_progress_n(fact, execution.progress_calls)
-        if n is None:
-            return None
-        return (n, steps, name, target, byte_count)
+        """Maintain the observer's in-flight table (caller holds the run lock)."""
+        self._progress(execution).track(event_type, payload)
 
     def _stop_progress_observer(self, execution: _Execution) -> None:
-        """Stop the R3a observer: close under the run lock, then bounded join.
+        """Stop the R3a observer as the first finalize step.
 
-        The field swap happens under the run lock (the same lock
-        :meth:`_ensure_progress_observer` starts under), and the closed flag
-        blocks any later start — a ``subagent_started`` committed between this
-        stop and the verdict must not launch a thread nobody will stop. The
-        join and the source close happen outside the lock because the loop
-        takes the run lock to emit. A run that never dispatched has nothing to
-        stop. The source is closed even when the join times out, so a late poll
-        fails instead of emitting into a finalized run; the thread is a daemon
-        and dies with the process.
+        Creating the observer here when no dispatch happened is what keeps the
+        closed flag authoritative: a late ``subagent_started`` between this
+        stop and the verdict finds a closed observer and starts no thread.
         """
-        with execution.lock:
-            execution.progress_observer_closed = True
-            stop = execution.progress_stop
-            thread = execution.progress_thread
-            source = execution.progress_source
-            execution.progress_stop = None
-            execution.progress_thread = None
-            execution.progress_source = None
-        if stop is not None:
-            stop.set()
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=_PROGRESS_JOIN_SECONDS)
-        if source is not None:
-            try:
-                source.close()
-            except Exception:  # noqa: BLE001 - closing must not block finalize
-                logger.debug(
-                    "child progress source close failed run=%s",
-                    execution.record.run_id,
-                    exc_info=True,
-                )
+        self._progress(execution).stop()
 
     def _progress_warning(self, execution: _Execution, detail: str) -> None:
-        """An observer failure surfaces as at most one ``kernel_status`` warning."""
-        run_id = execution.record.run_id
-        logger.warning("run=%s %s", run_id, detail)
-        with execution.lock:
-            if execution.progress_warned:
-                return
-            execution.progress_warned = True
+        """The observer's one allowed ``kernel_status`` warning (at most once)."""
         try:
             self._emit_open(
                 execution,
@@ -2037,7 +1863,9 @@ class RunManager:
             )
         except EventLogError as exc:
             logger.error(
-                "child progress warning could not be persisted run=%s: %s", run_id, exc
+                "child progress warning could not be persisted run=%s: %s",
+                execution.record.run_id,
+                exc,
             )
 
     # -- child-run (subagent) documents, §3.5 -----------------------------------
@@ -2124,13 +1952,13 @@ class RunManager:
         if self._family.enrich_children(
             execution.record.run_id,
             runtime=execution.runtime,
-            artifact_failures=execution.artifact_failures,
+            artifact_failures=execution.artifact_facts.artifact_failures,
             sweep=lambda path: self._sanitize_workspace(
                 path, self._run_redactor(execution)
             ),
             warn=lambda detail: self._child_doc_warning(execution, detail),
         ):
-            execution.redacted = True
+            execution.artifact_facts.redacted = True
 
     def _settle_children(self, execution: _Execution, verdict: Verdict) -> None:
         """Close out children whose own finished event never arrived.

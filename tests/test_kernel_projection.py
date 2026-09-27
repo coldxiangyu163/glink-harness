@@ -445,7 +445,7 @@ def _bare_runner() -> Any:
 
 def test_usage_is_summed_across_requests_and_deduped_by_message_identity() -> None:
     runner = _bare_runner()
-    execution = SimpleNamespace(usage_total={}, usage_keys=set())
+    execution = SimpleNamespace(execution_facts=SimpleNamespace(usage_total={}, usage_keys=set()))
 
     out1 = _accumulate(runner, execution, _turn(1, 100))
     assert out1 is not None
@@ -460,7 +460,7 @@ def test_usage_is_summed_across_requests_and_deduped_by_message_identity() -> No
 
     # 同一 message 身份（timestamp/id）重复到达只计一次：返回 None，不产生第二帧。
     assert _accumulate(runner, execution, _turn(2, 200)) is None
-    assert execution.usage_total["requests"] == 2
+    assert execution.execution_facts.usage_total["requests"] == 2
     # 没有身份的帧无从去重，每次都计。
     out3 = _accumulate(runner, execution, _turn(None, 50))
     assert out3 is not None and out3["usage"]["totalTokens"] == 350
@@ -470,7 +470,7 @@ def test_usage_is_summed_across_requests_and_deduped_by_message_identity() -> No
 
 def test_usage_cost_is_summed_only_when_reported() -> None:
     runner = _bare_runner()
-    execution = SimpleNamespace(usage_total={}, usage_keys=set())
+    execution = SimpleNamespace(execution_facts=SimpleNamespace(usage_total={}, usage_keys=set()))
     _accumulate(runner, execution, _turn(1, 10, cost={"total": 0.5}))
     out = _accumulate(runner, execution, _turn(2, 10, cost={"total": 0.5}))
     assert out is not None

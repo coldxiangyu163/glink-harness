@@ -257,7 +257,10 @@ pi 族另有 `_meta.json` 增强（R2，见下「R2 增强与关联」）。
 瞬时进度污染。
 
 进度由观察者 seam 供给：`ExecutionAdapter.child_progress_source()` 是 **ABC 默认空实现**
-（与 `recovered_session` / `recover_subagents` 同例，不覆写即该面无进度）。runner 每 run 至多起**一个**轮询线程，finalize 时退出，连续失败按有界退避
+（与 `recovered_session` / `recover_subagents` 同例，不覆写即该面无进度）。每 run 的观察者
+对象、轮询线程、停止事件、closed 标志、节流/单调钳制与有界退避都在
+`runs/child_progress_observer.py`；`RunManager` 只在已提交的 started/finished 帧与
+finalize 第一步调用它，每 run 至多起**一个**轮询线程，finalize 时退出，连续失败按有界退避
 后即停，且**不在准入锁内**。关联规则按族区分：
 
 * **pi 族**：前台守卫保证同一时刻至多一个在飞派发 call；transcript 文件
@@ -267,7 +270,7 @@ pi 族另有 `_meta.json` 增强（R2，见下「R2 增强与关联」）。
   transcript，因此进度源只报告**自上轮以来有变化**的文件（首次见到只建基线），
   冻结的旧文件永远不会被错配给新在飞的 child（与 R2「无法区分宁可不关联」同一条
   不伪造口径）；服务端对 `steps`/`bytes` 做单调钳制（快照语义，替换重解析也不回退）。
-  观察者在线程停止后不再启动：finalize 停止观察者后在 run 锁内置 closed 标志，
+  观察者在线程停止后不再启动：finalize 停止观察者时在 run 锁内置观察者对象的 closed 标志，
   停止与 verdict 之间迟到的 started 帧不会再起线程。
 * **ACP 族**：主会话 `tool/call` 帧加上**相邻**的 `subagent/catalog` 帧给出
   callId↔childId 的精确关联，子会话的 step/tool 帧提取进度（实测见
@@ -621,7 +624,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `host/pi_glink/web_*.py` | 宿主 HTTP 层 | `web_routes`（路由与 run/health/报告 API）/ `web_sse`（事件流与连接额度）/ `web_security`（身份、会话与请求防护）/ `web_http`（请求体、响应、静态资源、脱敏访问日志）；一个 `HostRequestHandler` 由它们组合而成 |
 | `host/pi_glink/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
 | `host/pi_glink/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env` / `subagent_artifacts`（pi-subagents 产物布局解析与关联，R2）；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）；两族的 run 生命周期策略：`harness` / `harness_pi` / `harness_acp`。不导入 `runs/` 或宿主编排模块 |
-| `host/pi_glink/runs/` | 编排层 | run 准入与执行骨架、收尾顺序、终态提交与资源台账：`runner`（RunManager）/ `resource_ledger`（外部资源台账、重启对账、人工裁决与在线身份探测扫描） |
+| `host/pi_glink/runs/` | 编排层 | run 准入与执行骨架、收尾顺序、终态提交与资源台账：`runner`（RunManager）/ `resource_ledger`（外部资源台账、重启对账、人工裁决与在线身份探测扫描）/ `child_progress_observer`（R3a 每 run 进度观察者） |
 | `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
 | `agent/` | 内核配置模板 | `settings.json`、`AGENTS.md`、`research-prompt.md`（最小工作约定）、`prompts/deepresearch.md`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
 | `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |
