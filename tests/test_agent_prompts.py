@@ -1,4 +1,4 @@
-"""Regressions for the appended working contract and the `/deepresearch` template."""
+"""Regressions for the three-layer prompt: work agreement, pack capabilities, blueprint."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ from pi_glink.config import build_config
 from pi_glink.kernel.agent_env import prepare_agent_dir, template_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CONTRACT_PATH = REPO_ROOT / "harnesses" / "pi" / "research-prompt.md"
+CONTRACT_PATH = REPO_ROOT / "methodology" / "work-agreement.md"
 CAPABILITIES_PATH = REPO_ROOT / "harnesses" / "pi" / "capabilities.md"
-DEEPRESEARCH_PATH = REPO_ROOT / "harnesses" / "pi" / "prompts" / "deepresearch.md"
+DEEPRESEARCH_PATH = REPO_ROOT / "methodology" / "blueprints" / "deepresearch.md"
 RESEARCHER_PATH = REPO_ROOT / "harnesses" / "pi" / "agents" / "researcher.md"
 
 #: 默认工作约定（2026-09-24 用户决定，参照 dsh 的最小提示词）只保留产品契约。
@@ -172,8 +172,8 @@ def test_the_pack_capabilities_reach_the_system_prompt(tmp_path: Path) -> None:
     assert config.pack_capabilities == capabilities
 
 
-def test_deepresearch_carries_the_methodology_without_a_gate() -> None:
-    """`/deepresearch` 是显式调用的严格模式，承接原默认约定里的方法论。"""
+def test_the_blueprint_carries_the_methodology_without_a_gate() -> None:
+    """`/deepresearch` 是显式调用的严格模式；蓝图（唯一真源）承接完整方法论。"""
     text = DEEPRESEARCH_PATH.read_text(encoding="utf-8")
     for obligation in _DEEPRESEARCH_OBLIGATIONS:
         assert obligation in text, obligation
@@ -184,6 +184,33 @@ def test_deepresearch_carries_the_methodology_without_a_gate() -> None:
     match = _UNAVAILABLE_TOOL_PATTERN.search(text)
     assert match is None, match.group(0)
     assert "`grep` 工具" not in text
+
+
+def test_the_work_agreement_carries_no_harness_specific_tool_name() -> None:
+    """工作约定是 harness 无关的产品契约：pi 的工具面只允许出现在能力提示里。"""
+    text = CONTRACT_PATH.read_text(encoding="utf-8")
+    for harness_name in ("subagent", "researcher", "deepresearch"):
+        assert harness_name not in text, harness_name
+
+
+def test_the_blueprint_is_the_single_methodology_source() -> None:
+    """蓝图身份与契约：`methodology/blueprints/deepresearch.md`（模板已删除）。"""
+    text = DEEPRESEARCH_PATH.read_text(encoding="utf-8")
+    assert text.startswith("+++\n")
+    frontmatter, _, body = text[4:].partition("\n+++\n")
+    assert 'format = "pi-glink-blueprint/v1"' in frontmatter
+    assert 'name = "deepresearch"' in frontmatter
+    assert "description" in frontmatter
+    # 结构化的阶段契约与正文方法论。
+    for anchor in ("[[stages]]", "deliverable", "checkpoint"):
+        assert anchor in frontmatter, anchor
+    assert "无论题目看起来多简单" in body
+    assert "report.md" in body
+    # 旧 pi 模板的展开语法不再出现（斜杠命令由宿主解释为蓝图请求）。
+    assert "$@" not in text
+    assert "feynman" not in text
+    # 包目录里不再有方法论副本。
+    assert not (REPO_ROOT / "harnesses" / "pi" / "prompts").exists()
 
 
 def test_researcher_definition_uses_only_the_runtime_tool_surface() -> None:
@@ -276,45 +303,5 @@ def test_researcher_definition_and_guard_reach_the_run_directory(tmp_path: Path)
     assert subagent_config["forceTopLevelAsync"] is False
 
 
-def test_deepresearch_template_forces_the_deep_flow_and_is_delivered() -> None:
-    """`/deepresearch` is a prompt template: the file name becomes the command."""
-    text = DEEPRESEARCH_PATH.read_text(encoding="utf-8")
-    assert text.startswith("---\n")
-    frontmatter, _, body = text[4:].partition("\n---\n")
-    assert "description:" in frontmatter
-    # The borrowed skeleton is credited with its version and license.
-    assert "feynman" in text and "0.3.48" in text and "MIT" in text
-    assert "$@" in body
-    # The explicit entry always delivers a report, however simple the topic.
-    assert "无论题目看起来多简单" in body
-    assert "report.md" in body
-    for forbidden in _FORBIDDEN_TEMPLATE_REFERENCES:
-        assert forbidden not in text, forbidden
-    # The template travels into the run's PI_CODING_AGENT_DIR like every other
-    # reviewed template entry.
-    delivered = {entry for entry, _path, _is_dir in template_manifest(REPO_ROOT / "harnesses" / "pi")}
-    assert "prompts/deepresearch.md" in delivered
 
 
-def test_prompt_templates_are_rendered_into_the_run_directory(tmp_path: Path) -> None:
-    """The prompt template reaches the per-run directory, not only the manifest."""
-    config = build_config(
-        {
-            "OPENAI_API_KEY": "sk-test-value",
-            "OPENAI_BASE_URL": "https://example.invalid/v1",
-            "OPENAI_MODEL": "openai/gpt-5.6-sol",
-            "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
-            "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-            # Never fall back to the operator's own credential file in a test.
-            "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "operator-web-search.json"),
-        },
-        REPO_ROOT,
-    )
-    runtime_dir = tmp_path / "runs" / "run-1" / "pi-agent"
-    runtime = prepare_agent_dir(
-        config,
-        runtime_dir=runtime_dir,
-        session_dir=runtime_dir.parent / "sessions",
-    )
-    rendered = runtime.directory / "prompts" / "deepresearch.md"
-    assert rendered.read_text(encoding="utf-8") == DEEPRESEARCH_PATH.read_text(encoding="utf-8")

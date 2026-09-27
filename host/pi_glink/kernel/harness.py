@@ -87,15 +87,10 @@ class HarnessFamily(ABC):
         self._config = config
         self._store = store
 
-    # -- (a) 准入：允许的 / 命令与凭据要求 ------------------------------------
+    # -- (a) 准入：凭据要求 -----------------------------------------------------
 
-    @abstractmethod
-    def allowed_prompt_commands(self) -> tuple[str, ...]:
-        """The ``/`` commands admission accepts（自 runner L612-624 搬迁）。
-
-        pi：``harnesses/pi/prompts/`` 渲染出的模板名；ACP：空表（其斜杠命令是
-        agent 自己的面，宿主不路由，plan §4.3）。
-        """
+    #: ``/`` 命令门禁自 GLINK-ARCH-6 起是宿主级、harness 无关（`/<蓝图名> <题目>`），
+    #: 不再由族提供白名单；族只负责它自己的凭据前提。
 
     @abstractmethod
     def validate_credentials(self, credentials: "RunCredentials") -> None:

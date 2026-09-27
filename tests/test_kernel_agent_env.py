@@ -17,7 +17,6 @@ from pi_glink.kernel.agent_env import (
     build_pi_env,
     local_package_source,
     prepare_agent_dir,
-    prompt_template_names,
     template_manifest,
 )
 
@@ -252,10 +251,9 @@ def test_template_manifest_lists_the_reviewable_entries(tmp_path: Path, template
         "extensions/hello.js",
     } <= relative
     # A symlink in the template is never delivered as a path into the host.
-    (template_dir / "prompts").mkdir()
-    (template_dir / "prompts" / "escape.md").symlink_to(tmp_path / "outside.md")
+    (template_dir / "extensions" / "escape.js").symlink_to(tmp_path / "outside.js")
     manifest = template_manifest(template_dir)
-    assert "prompts/escape.md" not in {entry for entry, _p, _d in manifest}
+    assert "extensions/escape.js" not in {entry for entry, _p, _d in manifest}
 
 
 def test_agents_directory_is_rendered_into_the_run_configuration(
@@ -272,26 +270,6 @@ def test_agents_directory_is_rendered_into_the_run_configuration(
     config = _config(tmp_path, template_dir)
     runtime = _prepare(config, tmp_path)
     assert (runtime.directory / "agents" / "researcher.md").read_text(encoding="utf-8") == "# researcher\n"
-
-
-def test_prompt_template_names_come_from_the_template_directory(tmp_path: Path) -> None:
-    """准入层的 `/` 命令白名单从 `harnesses/pi/prompts/` 推导，不硬编码。
-
-    pi 只展开文件名（stem）精确匹配的模板命令（docs/prompt-templates.md），
-    宿主因此把同一份模板目录当作唯一真源：新增命令 = 新增受审阅的模板文件；
-    符号链接不进入白名单（与 template_manifest 同口径）。
-    """
-    template = tmp_path / "template"
-    (template / "prompts").mkdir(parents=True)
-    (template / "prompts" / "deepresearch.md").write_text("题目：$@\n", encoding="utf-8")
-    (template / "prompts" / "notes.md").write_text("题目：$@\n", encoding="utf-8")
-    (template / "prompts" / "ignored.txt").write_text("不是模板\n", encoding="utf-8")
-    (template / "prompts" / "escape.md").symlink_to(template / "prompts" / "notes.md")
-    assert prompt_template_names(template) == ("deepresearch", "notes")
-    # 模板目录缺失 = 不接受任何 `/` 命令（fail-closed）。
-    assert prompt_template_names(tmp_path / "absent") == ()
-    # 仓库当前只有 `/deepresearch`：加载的包注册的扩展命令不在其中。
-    assert prompt_template_names(REPO_ROOT / "harnesses" / "pi") == ("deepresearch",)
 
 
 def test_template_settings_declare_pinned_packages_and_quiet_subagent_surfaces() -> None:

@@ -114,7 +114,7 @@ def test_slash_commands_outside_the_template_allowlist_are_refused(
 
     pi 对以 `/` 开头的消息会先执行扩展命令（docs/rpc-commands.md），而载入的
     pi-subagents 注册了 `/run --bg`、`/subagents-detach` 等。准入层只接受从
-    `harnesses/pi/prompts/` 推导的模板命令，并在任何 run 目录/执行面之前返回 400。
+    `methodology/blueprints/` 推导的蓝图命令（`/<蓝图名> <题目>`），并在任何 run 目录/执行面之前返回 400。
     """
     before = _run_dirs(server)
     status, _headers, raw = request(

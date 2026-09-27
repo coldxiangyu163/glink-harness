@@ -62,7 +62,7 @@ CLI 的 Node fetch 不认 socks5，构建走 Python SDK + `httpx[socks]`）。
 模型凭据写在运行期 `auth.json`（pi 官方凭据存储，0600，仓库外），随本 run 的运行期配置上传到沙箱
 `/home/user/config/`；不进沙箱进程环境（沙箱内 `env | grep -c OPENAI_API_KEY` 实测 0），随沙箱销毁
 而消失。pi-web-access 凭据随运行期 `web-search.json` 一并上传。交付内容不只几个 JSON：整个运行期目录
-（含 `AGENTS.md`、`extensions/`、`skills/`、`prompts/` 等模板条目）按同一路径语义上传，并记录
+（含 `AGENTS.md`、`extensions/`、`skills/` 等模板条目）按同一路径语义上传，并记录
 `(相对路径, sha256)` 清单供核验；沙箱内 JSONL 按 LF 分帧（U+2028 不得拆帧）。沙箱命令以
 `background=True, stdin=True` 启动，宿主用共享 `PiRpcClient` 走同一条 stdio 通道收发帧（stdout 块
 不保证帧对齐，仍按 LF 拆帧）；流断开即 `execution_error`，已交付帧保留、不补发、不伪造完整性
@@ -158,7 +158,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | POST | `/api/invitations/check` | 校验邀请可用性，body `{"token": "…"}`（限速；无效与已用同形返回 `{"valid":false}`；邀请码只走 JSON body，不进 URL/查询/日志） |
 | POST | `/api/admin/invitations` | 管理员为**本租户**签发一次性邀请（需要 CSRF；响应只在这一次返回邀请码原文） |
 
-本机（`local`）执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。以 `/` 开头的 prompt 只有命令名等于 `harnesses/pi/prompts/` 下模板文件名的才被接受（当前仅 `/deepresearch`），其余返回 `400 unsupported_command`（错误体只给允许的命令列表，不回显被拒输入）——pi 对这类消息会先执行扩展命令，而 pi-subagents 注册了 `/run --bg`、`/subagents-detach` 等后台入口；拒绝在任何 run 目录/执行面创建之前，追问同样适用。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
+本机（`local`）执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。以 `/` 开头的 prompt 只接受宿主解释的 `/<蓝图名> <题目>`（蓝图名从 `methodology/blueprints/` 推导，当前仅 `deepresearch`），其余返回 `400 unsupported_command`（错误体只给推导出的蓝图名列表，不回显被拒输入）——pi 对这类消息会先执行扩展命令，而 pi-subagents 注册了 `/run --bg`、`/subagents-detach` 等后台入口；拒绝在任何 run 目录/执行面创建之前，追问同样适用。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
 
 多租户模式（`PI_GLINK_TENANCY=multitenant`）下所有 `/api/*`（健康的存活性探测除外）都要求可信身份——网关断言或站内会话：未认证 `401`，权限不足 `403`，未知/异租户/legacy 记录统一 `404`，超过并发上限 `429 quota_exceeded`。下一节说明完整语义。`/api/blueprints` 是宿主级资源的只读目录：认证后各租户看到同一份列表（与 `/api/config` 同形）；空目录/缺失目录都返回 `200 {"blueprints": []}`，格式不合契约的文件不进列表（原因只进日志）。
 
@@ -309,7 +309,7 @@ key 检索）；显式 `shared` 策略只渲染宿主级 `PI_GLINK_WEB_SEARCH_KE
 
 未覆盖项如实记录：真实模型下的前台并行效果与子代理会话文件的收尾脱敏尚未验证；客户端输入面的
 `/` 命令（`/run --bg`、`/subagents-detach` 等）不在 `tool_call` 钩子可达范围，由宿主在准入层挡住
-（只接受 `harnesses/pi/prompts/` 模板命令，其余 `400 unsupported_command`，见 architecture.md §4）。
+（只接受 `/<蓝图名> <题目>`，其余 `400 unsupported_command`，见 architecture.md §4）。
 
 ## 安全边界
 
@@ -386,7 +386,8 @@ node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 26 个角�
 | `PI_GLINK_ACP_ENV` | 空 | 给 ACP agent 进程传环境变量时；`HOME` 不可覆盖（每 run 状态根是隔离边界） |
 | `LOCAL_WEB_ACP_WORKER_IMAGE` | `pi-glink-acp-worker:latest` | ACP + `docker` 面换镜像时（与 pi 面镜像分开，二者装的 agent 不同） |
 | `LOCAL_WEB_E2B_ACP_TEMPLATE` | `glink-acp-worker` | ACP + `e2b` 面换模板时（与 pi 面模板分开，同上） |
-| `PI_GLINK_BLUEPRINTS_DIR` | `<repo>/blueprints` | 蓝图模板放在别处时；目录缺失不是启动错误，只表示可用蓝图集合为空 |
+| `PI_GLINK_METHODOLOGY_DIR` | `<repo>/methodology` | 方法论根（`work-agreement.md` 与 `blueprints/`）放在别处时 |
+| `PI_GLINK_BLUEPRINTS_DIR` | `<methodology>/blueprints` | 蓝图目录单独覆盖时；目录缺失不是启动错误，只表示可用蓝图集合为空 |
 | `LOCAL_WEB_TASK_TIMEOUT_SECONDS` | `1800` | 单次 run 的整体超时（秒）；题型明显更长/更短时。E2B 沙箱寿命按它 + 300s 取值 |
 | `OPENAI_CONTEXT_WINDOW` | `400000` | pi 面模型元数据的上下文窗口；provider 窗口更小时 |
 | `OPENAI_MAX_TOKENS` | `65536` | pi 面模型元数据的输出上限；provider 上限更短时 |

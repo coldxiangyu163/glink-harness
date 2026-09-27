@@ -19,7 +19,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 #: 现行文档（历史证据 ``docs/evidence/`` 与集成笔记按 brief 不在扫描范围）。
-DRIFT_DOCUMENTS = ("README.md", "docs/pi-boundary.md", "docs/architecture.md")
+#: ``docs/multi-harness-plan.md`` 自 GLINK-ARCH-6 起纳入：§3.5 的已删除 e2b json 机制
+#: 描述必须留在带「删除」等历史标记的行上。
+DRIFT_DOCUMENTS = (
+    "README.md",
+    "docs/pi-boundary.md",
+    "docs/architecture.md",
+    "docs/multi-harness-plan.md",
+)
 
 #: 已删除机制的关键词。``tee`` 与「按文件补齐」是同一套 tee/补读机制的入口，
 #: 只在词边界上匹配，避免误伤普通英文单词。

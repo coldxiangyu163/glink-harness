@@ -1,6 +1,6 @@
 """pi 族策略面的单元测试。
 
-钉住自 runner 搬迁的 pi 族行为：模板命令白名单、缺模型凭据的准入拒绝
+钉住自 runner 搬迁的 pi 族行为：缺模型凭据的准入拒绝
 原文、续接种子值与会话身份校验时机，以及 pi stop 词汇到产品终态词汇的
 逐格映射（oracle 即 runner ``_decide`` 现分支字面量）。
 """
@@ -14,7 +14,7 @@ import pytest
 
 from acp_pack import write_acp_pack
 from pi_glink.config import ConfigError, HostConfig, build_config
-from pi_glink.kernel.agent_env import RunCredentials, prompt_template_names
+from pi_glink.kernel.agent_env import RunCredentials
 from pi_glink.kernel.harness import select_family
 from pi_glink.kernel.harness_acp import AcpHarnessFamily
 from pi_glink.kernel.harness_pi import PiHarnessFamily
@@ -50,20 +50,6 @@ def make_family(tmp_path: Path, harness: str = "pi"):
 
 
 # -- (a) 准入 -----------------------------------------------------------------
-
-
-def test_pi_allowlist_is_the_rendered_template_names(tmp_path: Path) -> None:
-    config, _store, family = make_family(tmp_path)
-    assert isinstance(family, PiHarnessFamily)
-    expected = prompt_template_names(config.agent_config_dir)
-    assert expected, "测试前置：仓库自带 prompt 模板，白名单不应为空"
-    assert family.allowed_prompt_commands() == expected
-
-
-def test_acp_allowlist_is_empty_by_construction(tmp_path: Path) -> None:
-    _config, _store, family = make_family(tmp_path, "acp")
-    assert isinstance(family, AcpHarnessFamily)
-    assert family.allowed_prompt_commands() == ()
 
 
 def test_pi_validate_credentials_refuses_a_missing_model_key(tmp_path: Path) -> None:

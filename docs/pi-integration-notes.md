@@ -213,7 +213,7 @@ GLINK-SUB-01 已记录它与 `~/.feynman/npm-global` 参考副本有 23 个 `src
 该发布包。离线验证证据：`docs/evidence/pi-subagents-foreground.txt`。
 
 **范围注**：本节只记录工具面的强制前台与子代理定义（`harnesses/pi/agents/researcher.md`）。委派约定
-（2026-09-24 用户决定）写在最小化后的 `harnesses/pi/research-prompt.md`：独立、可并行的子问题**可以**
+（2026-09-24 用户决定）写在最小化后的 `methodology/work-agreement.md`（GLINK-ARCH-6 前为 pi 包内模板）：独立、可并行的子问题**可以**
 交给 `researcher`，任务说明自包含，主 agent 亲自核实回报的关键事实并负责整合与 `report.md`；
 何时派、派几个由模型按题目决定，不设固定检索步骤。
 
@@ -239,7 +239,7 @@ GLINK-SUB-01 已记录它与 `~/.feynman/npm-global` 参考副本有 23 个 `src
 | 16 | `share: true`（`schemas.ts` 单 agent overrides；`src/runs/foreground/execution.ts` 的 `shareEnabled`） | 把子代理会话上传到 GitHub Gist | **阻止** | 会话内容离开本 run 目录，超出宿主的脱敏与目录边界 |
 | 17 | `worktree: true`（`schemas.ts:240/307`；`src/runs/shared/worktree.ts:173-175` 默认基目录 `os.tmpdir()`） | 在 run 目录外创建 git worktree | **阻止** | 生命周期不由本 run 回收路径保证，且落在工作区外 |
 | 18 | `cwd` / `sessionDir` / `output` / `chainDir` 路径参数（`schemas.ts:135/157/188/218/315`；chainDir 默认 `src/shared/settings.ts:174-176` = `CHAIN_RUNS_DIR`，即 OS 临时目录） | 把读写/产物放到工作区外 | **阻止**（工作区外）或 **改写**（`chainDir` 固定为 `<workspace>/.pi-subagents/chain-runs`） | 宿主只对本 run 工作区做收尾脱敏与目录边界保护（architecture.md §6.1） |
-| 19 | **不在工具面上的入口**：pi-subagents 注册的扩展命令（`src/slash/slash-commands.ts:1181-1340`：`/run [--bg]`、`/chain [--bg]`、`/parallel`、`/subagents-detach`、`/subagents-stop`、`/subagents-fleet`、…） | 用户输入（RPC `prompt`）直接执行的扩展命令 | **宿主准入层挡住**（GLINK-SUB-02 评审修复）：只接受 `harnesses/pi/prompts/` 模板命令，其余 `400 unsupported_command` | pi 先派发扩展命令、后触发 `input` 事件（`docs/rpc-commands.md`：extension command “executes immediately”），`tool_call` 钩子拿不到 → 门禁放在 `runs/runner.py::start`（见 §10.4 与 architecture.md §4） |
+| 19 | **不在工具面上的入口**：pi-subagents 注册的扩展命令（`src/slash/slash-commands.ts:1181-1340`：`/run [--bg]`、`/chain [--bg]`、`/parallel`、`/subagents-detach`、`/subagents-stop`、`/subagents-fleet`、…） | 用户输入（RPC `prompt`）直接执行的扩展命令 | **宿主准入层挡住**（GLINK-SUB-02 评审修复；GLINK-ARCH-6 起为宿主解释的 `/<蓝图名> <题目>`）：其余 `/` 开头输入一律 `400 unsupported_command` | pi 先派发扩展命令、后触发 `input` 事件（`docs/rpc-commands.md`：extension command “executes immediately”），`tool_call` 钩子拿不到 → 门禁放在 `runs/runner.py::start`（见 §10.4 与 architecture.md §4） |
 
 判定与常量都在 `harnesses/pi/extensions/subagent-foreground-guard.ts`；单测
 `tests/extensions/subagent-foreground-guard.test.mjs` 对每一行都有正反例（含 handler 异常时阻止）。
@@ -297,7 +297,7 @@ researcher 的 `tools` 白名单（`read,bash,write,edit,web_search,fetch_conten
 1. **扩展命令面的处置（GLINK-SUB-02 评审修复）**：`/run --bg`、`/chain --bg`、`/subagents-detach` 等
    由用户输入直接执行的 pi-subagents 命令，`tool_call` 钩子拿不到（pi 先派发扩展命令、后触发 `input`
    事件）。宿主现已在**准入层**加 `/` 命令门禁：去掉前导空白的 prompt 若以 `/` 开头，只接受命令名
-   等于 `harnesses/pi/prompts/` 下模板 stem 的（当前仅 `deepresearch`），其余 `400 unsupported_command`，
+   属于 `/<蓝图名> <题目>`（蓝图名从 `methodology/blueprints/` 推导，当前仅 `deepresearch`），其余 `400 unsupported_command`，
    不创建 run 目录；追问、三个执行面同一条判定（`runs/runner.py::start` +
    `kernel/agent_env.py::prompt_template_names`，回归见 `tests/test_runs_api.py` /
    `tests/test_runner.py`）。仍存在的边界：门禁只管宿主验收的 prompt 入口，不阻止内核启动后

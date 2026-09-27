@@ -454,14 +454,17 @@ def test_upload_config_delivers_the_runtime_directory_with_a_manifest(tmp_path: 
 
 
 def test_upload_manifest_covers_reviewable_template_entries(tmp_path: Path) -> None:
-    """Extensions/skills/prompts are delivered with the same path semantics."""
+    """原义务（pack 迁移前）：extensions/skills/prompts 都随模板清单送达。
+
+    新义务（GLINK-ARCH-6）：方法论迁到 `methodology/`（工作约定与蓝图由宿主拼进系统
+    提示，不再落运行期目录），pi 包的模板条目只剩 settings/AGENTS.md/agents/extensions/
+    skills；送达路径语义不变。
+    """
     template = tmp_path / "template"
     (template / "extensions").mkdir(parents=True)
     (template / "settings.json").write_text('{"defaultThinkingLevel": "high"}\n', encoding="utf-8")
     (template / "AGENTS.md").write_text("# agent\n", encoding="utf-8")
     (template / "extensions" / "hello.js").write_text("export default () => {};\n", encoding="utf-8")
-    (template / "prompts").mkdir()
-    (template / "prompts" / "research.md").write_text("prompt\n", encoding="utf-8")
     config = make_config(tmp_path, PI_CODING_AGENT_DIR=str(template))
     runtime = _prepare(config, tmp_path)
     sandbox = FakeSandbox()
@@ -472,9 +475,9 @@ def test_upload_manifest_covers_reviewable_template_entries(tmp_path: Path) -> N
     client.upload_config()
 
     delivered = {relative for relative, _digest in client.upload_manifest}
-    assert {"AGENTS.md", "settings.json", "extensions/hello.js", "prompts/research.md"} <= delivered
+    assert {"AGENTS.md", "settings.json", "extensions/hello.js"} <= delivered
     assert "/home/user/config/extensions/hello.js" in sandbox.written
-    assert "/home/user/config/prompts/research.md" in sandbox.written
+    assert not any(relative.startswith("prompts/") for relative in delivered)
     client.close()
 
 

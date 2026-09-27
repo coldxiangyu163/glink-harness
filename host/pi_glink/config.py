@@ -93,10 +93,15 @@ class HostConfig:
     executor: str
     pi_bin: str
     agent_config_dir: Path
-    #: Repository-level session-blueprint directory
-    #: (``PI_GLINK_BLUEPRINTS_DIR``, default ``<repo>/blueprints``). The
-    #: accepted blueprint names are derived from this directory at admission
-    #: time; a missing directory offers no names and never fails startup.
+    #: Repository-level methodology directory (``PI_GLINK_METHODOLOGY_DIR``,
+    #: default ``<repo>/methodology``): the harness-independent work agreement
+    #: (``work-agreement.md``) and the blueprint directory live here.
+    methodology_dir: Path
+    #: Repository-level session-blueprint directory (default
+    #: ``<methodology_dir>/blueprints``; ``PI_GLINK_BLUEPRINTS_DIR`` overrides).
+    #: The accepted blueprint names are derived from this directory at admission
+    #: time and are also the accepted ``/<name> <topic>`` slash commands; a
+    #: missing directory offers no names and never fails startup.
     blueprints_dir: Path
     session_dir: Path
     workspace_root: Path
@@ -275,6 +280,11 @@ class HostConfig:
     def binds_loopback(self) -> bool:
         return self.host in _LOOPBACK_HOSTS
 
+    @property
+    def work_agreement_path(self) -> Path:
+        """The harness-independent working agreement appended to every run."""
+        return self.methodology_dir / "work-agreement.md"
+
     def public_view(self) -> dict[str, object]:
         """Fields safe to send to the browser: no credentials, no host paths."""
         return {
@@ -393,8 +403,11 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     agent_config_dir = _path(
         values, "PI_CODING_AGENT_DIR", harnesses_dir / pack.name
     )
+    methodology_dir = _path(
+        values, "PI_GLINK_METHODOLOGY_DIR", repo_root / "methodology"
+    )
     blueprints_dir = _path(
-        values, "PI_GLINK_BLUEPRINTS_DIR", repo_root / "blueprints"
+        values, "PI_GLINK_BLUEPRINTS_DIR", methodology_dir / "blueprints"
     )
     accounts_db = _optional_path(
         values, "PI_GLINK_ACCOUNTS_DB", data_root / "accounts" / "accounts.db"
@@ -422,6 +435,7 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         pack_home=pack.home,
         pi_bin=_text(values, "PI_GLINK_PI_BIN", "pi"),
         agent_config_dir=agent_config_dir,
+        methodology_dir=methodology_dir,
         blueprints_dir=blueprints_dir,
         session_dir=_path(values, "PI_CODING_AGENT_SESSION_DIR", data_root / "sessions"),
         workspace_root=_path(values, "PI_GLINK_WORKSPACE_ROOT", data_root / "workspaces"),

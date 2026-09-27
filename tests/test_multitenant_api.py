@@ -497,7 +497,7 @@ def test_blueprints_are_host_level_and_identical_for_every_tenant(
     payload = json.loads(alpha[2])
     names = [item["name"] for item in payload["blueprints"]]
     assert names == sorted(names)
-    assert "deep-research" in names
+    assert "deepresearch" in names
     assert payload["blueprints"][0]["stages"], "阶段元数据随列表下发"
     # 列表不携带路径/凭据，也不回显任何租户凭据值。
     rendered = alpha[2].decode("utf-8")

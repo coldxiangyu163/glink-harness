@@ -70,14 +70,6 @@ class AcpHarnessFamily(HarnessFamily):
 
     # -- (a) 准入 --------------------------------------------------------------
 
-    def allowed_prompt_commands(self) -> tuple[str, ...]:
-        # An ACP agent's slash commands (advertised through
-        # ``available_commands_update``) are its own surface and none of them
-        # are routed by this host: that family's allowlist is empty by
-        # construction, derived from the harness instead of a
-        # template-directory lookup (plan §4.3).
-        return ()
-
     def validate_credentials(self, credentials: "RunCredentials") -> None:
         """空实现：agent 自带模型配置，宿主凭据不是准入条件。"""
         # The ACP family does not use the host's model credential: the agent

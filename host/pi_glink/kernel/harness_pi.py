@@ -1,6 +1,6 @@
 """The pi harness family（实现体自 runner.py 对应段落逐字搬迁）。
 
-pi 族的策略面：模板命令白名单、宿主模型凭据准入、会话文件种子、
+pi 族的策略面：宿主模型凭据准入、会话文件种子、
 ``AgentRuntime`` 渲染与 ``Projector``、RPC/Docker/E2B 面的 adapter 组装、
 pi stop 词汇归一化，以及 pi-subagents 的子代理增强与进度配对。
 """
@@ -25,7 +25,6 @@ from .agent_env import (
     build_pi_argv,
     build_pi_env,
     prepare_agent_dir,
-    prompt_template_names,
 )
 from .docker_env import (
     build_plan as build_docker_plan,
@@ -74,11 +73,6 @@ class PiHarnessFamily(HarnessFamily):
     name = "pi"
 
     # -- (a) 准入 --------------------------------------------------------------
-
-    def allowed_prompt_commands(self) -> tuple[str, ...]:
-        # pi dispatches extension commands and expands prompt templates, so the
-        # allowlist is the rendered prompt-template names.
-        return prompt_template_names(self._config.agent_config_dir)
 
     def validate_credentials(self, credentials: "RunCredentials") -> None:
         # The ACP family does not use the host's model credential: the agent

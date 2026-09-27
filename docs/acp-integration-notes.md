@@ -1415,7 +1415,7 @@ ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上
 
 ### 13.3 现状余量
 
-| 量 | 当前（`deep-research`） | 上限内最坏 | 来源 |
+| 量 | 当前（`deepresearch`，当时名 `deep-research`） | 上限内最坏 | 来源 |
 |---|---|---|---|
 | 蓝图源文件 | 5,550 B | 32,768 B（32 KiB 上限） | `宿主代码` |
 | 蓝图渲染文本 | 5,535 B | 33,003 B | `合成实测` |
@@ -1445,7 +1445,7 @@ ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上
 ### 13.5 测量方法（可复现）
 
 本次测量用生产的 `load_blueprint`/`render_blueprint`/`parse_blueprint` 与 `compose_prompt`：
-把 `deep-research.md`（5,550 B）与一个恰好 32 KiB 的合成合法文档分别渲染，再把结果放进
+把 `deepresearch.md`（当时名 `deep-research.md`，5,550 B）与一个恰好 32 KiB 的合成合法文档分别渲染，再把结果放进
 `session/prompt` 的 `params`，用 `json.dumps(..., ensure_ascii=False, separators=(",", ":"))`
 量帧；题面上下界用 `web_http.MAX_REQUEST_BYTES`。脚本是临时文件、未入仓（纯合成，
 不建沙箱、不调模型）。

@@ -78,7 +78,7 @@ THINKING_FORMAT = "openrouter"
 #: the workbench ships its own ``researcher`` definition there so the dispatch tool
 #: finds it in every face. ``extensions`` carries both the pi-glink
 #: foreground-dispatch guard and pi-subagents' own extension config.
-TEMPLATE_ENTRIES = ("settings.json", "AGENTS.md", "agents", "extensions", "skills", "prompts")
+TEMPLATE_ENTRIES = ("settings.json", "AGENTS.md", "agents", "extensions", "skills")
 #: Backwards-compatible private alias (the list is part of the module contract
 #: for the E2B upload manifest, so it is exported under a public name).
 _TEMPLATE_ENTRIES = TEMPLATE_ENTRIES
@@ -278,39 +278,6 @@ def template_manifest(template_dir: Path) -> list[tuple[str, Path, bool]]:
     return manifest
 
 
-#: Prompt-template directory inside the agent template. Its ``*.md`` file stems
-#: are the ``/`` command names pi expands (docs/prompt-templates.md) and, because
-#: of that, the only ``/`` messages the host admits. Adding a file there is the
-#: single source of truth for the accepted command set.
-PROMPTS_DIRNAME = "prompts"
-
-
-def prompt_template_names(template_dir: Path) -> tuple[str, ...]:
-    """The ``/`` command names this configuration accepts, from the template directory.
-
-    pi expands a prompt template only when the message starts with ``/`` and its
-    first token exactly equals a template file's stem (``expandPromptTemplate``:
-    ``^/([^\\s]+)`` plus a case-sensitive name match). Every other ``/...``
-    message is either an extension command or plain text; the host admits only
-    this set, so a new command is reviewed repository content rather than
-    something a loaded package registers at runtime.
-
-    Symlinks are skipped for the same reason :func:`template_manifest` skips
-    them: the accepted set must be repository content, not a path into the
-    operator's filesystem.
-    """
-    directory = Path(template_dir) / PROMPTS_DIRNAME
-    if not directory.is_dir():
-        return ()
-    return tuple(
-        sorted(
-            path.stem
-            for path in directory.glob("*.md")
-            if path.is_file() and not path.is_symlink()
-        )
-    )
-
-
 def local_package_source(source: str) -> str | None:
     """The image-local path for a prebaked ``npm:`` package, else ``None``.
 
@@ -507,8 +474,8 @@ def _write_auth_json(credentials: RunCredentials, directory: Path) -> Path | Non
 def _sync_template(template_dir: Path, target_dir: Path) -> None:
     """Replace every template entry in the runtime directory.
 
-    Replacement (not merge) is the point: a run must not inherit an extension,
-    skill or prompt that a previous render left in the same directory. Each
+    Replacement (not merge) is the point: a run must not inherit an extension or
+    skill that a previous render left in the same directory. Each
     top-level entry is removed and re-copied; files inside template directories
     are copied individually so symlinks cannot smuggle content in.
     """

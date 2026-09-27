@@ -31,7 +31,7 @@ abort、``session_ready`` 前即知会话身份。架构文档 §5.2 记录这�
 
 **Configuration delivery.** The sandbox receives the *whole* per-run runtime
 directory (generated files plus the reviewed template entries: ``AGENTS.md``,
-``settings.json``, ``extensions/``, ``skills/``, ``prompts/``), with the same
+``settings.json``, ``extensions/``, ``skills/``), with the same
 relative paths the in-process and Docker faces use. The upload records a manifest
 of ``(relative path, sha256)`` so the delivery is verifiable instead of "the
 current directory happened to be empty". ``settings.json`` renders the prebaked

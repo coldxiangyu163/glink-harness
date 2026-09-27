@@ -49,10 +49,10 @@ from pi_glink.store import RunStore
 from pi_glink.tenancy import TenantContext, TenantCredentialStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BLUEPRINTS = REPO_ROOT / "blueprints"
+BLUEPRINTS = REPO_ROOT / "methodology" / "blueprints"
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
 FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"
-CONTRACT_PATH = REPO_ROOT / "harnesses" / "pi" / "research-prompt.md"
+CONTRACT_PATH = REPO_ROOT / "methodology" / "work-agreement.md"
 CAPABILITIES_PATH = REPO_ROOT / "harnesses" / "pi" / "capabilities.md"
 
 
@@ -182,9 +182,9 @@ def run_dirs(config: HostConfig) -> list[str]:
 def test_repository_blueprint_is_well_formed() -> None:
     """The built-in example satisfies every part of the frontmatter contract."""
     names = blueprint_names(BLUEPRINTS)
-    assert names == ("deep-research",), names
-    blueprint = load_blueprint(BLUEPRINTS, "deep-research")
-    assert blueprint.name == "deep-research"
+    assert names == ("deepresearch",), names
+    blueprint = load_blueprint(BLUEPRINTS, "deepresearch")
+    assert blueprint.name == "deepresearch"
     assert blueprint.description
     assert len(blueprint.stages) >= 3
     assert [stage.id for stage in blueprint.stages] == [
@@ -199,17 +199,17 @@ def test_repository_blueprint_is_well_formed() -> None:
     assert "report.md" in blueprint.body
     # The file on disk is exactly what makes it a blueprint: the stem, the
     # declared name and the API value are one identity.
-    assert (BLUEPRINTS / "deep-research.md").is_file()
+    assert (BLUEPRINTS / "deepresearch.md").is_file()
 
 
 def test_blueprint_keeps_the_existing_deep_research_methodology() -> None:
     """The example reuses the reviewed methodology; it invents no new claims.
 
     Same obligation set as ``tests/test_agent_prompts.py`` pins for
-    ``harnesses/pi/prompts/deepresearch.md``: the blueprint is the structured,
+    The deleted pi prompt template: the blueprint is the structured,
     harness-agnostic spelling of that same contract.
     """
-    text = (BLUEPRINTS / "deep-research.md").read_text(encoding="utf-8")
+    text = (BLUEPRINTS / "deepresearch.md").read_text(encoding="utf-8")
     for anchor in (
         "report.md",
         "来源分层",
@@ -623,11 +623,11 @@ def wait_for_terminal(server: PiGlinkServer, run_id: str, timeout: float = 30.0)
 
 def test_run_api_accepts_a_blueprint_and_records_it(server: PiGlinkServer) -> None:
     status, raw = request(
-        server, "/api/runs", method="POST", body={"prompt": "带蓝图的产品题目", "blueprint": "deep-research"}
+        server, "/api/runs", method="POST", body={"prompt": "带蓝图的产品题目", "blueprint": "deepresearch"}
     )
     assert status == 201
     run = json.loads(raw)["run"]
-    assert run["blueprint"] == "deep-research"
+    assert run["blueprint"] == "deepresearch"
     assert [stage["id"] for stage in run["blueprintStages"]] == [
         "frame",
         "evidence",
@@ -639,15 +639,15 @@ def test_run_api_accepts_a_blueprint_and_records_it(server: PiGlinkServer) -> No
     # The detail view and the list view carry the same facts as the record.
     _status, raw = request(server, f"/api/runs/{run['runId']}")
     detail = json.loads(raw)["run"]
-    assert detail["blueprint"] == "deep-research"
+    assert detail["blueprint"] == "deepresearch"
     _status, raw = request(server, "/api/runs")
     listed = next(item for item in json.loads(raw)["runs"] if item["runId"] == run["runId"])
-    assert listed["blueprint"] == "deep-research"
+    assert listed["blueprint"] == "deepresearch"
     assert listed["blueprintStages"] == run["blueprintStages"]
 
     final = wait_for_terminal(server, run["runId"])
     assert final["status"] == "finished"
-    assert final["blueprint"] == "deep-research"
+    assert final["blueprint"] == "deepresearch"
     assert final["blueprintStages"][0]["checkpoint"]
 
 
@@ -713,11 +713,11 @@ def test_blueprints_api_lists_usable_templates_and_matches_admission(
     assert status == 200
     payload = json.loads(raw)
     names = [item["name"] for item in payload["blueprints"]]
-    assert "deep-research" in names
+    assert "deepresearch" in names
     assert names == sorted(names) and len(names) == len(set(names))
 
-    listed = next(item for item in payload["blueprints"] if item["name"] == "deep-research")
-    parsed = load_blueprint(BLUEPRINTS, "deep-research")
+    listed = next(item for item in payload["blueprints"] if item["name"] == "deepresearch")
+    parsed = load_blueprint(BLUEPRINTS, "deepresearch")
     assert listed["description"] == parsed.description
     assert listed["stages"] == [stage.as_record() for stage in parsed.stages]
     assert set(listed["stages"][0]) == {"id", "title", "goal", "deliverable", "checkpoint"}
@@ -726,7 +726,7 @@ def test_blueprints_api_lists_usable_templates_and_matches_admission(
 
     # 与准入同源：同一目录推导的 run 记录逐字段（含顺序）相同。
     status, raw = request(
-        server, "/api/runs", method="POST", body={"prompt": "对照题目", "blueprint": "deep-research"}
+        server, "/api/runs", method="POST", body={"prompt": "对照题目", "blueprint": "deepresearch"}
     )
     assert status == 201
     run = json.loads(raw)["run"]

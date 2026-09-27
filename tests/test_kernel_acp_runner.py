@@ -217,7 +217,7 @@ def test_acp_run_projects_the_whole_lifecycle_and_the_report(tmp_path: Path) -> 
     # The working agreement (harnesses/pi/research-prompt.md) is delivered as the
     # leading block of the same text message; ACP has no system-role channel,
     # so the product cannot rely on one (see docs/acp-integration-notes.md M2).
-    system_text = (REPO_ROOT / "harnesses" / "pi" / "research-prompt.md").read_text(encoding="utf-8").strip()
+    system_text = (REPO_ROOT / "methodology" / "work-agreement.md").read_text(encoding="utf-8").strip()
     assert prompt["text"].startswith("以下是宿主工作台注入的 system prompt")
     assert f"<system-prompt>\n{system_text}\n</system-prompt>" in prompt["text"]
     assert prompt["text"].endswith("--- 用户请求 ---\n\n用一句话说明这个仓库是做什么的")
@@ -839,15 +839,47 @@ def test_acp_env_entries_reach_the_agent_process(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "prompt", ["/deepresearch", "  /deepresearch", "/run --bg", "/subagents-detach", "/"]
+    "prompt",
+    [
+        "/run --bg",
+        "/subagents-detach",
+        "/",
+        "/DeepResearch x",
+        "/deepresearch /run --bg",
+    ],
 )
-def test_acp_refuses_every_slash_prompt_before_creating_anything(
+def test_acp_refuses_foreign_slash_prompts_before_creating_anything(
     tmp_path: Path, prompt: str
 ) -> None:
+    """原义务（M1/M2）：ACP 拒绝一切以 / 开头的 prompt（agent 的命令表不路由）。
+
+    新义务（GLINK-ARCH-6）：斜杠解释是宿主级、harness 无关——`/<蓝图名> <题目>` 在
+    ACP 面同样被接受为蓝图请求；其余 `/` 开头输入仍 fail-closed（拒绝早于 run 创建），
+    允许名单是宿主推导的蓝图名而不是空集。
+    """
     _config, store, manager = build_manager(tmp_path)
     with pytest.raises(UnsupportedCommand) as excinfo:
         manager.start(prompt)
-    assert excinfo.value.allowed == ()
+    assert excinfo.value.allowed == ("deepresearch",)
+    assert store.list(limit=None) == []
+
+
+def test_acp_accepts_the_host_blueprint_command(tmp_path: Path) -> None:
+    """蓝图命令在 ACP 面同样成立：命令名来自宿主蓝图目录，不是 agent 的命令表。"""
+    settings = {"FAKE_ACP_WRITE_REPORT": True}
+    _config, store, manager = build_manager(tmp_path, settings)
+    record = manager.start("/deepresearch 跨境资金监管")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FINISHED
+    stored = store.get(record.run_id)
+    assert stored is not None
+    assert stored.blueprint == "deepresearch" and stored.prompt == "跨境资金监管"
+
+
+def test_acp_refuses_a_bare_blueprint_command(tmp_path: Path) -> None:
+    _config, store, manager = build_manager(tmp_path)
+    with pytest.raises(ValueError, match="must not be empty"):
+        manager.start("/deepresearch")
     assert store.list(limit=None) == []
 
 

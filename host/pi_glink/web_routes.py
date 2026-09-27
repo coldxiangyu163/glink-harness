@@ -377,15 +377,15 @@ class RoutesMixin:
             )
         except UnsupportedCommand as exc:
             # ``/``-prefix input is how pi reaches extension commands, including
-            # pi-subagents' detaching ones. Only the prompt templates rendered
-            # from ``harnesses/pi/prompts/`` are accepted; the refusal names the
-            # allowlist and never echoes the rejected command or the prompt.
+            # pi-subagents' detaching ones. Since GLINK-ARCH-6 the host itself
+            # interprets ``/<blueprint> <topic>``; the refusal names the derived
+            # blueprint stems and never echoes the rejected command or the prompt.
             self._send_json(
                 HTTPStatus.BAD_REQUEST,
                 {
                     "error": "unsupported_command",
                     "allowed": list(exc.allowed),
-                    "message": "prompt 以 / 开头但不是本工作台接受的模板命令",
+                    "message": "prompt 以 / 开头但不是本工作台接受的蓝图命令",
                 },
                 head_only=False,
             )

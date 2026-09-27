@@ -519,7 +519,7 @@ exit 78 失败（`kernel_exit`）——再 `cd` 工作区并 `exec` 整条 argv�
 `close_stdin` 后退出码 0，15/15，证据 `docs/evidence/pi-e2b-rpc-stdin-spike.txt`）；宿主侧离线
 验证用 stdin 版 fake 沙箱（fake handle + 真实 fake pi 子进程）；**通道级 spike 已过，host 级真实
 E2B live 冒烟未做**。配置交付带有 `(相对路径, sha256)` 清单，`harnesses/pi/` 的 `settings.json`、
-`extensions/`、`skills/`、`prompts/` 与生成文件都按同一路径语义送达。旧路径接口的误读与更正过程
+`extensions/`、`skills/` 与生成文件都按同一路径语义送达（工作约定与蓝图由宿主拼进系统提示，不落运行期目录）。旧路径接口的误读与更正过程
 记录在 `docs/evidence/e2b-run.txt` 末尾（历史证据，描述的是已删除的机制）。
 
 同一个适配器显式传 `commands.run(..., timeout=<沙箱寿命>)`：SDK 默认值是命令累计运行 60 秒，

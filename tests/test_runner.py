@@ -32,7 +32,7 @@ from pi_glink.runs.runner import (
     RunBusy,
     RunManager,
     UnsupportedCommand,
-    prompt_names_unsupported_command,
+    parse_blueprint_command,
 )
 from pi_glink.store import CANCELLED, FAILED, FINISHED, RUNNING, RunStore
 from pi_glink.tenancy import TenantContext
@@ -394,18 +394,29 @@ def test_prompt_reaches_the_kernel_verbatim_and_never_through_argv(tmp_path: Pat
     # `--append-system-prompt` path).
     assert "--append-system-prompt" in argv
     appended = argv[argv.index("--append-system-prompt") + 1]
-    contract = (REPO_ROOT / "harnesses" / "pi" / "research-prompt.md").read_text(encoding="utf-8").strip()
+    contract = (REPO_ROOT / "methodology" / "work-agreement.md").read_text(encoding="utf-8").strip()
     capabilities = (REPO_ROOT / "harnesses" / "pi" / "capabilities.md").read_text(encoding="utf-8").strip()
     assert contract in appended, "the rendered research prompt must reach the kernel verbatim"
     assert capabilities in appended, "the pack capability prompt must reach the kernel verbatim"
 
 
-# -- slash 命令门禁（GLINK-SUB-02 评审修复） ---------------------------------
+# -- 斜杠命令门禁（GLINK-ARCH-6：宿主解释蓝图命令） ---------------------------
 
 
 def _run_dirs(config: HostConfig) -> list[str]:
     runs = config.data_root / "runs"
     return sorted(path.name for path in runs.glob("*")) if runs.is_dir() else []
+
+
+def _write_blueprint(directory: Path, name: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{name}.md").write_text(
+        '+++\nformat = "pi-glink-blueprint/v1"\n'
+        f'name = "{name}"\ndescription = "合成蓝图"\n\n'
+        '[[stages]]\nid = "one"\ntitle = "阶段"\ngoal = "目标"\n'
+        'deliverable = "产出"\ncheckpoint = "检查点"\n+++\n\n正文。\n',
+        encoding="utf-8",
+    )
 
 
 @pytest.mark.parametrize(
@@ -416,17 +427,21 @@ def _run_dirs(config: HostConfig) -> list[str]:
         "   /chain scout -> planner",
         "\n\t/parallel researcher --bg",
         "/",
-        # pi 的模板匹配精确且大小写敏感：这些既不是模板，也不是普通文本。
+        # 名字精确且大小写敏感：这些既不是蓝图，也不是普通文本。
         "/DeepResearch 题目",
         "/deepresearch2 题目",
         "/skill:pi-subagents",
+        # 题目本身仍以 / 开头：重写后的 prompt 绝不能带着 / 进内核。
+        "/deepresearch /run --bg",
     ],
 )
 def test_the_command_gate_refuses_before_any_run_exists(tmp_path: Path, text: str) -> None:
-    """载入 pi-subagents 后，`/run --bg` 等命令能绕过 tool_call 守卫。
+    """pi 会把以 / 开头的消息交给扩展命令；宿主只解释 /<蓝图名> <题目>。
 
-    准入层只放行从 `harnesses/pi/prompts/` 推导出的模板命令（当前只有 deepresearch）；
-    拒绝必须发生在凭据解析、父会话读取、run 目录与执行面创建之前。
+    原义务（GLINK-SUB-02）：只放行从模板目录推导出的模板命令。
+    新义务（GLINK-ARCH-6）：宿主自己解释 `/<蓝图名> <题目>`（蓝图名从
+    `methodology/blueprints/` 推导），其余 `/` 开头输入一律拒绝；拒绝必须发生在
+    凭据解析、父会话读取、run 目录与执行面创建之前。
     """
     manager, _store = build_manager(tmp_path)
     with pytest.raises(UnsupportedCommand) as excinfo:
@@ -435,43 +450,90 @@ def test_the_command_gate_refuses_before_any_run_exists(tmp_path: Path, text: st
     assert _run_dirs(manager.config) == [], "拒绝必须早于 run 目录创建"
 
 
+def test_a_bare_blueprint_command_has_no_topic(tmp_path: Path) -> None:
+    manager, _store = build_manager(tmp_path)
+    with pytest.raises(ValueError, match="must not be empty"):
+        manager.start("/deepresearch")
+    assert _run_dirs(manager.config) == []
+
+
+def test_a_blueprint_cannot_be_given_twice(tmp_path: Path) -> None:
+    manager, _store = build_manager(tmp_path)
+    with pytest.raises(ValueError, match="不能同时"):
+        manager.start("/deepresearch 题目", blueprint="deepresearch")
+    assert _run_dirs(manager.config) == []
+
+
+def test_a_blueprint_command_equals_the_blueprint_field(tmp_path: Path) -> None:
+    """`/deepresearch <题目>` ≡ `blueprint=deepresearch` + `prompt=<题目>`。"""
+    field_manager, field_store = build_manager(tmp_path / "field")
+    field_run = field_manager.start("监管新规", blueprint="deepresearch")
+    assert field_manager.wait(field_run.run_id, timeout=30).status == FINISHED
+
+    slash_manager, slash_store = build_manager(tmp_path / "slash")
+    slash_run = slash_manager.start("/deepresearch 监管新规")
+    assert slash_manager.wait(slash_run.run_id, timeout=30).status == FINISHED
+
+    field = field_store.get(field_run.run_id)
+    slash = slash_store.get(slash_run.run_id)
+    assert field is not None and slash is not None
+    assert slash.prompt == field.prompt == "监管新规", "斜杠命令必须被重写，不能原样进内核"
+    assert slash.blueprint == field.blueprint == "deepresearch"
+    assert slash.blueprint_stages == field.blueprint_stages
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("普通问题", False),
-        ("正文里出现 /run --bg 也不算命令", False),
-        ("  普通问题前导空白", False),
-        ("/deepresearch 题目", False),
-        ("/deepresearch", False),
-        ("\t/deepresearch 题目", False),
-        ("/run --bg x", True),
-        ("  /subagents-detach", True),
-        ("/", True),
-        ("/DeepResearch x", True),
-        ("/deepresearch2 x", True),
-        ("/skill:pi-subagents", True),
+        ("普通问题", (None, "普通问题")),
+        ("正文里出现 /run --bg 也不算命令", (None, "正文里出现 /run --bg 也不算命令")),
+        ("  普通问题前导空白", (None, "  普通问题前导空白")),
+        ("/deepresearch 题目", ("deepresearch", "题目")),
+        ("\t/deepresearch 题目", ("deepresearch", "题目")),
+        ("/deepresearch   两个空格 的题目 ", ("deepresearch", "两个空格 的题目")),
     ],
 )
-def test_command_detection_follows_pi_semantics(text: str, expected: bool) -> None:
-    assert prompt_names_unsupported_command(text, ("deepresearch",)) is expected
+def test_command_detection_splits_the_blueprint_form(
+    text: str, expected: tuple[str | None, str]
+) -> None:
+    assert parse_blueprint_command(text, ("deepresearch",)) == expected
 
 
-def test_the_command_gate_reads_the_template_directory(tmp_path: Path) -> None:
-    """命令白名单不硬编码：模板目录里有什么，就放行什么。"""
-    template = tmp_path / "agent-template"
-    (template / "prompts").mkdir(parents=True)
-    (template / "prompts" / "deepresearch.md").write_text("题目：$@\n", encoding="utf-8")
-    manager, _store = build_manager(tmp_path, PI_CODING_AGENT_DIR=str(template))
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/run --bg x",
+        "  /subagents-detach",
+        "/",
+        "/DeepResearch x",
+        "/deepresearch2 x",
+        "/skill:pi-subagents",
+        "/deepresearch /run --bg",
+    ],
+)
+def test_command_detection_refuses_everything_else(text: str) -> None:
+    with pytest.raises(UnsupportedCommand) as excinfo:
+        parse_blueprint_command(text, ("deepresearch",))
+    assert excinfo.value.allowed == ("deepresearch",)
 
-    record = manager.start("/deepresearch 监管新规")
+
+def test_a_bare_blueprint_command_is_not_a_command_form() -> None:
+    with pytest.raises(ValueError, match="must not be empty"):
+        parse_blueprint_command("/deepresearch", ("deepresearch",))
+
+
+def test_the_blueprint_command_names_come_from_the_blueprint_directory(tmp_path: Path) -> None:
+    """命令名单不硬编码：蓝图目录里有什么，就放行什么。"""
+    blueprints = tmp_path / "blueprints"
+    _write_blueprint(blueprints, "synthetic")
+    manager, _store = build_manager(tmp_path, PI_GLINK_BLUEPRINTS_DIR=str(blueprints))
+
+    record = manager.start("/synthetic 题目")
     assert manager.wait(record.run_id, timeout=30).status == FINISHED
+    assert record.blueprint == "synthetic"
 
     with pytest.raises(UnsupportedCommand):
-        manager.start("/notes 还没有这个模板")
-
-    (template / "prompts" / "notes.md").write_text("题目：$@\n", encoding="utf-8")
-    record = manager.start("/notes 现在可以了")
-    assert manager.wait(record.run_id, timeout=30).status == FINISHED
+        manager.start("/notes 还没有这个蓝图")
 
 
 def test_two_runs_do_not_share_runtime_configuration_or_credentials(tmp_path: Path) -> None:

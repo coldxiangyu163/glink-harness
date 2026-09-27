@@ -16,9 +16,9 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | packages | docs/packages.md | `npm:pi-web-access@0.31.0`（检索能力全部来自它；inproc 运行期安装，docker/e2b 从 `/opt/pi-packages` 本地加载）；`npm:pi-subagents@0.40.0`（自 GLINK-SUB-02 加载：前台强制靠本仓自有 `tool_call` 扩展，不靠包开关，见 pi-integration-notes.md §10） |
 | extensions | docs/extensions.md | `harnesses/pi/extensions/subagent-foreground-guard.ts`：官方 `tool_call` 钩子把 pi-subagents 的派发改写为前台同步、其余后台/定时/控制入口阻止（含 fail-closed）；`harnesses/pi/extensions/subagent/config.json` 是同包读取的最保守 extension config |
 | skills | docs/skills.md | 目录预留（`harnesses/pi/skills/`） |
-| prompt templates | docs/prompt-templates.md | `harnesses/pi/prompts/deepresearch.md`：`/deepresearch <题目>` 显式入口，强制深入流程并叠加更严格的覆盖声明、核查留痕与二次来源收紧（GLINK-ARCH-6 阶段 3 将删除该模板，方法论改由蓝图承载）；通用工作约定仍走 `--append-system-prompt` |
+| prompt templates | docs/prompt-templates.md | **本仓已不使用**（GLINK-ARCH-6）：方法论在 `methodology/`（`work-agreement.md` + `blueprints/*.md`），`/<蓝图名> <题目>` 由宿主解释为蓝图请求，不再依赖 pi 的模板展开 |
 | `AGENTS.md` | docs/quickstart.md 等 | 目录预留（`harnesses/pi/AGENTS.md`），当前约定走 §下一条 |
-| `--append-system-prompt` | `pi --help` | `harnesses/pi/research-prompt.md`（最小工作约定：产品契约）+ `harnesses/pi/capabilities.md`（pi 包能力与可选委派） → `runs/runner.py::_extra_argv`，内核系统提示词本身不改 |
+| `--append-system-prompt` | `pi --help` | `methodology/work-agreement.md`（最小工作约定：产品契约）+ 选中包的 `capabilities.md`（如 pi 的 `subagent`/`researcher` 委派）+ 蓝图渲染 → `runs/runner.py::_extra_argv`，内核系统提示词本身不改 |
 | headless 协议 | docs/rpc.md | 三面均 `--mode rpc`（共享 `kernel/rpc.py::PiRpcClient`；本机直接 spawn，Docker 跨容器 stdio，E2B 经沙箱后台命令 `stdin=True` + `SandboxCommandProcess` 以 `popen=` 注入，GLINK-ARCH-3 收敛）；三面都只按 LF 分帧（`kernel/framing.py`，共享语料 `tests/fixtures/lf-framing.json`） |
 | 环境变量 | docs/environment-variables.md | `PI_CODING_AGENT_DIR`、`PI_CODING_AGENT_SESSION_DIR`、`PI_SKIP_VERSION_CHECK`、`PI_TELEMETRY`（模型凭据不经环境变量，写运行期 `auth.json`；两个目录都是每 run 独立） |
 | CLI 参数 | docs/cli.md、docs/sessions.md | `--provider`、`--model`、`--name`；追问用 `--session <path>` 打开上一轮会话的独立副本（`kernel/agent_env.py::build_pi_argv`、`runs/runner.py`、`kernel/e2b_env.py`） |
@@ -156,4 +156,4 @@ GLINK-SUB-02（2026-09-24）复跑：
 | E2B 后台命令的流式接口是 `CommandHandle`，不是 `commands.run()` 上的回调 | 沿用旧结论会让该面退化为结束后回放 | `spawn_rpc` 以 `background=True, stdin=True` 启动 `pi --mode rpc`，handle 经 `SandboxCommandProcess` 注入共享 `PiRpcClient` 实时投递；断流即 `execution_error`、不补发（`e2b_env.py`，见 architecture.md §5.2） |
 | E2B 会话文件不会自动留存 | 未回收则不能追问 | 销毁前回收单个有界 `.jsonl` 到本 run 专属目录并脱敏；失败时明确拒绝追问 |
 | 模型 key 以文件形式位于本 run 的运行期 `auth.json`（不在进程环境） | 工具可用 `read` 打开并回显 | `env` 类读取已不可行（三面实测 0）；回显被出站脱敏覆盖（含跨 delta 分割，见 architecture.md §3.3/§6.1）；更强隔离用 Docker / E2B 面 |
-| pi-subagents 的扩展命令（`/run --bg`、`/chain --bg`、`/subagents-detach` 等）由用户输入直接执行，且先于 pi 的 `input` 事件派发 | `tool_call` 钩子不可达；载入 pi-subagents 后，客户端可控的 prompt 一旦以 `/` 开头就会先执行这些命令，发起不随主 run 取消/超时收口的后台进程 | 模型工具面用 `harnesses/pi/extensions/subagent-foreground-guard.ts` 强制前台（pi-integration-notes.md §10）；客户端输入面由宿主在**准入层**加 `/` 命令门禁：只接受 `harnesses/pi/prompts/` 模板名，其余 `400 unsupported_command`（architecture.md §4，回归 `tests/test_runs_api.py` / `tests/test_runner.py`） |
+| pi-subagents 的扩展命令（`/run --bg`、`/chain --bg`、`/subagents-detach` 等）由用户输入直接执行，且先于 pi 的 `input` 事件派发 | `tool_call` 钩子不可达；载入 pi-subagents 后，客户端可控的 prompt 一旦以 `/` 开头就会先执行这些命令，发起不随主 run 取消/超时收口的后台进程 | 模型工具面用 `harnesses/pi/extensions/subagent-foreground-guard.ts` 强制前台（pi-integration-notes.md §10）；客户端输入面由宿主在**准入层**加 `/` 命令门禁：只接受 `/<蓝图名> <题目>`（蓝图名从 `methodology/blueprints/` 推导），其余 `400 unsupported_command`（architecture.md §4，回归 `tests/test_runs_api.py` / `tests/test_runner.py`） |

@@ -17,7 +17,6 @@ from __future__ import annotations
 from .runner import (
     REPORT_FILENAME,
     REPORT_MAX_BYTES,
-    RESEARCH_PROMPT_FILENAME,
     BlueprintUnavailable,
     ClientFactory,
     EventLogError,
@@ -28,7 +27,7 @@ from .runner import (
     RunQuotaExceeded,
     StopDecision,
     UnsupportedCommand,
-    prompt_names_unsupported_command,
+    parse_blueprint_command,
 )
 
 __all__ = [
@@ -38,12 +37,11 @@ __all__ = [
     "FollowupUnavailable",
     "REPORT_FILENAME",
     "REPORT_MAX_BYTES",
-    "RESEARCH_PROMPT_FILENAME",
     "ResourcesUnreleased",
     "RunBusy",
     "RunManager",
     "RunQuotaExceeded",
     "StopDecision",
     "UnsupportedCommand",
-    "prompt_names_unsupported_command",
+    "parse_blueprint_command",
 ]

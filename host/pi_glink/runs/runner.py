@@ -106,7 +106,8 @@ from .resource_ledger import ResourceLedger, RunBusy
 logger = logging.getLogger("pi_glink.runs.runner")
 
 #: System prompt appended to every run (pi's own prompt stays untouched).
-RESEARCH_PROMPT_FILENAME = "research-prompt.md"
+#: The harness-independent work agreement lives in the methodology directory
+#: (``methodology/work-agreement.md``); see ``HostConfig.work_agreement_path``.
 #: Ceiling for artifacts the host reads back and serves.
 REPORT_MAX_BYTES = 32 * 1024 * 1024
 
@@ -147,18 +148,22 @@ class RunQuotaExceeded(RuntimeError):
 
 
 class UnsupportedCommand(RuntimeError):
-    """The prompt names a ``/`` command outside the workbench's allowlist.
+    """The prompt opens with a ``/`` command the host does not accept.
 
-    pi dispatches extension commands and expands prompt templates for a message
-    that starts with ``/`` (docs/rpc-commands.md). Once pi-subagents is loaded,
-    commands such as ``/run --bg`` or ``/subagents-detach`` would start a
-    detached run that no longer follows this run's cancel/timeout/reclaim path,
-    and the entry is client-controlled input. Admission therefore accepts only
-    the prompt-template names rendered from ``harnesses/pi/prompts/``.
+    Since GLINK-ARCH-6 the host itself interprets ``/<blueprint> <topic>`` as
+    ``blueprint=<name>`` + ``prompt=<topic>``; every other ``/``-prefixed input is
+    refused. The gate exists because pi dispatches extension commands and expands
+    prompt templates for a message that starts with ``/`` (docs/rpc-commands.md):
+    once pi-subagents is loaded, commands such as ``/run --bg`` or
+    ``/subagents-detach`` would start a detached run that no longer follows this
+    run's cancel/timeout/reclaim path, and the entry is client-controlled input.
+    The rewritten prompt must never carry the slash into the kernel, so a topic
+    that starts with ``/`` is refused too.
 
-    ``allowed`` carries only the accepted names; the refused command itself is
-    never echoed back to the caller (the HTTP layer reports the allowlist at
-    most), so the refusal does not turn the endpoint into a command oracle.
+    ``allowed`` carries only the accepted blueprint names (reviewed repository
+    content); the refused command itself is never echoed back to the caller (the
+    HTTP layer reports the allowlist at most), so the refusal does not turn the
+    endpoint into a command oracle.
     """
 
     def __init__(self, allowed: Sequence[str]) -> None:
@@ -166,22 +171,26 @@ class UnsupportedCommand(RuntimeError):
         super().__init__("prompt names an unsupported / command")
 
 
-def prompt_names_unsupported_command(text: str, allowed: Sequence[str]) -> bool:
-    """Whether ``text`` opens with a ``/`` command outside ``allowed``.
+def parse_blueprint_command(text: str, allowed: Sequence[str]) -> tuple[str | None, str]:
+    """Split a ``/<blueprint> <topic>`` prompt; refuse anything else.
 
-    The prompt is checked the way pi reads it: leading whitespace does not make
-    ``/run`` less of a command, the name is the first whitespace-delimited token
-    (a bare ``/`` has no name and is refused), and the comparison is exact
-    because pi's template match is case-sensitive. Text that does not start with
-    ``/`` is never a command — a ``/run`` in the middle of a question is ordinary
-    prose and stays acceptable.
+    Returns ``(blueprint, prompt)``. Text that does not open with ``/`` is an
+    ordinary prompt and comes back unchanged. The accepted form is exactly a
+    known blueprint name followed by whitespace and a non-empty topic that does
+    not itself start with ``/`` (the rewritten prompt must not reach pi's
+    extension dispatch).
     """
     stripped = text.lstrip()
     if not stripped.startswith("/"):
-        return False
-    match = re.match(r"^/(\S+)", stripped)
+        return None, text
+    match = re.match(r"^/(\S+)(?:\s+([\s\S]*))?$", stripped)
     name = match.group(1) if match is not None else ""
-    return name not in allowed
+    topic = (match.group(2) or "").strip() if match is not None else ""
+    if name not in allowed or topic.startswith("/"):
+        raise UnsupportedCommand(allowed)
+    if not topic:
+        raise ValueError("prompt must not be empty after a /<blueprint> command")
+    return name, topic
 
 
 class BlueprintUnavailable(RuntimeError):
@@ -447,17 +456,20 @@ class RunManager:
         text = (prompt or "").strip()
         if not text:
             raise ValueError("prompt must not be empty")
-        # Slash-command gate: a message starting with ``/`` reaches pi's
-        # extension-command dispatch before anything else, and the loaded
-        # pi-subagents package registers detaching commands (``/run --bg``,
-        # ``/subagents-detach``, …) that no run lifecycle here owns. Only the
-        # prompt templates rendered from ``harnesses/pi/prompts/`` are accepted; the
-        # refusal happens before a credential is resolved, before the parent's
-        # session is read and before any run directory or execution face exists,
-        # and the same call serves first turns and follow-ups on every face.
-        allowed_commands = self._family.allowed_prompt_commands()
-        if prompt_names_unsupported_command(text, allowed_commands):
-            raise UnsupportedCommand(allowed_commands)
+        # 宿主级 ``/`` 命令门禁（harness 无关，GLINK-ARCH-6）：以 ``/`` 开头的输入只会
+        # 被解释为 ``/<蓝图名> <题目>``；其余（包括重写后仍以 ``/`` 开头的题目）一律拒绝，
+        # 因为 pi 对以 ``/`` 开头的消息先派发扩展命令，而 pi-subagents 注册的
+        # ``/run --bg`` / ``/subagents-detach`` 不随本 run 的生命周期收口。拒绝发生在凭据
+        # 解析、父会话读取、run 目录与执行面创建之前，同一条判定服务所有族、追问与三面。
+        allowed_commands = blueprint_names(self.config.blueprints_dir)
+        command_blueprint, text = parse_blueprint_command(text, allowed_commands)
+        if command_blueprint is not None:
+            if blueprint is not None:
+                # 两个入口同时给出时不猜优先级（斜杠形式就是 blueprint 字段的糖）。
+                raise ValueError(
+                    "blueprint 不能同时由 /<蓝图名> 命令与 blueprint 字段给出"
+                )
+            blueprint = command_blueprint
         # The session template is resolved and rendered before any credential is
         # read, any parent is inspected or a run directory exists: an unknown or
         # malformed blueprint refuses the whole admission, on every harness.
@@ -1455,7 +1467,7 @@ class RunManager:
         return "\n\n".join(part for part in parts if part)
 
     def _research_prompt_text(self) -> str:
-        path = self.config.agent_config_dir / RESEARCH_PROMPT_FILENAME
+        path = self.config.work_agreement_path
         if not path.is_file():
             return ""
         return path.read_text(encoding="utf-8").strip()

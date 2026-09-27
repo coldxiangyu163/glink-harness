@@ -1,8 +1,9 @@
 +++
-# 会话蓝图（GLINK-ACP-10 第一增量）。方法论与 harnesses/pi/prompts/deepresearch.md 同源：
-# 同一个交付契约、来源分层与自我核查义务，换成 host 侧、harness 无关的结构化形式。
+# 方法论蓝图（GLINK-ARCH-6 起是方法论的唯一真源）。原名 deep-research（GLINK-ACP-10），
+# 2026-09-27 改名 deepresearch，与用户已习惯的 /deepresearch 斜杠命令一致；
+# 原 pi 的 prompts/deepresearch.md 模板已删除，规范性要求与本蓝图逐条对应。
 format = "pi-glink-blueprint/v1"
-name = "deep-research"
+name = "deepresearch"
 description = "严格深入研究：按阶段取证与覆盖声明，交付工作区 report.md 与末尾「来源与核查」。"
 
 [[stages]]

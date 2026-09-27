@@ -257,12 +257,11 @@ GLINK-ARCH-6 从产品移除，**现有包的 `permission_allow` 全部为空**�
 
 ### 4.3 准入与门禁
 
-ACP prompt 是结构化 ContentBlock，不存在 pi 那样的「`/` 前缀先派发扩展命令」面；但
-`available_commands_update` 表明 agent 可能自带 slash 命令——准入层对 ACP 族拒绝
-以 `/` 开头的 prompt（同形复用现有门禁入口，允许清单为空集，从 harness 能力推导而非
-硬编码模板目录）。M2 实测 codex-acp 确实在 `session/new` 后广播 6 条命令，准入拒绝不受
-其影响。宿主侧另有**与 harness 无关**的准入项：可选的会话蓝图（`POST /api/runs` 的
-`blueprint` 字段，从 `blueprints/` 目录推导、未知或畸形即 400、pi 与 ACP 同规则）；
+斜杠命令自 GLINK-ARCH-6 起由**宿主统一解释**（harness 无关，见 §3.3）：`/<蓝图名> <题目>`
+等价于 API 的 `blueprint=<蓝图名>` + `prompt=<题目>`，其余以 `/` 开头的输入一律
+`400 unsupported_command`。ACP agent 自带 slash 命令（`available_commands_update`）仍不被
+宿主路由，门禁因此对所有族一致。M2 实测 codex-acp 确实在 `session/new` 后广播 6 条命令，
+准入判定不受其影响。蓝图从 `methodology/blueprints/` 目录推导、未知或畸形即 400；
 格式与设计边界见 [会话蓝图模板](blueprint-templates.md)。
 
 ### 4.4 续接（resume）
