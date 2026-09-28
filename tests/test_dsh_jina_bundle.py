@@ -44,7 +44,10 @@ def load_json(path: Path) -> dict:
 def harness_version() -> str:
     with HARNESS_TOML.open("rb") as handle:
         manifest = tomllib.load(handle)
-    return manifest["version"]
+    # 清单 v2：上游版本钉点在 [[image.packages]]，ACP 包的 agent 条目即 dsh 本体。
+    agents = [item for item in manifest["image"]["packages"] if item["role"] == "agent"]
+    assert [item["package"] for item in agents] == ["@deepseek-ai/dsh"]
+    return agents[0]["version"]
 
 
 def bundle_patch_text() -> str:

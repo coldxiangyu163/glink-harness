@@ -34,7 +34,7 @@ def config(values: Mapping[str, str]):
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "PI_GLINK_HARNESS": "acp",
-        "PI_GLINK_ACP_COMMAND": "fake-agent --acp",
+        "TEST_ACP_COMMAND": "fake-agent --acp",
     }
     base.update(values)
     apply_acp_pack(base, Path(tempfile.mkdtemp(prefix="glink-acp-pack-")))

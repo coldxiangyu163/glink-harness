@@ -170,8 +170,8 @@ class PiHarnessFamily(HarnessFamily):
     def launch(self, spec: ExecutionSpec, sandbox: Sandbox) -> Launch:
         """pi in RPC mode, with its config and session directories placed.
 
-        ``argv[0]`` is the host's ``config.pi_bin`` in-process and the image's
-        ``pi`` on an isolated sandbox (a host path means nothing there), where
+        ``argv[0]`` is the host's ``config.pi_bin`` in-process and the pack
+        manifest's image-local entry (``[entry].command``) on an isolated sandbox (a host path means nothing there), where
         the image's package guard runs first. ``spec.extra_argv`` already holds
         ``--name pi-glink-<run_id>`` and the optional ``--append-system-prompt``
         (the runner injects them identically on every sandbox). The
@@ -187,7 +187,7 @@ class PiHarnessFamily(HarnessFamily):
         config_dir = sandbox.place("config", runtime.directory)
         sessions_dir = sandbox.place("sessions", runtime.session_dir)
         argv = [
-            "pi" if sandbox.isolated else spec.config.pi_bin,
+            spec.config.pack.command[0] if sandbox.isolated else spec.config.pi_bin,
             "--mode", "rpc",
             "--provider", runtime.provider_id,
             "--model", runtime.model_id,

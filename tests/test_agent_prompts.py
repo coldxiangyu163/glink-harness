@@ -169,7 +169,8 @@ def test_the_pack_capabilities_reach_the_system_prompt(tmp_path: Path) -> None:
         REPO_ROOT,
     )
     capabilities = CAPABILITIES_PATH.read_text(encoding="utf-8").strip()
-    assert config.pack_capabilities == capabilities
+    assert config.pack.prompt == capabilities
+    assert config.pack.prompt_path == CAPABILITIES_PATH
 
 
 def test_the_blueprint_carries_the_methodology_without_a_gate() -> None:

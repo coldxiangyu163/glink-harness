@@ -48,7 +48,7 @@ sandbox dies (:class:`~pi_glink.kernel.acp_e2b_env.AcpSandboxTransfer`).
 the first ``reject_once``/``reject_always`` option is selected, or — when the
 agent offers no rejection — the request is answered ``cancelled``. Either way
 the refusal is emitted as a ``kernel_status`` frame, never silently swallowed.
-A run explicitly given ``PI_GLINK_ACP_PERMISSION_ALLOW`` (option kinds and
+A pack that declares ``capabilities.permission_allow`` (option kinds and
 optionally tool kinds) may instead select the narrowest matching ``allow_*``
 option; the decision is still recorded, with the policy that produced it. When
 the request omits ``toolCall.kind`` (the field is optional and some agents omit
@@ -74,6 +74,8 @@ from ..config import (
     ACP_PERMISSION_OPTION_KINDS,
     ACP_PERMISSION_TOOL_KINDS,
 )
+from .acp_child_progress import FORMAT as DSH_SESSION_PROGRESS
+from .acp_child_progress import SESSIONS_RELATIVE as DSH_SESSIONS_RELATIVE
 from .acp_child_progress import AcpChildProgressSource
 from .acp_child_progress import available as acp_progress_available
 from .acp_e2b_env import AcpSandboxTransfer
@@ -442,7 +444,7 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
             return self._replayed_updates
 
     def _apply_session_config(self, client: AcpRpcClient, session_id: str) -> None:
-        """Apply ``PI_GLINK_ACP_SESSION_CONFIG`` right after ``session/new``.
+        """Apply the pack's ``capabilities.session_config`` right after ``session/new``.
 
         Modes, model and reasoning options are advertised by the agent as
         ``configOptions``; the values differ per agent, so nothing is hardcoded.
@@ -451,7 +453,7 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         not choose (fail closed). When the advertised current value already
         matches, no request is sent.
         """
-        for config_id, value in self.spec.config.acp_session_config:
+        for config_id, value in self.spec.config.pack.capabilities.session_config:
             option = next(
                 (
                     entry
@@ -463,7 +465,7 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
             if option is None:
                 raise AcpProtocolError(
                     f"ACP agent 未提供配置选项 {config_id!r}；"
-                    "PI_GLINK_ACP_SESSION_CONFIG 不能被静默忽略"
+                    "包清单 capabilities.session_config 不能被静默忽略"
                 )
             if str(option.get("type") or "select") == "select":
                 values = _select_values(option)
@@ -829,9 +831,11 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         return publishable_recovered_session(self.session_info())
 
     def child_progress_source(self) -> AcpChildProgressSource | None:
-        """Poll the state root's dsh session files for child progress (R3a).
+        """Poll the state root's session files for child progress (R3a).
 
-        A mounting sandbox shares the host state root (the container mounts
+        The source is chosen by the pack's declared ``child_progress``
+        capability, never by the pack name: a pack that declares none honestly
+        has no running progress on any face. For ``dsh-session-zstd``, a mounting sandbox shares the host state root (the container mounts
         this run's ``HOME``), so one source serves in-process and Docker. The
         sessions are dsh's private zstd format, so the source exists only
         while ``zstandard`` is installed (``pi-glink[acp-progress]``); without
@@ -839,12 +843,14 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         **coarse** (``None``): its sessions die with it and no live mirror of
         them is implemented.
         """
+        if self.spec.config.pack.capabilities.child_progress != DSH_SESSION_PROGRESS:
+            return None
         if self.sandbox.remote or not acp_progress_available():
             return None
         home = getattr(self.spec.runtime, "home", None)
         if home is None:
             return None
-        return AcpChildProgressSource(Path(home) / ".dsh" / "sessions")
+        return AcpChildProgressSource(Path(home).joinpath(*DSH_SESSIONS_RELATIVE))
 
     def identity(self) -> Mapping[str, str]:
         # The carrier's durable identity (container name, sandbox id); none
@@ -1007,7 +1013,7 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         a request without a tool kind is refused rather than trusted. The
         narrowest option (``allow_once``) is preferred over ``allow_always``.
         """
-        allowlist = self.spec.config.acp_permission_allow
+        allowlist = self.spec.config.pack.capabilities.permission_allow
         if not allowlist:
             return None
         allow_option_kinds = tuple(

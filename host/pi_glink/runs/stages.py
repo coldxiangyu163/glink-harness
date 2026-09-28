@@ -328,7 +328,7 @@ class PrepareStage:
         """
         parts = [
             self._research_prompt_text(),
-            self.s.config.pack_capabilities,
+            self.s.config.pack.prompt,
             execution.blueprint_prompt,
         ]
         return "\n\n".join(part for part in parts if part)

@@ -54,7 +54,7 @@ def make_config(tmp_path: Path, **overrides: str):
         # 测试绝不触碰操作员的真实数据根（~/.pi-glink）。
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "PI_GLINK_HARNESS": "acp",
-        "PI_GLINK_ACP_COMMAND": "dsh --profile acp",
+        "TEST_ACP_COMMAND": "dsh --profile acp",
     }
     values.update(overrides)
     apply_acp_pack(values, tmp_path)
@@ -478,7 +478,7 @@ def test_the_acp_docker_plan_feeds_the_adapter_through_the_runner(
         tmp_path,
         LOCAL_WEB_EXECUTOR="docker",
         LOCAL_WEB_ACP_WORKER_IMAGE="pi-glink-acp-worker:test",
-        PI_GLINK_ACP_COMMAND="codex-acp --flag value",
+        TEST_ACP_COMMAND="codex-acp --flag value",
         PI_GLINK_ACP_ENV="ACME_MODE=workspace",
     )
     runtime = make_runtime(config, tmp_path, name="plan")
@@ -560,10 +560,10 @@ def test_the_command_is_split_without_a_shell(tmp_path: Path) -> None:
     config = make_config(
         tmp_path,
         LOCAL_WEB_EXECUTOR="docker",
-        PI_GLINK_ACP_COMMAND="python -m fake --config /workspace/cfg.json",
+        TEST_ACP_COMMAND="python -m fake --config /workspace/cfg.json",
     )
     runtime = make_runtime(config, tmp_path)
     plan = make_plan(config, runtime, tmp_path)
     tail = plan.argv[plan.argv.index(plan.image) :]
     assert tail[1:] == ["python", "-m", "fake", "--config", "/workspace/cfg.json"]
-    assert list(config.acp_command) == tail[1:]
+    assert list(config.pack.command) == tail[1:]

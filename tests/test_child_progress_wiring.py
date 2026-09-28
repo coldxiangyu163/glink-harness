@@ -225,6 +225,21 @@ def _spec(tmp_path: Path, runtime: Any) -> ExecutionSpec:
     )
 
 
+def _acp_spec(tmp_path: Path, runtime: Any, **overrides: str) -> ExecutionSpec:
+    """An ACP spec whose pack declares the dsh session progress source."""
+    values = {"TEST_ACP_COMMAND": "fake-acp", "TEST_ACP_CHILD_PROGRESS": "dsh-session-zstd"}
+    values.update(overrides)
+    return ExecutionSpec(
+        config=make_config(tmp_path, **values),
+        runtime=runtime,
+        run_id="seam000",
+        prompt="p",
+        system_prompt="",
+        workspace=tmp_path / "ws",
+        timeout_seconds=60,
+    )
+
+
 def _sandbox(spec: ExecutionSpec, executor: str) -> Sandbox:
     return open_sandbox(
         executor, config=spec.config, run_id=spec.run_id, workspace=spec.workspace
@@ -280,13 +295,28 @@ def test_e2b_adapter_sources_only_while_the_sandbox_lives(tmp_path: Path) -> Non
 def test_acp_adapter_sources_the_state_root_sessions(tmp_path: Path) -> None:
     """ACP inproc/docker: dsh sessions below the run's state root (zstd 可用时)。"""
     home = tmp_path / "acp-home"
-    spec = _spec(tmp_path, SimpleNamespace(home=home))
+    spec = _acp_spec(tmp_path, SimpleNamespace(home=home))
+    assert spec.config.pack.capabilities.child_progress == "dsh-session-zstd"
     for executor in ("inproc", "docker"):
         source = _acp_adapter(spec, executor).child_progress_source()
 
         assert isinstance(source, AcpChildProgressSource)
         assert source._root == home / ".dsh" / "sessions"  # noqa: SLF001
         source.close()
+
+
+def test_acp_adapter_has_no_source_when_the_pack_declares_none(tmp_path: Path) -> None:
+    """未声明 capabilities.child_progress 的 ACP 包如实没有进度源。
+
+    族代码只读能力声明：即使状态根目录下恰好有 ``.dsh/sessions``，也不按
+    目录或包名猜它是 dsh。
+    """
+    home = tmp_path / "acp-home"
+    (home / ".dsh" / "sessions").mkdir(parents=True)
+    spec = _acp_spec(tmp_path, SimpleNamespace(home=home), TEST_ACP_CHILD_PROGRESS="")
+    assert spec.config.pack.capabilities.child_progress is None
+    for executor in ("inproc", "docker"):
+        assert _acp_adapter(spec, executor).child_progress_source() is None
 
 
 def test_acp_adapter_has_no_source_without_zstandard(
@@ -296,14 +326,14 @@ def test_acp_adapter_has_no_source_without_zstandard(
     monkeypatch.setattr(
         "pi_glink.kernel.acp_execution.acp_progress_available", lambda: False
     )
-    adapter = _acp_adapter(_spec(tmp_path, SimpleNamespace(home=tmp_path / "acp-home")), "inproc")
+    adapter = _acp_adapter(_acp_spec(tmp_path, SimpleNamespace(home=tmp_path / "acp-home")), "inproc")
 
     assert adapter.child_progress_source() is None
 
 
 def test_acp_sandbox_face_stays_coarse(tmp_path: Path) -> None:
     """ACP e2b 面不实现进度源（能力如实停留 coarse），沙箱活着也一样。"""
-    adapter = _acp_adapter(_spec(tmp_path, SimpleNamespace(home=tmp_path / "acp-home")), "e2b")
+    adapter = _acp_adapter(_acp_spec(tmp_path, SimpleNamespace(home=tmp_path / "acp-home")), "e2b")
     assert adapter.child_progress_source() is None
     adapter.sandbox._handle = SimpleNamespace(files=SimpleNamespace())  # noqa: SLF001
     assert adapter.child_progress_source() is None
@@ -553,7 +583,7 @@ def test_a_failing_source_factory_is_one_warning_not_a_crash(tmp_path: Path) -> 
 def test_acp_facts_map_by_call_id(tmp_path: Path) -> None:
     """ACP 族：fact 的 call_id 精确命中 started 事件的 toolCallId 才投影。"""
     manager, store = build_manager(
-        tmp_path, PI_GLINK_HARNESS="acp", PI_GLINK_ACP_COMMAND="dsh"
+        tmp_path, PI_GLINK_HARNESS="acp", TEST_ACP_COMMAND="dsh"
     )
     child = "e3282967-2222-4222-8222-222222222222"
     source = FakeSource(

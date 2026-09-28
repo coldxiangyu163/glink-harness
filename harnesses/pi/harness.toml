@@ -1,8 +1,41 @@
 # pi 包：pi 族的配置模板与扩展本体。
 #
-# pi 的版本固定点不在本清单里：内核版本在 docker/Dockerfile.worker 与
-# docker/e2b/Dockerfile.e2b 的 `ARG PI_VERSION`，预装包版本在 settings.json，
-# 三者一致性由 tests/test_repository_boundaries.py 卡住。
-format = "pi-glink-harness/v1"
+# 本清单是 pi 族版本的唯一真源：内核（role="kernel"）与预装 pi 包（role="pi-package"）
+# 的精确版本在下方 [[image.packages]]。docker/Dockerfile.worker、docker/e2b/Dockerfile.e2b
+# 的 `ARG *_VERSION`、docker/e2b/templates.json 与 settings.json 的 packages 字段都由
+# scripts/generate-pack-artifacts.py 从这里生成（手改会被 tests/test_repository_boundaries.py
+# 判为漂移）。
+format = "pi-glink-harness/v2"
 name = "pi"
 family = "pi"
+
+[entry]
+# 隔离执行面（docker / e2b）镜像内的内核可执行名；inproc 的默认 PI_GLINK_PI_BIN 也取它。
+command = ["pi"]
+
+[capabilities]
+# pi 会话文件可续接（追问经 session 文件恢复）。
+resume = true
+
+[image]
+target = "pi-worker"
+cpu_count = 2
+memory_mb = 4096
+
+[[image.packages]]
+arg = "PI_VERSION"
+package = "@earendil-works/pi-coding-agent"
+version = "0.86.1"
+role = "kernel"
+
+[[image.packages]]
+arg = "PI_WEB_ACCESS_VERSION"
+package = "pi-web-access"
+version = "0.31.0"
+role = "pi-package"
+
+[[image.packages]]
+arg = "PI_SUBAGENTS_VERSION"
+package = "pi-subagents"
+version = "0.40.0"
+role = "pi-package"

@@ -1,0 +1,40 @@
+{
+  "format": "pi-glink-e2b-templates/v1",
+  "generated_by": "scripts/generate-pack-artifacts.py（勿手改；改 harnesses/<包>/harness.toml 后重新生成）",
+  "templates": {
+    "pi-worker": {
+      "alias": "pi-glink-worker",
+      "dockerfile": "docker/e2b/Dockerfile.e2b",
+      "cpu_count": 2,
+      "memory_mb": 4096,
+      "packs": [
+        "pi"
+      ],
+      "build_args": {
+        "PI_SUBAGENTS_VERSION": "0.40.0",
+        "PI_VERSION": "0.86.1",
+        "PI_WEB_ACCESS_VERSION": "0.31.0"
+      },
+      "builder": "sdk",
+      "build_command": ".venv/bin/python scripts/build-e2b-template.py --tag candidate"
+    },
+    "acp-worker": {
+      "alias": "glink-acp-worker",
+      "dockerfile": "docker/e2b/Dockerfile.acp-e2b",
+      "cpu_count": 2,
+      "memory_mb": 4096,
+      "packs": [
+        "codex",
+        "dsh",
+        "opencode"
+      ],
+      "build_args": {
+        "CODEX_ACP_VERSION": "1.13.1",
+        "DSH_VERSION": "0.1.5-rc.3",
+        "OPENCODE_AI_VERSION": "1.18.32"
+      },
+      "builder": "cli",
+      "build_command": "npx -y @e2b/cli template create glink-acp-worker --dockerfile docker/e2b/Dockerfile.acp-e2b --cpu-count 2 --memory-mb 4096"
+    }
+  }
+}

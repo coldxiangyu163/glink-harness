@@ -245,7 +245,7 @@ class AcpHarnessFamily(HarnessFamily):
 
     def make_projector(self, redactor: "SecretRedactor") -> AcpProjector:
         return AcpProjector(
-            redactor, subagent_dispatch=self._config.acp_subagent_dispatch
+            redactor, subagent_dispatch=self._config.pack.capabilities.subagent_dispatch
         )
 
     # -- (d) launch 与驱动 ------------------------------------------------------
@@ -253,7 +253,7 @@ class AcpHarnessFamily(HarnessFamily):
     def launch(self, spec: ExecutionSpec, sandbox: Sandbox) -> Launch:
         """What the ACP agent process needs, independent of where it runs.
 
-        The argv is the frozen ``PI_GLINK_ACP_COMMAND`` verbatim and is never
+        The argv is the selected pack's ``entry.command`` verbatim and is never
         shell-expanded; on an isolated sandbox it names an image-local command.
         ``HOME`` is this run's own agent state root as the sandbox places it
         (host path in-process, :data:`CONTAINER_HOME` in Docker, the uploaded

@@ -61,7 +61,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ..config import ConfigError, HostConfig
 from .sweep import SessionSweep
@@ -99,17 +99,14 @@ IMAGE_PACKAGE_NODE_MODULES = f"{IMAGE_PACKAGE_ROOT}/node_modules"
 #: Docker face uses it as ``--entrypoint`` (a pre-change image fails at
 #: ``docker run`` itself), the E2B face calls it inside the command chain.
 IMAGE_PACKAGE_GUARD = f"{IMAGE_PACKAGE_ROOT}/check-packages.sh"
-#: Packages the container faces may load from the image: an ``npm:`` entry
-#: naming one of these is rendered as its image-local path. Both images install
-#: ``pi-web-access`` and ``pi-subagents`` by pinned ARG.
-#:
-#: ``pi-subagents`` is loaded since GLINK-SUB-02: the product forces foreground
-#: synchronous dispatch through its own ``tool_call`` guard
-#: (``harnesses/pi/extensions/subagent-foreground-guard.ts``) plus a conservative
-#: extension config, so the async/detached blocker GLINK-SUB-01 found is handled
-#: on the pi-glink side instead of by a package switch. See
-#: docs/pi-integration-notes.md (pi-subagents 0.40.0 dispatch surface).
-CONTAINER_LOCAL_PACKAGES = ("pi-web-access", "pi-subagents")
+#: Which packages the container faces load from the image is no longer a list
+#: here: it is the pi pack manifest's ``role = "pi-package"`` entries
+#: (``HarnessPack.prebaked_pi_packages()``), the same entries the image ARGs and
+#: ``settings.json`` are generated from. ``pi-subagents`` is loaded since
+#: GLINK-SUB-02: the product forces foreground synchronous dispatch through its
+#: own ``tool_call`` guard (``harnesses/pi/extensions/subagent-foreground-guard.ts``)
+#: plus a conservative extension config. See docs/pi-integration-notes.md
+#: (pi-subagents 0.40.0 dispatch surface).
 
 #: Environment names handed to the pi process verbatim.
 #:
@@ -258,7 +255,7 @@ def prepare_agent_dir(
     sessions.mkdir(parents=True, exist_ok=True, mode=0o700)
     _sync_template(config.agent_config_dir, directory)
     if image_packages:
-        _map_prebaked_packages(directory)
+        _map_prebaked_packages(directory, config.pack.prebaked_pi_packages())
     _write_web_search_config(egress, directory)
     _write_auth_json(egress, directory)
 
@@ -300,20 +297,20 @@ def template_manifest(template_dir: Path) -> list[tuple[str, Path, bool]]:
     return manifest
 
 
-def local_package_source(source: str) -> str | None:
+def local_package_source(source: str, prebaked: Sequence[str]) -> str | None:
     """The image-local path for a prebaked ``npm:`` package, else ``None``.
 
-    Only the documented npm spec form is recognized: ``npm:<name>`` with an
-    optional ``@<range>`` (scoped names included). Ranges are accepted because
-    the image copy *is* the pinned version (the repository pins it in the
-    Dockerfile and in ``harnesses/pi/settings.json``, tied together by
-    ``tests/test_repository_boundaries.py``); the path itself carries no version
-    so the mapping cannot drift when the pin moves.
+    ``prebaked`` is the pack manifest's prebaked package names. Only the
+    documented npm spec form is recognized: ``npm:<name>`` with an optional
+    ``@<range>`` (scoped names included). Ranges are accepted because the image
+    copy *is* the pinned version (the Dockerfile ARG and ``settings.json`` are
+    both generated from the same manifest entry); the path itself carries no
+    version so the mapping cannot drift when the pin moves.
     """
     if not isinstance(source, str) or not source.startswith("npm:"):
         return None
     name = _npm_package_name(source[len("npm:"):].strip())
-    if name not in CONTAINER_LOCAL_PACKAGES:
+    if name not in prebaked:
         return None
     return f"{IMAGE_PACKAGE_NODE_MODULES}/{name}"
 
@@ -330,7 +327,7 @@ def _npm_package_name(spec: str) -> str:
     return spec[:at] if at > 0 else spec
 
 
-def _map_prebaked_packages(directory: Path) -> Path | None:
+def _map_prebaked_packages(directory: Path, prebaked: Sequence[str]) -> Path | None:
     """Point a container-face ``settings.json`` at the image-local packages.
 
     The runtime directory is a copy of the reviewed template, so the rewrite
@@ -361,7 +358,7 @@ def _map_prebaked_packages(directory: Path) -> Path | None:
     rewritten: list[Any] = []
     changed = False
     for entry in packages:
-        replacement, mapped = _map_package_entry(entry)
+        replacement, mapped = _map_package_entry(entry, prebaked)
         rewritten.append(replacement)
         changed = changed or mapped
     if not changed:
@@ -373,7 +370,7 @@ def _map_prebaked_packages(directory: Path) -> Path | None:
     return path
 
 
-def _map_package_entry(entry: Any) -> tuple[Any, bool]:
+def _map_package_entry(entry: Any, prebaked: Sequence[str]) -> tuple[Any, bool]:
     """One ``packages`` entry, rewritten to its image path when prebaked.
 
     The object form (``{"source": …, "skills": []}``) keeps its filters: only
@@ -381,10 +378,10 @@ def _map_package_entry(entry: Any) -> tuple[Any, bool]:
     it came straight from the parsed document.
     """
     if isinstance(entry, str):
-        local = local_package_source(entry)
+        local = local_package_source(entry, prebaked)
         return (local, True) if local is not None else (entry, False)
     if isinstance(entry, dict) and isinstance(entry.get("source"), str):
-        local = local_package_source(entry["source"])
+        local = local_package_source(entry["source"], prebaked)
         if local is not None:
             rewritten = dict(entry)
             rewritten["source"] = local

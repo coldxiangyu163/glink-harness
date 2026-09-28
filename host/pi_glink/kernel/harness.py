@@ -324,8 +324,8 @@ def select_family(
     run's frozen spec, so nothing assumes one harness per host. ``harness`` is
     a pack manifest ``family`` (``pi``/``acp``), derived and validated by
     :func:`pi_glink.config.build_config`; the pack itself travels on the
-    frozen config (``harness_pack``, ``pack_capabilities``, ``pack_home``,
-    the ACP argv/options).
+    frozen config as the parsed manifest object (``config.pack``: entry argv,
+    capability matrix, prompt, HOME overlay, image requirement).
     """
     from .harness_acp import AcpHarnessFamily
     from .harness_pi import PiHarnessFamily

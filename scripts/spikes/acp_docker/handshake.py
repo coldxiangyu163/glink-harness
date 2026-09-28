@@ -98,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     credential_dests = ", ".join(dest for _source, dest in config.acp_credential_files) or "（无）"
     print(f"凭据落点: HOME/{credential_dests}（源只读；容器内为嵌套只读挂载）")
     session_config = "; ".join(
-        f"{name}={value}" for name, value in config.acp_session_config
+        f"{name}={value}" for name, value in config.pack.capabilities.session_config
     )
     print(f"会话配置: {session_config or '（无）'}")
     print(f"数据根: {workdir}")

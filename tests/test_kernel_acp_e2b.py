@@ -321,7 +321,7 @@ def make_config(tmp_path: Path, **overrides: str):
         "LOCAL_WEB_EXECUTOR": "e2b",
         "E2B_API_KEY": "e2b-secret-key",
         "PI_GLINK_HARNESS": "acp",
-        "PI_GLINK_ACP_COMMAND": "dsh --profile acp",
+        "TEST_ACP_COMMAND": "dsh --profile acp",
     }
     values.update(overrides)
     apply_acp_pack(values, tmp_path)
@@ -485,7 +485,7 @@ def test_credentials_are_uploaded_into_the_run_home_and_hardened(tmp_path: Path)
 def test_the_agent_command_is_the_frozen_argv_in_the_sandbox_workspace(tmp_path: Path) -> None:
     config = make_config(
         tmp_path,
-        PI_GLINK_ACP_COMMAND=fake_agent_command(
+        TEST_ACP_COMMAND=fake_agent_command(
             tmp_path, {"FAKE_ACP_LOG": str(tmp_path / "agent.jsonl")}
         ),
         PI_GLINK_ACP_ENV="ACME_MODE=sandbox-mode-value",
@@ -495,7 +495,7 @@ def test_the_agent_command_is_the_frozen_argv_in_the_sandbox_workspace(tmp_path:
     client = make_sandbox_client(config, runtime, tmp_path, sandbox)
     client.open()
     argv = list(client.launch.argv)
-    assert argv == list(config.acp_command)
+    assert argv == list(config.pack.command)
     assert client.sandbox.command(client.launch) == f"cd {SANDBOX_WORKSPACE} && exec {shlex.join(argv)}"
     # HOME is the run's sandbox state root; extra entries are the explicit
     # process-environment channel (values never enter the command line).
@@ -516,7 +516,7 @@ def test_the_agent_command_is_the_frozen_argv_in_the_sandbox_workspace(tmp_path:
 
 
 def test_an_argv_argument_with_spaces_stays_one_argument(tmp_path: Path) -> None:
-    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND="agent --config '/tmp/a b/c.json'")
+    config = make_config(tmp_path, TEST_ACP_COMMAND="agent --config '/tmp/a b/c.json'")
     runtime = make_runtime(config, tmp_path)
     client = make_sandbox_client(config, runtime, tmp_path, FakeSandbox(tmp_path))
     assert (
@@ -556,7 +556,7 @@ def test_the_agent_is_bridged_over_the_sandbox_handle(tmp_path: Path) -> None:
     settings = {"sessionId": "sandbox-session", "log": str(tmp_path / "agent.jsonl")}
     config = make_config(
         tmp_path,
-        PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings),
+        TEST_ACP_COMMAND=fake_agent_command(tmp_path, settings),
     )
     runtime = make_runtime(config, tmp_path)
     sandbox = FakeSandbox(tmp_path)
@@ -616,7 +616,7 @@ def test_the_bridge_wraps_the_handle_as_a_subprocess(tmp_path: Path) -> None:
         "    sys.stdout.buffer.flush()\n",
         encoding="utf-8",
     )
-    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
+    config = make_config(tmp_path, TEST_ACP_COMMAND=f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}")
     runtime = make_runtime(config, tmp_path)
     sandbox = FakeSandbox(tmp_path, report=None)
     client = make_sandbox_client(config, runtime, tmp_path, sandbox)
@@ -672,7 +672,7 @@ def test_a_broken_stream_reports_no_exit_code_instead_of_inventing_one(tmp_path:
 def test_an_acp_run_finishes_on_the_sandbox_face(tmp_path: Path) -> None:
     log = tmp_path / "agent.jsonl"
     settings = {"FAKE_ACP_LOG": str(log), "FAKE_ACP_WRITE_REPORT": True}
-    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings))
+    config = make_config(tmp_path, TEST_ACP_COMMAND=fake_agent_command(tmp_path, settings))
     # No pre-seeded report: the agent writes it through the sandbox workspace,
     # so the recovered deliverable really travelled agent -> sandbox -> host.
     sandbox = FakeSandbox(tmp_path, report=None)
@@ -773,7 +773,7 @@ def test_the_sandbox_face_reports_the_agent_stderr_tail_on_a_kernel_exit(
     settings = {"FAKE_ACP_STDERR": f"dsh: 沙箱内崩溃 OPENAI_API_KEY={secret}"}
     config = make_config(
         tmp_path,
-        PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings),
+        TEST_ACP_COMMAND=fake_agent_command(tmp_path, settings),
         OPENAI_API_KEY=secret,
     )
     sandbox = FakeSandbox(tmp_path, report=None)
@@ -808,7 +808,7 @@ def test_acp_followup_resumes_the_parent_session_across_sandboxes(tmp_path: Path
     """
     log = tmp_path / "agent.jsonl"
     settings = {"FAKE_ACP_LOG": str(log), "FAKE_ACP_WRITE_REPORT": True}
-    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings))
+    config = make_config(tmp_path, TEST_ACP_COMMAND=fake_agent_command(tmp_path, settings))
     sandboxes: list[FakeSandbox] = []
     store = RunStore(config.data_root / "runs")
     manager = RunManager(
@@ -906,7 +906,7 @@ def test_acp_followup_refused_when_the_state_recovery_failed(tmp_path: Path) -> 
     created — the host does not pay for a resume it knows cannot work.
     """
     settings = {"FAKE_ACP_WRITE_REPORT": True}
-    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings))
+    config = make_config(tmp_path, TEST_ACP_COMMAND=fake_agent_command(tmp_path, settings))
     sandboxes: list[FakeSandbox] = []
     store = RunStore(config.data_root / "runs")
     manager = RunManager(
@@ -947,7 +947,7 @@ def test_state_recovery_bounds_refuse_the_whole_mirror(
     the source. A violation must leave no recovered root at all.
     """
     settings = {"FAKE_ACP_WRITE_REPORT": True}
-    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings))
+    config = make_config(tmp_path, TEST_ACP_COMMAND=fake_agent_command(tmp_path, settings))
     for constant, value, seed in (
         ("INHERIT_MAX_FILE_BYTES", 1024, {"big.bin": b"x" * 4096}),
         ("INHERIT_MAX_FILES", 1, {"a.bin": b"a", "b.bin": b"b"}),
@@ -1014,7 +1014,7 @@ def test_inherited_state_secrets_join_the_child_redaction_boundary(tmp_path: Pat
     inherited_secret = "sk-live-inherited-credential-0123456789"
     log = tmp_path / "agent.jsonl"
     settings = {"FAKE_ACP_LOG": str(log), "FAKE_ACP_WRITE_REPORT": True}
-    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings))
+    config = make_config(tmp_path, TEST_ACP_COMMAND=fake_agent_command(tmp_path, settings))
     sandboxes: list[FakeSandbox] = []
 
     class SeedingFactory:
@@ -1054,7 +1054,7 @@ def test_acp_e2b_followup_admission_matrix(tmp_path: Path) -> None:
       resumable): refused, never inherited from an absent root.
     """
     settings = {"FAKE_ACP_WRITE_REPORT": True}
-    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings))
+    config = make_config(tmp_path, TEST_ACP_COMMAND=fake_agent_command(tmp_path, settings))
     store = RunStore(config.data_root / "runs")
     sandboxes: list[FakeSandbox] = []
     manager = RunManager(
@@ -1087,7 +1087,7 @@ def test_acp_e2b_followup_admission_matrix(tmp_path: Path) -> None:
     }
     config2 = make_config(
         tmp_path,
-        PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, no_resume, name="no-resume.json"),
+        TEST_ACP_COMMAND=fake_agent_command(tmp_path, no_resume, name="no-resume.json"),
         LOCAL_WEB_DATA_ROOT=str(tmp_path / "capability-data"),
     )
     store2 = RunStore(config2.data_root / "runs")
@@ -1124,7 +1124,7 @@ def test_restoring_the_inherited_state_must_succeed_before_the_agent_starts(
     state root — and the just-created sandbox must still be destroyed.
     """
     settings = {"FAKE_ACP_WRITE_REPORT": True}
-    config = make_config(tmp_path, PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings))
+    config = make_config(tmp_path, TEST_ACP_COMMAND=fake_agent_command(tmp_path, settings))
     sandboxes: list[FakeSandbox] = []
 
     def factory(**_kwargs: Any) -> FakeSandbox:
@@ -1183,7 +1183,7 @@ def test_acp_followup_refuses_a_parent_owned_by_another_tenant_on_the_sandbox_fa
     tenants_file.chmod(0o600)
     config = make_config(
         tmp_path,
-        PI_GLINK_ACP_COMMAND=fake_agent_command(
+        TEST_ACP_COMMAND=fake_agent_command(
             tmp_path, {"FAKE_ACP_WRITE_REPORT": True}, name="tenant-settings.json"
         ),
         PI_GLINK_TENANCY="multitenant",
@@ -1256,7 +1256,7 @@ def test_the_credential_value_stays_in_the_sandbox_file(tmp_path: Path) -> None:
     settings = {"FAKE_ACP_LOG": str(tmp_path / "agent.jsonl"), "FAKE_ACP_WRITE_REPORT": True}
     config = make_config(
         tmp_path,
-        PI_GLINK_ACP_COMMAND=fake_agent_command(tmp_path, settings),
+        TEST_ACP_COMMAND=fake_agent_command(tmp_path, settings),
         PI_GLINK_ACP_CREDENTIAL_FILES=f"{source}=.codex/auth.json",
     )
     sandbox = FakeSandbox(tmp_path)
@@ -1317,7 +1317,7 @@ def test_a_cloud_failure_before_the_sandbox_exists_is_reported(tmp_path: Path) -
 def test_the_runner_wires_the_acp_e2b_plan_from_the_frozen_configuration(tmp_path: Path) -> None:
     config = make_config(
         tmp_path,
-        PI_GLINK_ACP_COMMAND="dsh --profile acp",
+        TEST_ACP_COMMAND="dsh --profile acp",
         LOCAL_WEB_E2B_ACP_TEMPLATE="glink-acp-worker:pinned",
     )
     runtime = make_runtime(config, tmp_path)

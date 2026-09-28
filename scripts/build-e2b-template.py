@@ -12,7 +12,9 @@
 
 为什么用 Python SDK 而不是 `npx @e2b/cli template create`：
 CLI 基于 Node 的 fetch，不认 socks5 代理；SDK 走 httpx，装上 socksio 即可在
-需要代理的网络里完成构建。构建参数与 docker/e2b/Dockerfile.e2b 是同一份真源。
+需要代理的网络里完成构建。别名、Dockerfile 与 CPU / 内存默认值读取生成产物
+docker/e2b/templates.json 的 ``pi-worker`` 条目（由 scripts/generate-pack-artifacts.py
+从 harnesses/pi/harness.toml 生成），不在本脚本里另写一份。
 
 候选流程（GLINK-PKG-01）：E2B 服务端会把最新构建设成 `default`，所以
 ``--tag candidate`` 会先把当前 default build 标成 ``previous``，构建后若
@@ -24,6 +26,7 @@ build id 与 tag 现状，供交付证据记录，不输出任何凭据。
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -31,7 +34,10 @@ from pathlib import Path
 from e2b import Template
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DOCKERFILE = REPO_ROOT / "docker" / "e2b" / "Dockerfile.e2b"
+#: 生成产物：E2B 模板参数（清单派生，见 scripts/generate-pack-artifacts.py）。
+TEMPLATES = REPO_ROOT / "docker" / "e2b" / "templates.json"
+_TEMPLATE = json.loads(TEMPLATES.read_text(encoding="utf-8"))["templates"]["pi-worker"]
+DOCKERFILE = REPO_ROOT / _TEMPLATE["dockerfile"]
 #: 候选构建前的生产 build 会带上这个 tag，作为回滚句柄。
 ROLLBACK_TAG = "previous"
 
@@ -67,9 +73,9 @@ def _promote(alias: str, source_tag: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="构建 pi-glink 的 E2B 模板")
-    parser.add_argument("--alias", default=os.environ.get("PI_GLINK_E2B_TEMPLATE", "pi-glink-worker"))
-    parser.add_argument("--cpu", type=int, default=2)
-    parser.add_argument("--memory-mb", type=int, default=4096)
+    parser.add_argument("--alias", default=os.environ.get("PI_GLINK_E2B_TEMPLATE", _TEMPLATE["alias"]))
+    parser.add_argument("--cpu", type=int, default=_TEMPLATE["cpu_count"])
+    parser.add_argument("--memory-mb", type=int, default=_TEMPLATE["memory_mb"])
     parser.add_argument(
         "--tag",
         default="",

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from pi_glink.config import ConfigError, build_config
+from pi_glink.harnesses import load_pack
 from pi_glink.kernel.agent_env import (
     AUTH_FILENAME,
     IMAGE_PACKAGE_NODE_MODULES,
@@ -413,7 +414,17 @@ def test_container_faces_keep_the_object_form_filters(tmp_path: Path, template_d
     ],
 )
 def test_local_package_source_only_maps_prebaked_names(source: str, expected: str | None) -> None:
-    assert local_package_source(source) == expected
+    # 预装名单来自 pi 包清单的 role="pi-package" 条目，不是代码里的第二份列表。
+    prebaked = load_pack(REPO_ROOT / "harnesses", "pi").prebaked_pi_packages()
+    assert local_package_source(source, prebaked) == expected
+
+
+def test_an_undeclared_package_is_not_mapped_even_if_the_name_matches() -> None:
+    """清单未声明为 pi-package 的名字不映射（镜像里没有它），不猜。"""
+    assert local_package_source("npm:pi-web-access@0.31.0", ()) is None
+    assert local_package_source("npm:other-tools@1.0.0", ("other-tools",)) == (
+        f"{IMAGE_PACKAGE_NODE_MODULES}/other-tools"
+    )
 
 
 def test_container_faces_refuse_a_malformed_settings_file(
@@ -445,6 +456,7 @@ def test_repository_template_declares_only_prebaked_packages() -> None:
     for entry in settings["packages"]:
         sources.append(entry if isinstance(entry, str) else entry["source"])
     assert sources, "模板必须声明检索扩展"
+    prebaked = load_pack(REPO_ROOT / "harnesses", "pi").prebaked_pi_packages()
     for source in sources:
         assert source.startswith("npm:"), source
-        assert local_package_source(source) is not None, source
+        assert local_package_source(source, prebaked) is not None, source

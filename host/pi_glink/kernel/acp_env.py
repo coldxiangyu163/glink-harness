@@ -32,9 +32,9 @@ only what every one of them needs from the host:
   environment, e.g. ``ANTHROPIC_API_KEY``). Values whose *name* looks like a
   credential join the same redaction boundary, so both channels behave alike.
 
-The host never runs the command through a shell: ``PI_GLINK_ACP_COMMAND`` is
-split with :func:`shlex.split` and executed as an argv, so a run cannot inherit
-shell expansion from the configuration.
+The host never runs the command through a shell: the pack's ``entry.command``
+is an argv array in the manifest and is executed as such, so a run cannot
+inherit shell expansion from the configuration.
 """
 
 from __future__ import annotations
@@ -186,7 +186,7 @@ def prepare_acp_runtime(
     Credential sources are read only: the operator's own files are never
     written, moved or chmodded by this function.
     """
-    if not config.acp_command:
+    if not config.pack.command:
         raise ConfigError(
             f"harness 包 {config.harness_pack!r} 缺少 command（ACP agent 的命令行）"
         )
@@ -220,7 +220,7 @@ def prepare_acp_runtime(
     return AcpRuntime(
         directory=directory,
         home=home,
-        command=shlex.join(config.acp_command),
+        command=shlex.join(config.pack.command),
         secrets=_dedupe(secrets),
         credential_dests=credential_dests,
     )
@@ -318,7 +318,7 @@ def _normalise_relative(value: str) -> str:
 
 def build_acp_argv(config: HostConfig) -> list[str]:
     """The agent's argv: the selected pack's frozen command, never shell-expanded."""
-    argv = list(config.acp_command)
+    argv = list(config.pack.command)
     if not argv:
         raise ConfigError(
             f"harness 包 {config.harness_pack!r} 的 command 为空；需要 ACP agent 的可执行命令"
@@ -356,7 +356,7 @@ def _apply_home_overlay(config: HostConfig, home: Path) -> None:
     function, so a credential destination always wins over an overlay entry with
     the same path.
     """
-    overlay = config.pack_home
+    overlay = config.pack.home
     if overlay is None:
         return
     entries = 0

@@ -38,6 +38,13 @@ except ImportError:  # pragma: no cover - 由 monkeypatch 测试覆盖降级路�
 
 log = logging.getLogger(__name__)
 
+#: 包清单 ``capabilities.child_progress`` 取值：本模块解析的格式名。族代码只按这个
+#: 能力声明选择进度源，不按包名识别 dsh。
+FORMAT = "dsh-session-zstd"
+
+#: 会话根相对 agent 状态根（每 run 的 ``HOME``）的位置。
+SESSIONS_RELATIVE = (".dsh", "sessions")
+
 #: dsh 会话文件名（主/子会话同名，按所在目录的 sessionId 区分）。
 SESSION_FILENAME = "session.v4.jsonl.zstd"
 

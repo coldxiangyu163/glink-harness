@@ -44,9 +44,11 @@ bash scripts/check.sh
 - Git 已跟踪文件中出现真实配置/运行态文件的禁止路径；不读取 `.env` 内容。测试 fixture 中明确合成的 JSON 凭据样例可以保留。
 - `host/` 的 Python 导入重新依赖 `frontier_agent` 或 `apodex`，以及源码中的字面 JS 导入直接引用 pi 的 `src/` 或 `dist/` 私有路径。
 - 导入方向：`host/pi_glink/kernel/` 反向导入编排层（`pi_glink.runs`）或宿主编排模块（`tenancy` / `auth` / `accounts` / `ownership` / `blueprints` / `web_*` / `app` / `cli`）；`store` 只在三个 harness 族模块（`harness` / `harness_pi` / `harness_acp`）中允许导入。
-- Docker 与 E2B Dockerfile 的 Node/pi 声明丢失精确版本或发生分叉，两个预装包
-  （`pi-web-access` / `pi-subagents`）的模板 pin 与镜像 ARG 漂移，以及三个 ACP 包
-  （dsh/codex/opencode）在 `harness.toml` 里声明的上游包与版本跟两个 ACP 镜像的同名 ARG 不一致。
+- Docker 与 E2B Dockerfile 的 Node 基础镜像 tag 丢失精确版本或发生分叉；由包清单生成的产物
+  （四个 Dockerfile 的 `ARG *_VERSION` 行、`docker/e2b/templates.json`、`harnesses/pi/settings.json`
+  的 `packages`）与 `harnesses/<pack>/harness.toml` 的 `[image]` 声明不一致（等价于
+  `python3 scripts/generate-pack-artifacts.py --check` 失败）；某个声明的包没有以 `pkg@${ARG}`
+  形式安装；Dockerfile 出现未被任何清单声明的版本钉点。
 
 检查器自身有临时仓库和非法输入反例。合法的 TypeScript extension 和 pi 公共包导入不被禁止。路径/import 检查不能识别所有源码复制、动态加载或间接泄漏；没有命中不代表经过完整供应链或安全审计。Dockerfile 一致也不证明当前镜像/模板已重建。
 
@@ -57,7 +59,7 @@ bash scripts/check.sh
 | 修改范围 | 最窄可信检查 | 最终覆盖与限制 |
 |---|---|---|
 | 仓库边界、Dockerfile 版本声明 | `python -m pytest tests/test_repository_boundaries.py` | 非法输入反例和当前工作区；不证明部署产物版本 |
-| Harness 包选择与清单 | `python -m pytest tests/test_harness_packs.py tests/test_kernel_acp_config.py` | 清单解析全有或全无（未知键、缺必填、family 专属键、非精确版本、超限、链接均拒绝）；仓库四个包的事实（族、argv、package/version 与两个 ACP 镜像 ARG 一致）；选择从包名推导族、argv、session_config、permission_allow与能力提示；旧 `PI_GLINK_HARNESS=acp` 与 `PI_GLINK_ACP_COMMAND`/`SESSION_CONFIG`/`PERMISSION_ALLOW` 启动即拒绝；凭证/env 仍留环境配置且非 ACP 包下设置即拒绝；`home/` 覆盖层先于凭据注入、凭据目标优先、链接跳过、超限拒绝；run 记录写入 `harness_pack`，同族异包的追问 `session_unavailable`；不包含真实 agent、镜像构建或模板升级 |
+| Harness 包选择与清单 | `python -m pytest tests/test_harness_packs.py tests/test_kernel_acp_config.py` | 清单解析全有或全无（未知键、缺必填、family 专属键、非精确版本、超限、链接均拒绝）；v1 清单（`pi-glink-harness/v1`）拒绝且不迁移；仓库四个包的事实（族、`[entry]` argv、`[capabilities]` 矩阵、`[image]` 包与版本）；`config.pack` 就是解析出的包对象（`HostConfig` 无抄来的 `acp_*` 字段）；`capabilities.resume = false` 的包追问一律 `session_unavailable`；未声明 `child_progress` 的 ACP 包没有进度源；`PI_GLINK_HARNESS=acp` 只按不存在的包拒绝，`PI_GLINK_ACP_COMMAND`/`SESSION_CONFIG`/`PERMISSION_ALLOW` 不再被读取；凭证/env 仍留环境配置且非 ACP 包下设置即拒绝；`home/` 覆盖层先于凭据注入、凭据目标优先、链接跳过、超限拒绝；run 记录写入 `harness_pack`，同族异包的追问 `session_unavailable`；不包含真实 agent、镜像构建或模板升级 |
 | dsh `web_fetch` 的 Jina provider（GLINK-DSH-02） | `node --import ./harnesses/dsh/bundles/dsh-web-fetch-jina/tests/support/register-stubs.mjs --test harnesses/dsh/bundles/dsh-web-fetch-jina/tests/*.test.mjs` + `python -m pytest tests/test_dsh_jina_bundle.py` | 成功、目标 404、PDF 文本、字符截断、字节超限（声明/流式）、非 JSON 信封、401/402/403/422/429/5xx、超时、取消（预先/进行中）、无 key、非 http(s)/内网 URL（含十进制 IPv4 归一化）、DNS 私网答案、传输异常、运行期非法配置、审计事件——全部以结果或 `WebError` 返回，无进程级异常（dsh seam 替身，不打网络）；仓库边界另钉 peer 范围覆盖镜像钉版、bundle patch 的 provider 行与 `web.fetchProvider: jina`、`web-fetch-http` 只禁用、`tool-web` 预算、每 run 覆盖层清单、两个 ACP Dockerfile 的安装落点与自检、`check.sh` 入口与空测试集失败面；不包含真实 Jina、镜像构建或 E2B run（真实面证据见 [ACP 集成笔记](acp-integration-notes.md) §19） |
 | 默认检查入口 | `python -m pytest tests/test_check_entrypoint.py` | 环境隔离、无自动安装、原退出码、失败不继续、资源清理 |
 | 配置与凭据交付（每 run 独立） | `python -m pytest tests/test_kernel_agent_env.py tests/test_redaction.py tests/test_kernel_sweep.py tests/test_artifacts.py` | 合成凭据穿过真实投影/存储/下载/会话路径；流式释放等于整段脱敏（前后缀重叠、重复片段、全部分割位置、多帧、逐字符与合法相邻文本），并走 fake pi → runner → 日志/总线；收尾扫描契约：pi 会话目录仍重写，ACP 状态根（home/recovered）只读扫描、凭据形状值并入本 run 边界且文件字节不改写（缺失的根按无可扫之物），ACP 运行时进入会话扫描（`SealStage.sweep` → `RunSecretBoundary.seal_sessions`）不再抛错（原 AttributeError 机制直接变红）；注入凭据副本（credential_dests）在扫描之后删除（两处状态根、只删已知相对路径、链接/越界不跟随、文件不存在不算失败、失败记入 artifactFailures 不改终态；追问从源重新注入并在子 run 收尾再删）；`ArtifactTree.remove` 本身只删普通文件（链接/目录/越界拒绝，目标不动）；`HOLD_CAP` 边界（8192/8193/8194/20000 字符已知值、重叠长值、任意多帧）不释放未判定文本、暂存不超界、越界后本块失败即闭合；同目录重渲染不会残留旧 token/扩展；运行期 `auth.json` / `web-search.json` 只含出口代理 token；用临时 HOME，不读个人 `web-search.json` |

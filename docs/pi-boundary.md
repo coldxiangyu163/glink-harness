@@ -66,13 +66,18 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 
 ## 3. 升级路径
 
-pi 的版本在三处被固定，升级只改这三处 + 回归：
+pi 与两个预装包的版本**只在一处声明**：`harnesses/pi/harness.toml` 的 `[[image.packages]]`
+（`PI_VERSION` = `@earendil-works/pi-coding-agent` 0.86.1，`role = "kernel"`；
+`PI_WEB_ACCESS_VERSION` = `pi-web-access` 0.31.0 与 `PI_SUBAGENTS_VERSION` = `pi-subagents` 0.40.0，
+`role = "pi-package"`）。其余位置是 `scripts/generate-pack-artifacts.py` 的生成产物（入库，
+`tests/test_repository_boundaries.py` 比对生成结果与仓库现状）：
 
 | 位置 | 事实 |
 |---|---|
-| `docker/Dockerfile.worker` | `ARG PI_VERSION=0.86.1`（镜像内 pi 版本）；`FROM node:24.21.0-bookworm-slim`（Node 精确 tag）；`ARG PI_WEB_ACCESS_VERSION` / `ARG PI_SUBAGENTS_VERSION` 把包装到 `/opt/pi-packages` |
-| `docker/e2b/Dockerfile.e2b` | 同一 `ARG PI_VERSION`；同一 Node 精确 tag（E2B 模板内 pi / Node 版本）；同一包 ARG 与 `/opt/pi-packages` 布局 |
-| `harnesses/pi/settings.json` | 包声明的真源：`npm:pi-web-access@0.31.0` 与 `npm:pi-subagents@0.40.0`。容器面的 `npm:` 改写为 `/opt/pi-packages/node_modules/<name>` 本地包；两者一致性与 Dockerfile ARG 由 `tests/test_repository_boundaries.py` 卡住 |
+| `docker/Dockerfile.worker` | 生成的 `ARG PI_VERSION` / `ARG PI_WEB_ACCESS_VERSION` / `ARG PI_SUBAGENTS_VERSION`（包装到 `/opt/pi-packages`）；手写的 `FROM node:24.21.0-bookworm-slim`（Node 精确 tag，不是包属性） |
+| `docker/e2b/Dockerfile.e2b` | 同一组生成的 ARG；同一 Node 精确 tag；同一 `/opt/pi-packages` 布局 |
+| `docker/e2b/templates.json` | 生成的 E2B 模板参数（`pi-worker`：别名、Dockerfile、CPU/内存、构建参数、构建命令）；`scripts/build-e2b-template.py` 的缺省值从这里读 |
+| `harnesses/pi/settings.json` | 生成的 `packages`：`npm:pi-web-access@0.31.0` 与 `npm:pi-subagents@0.40.0`。容器面按清单的 `pi-package` 名单把 `npm:` 改写为 `/opt/pi-packages/node_modules/<name>` 本地包 |
 | 本机 inproc 面 | 使用宿主安装的 pi；`PI_GLINK_PI_BIN` 可指向任意版本做隔离演练 |
 
 步骤：
@@ -89,7 +94,9 @@ pi 的版本在三处被固定，升级只改这三处 + 回归：
    .venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7864 --prompt "…"
    ```
    验证证据：宿主启动横幅会打印实际使用的 pi 路径；也可用 `ps` 确认子进程来自隔离目录。
-3. 若通过 → 更新 Dockerfile 的 `ARG PI_VERSION`、重建镜像与 E2B 模板、重跑三面 smoke；
+3. 若通过 → 改 `harnesses/pi/harness.toml` 里 kernel 条目的 `version`，运行
+   `python3 scripts/generate-pack-artifacts.py` 并提交产物；重建镜像与 E2B 模板、重跑三面 smoke
+   （后两步需单独授权）；
 4. 若失败 → 把差异记进 `docs/pi-integration-notes.md`（哪条假设变了），再决定适配或暂缓；
    适配也只允许落在 §1 的扩展点里。
 
