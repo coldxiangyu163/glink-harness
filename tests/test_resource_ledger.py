@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from pi_glink import event_schema
 from pi_glink.config import HostConfig, build_config
 from pi_glink.events import EventBus
 from pi_glink.kernel import docker_env, e2b_env
@@ -751,6 +752,9 @@ def test_reconcile_closes_leftover_children_and_summarizes_them(tmp_path: Path) 
     assert store.read_child("leftover-kids", 1)["status"] == "finished", "已收口的不改写"
     terminal = store.committed_terminal("leftover-kids")
     assert terminal["type"] == "run_failed"
+    # The reconciled terminal bypasses the bus but is a versioned, schema-valid
+    # envelope like any bus frame.
+    assert event_schema.envelope_problems(terminal) == []
     assert terminal["payload"]["children"] == [
         {"n": 0, "agent": "researcher", "task": "调研甲", "status": "interrupted"},
         {"n": 1, "agent": "researcher", "task": "调研乙", "status": "finished"},

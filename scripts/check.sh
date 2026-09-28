@@ -87,6 +87,8 @@ run_check() {
 }
 
 printf '\n[SKIP] 外部标准库逐值对齐：不读取个人标准库，不计入本次通过范围。\n'
+# 前端事件常量由 host/pi_glink/event_schema.py 生成；生成物落后于 schema 即失败。
+run_check '事件 schema 生成物是最新的' "$python" scripts/gen-event-schema.py --check
 run_check 'Python（含仓库边界和检查入口回归）' \
   "$python" -m pytest tests -ra -p no:cacheprovider \
   --basetemp="$scratch/pytest" \

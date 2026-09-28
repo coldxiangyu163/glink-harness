@@ -42,6 +42,8 @@ def check_fixture(tmp_path: Path, *, python_status: int = 0, node_status: int = 
         f'if [ "$1" = "-c" ]; then exit {preflight_status}; fi\n'
         f'/usr/bin/env > {quote(str(repo / "python-env.txt"))}\n'
         f'printf "%s\\n" "$@" > {quote(str(repo / "python-args.txt"))}\n'
+        f'printf "%s " "$@" >> {quote(str(repo / "python-calls.txt"))}\n'
+        f'printf "\\n" >> {quote(str(repo / "python-calls.txt"))}\n'
         f"exit {python_status}\n"
     )
     python.chmod(0o755)
@@ -104,6 +106,11 @@ def test_checks_use_disposable_environment_and_report_optional_scope(tmp_path: P
         assert not home.exists(), "temporary HOME must be removed after success"
         assert actual["PYTHONPATH"] == str(repo / "host")
         assert actual["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+    # 先校验前端事件常量生成物（schema 单一来源），再跑 pytest。
+    calls = (repo / "python-calls.txt").read_text().splitlines()
+    assert calls[0].split() == ["scripts/gen-event-schema.py", "--check"]
+    assert calls[1].split()[:3] == ["-m", "pytest", "tests"]
+    assert len(calls) == 2
     args = (repo / "python-args.txt").read_text().splitlines()
     assert args[:3] == ["-m", "pytest", "tests"]
     assert "--deselect=tests/test_ui_tokens.py::test_ui_tokens_match_standard_library" in args

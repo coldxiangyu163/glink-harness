@@ -13,7 +13,12 @@ already consumes::
 
     id: <seq>
     event: <type>
-    data: {"runId": …, "seq": …, "ts": …, "payload": {…}}
+    data: {"type": …, "v": …, "runId": …, "seq": …, "ts": …, "payload": {…}}
+
+**Schema.** The payload of every type and its version ``v`` are declared once in
+:mod:`pi_glink.event_schema`; ``commit`` validates each frame against it before
+anything is persisted or shown, and the front-end constants are generated from
+the same declaration (``web/modules/event-schema.gen.mjs``).
 
 ``seq`` is per run and monotonic, so a reconnecting client can resume with
 ``Last-Event-ID`` without replaying or skipping work.
@@ -46,6 +51,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Mapping
+
+from . import event_schema
 
 logger = logging.getLogger("pi_glink.events")
 
@@ -81,6 +88,19 @@ KERNEL_STATUS = "kernel_status"
 
 TERMINAL_EVENT_TYPES = frozenset({RUN_FINISHED, RUN_FAILED, RUN_CANCELLED})
 
+#: Every product event type; must equal the schema's vocabulary.
+EVENT_TYPES = frozenset(
+    {
+        RUN_STARTED, RUN_STAGE, RUN_FINISHED, RUN_FAILED, RUN_CANCELLED,
+        SESSION_READY, TURN_STARTED, TURN_FINISHED, ASSISTANT_DELTA,
+        ASSISTANT_MESSAGE, THINKING_DELTA, TOOL_STARTED, TOOL_UPDATED,
+        TOOL_FINISHED, SUBAGENT_STARTED, SUBAGENT_FINISHED, SUBAGENT_UPDATED,
+        USAGE_REPORTED, KERNEL_STATUS,
+    }
+)
+if EVENT_TYPES != set(event_schema.BY_TYPE) or TERMINAL_EVENT_TYPES != event_schema.TERMINAL_TYPES:
+    raise RuntimeError("events.py 的事件词表与 event_schema.SPECS 不一致")
+
 #: Upper bound on frames a single run keeps for the replay-to-live handover.
 _RING_CAPACITY = 4000
 #: Upper bound on frames queued for one live subscriber before it is dropped.
@@ -106,10 +126,13 @@ class RunEvent:
     seq: int
     payload: Mapping[str, Any] = field(default_factory=dict)
     ts: float = field(default_factory=time.time)
+    #: Payload schema version of ``type`` (:data:`event_schema.EVENT_VERSIONS`).
+    v: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "type": self.type,
+            "v": self.v,
             "runId": self.run_id,
             "seq": self.seq,
             "ts": self.ts,
@@ -176,14 +199,24 @@ class EventBus:
         ring and not offered to anyone. If it raises, the sequence number is not
         consumed and nothing is published: the frame is invisible everywhere
         rather than present in only one surface.
+
+        The payload is validated against :mod:`pi_glink.event_schema` first;
+        in strict mode a violation raises :class:`EventSchemaError` before any
+        sequence number is assigned.
         """
+        body = dict(payload or {})
+        event_schema.check(event_type, body, source=f"bus run={run_id}")
         with self._lock:
             commit_lock = self._commit_locks.setdefault(run_id, threading.Lock())
         with commit_lock:
             with self._lock:
                 seq = self._counters.get(run_id, 0) + 1
             event = RunEvent(
-                type=event_type, run_id=run_id, seq=seq, payload=dict(payload or {})
+                type=event_type,
+                run_id=run_id,
+                seq=seq,
+                payload=body,
+                v=event_schema.EVENT_VERSIONS.get(event_type, 0),
             )
             if persist is not None:
                 persist(event)

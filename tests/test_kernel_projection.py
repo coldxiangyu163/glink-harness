@@ -173,7 +173,7 @@ def test_run_stage_payloads_carry_the_stage_name_and_fields() -> None:
 
 def test_tool_updated_passes_each_cumulative_snapshot_through_verbatim() -> None:
     """pi 的 partialResult 是「截至目前累计输出」，投影逐帧原样交出快照——
-    前端**替换**显示（tests/web/run-stream.test.mjs）；投影若做增量换算或拼接，
+    前端**替换**显示（tests/web/run-stream.test.mjs、run-reducer.test.mjs）；投影若做增量换算或拼接，
     替换语义就被破坏。"""
     snapshots = ["", "total 8\n", "total 8\nreport.md\n"]
     outputs = []

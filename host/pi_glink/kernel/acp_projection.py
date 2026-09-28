@@ -36,6 +36,7 @@ from typing import Any, Callable, Mapping
 from .. import events
 from ..redaction import SecretRedactor, StreamRedactor
 from .projection import (
+    checked,
     SUBAGENT_TOOL_NAME,
     extract_text,
     project_args,
@@ -101,6 +102,9 @@ class AcpProjector:
     # -- the projection -------------------------------------------------------
 
     def project(self, frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+        return checked(self._project(frame), "acp projection")
+
+    def _project(self, frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         produced: list[tuple[str, dict[str, Any]]] = []
         frame_type = frame.get("type")
         if frame_type == "acp_turn_started":
