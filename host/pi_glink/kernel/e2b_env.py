@@ -84,10 +84,68 @@ SANDBOX_PACKAGE_GUARD = IMAGE_PACKAGE_GUARD
 #: One uploaded config file / recovered artifact may not exceed this.
 UPLOAD_MAX_BYTES = 8 * 1024 * 1024
 ARTIFACT_MAX_BYTES = 32 * 1024 * 1024
+#: Host-side deadline for one E2B *files* request on the close-out path
+#: (listing, metadata, streamed or whole reads). The SDK default is 60s, so a
+#: single stuck call could stretch the recovery minute by minute and defer the
+#: terminal commit; a stalled call is recorded as an artifact failure instead.
+#: ``child_progress`` polls its own ``files`` reads under the same value.
+E2B_REQUEST_TIMEOUT_SECONDS = 15.0
+#: Host-side deadline for one kill call in the teardown path. The SDK's
+#: ``CommandHandle.kill()`` accepts no request timeout, and a wedged transport
+#: must not hold the close-out open, so the kill runs on a daemon thread and
+#: the host gives up after this bound. The timeout is a *recorded* failure
+#: (``CleanupReport.failures`` / the ledger's hold reason), never a silent loss
+#: and never an unbounded stall before the terminal commit.
+E2B_KILL_TIMEOUT_SECONDS = 15.0
+#: Bounds for the run workspace recovery (direct file children; a single read is
+#: already bounded by ``ARTIFACT_MAX_BYTES``). A runaway agent cannot turn the
+#: close-out into an unbounded copy: going over either bound records a failure in
+#: the run's ``artifactFailures`` and stops, never blocks the verdict.
+WORKSPACE_RECOVER_MAX_FILES = 64
+WORKSPACE_RECOVER_MAX_TOTAL_BYTES = 64 * 1024 * 1024
 
 
 class SandboxError(RuntimeError):
     """Raised when the sandbox cannot be created or the run cannot start."""
+
+
+def kill_within_budget(
+    kill: Callable[[], Any],
+    *,
+    what: str,
+    timeout: float | None = None,
+) -> Any:
+    """Run one kill call under a host-side deadline.
+
+    Returns the call's result when it returned within the bound, re-raises what
+    it raised when it failed, and raises :class:`SandboxError` when the host
+    gives up waiting. The call runs on a daemon thread so a wedged
+    SDK/transport call can neither keep the host process alive nor hold the
+    terminal commit open; every caller records the raised failure in its own
+    failure list (the sandbox's :class:`CleanupReport` or the resource ledger's
+    hold reason).
+    """
+    bound = E2B_KILL_TIMEOUT_SECONDS if timeout is None else timeout
+    done = threading.Event()
+    result: list[Any] = []
+    failure: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            result.append(kill())
+        except Exception as exc:  # noqa: BLE001 - re-raised to the caller
+            failure.append(exc)
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, name="e2b-kill", daemon=True).start()
+    if not done.wait(bound):
+        raise SandboxError(
+            f"{what} kill 未在 {bound:g}s 内返回（宿主放弃等待，销毁结果不确定）"
+        )
+    if failure:
+        raise failure[0]
+    return result[0] if result else None
 
 
 class PiSandboxTransfer:
@@ -310,10 +368,20 @@ class SandboxCommandProcess:
         self.kill()
 
     def kill(self) -> None:
+        """Kill the background command under the host's kill deadline.
+
+        ``CommandHandle.kill()`` takes no request timeout: without the bound a
+        wedged transport would hold ``PiRpcClient.close`` (and with it the whole
+        close-out) open forever. A kill that does not return in time is logged;
+        the caller's following ``wait`` then reports the unobserved end as the
+        usual failure, so the run records an unreleased resource instead of
+        hanging. The sandbox teardown (``E2BSandbox.close``) is the release
+        authority and applies the same bound.
+        """
         try:
-            self._handle.kill()
-        except Exception:  # noqa: BLE001 - the sandbox is torn down anyway
-            logger.debug("sandbox command kill failed", exc_info=True)
+            kill_within_budget(self._handle.kill, what="沙箱命令")
+        except Exception as exc:  # noqa: BLE001 - the sandbox is torn down anyway
+            logger.warning("sandbox command kill did not complete: %s", exc)
 
 
 class _HandleStdin:
@@ -432,7 +500,9 @@ def _recover_workspace(sandbox: Any, destination: Path) -> tuple[list[Path], lis
     """
     destination.mkdir(parents=True, exist_ok=True)
     try:
-        entries = sandbox.files.list(SANDBOX_WORKSPACE)
+        entries = sandbox.files.list(
+            SANDBOX_WORKSPACE, request_timeout=E2B_REQUEST_TIMEOUT_SECONDS
+        )
     except Exception as exc:  # noqa: BLE001 - surfaced to the caller
         return [], [f"无法列出沙箱工作区: {type(exc).__name__}: {exc}"]
     try:
@@ -441,6 +511,7 @@ def _recover_workspace(sandbox: Any, destination: Path) -> tuple[list[Path], lis
         return [], [f"宿主工作区不可用: {exc}"]
     files: list[Path] = []
     failures: list[str] = []
+    total = 0
     with tree:
         for entry in entries:
             name = str(getattr(entry, "name", None) or "")
@@ -465,6 +536,15 @@ def _recover_workspace(sandbox: Any, destination: Path) -> tuple[list[Path], lis
                 continue
             if name.startswith("."):
                 continue
+            # Same triple bound as the subagent mirror: the file count is
+            # checked before reading, the total after reading and before
+            # writing. A breach is a recorded failure and stops the copy; the
+            # verdict is never blocked by a runaway workspace.
+            if len(files) >= WORKSPACE_RECOVER_MAX_FILES:
+                failures.append(
+                    f"工作区产物超过文件数上限（{WORKSPACE_RECOVER_MAX_FILES}）"
+                )
+                break
             # Bound the read with the listing's own metadata before loading
             # the entry; an entry whose size the SDK does not report falls
             # back to a streamed, bounded read.
@@ -478,6 +558,12 @@ def _recover_workspace(sandbox: Any, destination: Path) -> tuple[list[Path], lis
             if data is None:
                 failures.append(f"产物不可读取或超过上限: {name}: {failure}")
                 continue
+            total += len(data)
+            if total > WORKSPACE_RECOVER_MAX_TOTAL_BYTES:
+                failures.append(
+                    f"工作区产物超过总量上限（{WORKSPACE_RECOVER_MAX_TOTAL_BYTES} 字节）"
+                )
+                break
             try:
                 tree.replace(name, data, max_bytes=ARTIFACT_MAX_BYTES)
             except (ArtifactError, OSError) as exc:
@@ -534,7 +620,7 @@ def _entry_size(sandbox: Any, path: str) -> int | None:
     if not callable(get_info):
         return None
     try:
-        info = get_info(path)
+        info = get_info(path, request_timeout=E2B_REQUEST_TIMEOUT_SECONDS)
     except Exception:  # noqa: BLE001 - absence is the caller's decision
         return None
     size = getattr(info, "size", None)
@@ -553,7 +639,8 @@ def _stream_reader(sandbox: Any, path: str) -> tuple[Any, str | None]:
     if not callable(read):
         return None, None
     try:
-        return read(path, format="stream"), None
+        stream = read(path, format="stream", request_timeout=E2B_REQUEST_TIMEOUT_SECONDS)
+        return stream, None
     except TypeError:
         # An SDK (or test double) without the streaming overload: the caller
         # falls back to the size metadata as its only pre-read bound.
@@ -614,7 +701,7 @@ def _read_file_bounded(
     if size is None:
         return None, "SDK 未提供文件大小且不支持流式读取，拒绝整份载入"
     try:
-        content = sandbox.files.read(path)
+        content = sandbox.files.read(path, request_timeout=E2B_REQUEST_TIMEOUT_SECONDS)
     except Exception as exc:  # noqa: BLE001 - surfaced as a failure reason
         return None, f"{type(exc).__name__}: {exc}"
     data = content if isinstance(content, (bytes, bytearray)) else str(content).encode("utf-8")
@@ -687,7 +774,9 @@ def _session_candidates(
     cannot even be read or two header-mains appear — the layout is then
     unexplained and neither continuation nor recovery may guess.
     """
-    entries = sandbox.files.list(SANDBOX_SESSIONS)
+    entries = sandbox.files.list(
+        SANDBOX_SESSIONS, request_timeout=E2B_REQUEST_TIMEOUT_SECONDS
+    )
     candidates: list[str] = []
     for entry in entries:
         if _entry_kind(entry) != "file":
@@ -779,7 +868,11 @@ def _mirror_subagent_data(
 
     artifacts_root = f"{SANDBOX_SESSIONS}/{SUBAGENT_ARTIFACTS_DIRNAME}"
     try:
-        entries = sandbox.files.list(artifacts_root, depth=SUBAGENT_RECOVER_MAX_DEPTH)
+        entries = sandbox.files.list(
+            artifacts_root,
+            depth=SUBAGENT_RECOVER_MAX_DEPTH,
+            request_timeout=E2B_REQUEST_TIMEOUT_SECONDS,
+        )
     except Exception as exc:  # noqa: BLE001 - surfaced as a failure reason
         failures.append(f"无法列出子代理产物目录: {type(exc).__name__}: {exc}")
         return files, failures
@@ -837,8 +930,12 @@ def confirm_sandbox_absent(
     if not sandbox_id:
         return False, "缺少持久化的 sandbox_id"
     kill = kill_factory or _default_kill(api_key)
+    # The SDK's single-id kill has no host deadline: a wedged call must surface
+    # as an unconfirmed hold (uncertainty keeps the hold) instead of blocking
+    # the reconciliation forever. The not-found contract is unchanged: only the
+    # SDK's own not-found *types* confirm release.
     try:
-        killed = kill(sandbox_id)
+        killed = kill_within_budget(lambda: kill(sandbox_id), what="沙箱")
     except Exception as exc:  # noqa: BLE001 - uncertainty keeps the hold
         if _is_not_found(exc):
             return True, f"SDK 确认沙箱不存在: {type(exc).__name__}"

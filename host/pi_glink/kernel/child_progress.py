@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from .e2b_env import (
+    E2B_REQUEST_TIMEOUT_SECONDS,
     SUBAGENT_RECOVER_MAX_DEPTH,
     SUBAGENT_RECOVER_MAX_FILE_BYTES,
     SUBAGENT_RECOVER_MAX_FILES,
@@ -61,8 +62,9 @@ _READ_CHUNK_BYTES = 1024 * 1024
 #: E2B 面单次 ``files.list`` / ``files.read`` 的请求超时（秒）。SDK 默认 60s
 #: 会把一次卡住的调用变成整整一分钟的停顿，且真实故障（沙箱繁忙）时每次
 #: poll 都撞满这个值；显式收窄后失败更快、退避后重试更密（GLINK-OBS-01
-#: 第 4 项：r2 里 5 次 60s 超时击穿了当时的重试预算）。
-E2B_PROGRESS_REQUEST_TIMEOUT_SECONDS = 15.0
+#: 第 4 项：r2 里 5 次 60s 超时击穿了当时的重试预算）。值来自
+#: :mod:`pi_glink.kernel.e2b_env`：回收与进度共用同一条有界口径，单一真源。
+E2B_PROGRESS_REQUEST_TIMEOUT_SECONDS = E2B_REQUEST_TIMEOUT_SECONDS
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)

@@ -57,6 +57,7 @@ from .e2b_env import (
     SandboxError,
     _create_sandbox,
     _recover_workspace,
+    kill_within_budget,
 )
 
 
@@ -434,8 +435,10 @@ class E2BSandbox(Sandbox):
         handle = self._handle
         self._handle = None
         if handle is not None:
+            # 销毁是释放权威，但 kill 本身不能无界：SDK 的 command kill 不接受
+            # 请求超时，运输楔死时宿主必须放弃等待并记失败（不谎报已释放）。
             try:
-                handle.kill()
+                kill_within_budget(handle.kill, what="sandbox")
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 failures.append(f"sandbox kill failed: {type(exc).__name__}: {exc}")
         return CleanupReport(

@@ -105,8 +105,9 @@ class FakeFiles:
             return _Stream([data])
         return data
 
-    def get_info(self, path: str) -> Any:
+    def get_info(self, path: str, request_timeout: float | None = None) -> Any:
         """The SDK's entry metadata: the host bounds the read by ``size`` first."""
+        self._sandbox.info_timeouts.append(request_timeout)
         sizes = self._sandbox.sizes
         if path in sizes:
             return _Info(sizes[path])
@@ -362,9 +363,11 @@ class FakeSandbox:
         #: Paths the host asked to read (the bounded-read regressions).
         self.reads: list[str] = []
         #: ``request_timeout`` values the host passed to ``files.list`` /
-        #: ``files.read`` (``None`` when the caller left the SDK default).
+        #: ``files.read`` / ``files.get_info`` (``None`` when the caller left
+        #: the SDK default).
         self.list_timeouts: list[float | None] = []
         self.read_timeouts: list[float | None] = []
+        self.info_timeouts: list[float | None] = []
         #: Entry sizes the SDK reports instead of the real content length.
         self.sizes: dict[str, int] = {}
         #: Entry kinds the SDK reports (path -> "file"/"dir"/"symlink"/enum).

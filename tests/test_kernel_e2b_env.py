@@ -1053,6 +1053,161 @@ def test_directories_and_symlinks_are_skipped_without_a_false_failure(tmp_path: 
     assert "/home/user/workspace/linked.md" not in sandbox.reads, "链接不得被跟随"
 
 
+def test_recovery_calls_carry_the_host_request_timeout(tmp_path: Path) -> None:
+    """E2B 面回收/会话的 files 调用不得留 SDK 默认 60s。
+
+    对基线红：``files.list`` / ``get_info`` / ``read`` 均不传
+    ``request_timeout``，一次卡住的调用会把终态提交拖满 SDK 默认 60s；
+    子代理回收与进度轮询早有显式收窄的先例。
+    """
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    sandbox.workspace_files = ("report.md",)
+    sandbox.readable["/home/user/workspace/report.md"] = "# 报告\n"
+    sandbox.session_files = ("research.jsonl", "branch.jsonl")
+    sandbox.readable["/home/user/sessions/research.jsonl"] = _session_bytes("main")
+    sandbox.readable["/home/user/sessions/branch.jsonl"] = _session_bytes(
+        "branch", parent="/home/user/sessions/research.jsonl"
+    )
+    sandbox.artifact_files = ("note.md",)
+    sandbox.readable["/home/user/sessions/subagent-artifacts/note.md"] = b"note\n"
+    client = _recovery_client(config, runtime, sandbox, tmp_path)
+
+    client.sandbox.recover_workspace(tmp_path / "ws")
+    client.transfer.recover_session()
+    client.transfer.recover_subagent_files(tmp_path / "sub" / "subagents")
+
+    assert sandbox.list_timeouts, "回收路径必须调查过 files.list"
+    assert all(timeout is not None for timeout in sandbox.list_timeouts)
+    assert sandbox.read_timeouts, "回收路径必须调查过 files.read"
+    assert all(timeout is not None for timeout in sandbox.read_timeouts)
+    assert sandbox.info_timeouts, "会话回收的 get_info 也必须带宿主超时"
+    assert all(timeout is not None for timeout in sandbox.info_timeouts)
+    # 与子代理回收/进度轮询同一有界口径（单一真源），不是 SDK 默认 60s。
+    assert set(sandbox.list_timeouts) == {e2b_env.E2B_REQUEST_TIMEOUT_SECONDS}
+
+
+def test_workspace_recovery_stops_at_the_file_count_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """工作区回收有文件数上限；超限记失败，不读出上限外的文件。"""
+    monkeypatch.setattr(e2b_env, "WORKSPACE_RECOVER_MAX_FILES", 2, raising=False)
+    sandbox = FakeSandbox(workspace_files=("a.md", "b.md", "c.md"))
+    for name in ("a.md", "b.md", "c.md"):
+        sandbox.readable[f"/home/user/workspace/{name}"] = b"x\n"
+
+    files, failures = _recover_from(sandbox, tmp_path)
+
+    assert {path.name for path in files} == {"a.md", "b.md"}
+    assert any("文件数上限" in failure for failure in failures)
+    assert "/home/user/workspace/c.md" not in sandbox.reads, "超限后不得再读"
+    assert not (tmp_path / "ws" / "c.md").exists()
+
+
+def test_workspace_recovery_stops_at_the_total_bytes_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """工作区回收有总量上限；越界的那份不落盘，失败如实记录。"""
+    monkeypatch.setattr(e2b_env, "WORKSPACE_RECOVER_MAX_TOTAL_BYTES", 10, raising=False)
+    sandbox = FakeSandbox(workspace_files=("a.md", "b.md"))
+    sandbox.readable["/home/user/workspace/a.md"] = b"123456"
+    sandbox.readable["/home/user/workspace/b.md"] = b"123456"
+
+    files, failures = _recover_from(sandbox, tmp_path)
+
+    assert {path.name for path in files} == {"a.md"}
+    assert any("总量上限" in failure for failure in failures)
+    assert not (tmp_path / "ws" / "b.md").exists()
+
+
+def test_a_capped_workspace_recovery_is_recorded_without_blocking_the_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """上限只是回收的界，不得阻断终态提交：run 仍以终态收场。"""
+    monkeypatch.setattr(e2b_env, "WORKSPACE_RECOVER_MAX_FILES", 0, raising=False)
+    config = make_config(tmp_path)
+    sandbox = FakeSandbox(
+        tmp_path / "sandbox", report=None, fake_pi_env={"FAKE_PI_WRITE_REPORT": "1"}
+    )
+    manager, storage = _manager(config, sandbox, tmp_path)
+
+    record = manager.start("工作区超限的研究")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final.status == "finished"
+    last_frame = json.loads(events_text(storage, record.run_id).strip().splitlines()[-1])
+    assert last_frame["type"] == "run_finished"
+    assert any(
+        "文件数上限" in failure
+        for failure in last_frame["payload"].get("artifactFailures", [])
+    )
+
+
+def test_a_hung_carrier_kill_returns_within_the_host_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """载体 kill 挂起不得无限阻塞收尾：宿主放弃等待并继续。"""
+    monkeypatch.setattr(e2b_env, "E2B_KILL_TIMEOUT_SECONDS", 0.05, raising=False)
+    gate = threading.Event()
+
+    class _HangingCommand:
+        pid = 1
+
+        def kill(self) -> bool:
+            gate.wait(3)
+            return True
+
+        def send_stdin(self, data: Any, request_timeout: float | None = None) -> None:
+            pass
+
+        def close_stdin(self, request_timeout: float | None = None) -> None:
+            pass
+
+        def __iter__(self) -> Any:
+            return iter(())
+
+        def wait(self) -> Any:
+            raise RuntimeError("command ended without an end event")
+
+    process = SandboxCommandProcess(_HangingCommand())
+    try:
+        started = time.monotonic()
+        process.kill()
+        assert time.monotonic() - started < 1.0, "宿主侧 kill 截止时间必须生效"
+    finally:
+        gate.set()
+
+
+def test_a_hung_sandbox_kill_is_bounded_and_recorded_as_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """沙箱销毁 kill 挂起：宿主放弃等待，且如实记进 CleanupReport.failures。"""
+    monkeypatch.setattr(e2b_env, "E2B_KILL_TIMEOUT_SECONDS", 0.05, raising=False)
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    client = _Face(
+        config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
+    )
+    client.open()
+    gate = threading.Event()
+
+    def hanging_kill() -> bool:
+        gate.wait(3)
+        return True
+
+    sandbox.kill = hanging_kill  # type: ignore[method-assign]
+    try:
+        started = time.monotonic()
+        report = client.sandbox.close()
+        assert time.monotonic() - started < 1.0, "宿主侧 kill 截止时间必须生效"
+    finally:
+        gate.set()
+    assert report.released is False
+    assert any("kill" in failure for failure in report.failures)
+
+
 def test_the_real_sdk_file_type_enum_is_understood(tmp_path: Path) -> None:
     e2b = pytest.importorskip("e2b")
     from e2b import FileType  # noqa: PLC0415 - optional dependency
