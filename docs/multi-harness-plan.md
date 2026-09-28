@@ -112,8 +112,11 @@ pi、dsh、codex（codex-acp）、opencode（均开源），**Claude（claude-ag
 | report.md 产物契约（prompt 约束） | 工作约定与蓝图 | 宿主级内容（`methodology/`），不再放进包 |
 | `ExecutionAdapter` 契约（start / deliver_input / wait / cancel / recover_artifacts / close / identity） | 斜杠命令解释、stopReason 词汇、续接能力声明 | 斜杠命令由宿主统一解释（§3.3）；每包声明自己的续接/会话选项 |
 
-执行面（inproc / docker / e2b）与 harness 是**正交两维**：适配器数量是
-「N 个 harness 族 × 2~3 个传输族」，不是全矩阵。
+执行面（inproc / docker / e2b）与 harness 是**正交两维**（S2 起在代码里也是两个独立抽象，
+见 §3.5 与 [架构](architecture.md) §2）：`Sandbox`（`kernel/sandbox.py`：inproc / docker / e2b）
+只管资源与传输，`HarnessFamily`（pi / acp）只管 launch、协议驱动、终态词汇、续接、子代理增强与
+usage；适配器按 `harness.driver(sandbox.spawn(harness.launch(spec)))` 组合，实现数量是
+「N 个 harness 族 + 3 个 sandbox」，不是 N×3 的矩阵，也没有 `(harness, executor)` 字符串分派。
 
 ## 3. 目标架构：三层内容与 harness 包
 
@@ -171,7 +174,8 @@ harnesses/<pack>/
 * `PI_GLINK_HARNESS=<pack>`（`pi` | `dsh` | `codex` | `opencode`，默认 `pi`）：一次部署一个，
   启动冻结，没有 per-run 参数与前端开关。
 * 族由清单的 `family` 推导，`select_family` 按清单构造族实例（`harness_pi.py` /
-  `harness_acp.py`）；runner 只比族的 `name`，不再读 harness 字符串做分支。
+  `harness_acp.py`）；每个 run 的族取自其记录的 `RunSpec.family`（§3.4），runner 不读
+  harness 字符串做分支，也不导入具体族（导入白名单见 `tests/test_repository_boundaries.py`）。
 * **旧变量启动即拒绝**（不做兼容映射）：
 
 | 旧变量 | 新写法 |
@@ -194,15 +198,19 @@ harnesses/<pack>/
 
 ### 3.4 run 记录与追问
 
-* `harness` 保持族语义（`pi`/`acp`）不变；新增 `harness_pack`（包名），与 run id/owner
-  同一次原子写入。
-* 追问：父记录带 `harness_pack` 时要求与本包相同，否则 `session_unavailable`（fail-closed）；
-  父记录无该字段按现有证明路径处理，历史数据不改写。
+* 准入时解析一次 `RunSpec{family, pack, executor, blueprint, credential_origin}`，作为
+  `meta.json` 的 `"spec"` 对象与 run id/owner 同一次原子写入（[架构](architecture.md) §2）；
+  此后族、执行面与追问门禁只读记录里的 spec。
+* 追问：`spec.family` 或 `spec.pack` 与本 run 不同即 `session_unavailable`（fail-closed）。
+* **旧记录不再可读**（S2 重新设计，无迁移）：顶层 `harness` / `harness_pack` / `executor`
+  形态的旧 meta 按不可读记录处理——不列出、不能追问，资源台账按损坏记录计入全局持有。
 
 ### 3.5 适配族
 
 ```
 HarnessFamily（kernel/harness.py + harness_pi.py / harness_acp.py）
+│  launch(spec, sandbox) → Launch；driver(spec, sandbox=, launch=) → ExecutionAdapter；
+│  build_adapter = driver(sandbox.spawn(launch(spec)))，族内没有按执行面的 plan 方法
 ├─ pi 族   — rpc（双向 stdio NDJSON，inproc/docker/e2b 三面共用同一份 PiRpcClient）；
 │            旧 e2b `--mode json` 单向流机制已随 GLINK-ARCH-3 删除；
 │            作为其它族的参照系与回归基线
@@ -210,6 +218,12 @@ HarnessFamily（kernel/harness.py + harness_pi.py / harness_acp.py）
 │            codex-acp（@agentclientprotocol/codex-acp）、opencode（`opencode acp`）；
 │            适配器进程与 agent 同容器/沙箱，stdio 桥接
 └─ SDK 直连族（可选，暂不建）— 未来落地即 HarnessFamily 的第三个实现
+
+Sandbox（kernel/sandbox.py，open_sandbox(spec.executor) 选出）
+├─ InprocSandbox — 本机子进程，passthrough 环境，路径即宿主路径
+├─ DockerSandbox — docker run -i；容器名为 planned_identity，close = docker rm -f
+└─ E2BSandbox    — 云沙箱后台命令（stdin=True）；沙箱 id 经 on_identity 回报；
+                   远程文件交付由族 driver 的传输器完成（PiSandboxTransfer / AcpSandboxTransfer）
 ```
 
 扩展机制的差异**保留在包里**：pi 走 `settings.json` 的 packages、`extensions/`、`agents/`

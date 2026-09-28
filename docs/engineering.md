@@ -95,7 +95,7 @@ bash scripts/check.sh
 **隔离浏览器套件（project-local 锁定依赖，不在默认检查内）**：`tests/fixtures/accounts_server.py`
 启动一个真实宿主（真实 Runner/存储/事件总线/HTTP/SSE/生产前端）在 OS 分配的 loopback 端口上，使用
 临时 data root、临时账号库与临时 `HOME`/`XDG`，只把执行面替换为进程内脚本化替身
-（`pi_glink.kernel.harness_pi.compose_adapter`，与 Python 回归同一机制）；它只读合成凭据、不发邮件、
+（`pi_glink.kernel.harness_pi.PiExecutionAdapter`，与 Python 回归同一机制）；它只读合成凭据、不发邮件、
 不接触真实 `.env`/`~/.pi`/既有服务，退出时由调用者按**记录的 PID** 终止（不要用宽匹配 `pkill`）。
 fixture 支持 `accounts` / `local` / `gateway` 三种身份面，题目里的 `[scenario:…]` 标记选择合成场景
 （`tools` / `subagent` / `slow` / `fail` / `length`）。
