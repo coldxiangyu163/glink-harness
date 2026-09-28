@@ -454,7 +454,7 @@ def test_a_pack_that_declares_no_resume_refuses_every_followup(tmp_path: Path) -
         run_id="parent-run",
         spec=RunSpec(family="acp", pack="demo", executor="inproc"),
     )
-    store.update("parent-run", status=FINISHED)
+    finish(store, "parent-run")
     admission = manager._admission  # noqa: SLF001
     with pytest.raises(FollowupUnavailable) as excinfo:
         admission.resumable_parent(None, "parent-run", admission.spec(None))
