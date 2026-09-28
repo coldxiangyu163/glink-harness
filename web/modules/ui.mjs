@@ -17,10 +17,16 @@ export function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
-/** Allow only http(s), mailto and relative URLs; everything else is dropped. */
+/** Allow only http(s), mailto and same-origin relative URLs; everything else is dropped. */
 export function safeUrl(value) {
   const text = String(value ?? '').trim();
   if (!text) return '';
+  // Browsers strip tab/CR/LF anywhere in a URL and treat `\` as `/`, so decide
+  // on the normalised form. `//host` (however it is spelled) is a
+  // protocol-relative reference to another origin, not a site-relative path;
+  // without this it would slip through the `/` prefix branch below.
+  const reference = text.replace(/[\t\n\r]/g, '').replaceAll('\\', '/');
+  if (reference.startsWith('//')) return '';
   if (text.startsWith('/') || text.startsWith('#') || text.startsWith('./') || text.startsWith('../')) {
     return text;
   }
