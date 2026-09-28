@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"agent 命令: {args.command}")
     print(f"命令级 env 名: {', '.join(name for name, _ in config.acp_env) or '（无）'}")
     session_config = "; ".join(
-        f"{name}={value}" for name, value in config.acp_session_config
+        f"{name}={value}" for name, value in config.pack.capabilities.session_config
     )
     print(f"会话配置: {session_config or '（无）'}")
     print(f"运行期 HOME: {runtime.home}")

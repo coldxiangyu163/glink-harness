@@ -1,10 +1,12 @@
 """Harness packs: manifest parsing, selection, the HOME overlay and the record.
 
-A pack (``harnesses/<pack>/harness.toml``) is the one place a harness's
-differences live: family, ACP argv, upstream pin, packaged session options and
-permission allowlist, plus an optional capability prompt and (ACP only) the
-``home/`` overlay. Parsing is all-or-nothing: a typo must refuse startup instead
-of silently falling back to another harness.
+A pack (``harnesses/<pack>/harness.toml``, format ``pi-glink-harness/v2``) is
+the one place a harness's differences live: family, ``[entry]`` argv, the
+``[capabilities]`` matrix family code reads, and the ``[image]`` requirement the
+Dockerfile ARGs / E2B template parameters are generated from, plus an optional
+capability prompt and (ACP only) the ``home/`` overlay. Parsing is
+all-or-nothing: a typo must refuse startup instead of silently falling back to
+another harness.
 """
 
 from __future__ import annotations
@@ -33,6 +35,42 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 REPO_PACKS = REPO_ROOT / "harnesses"
 
 
+PI_IMAGE = (
+    '\n[image]\ntarget = "pi-worker"\n'
+    '\n[[image.packages]]\narg = "PI_VERSION"\n'
+    'package = "@earendil-works/pi-coding-agent"\nversion = "1.0.0"\nrole = "kernel"\n'
+)
+ACP_IMAGE = (
+    '\n[image]\ntarget = "acp-worker"\n'
+    '\n[[image.packages]]\narg = "P_VERSION"\npackage = "p"\nversion = "1.0.0"\n'
+    'role = "agent"\n'
+)
+
+
+def pi_manifest(name: str = "demo", *, capabilities: str = "", image: str = PI_IMAGE) -> str:
+    return (
+        f'format = "pi-glink-harness/v2"\nname = "{name}"\nfamily = "pi"\n'
+        '\n[entry]\ncommand = ["pi"]\n'
+        f'\n[capabilities]\nresume = true\n{capabilities}'
+        f"{image}"
+    )
+
+
+def acp_manifest(
+    name: str = "demo",
+    *,
+    command: str = '["fake"]',
+    capabilities: str = "resume = true\n",
+    image: str = ACP_IMAGE,
+) -> str:
+    return (
+        f'format = "pi-glink-harness/v2"\nname = "{name}"\nfamily = "acp"\n'
+        f"\n[entry]\ncommand = {command}\n"
+        f"\n[capabilities]\n{capabilities}"
+        f"{image}"
+    )
+
+
 def write_manifest(root: Path, name: str, body: str) -> Path:
     pack_dir = Path(root) / "harnesses" / name
     pack_dir.mkdir(parents=True, exist_ok=True)
@@ -58,27 +96,43 @@ def build_values(tmp_path: Path, harnesses_dir: Path, **overrides: str) -> dict[
 def test_the_repository_packs_declare_the_expected_families_and_commands() -> None:
     assert pack_names(REPO_PACKS) == ("codex", "dsh", "opencode", "pi")
     pi = load_pack(REPO_PACKS, "pi")
-    assert pi.family == "pi" and pi.command == () and pi.package == ""
-    assert pi.capabilities is not None and pi.home is None
+    assert pi.family == "pi" and pi.command == ("pi",) and pi.home is None
+    assert pi.prompt and pi.prompt_path == REPO_PACKS / "pi" / "capabilities.md"
+    assert pi.capabilities.resume is True
+    assert [item.role for item in pi.image.packages] == ["kernel", "pi-package", "pi-package"]
+    assert pi.image.target == "pi-worker"
+    assert pi.prebaked_pi_packages() == ("pi-web-access", "pi-subagents")
 
     dsh = load_pack(REPO_PACKS, "dsh")
     assert dsh.family == "acp" and dsh.command == ("dsh", "--profile", "acp")
-    assert (dsh.package, dsh.version) == ("@deepseek-ai/dsh", "0.1.5-rc.3")
-    assert dsh.session_config == () and dsh.permission_allow == ()
+    assert [(i.package, i.version, i.role) for i in dsh.image.packages] == [
+        ("@deepseek-ai/dsh", "0.1.5-rc.3", "agent")
+    ]
+    assert dsh.image.target == "acp-worker"
+    caps = dsh.capabilities
+    assert caps.session_config == () and caps.permission_allow == ()
     # dsh 的 subagent 工具异步派发（GLINK-OBS-01 实测），由包声明而非宿主识别回复文本。
-    assert dsh.subagent_dispatch == "async"
+    assert caps.subagent_dispatch == "async"
+    # 运行中子代理进度源由能力声明，族代码不再按包名 / 状态根目录特判 dsh。
+    assert caps.child_progress == "dsh-session-zstd" and caps.resume is True
 
     codex = load_pack(REPO_PACKS, "codex")
     assert codex.command == ("codex-acp",)
-    assert (codex.package, codex.version) == ("@agentclientprotocol/codex-acp", "1.13.1")
+    assert [(i.package, i.version) for i in codex.image.packages] == [
+        ("@agentclientprotocol/codex-acp", "1.13.1")
+    ]
     # 1.13.1 的 mode 词表没有 auto（集成笔记 §14.5）：包故意不声明 session_config。
-    assert codex.session_config == ()
+    assert codex.capabilities.session_config == ()
 
     opencode = load_pack(REPO_PACKS, "opencode")
     assert opencode.command == ("opencode", "acp")
-    assert (opencode.package, opencode.version) == ("opencode-ai", "1.18.32")
-    # 未声明即同步：子代理工具调用的终态就是子代理的结果。
-    assert codex.subagent_dispatch == "sync" and opencode.subagent_dispatch == "sync"
+    assert [(i.package, i.version) for i in opencode.image.packages] == [
+        ("opencode-ai", "1.18.32")
+    ]
+    # 未声明即同步、无运行中进度源：子代理工具调用的终态就是子代理的结果。
+    for pack in (codex, opencode):
+        assert pack.capabilities.subagent_dispatch == "sync"
+        assert pack.capabilities.child_progress is None
 
 
 def test_a_missing_harnesses_directory_offers_no_names(tmp_path: Path) -> None:
@@ -88,65 +142,83 @@ def test_a_missing_harnesses_directory_offers_no_names(tmp_path: Path) -> None:
 
 
 def test_capability_prompt_is_read_verbatim(tmp_path: Path) -> None:
-    pack_dir = write_manifest(
-        tmp_path,
-        "demo",
-        'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "pi"\n',
-    )
+    pack_dir = write_manifest(tmp_path, "demo", pi_manifest())
     (pack_dir / "capabilities.md").write_text("## 能力\n\n- 一条事实。\n", encoding="utf-8")
     pack = load_pack(tmp_path / "harnesses", "demo")
-    assert pack.capabilities_text() == "## 能力\n\n- 一条事实。"
+    assert pack.prompt == "## 能力\n\n- 一条事实。"
+    assert pack.prompt_path == pack_dir / "capabilities.md"
+
+
+def test_a_pack_without_a_prompt_file_has_an_empty_prompt(tmp_path: Path) -> None:
+    write_manifest(tmp_path, "demo", pi_manifest())
+    pack = load_pack(tmp_path / "harnesses", "demo")
+    assert pack.prompt == "" and pack.prompt_path is None
 
 
 # -- manifest validation ------------------------------------------------------
+
+_V1 = 'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "pi"\n'
 
 
 @pytest.mark.parametrize(
     "body, fragment",
     [
-        ('format = "v2"\nname = "demo"\nfamily = "pi"\n', "format"),
-        ('format = "pi-glink-harness/v1"\nname = "other"\nfamily = "pi"\n', "目录名"),
-        ('format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "nope"\n', "family"),
+        # 退役的 v1 清单：不迁移，直接拒绝。
+        (_V1, "旧格式不再可读"),
+        (pi_manifest().replace("pi-glink-harness/v2", "v2"), "format"),
+        (pi_manifest().replace('name = "demo"', 'name = "other"'), "目录名"),
+        (pi_manifest().replace('family = "pi"', 'family = "nope"'), "family"),
+        (pi_manifest() + "nope = 1\n", "未知键"),
+        (pi_manifest(capabilities="nope = 1\n"), "未知键"),
+        # 缺 [entry] / [capabilities] / [image] 表。
+        (pi_manifest().replace('\n[entry]\ncommand = ["pi"]\n', ""), "[entry]"),
+        (pi_manifest(image=""), "[image]"),
         (
-            'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "pi"\nnope = 1\n',
-            "未知键",
+            'format = "pi-glink-harness/v2"\nname = "demo"\nfamily = "pi"\n'
+            '\n[entry]\ncommand = ["pi"]\n' + PI_IMAGE,
+            "[capabilities]",
         ),
+        # resume 必须显式声明为 bool。
+        (pi_manifest().replace("resume = true\n", ""), "capabilities.resume"),
+        (pi_manifest().replace("resume = true", 'resume = "yes"'), "capabilities.resume"),
+        # pi 的 entry 只命名内核可执行名。
+        (pi_manifest().replace('["pi"]', '["pi", "--mode", "rpc"]'), "一项"),
+        (acp_manifest(command="[]"), "entry.command"),
+        (acp_manifest(command='[""]'), "entry.command"),
+        # ACP 专属能力写进 pi 包即拒绝（不再按族名静默忽略）。
+        (pi_manifest(capabilities='subagent_dispatch = "async"\n'), 'family="acp"'),
+        (pi_manifest(capabilities='child_progress = "dsh-session-zstd"\n'), 'family="acp"'),
+        (pi_manifest(capabilities='permission_allow = ["read"]\n'), 'family="acp"'),
         (
-            'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "pi"\n'
-            'command = ["pi"]\n',
-            "只对 family=\"acp\"",
-        ),
-        (
-            'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "acp"\n',
-            "command",
-        ),
-        (
-            'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "acp"\n'
-            'command = ["fake"]\n',
-            "package",
-        ),
-        (
-            'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "acp"\n'
-            'command = ["fake"]\npackage = "p"\nversion = "latest"\n',
-            "精确版本",
-        ),
-        (
-            'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "acp"\n'
-            'command = ["fake"]\npackage = "p"\nversion = "1.0.0"\n'
-            'permission_allow = ["everything"]\n',
+            acp_manifest(capabilities='resume = true\npermission_allow = ["everything"]\n'),
             "permission_allow",
         ),
         (
-            'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "acp"\n'
-            'command = ["fake"]\npackage = "p"\nversion = "1.0.0"\n'
-            'subagent_dispatch = "background"\n',
+            acp_manifest(capabilities='resume = true\nsubagent_dispatch = "background"\n'),
             "subagent_dispatch",
         ),
         (
-            'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "pi"\n'
-            'subagent_dispatch = "async"\n',
-            "只对 family=\"acp\"",
+            acp_manifest(capabilities='resume = true\nchild_progress = "tail-the-log"\n'),
+            "child_progress",
         ),
+        # 镜像需求：target 必须属于本族、版本必须精确、ARG 名规范、角色合族。
+        (acp_manifest(image=PI_IMAGE), "image.target"),
+        (acp_manifest(image=ACP_IMAGE.replace('"1.0.0"', '"latest"')), "精确版本"),
+        (acp_manifest(image=ACP_IMAGE.replace('"1.0.0"', '"^1.0.0"')), "精确版本"),
+        (acp_manifest(image=ACP_IMAGE.replace('"P_VERSION"', '"P_TAG"')), "*_VERSION"),
+        (acp_manifest(image=ACP_IMAGE.replace('"agent"', '"kernel"')), "role"),
+        (acp_manifest(image=ACP_IMAGE.replace('role = "agent"\n', 'role = "agent"\nsha = "x"\n')), "未知键"),
+        (acp_manifest(image='\n[image]\ntarget = "acp-worker"\n'), "[[image.packages]]"),
+        (
+            acp_manifest(
+                image=ACP_IMAGE
+                + '\n[[image.packages]]\narg = "P_VERSION"\npackage = "q"\n'
+                'version = "1.0.0"\nrole = "agent"\n'
+            ),
+            "重复",
+        ),
+        (acp_manifest(image=ACP_IMAGE.replace('target = "acp-worker"', 'target = "acp-worker"\ncpu_count = 0')), "image.cpu_count"),
+        (pi_manifest(image=PI_IMAGE.replace('"kernel"', '"pi-package"')), "kernel"),
     ],
 )
 def test_a_manifest_that_is_not_exactly_one_pack_is_refused(
@@ -163,17 +235,16 @@ def test_the_shipped_manifests_parse_as_toml_and_validate(tmp_path: Path) -> Non
         document = tomllib.loads(
             (REPO_PACKS / name / "harness.toml").read_text(encoding="utf-8")
         )
-        assert document["format"] == "pi-glink-harness/v1"
+        assert document["format"] == "pi-glink-harness/v2"
         assert document["name"] == name
+        # resume 在每个随仓库发布的包里都是显式事实，不是默认值。
+        assert isinstance(document["capabilities"]["resume"], bool)
+        assert load_pack(REPO_PACKS, name).document == document
 
 
 def test_an_oversized_manifest_is_refused(tmp_path: Path) -> None:
     padding = "# " + "x" * (17 * 1024) + "\n"
-    write_manifest(
-        tmp_path,
-        "demo",
-        'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "pi"\n' + padding,
-    )
+    write_manifest(tmp_path, "demo", pi_manifest() + padding)
     with pytest.raises(HarnessPackError, match="字节"):
         load_pack(tmp_path / "harnesses", "demo")
 
@@ -181,10 +252,7 @@ def test_an_oversized_manifest_is_refused(tmp_path: Path) -> None:
 def test_symlinked_pack_entries_are_not_repository_content(tmp_path: Path) -> None:
     real = tmp_path / "elsewhere"
     real.mkdir()
-    (real / "harness.toml").write_text(
-        'format = "pi-glink-harness/v1"\nname = "linked"\nfamily = "pi"\n',
-        encoding="utf-8",
-    )
+    (real / "harness.toml").write_text(pi_manifest("linked"), encoding="utf-8")
     packs = tmp_path / "harnesses"
     packs.mkdir()
     os.symlink(real, packs / "linked")
@@ -197,50 +265,46 @@ def test_an_acp_pack_may_carry_session_config_and_permission_allow(tmp_path: Pat
     write_manifest(
         tmp_path,
         "demo",
-        'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "acp"\n'
-        'command = ["fake", "--acp"]\npackage = "demo-package"\nversion = "1.2.3"\n'
-        '\npermission_allow = ["allow_once", "read"]\n'
-        '\n[session_config]\nmode = "agent"\n',
+        acp_manifest(
+            command='["fake", "--acp"]',
+            capabilities=(
+                'resume = true\npermission_allow = ["allow_once", "read"]\n'
+                '\n[capabilities.session_config]\nmode = "agent"\n'
+            ),
+        ),
     )
     pack = load_pack(tmp_path / "harnesses", "demo")
-    assert pack.session_config == (("mode", "agent"),)
-    assert pack.permission_allow == ("allow_once", "read")
+    assert pack.capabilities.session_config == (("mode", "agent"),)
+    assert pack.capabilities.permission_allow == ("allow_once", "read")
+    assert pack.command_line() == "fake --acp"
 
 
 def test_an_acp_pack_declares_its_subagent_dispatch_mode(tmp_path: Path) -> None:
     write_manifest(
         tmp_path,
         "demo",
-        'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "acp"\n'
-        'command = ["fake"]\npackage = "demo-package"\nversion = "1.2.3"\n'
-        'subagent_dispatch = "async"\n',
+        acp_manifest(capabilities='resume = true\nsubagent_dispatch = "async"\n'),
     )
     pack = load_pack(tmp_path / "harnesses", "demo")
-    assert pack.subagent_dispatch == "async"
+    assert pack.capabilities.subagent_dispatch == "async"
     config = build_config(
         build_values(tmp_path, tmp_path / "harnesses", PI_GLINK_HARNESS="demo"), REPO_ROOT
     )
-    assert config.acp_subagent_dispatch == "async"
+    # 运行期直接引用包对象，配置里不再有抄来的 acp_* 字段。
+    assert config.pack == pack
+    assert config.pack.capabilities.subagent_dispatch == "async"
+    assert not hasattr(config, "acp_subagent_dispatch")
 
 
 def test_an_empty_home_overlay_directory_is_a_directory_not_a_failure(tmp_path: Path) -> None:
-    pack_dir = write_manifest(
-        tmp_path,
-        "demo",
-        'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "acp"\n'
-        'command = ["fake"]\npackage = "p"\nversion = "1.0.0"\n',
-    )
+    pack_dir = write_manifest(tmp_path, "demo", acp_manifest())
     (pack_dir / "home").mkdir()
     pack = load_pack(tmp_path / "harnesses", "demo")
     assert pack.home == pack_dir / "home"
 
 
 def test_a_home_overlay_on_a_pi_pack_is_refused(tmp_path: Path) -> None:
-    pack_dir = write_manifest(
-        tmp_path,
-        "demo",
-        'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "pi"\n',
-    )
+    pack_dir = write_manifest(tmp_path, "demo", pi_manifest())
     (pack_dir / "home").mkdir()
     with pytest.raises(HarnessPackError, match="home/"):
         load_pack(tmp_path / "harnesses", "demo")
@@ -253,10 +317,13 @@ def test_the_selected_pack_supplies_family_capabilities_and_overlay(tmp_path: Pa
     pack_dir = write_manifest(
         tmp_path,
         "demo",
-        'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "acp"\n'
-        'command = ["fake", "--acp"]\npackage = "p"\nversion = "1.0.0"\n'
-        '\npermission_allow = ["allow_once"]\n'
-        '\n[session_config]\nmode = "agent"\n',
+        acp_manifest(
+            command='["fake", "--acp"]',
+            capabilities=(
+                'resume = true\npermission_allow = ["allow_once"]\n'
+                '\n[capabilities.session_config]\nmode = "agent"\n'
+            ),
+        ),
     )
     (pack_dir / "capabilities.md").write_text("- 一条能力。\n", encoding="utf-8")
     (pack_dir / "home").mkdir()
@@ -266,12 +333,21 @@ def test_the_selected_pack_supplies_family_capabilities_and_overlay(tmp_path: Pa
         REPO_ROOT,
     )
     assert config.harness == "acp" and config.harness_pack == "demo"
-    assert config.acp_command == ("fake", "--acp")
-    assert config.acp_session_config == (("mode", "agent"),)
-    assert config.acp_permission_allow == ("allow_once",)
-    assert config.pack_capabilities == "- 一条能力。"
-    assert config.pack_home == pack_dir / "home"
+    assert config.pack.command == ("fake", "--acp")
+    assert config.pack.capabilities.session_config == (("mode", "agent"),)
+    assert config.pack.capabilities.permission_allow == ("allow_once",)
+    assert config.pack.prompt == "- 一条能力。"
+    assert config.pack.home == pack_dir / "home"
     assert config.agent_config_dir == pack_dir
+    for retired in (
+        "acp_command",
+        "acp_session_config",
+        "acp_permission_allow",
+        "acp_subagent_dispatch",
+        "pack_capabilities",
+        "pack_home",
+    ):
+        assert not hasattr(config, retired), retired
 
 
 # -- the ACP HOME overlay -----------------------------------------------------
@@ -281,12 +357,7 @@ def make_overlay_config(
     tmp_path: Path, *, credential_source: Path | None = None
 ) -> tuple[object, Path]:
     """A temporary ACP pack with a ``home/`` overlay; returns (config, pack home)."""
-    pack_dir = write_manifest(
-        tmp_path,
-        "demo",
-        'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "acp"\n'
-        'command = ["fake"]\npackage = "p"\nversion = "1.0.0"\n',
-    )
+    pack_dir = write_manifest(tmp_path, "demo", acp_manifest())
     home = pack_dir / "home"
     home.mkdir()
     values = build_values(tmp_path, tmp_path / "harnesses", PI_GLINK_HARNESS="demo")
@@ -327,12 +398,7 @@ def test_the_overlay_lands_first_and_credentials_win_the_same_path(tmp_path: Pat
 def test_a_run_record_carries_the_pack_and_a_foreign_pack_cannot_continue(
     tmp_path: Path,
 ) -> None:
-    write_manifest(
-        tmp_path,
-        "demo",
-        'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "acp"\n'
-        'command = ["fake"]\npackage = "p"\nversion = "1.0.0"\n',
-    )
+    write_manifest(tmp_path, "demo", acp_manifest())
     config = build_config(
         build_values(tmp_path, tmp_path / "harnesses", PI_GLINK_HARNESS="demo"),
         REPO_ROOT,
@@ -365,3 +431,42 @@ def test_a_run_record_carries_the_pack_and_a_foreign_pack_cannot_continue(
     with pytest.raises(FollowupUnavailable) as excinfo:
         manager._admission.resumable_parent(None, "foreign-run", manager._admission.spec(None))  # noqa: SLF001
     assert excinfo.value.code == "session_unavailable"
+
+
+def test_a_pack_that_declares_no_resume_refuses_every_followup(tmp_path: Path) -> None:
+    """``capabilities.resume = false``: admission refuses before reading the parent.
+
+    The same pack and a finished parent would otherwise be continued (the
+    adjacent legal input below); the refusal comes from the declared capability,
+    not from the pack's name or the parent's state.
+    """
+    write_manifest(
+        tmp_path, "demo", acp_manifest(capabilities="resume = false\n")
+    )
+    config = build_config(
+        build_values(tmp_path, tmp_path / "harnesses", PI_GLINK_HARNESS="demo"),
+        REPO_ROOT,
+    )
+    assert config.pack.capabilities.resume is False
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    store.create(
+        "题目",
+        run_id="parent-run",
+        spec=RunSpec(family="acp", pack="demo", executor="inproc"),
+    )
+    store.update("parent-run", status=FINISHED)
+    admission = manager._admission  # noqa: SLF001
+    with pytest.raises(FollowupUnavailable) as excinfo:
+        admission.resumable_parent(None, "parent-run", admission.spec(None))
+    assert excinfo.value.code == "session_unavailable"
+
+    # 相邻合法输入：同一父 run、声明 resume = true 的同名包可以续接。
+    write_manifest(tmp_path, "demo", acp_manifest(capabilities="resume = true\n"))
+    resumable = build_config(
+        build_values(tmp_path, tmp_path / "harnesses", PI_GLINK_HARNESS="demo"),
+        REPO_ROOT,
+    )
+    admission = RunManager(resumable, EventBus(), store)._admission  # noqa: SLF001
+    parent = admission.resumable_parent(None, "parent-run", admission.spec(None))
+    assert parent is not None

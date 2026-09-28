@@ -911,8 +911,8 @@ def test_the_allowlist_prefers_the_narrowest_allow_option(tmp_path: Path) -> Non
         tmp_path,
         config_overrides={
             "PI_GLINK_HARNESS": "acp",
-            "PI_GLINK_ACP_COMMAND": "agent --acp",
-            "PI_GLINK_ACP_PERMISSION_ALLOW": "allow_once,allow_always",
+            "TEST_ACP_COMMAND": "agent --acp",
+            "TEST_ACP_PERMISSION_ALLOW": "allow_once,allow_always",
         },
     )
     # The agent lists the durable allow first; the selection must still be

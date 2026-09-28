@@ -230,29 +230,11 @@ def runner_kernel_imports(relative: Path, text: str) -> list[str]:
     return violations
 
 
-def worker_versions(text: str) -> tuple[str, str]:
+def worker_node_tag(text: str) -> str:
     node = re.search(r"^FROM\s+(node:\d+\.\d+\.\d+-[\w.-]+)(?:@sha256:[a-f0-9]{64})?\s*$", text, re.MULTILINE)
-    pi = re.search(r"^ARG\s+PI_VERSION=(\d+\.\d+\.\d+(?:-[\w.-]+)?)\s*$", text, re.MULTILINE)
-    if node is None or pi is None:
-        raise ValueError("worker Dockerfile needs exact Node and pi versions")
-    return node.group(1), pi.group(1)
-
-
-def worker_package_versions(text: str) -> tuple[str, str]:
-    """The exact versions of the prebaked pi packages (both worker images).
-
-    The repository declares both packages in ``harnesses/pi/settings.json`` (the runtime
-    source for the in-process face) and both images install the same pins into
-    ``/opt/pi-packages``. A floating or missing declaration is a failure, not a
-    warning.
-    """
-    parsed = []
-    for name in ("PI_WEB_ACCESS_VERSION", "PI_SUBAGENTS_VERSION"):
-        match = re.search(rf"^ARG\s+{name}=(\d+\.\d+\.\d+(?:-[\w.-]+)?)\s*$", text, re.MULTILINE)
-        if match is None:
-            raise ValueError(f"worker Dockerfile needs an exact {name}")
-        parsed.append(match.group(1))
-    return parsed[0], parsed[1]
+    if node is None:
+        raise ValueError("worker Dockerfile needs an exact Node tag")
+    return node.group(1)
 
 
 def guard_packages(text: str) -> list[str]:
@@ -263,20 +245,43 @@ def guard_packages(text: str) -> list[str]:
     return match.group(1).split()
 
 
-def template_package_pins() -> dict[str, str]:
-    """``harnesses/pi/settings.json`` npm packages as ``name -> declared spec``."""
-    settings = json.loads((ROOT / "harnesses" / "pi" / "settings.json").read_text(encoding="utf-8"))
-    pins: dict[str, str] = {}
-    for entry in settings["packages"]:
-        source = entry if isinstance(entry, str) else entry["source"]
-        if not source.startswith("npm:"):
-            continue
-        spec = source[4:]
-        if spec.startswith("@"):
-            raise ValueError("scoped template packages need an explicit parser")
-        name, _at, version = spec.partition("@")
-        pins[name] = version
-    return pins
+def pack_artifacts_module():
+    """``scripts/generate-pack-artifacts.py`` loaded by path (it is not a package)."""
+    import importlib.util
+    import sys
+
+    path = ROOT / "scripts" / "generate-pack-artifacts.py"
+    spec = importlib.util.spec_from_file_location("generate_pack_artifacts", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(spec.name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+_ARTIFACT_SOURCES = (
+    "docker/Dockerfile.worker",
+    "docker/e2b/Dockerfile.e2b",
+    "docker/Dockerfile.acp-worker",
+    "docker/e2b/Dockerfile.acp-e2b",
+    "docker/e2b/templates.json",
+    "harnesses/pi/settings.json",
+)
+
+
+def synthetic_repo(tmp_path: Path) -> Path:
+    """A copy of the manifests and generated artifacts in a temporary directory."""
+    import shutil
+
+    root = tmp_path / "repo"
+    for relative in _ARTIFACT_SOURCES:
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, root / relative)
+    for manifest in (ROOT / "harnesses").glob("*/harness.toml"):
+        target = root / manifest.relative_to(ROOT)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(manifest, target)
+    return root
 
 
 def test_no_runtime_credentials_or_data_are_tracked() -> None:
@@ -366,10 +371,14 @@ def test_runner_rule_allows_the_abstractions() -> None:
     assert runner_kernel_imports(_RUNNER, text) == []
 
 
-def test_worker_version_declarations_are_exact_and_equal() -> None:
-    docker = worker_versions((ROOT / "docker/Dockerfile.worker").read_text())
-    e2b = worker_versions((ROOT / "docker/e2b/Dockerfile.e2b").read_text())
-    assert docker == e2b, "Docker/E2B version declarations diverged; this does not check deployed images"
+def test_worker_node_tags_are_exact_and_equal() -> None:
+    """Node 基础镜像不是包的属性：四个 Dockerfile 手写同一精确 tag。"""
+    tags = {
+        relative: worker_node_tag((ROOT / relative).read_text())
+        for relative in _ARTIFACT_SOURCES
+        if relative.endswith(("Dockerfile.worker", "Dockerfile.e2b", "Dockerfile.acp-worker", "Dockerfile.acp-e2b"))
+    }
+    assert len(set(tags.values())) == 1, f"Node tag diverged: {tags}; this does not check deployed images"
 
 
 @pytest.mark.parametrize("name", [".env", ".env.backup", "harnesses/pi/auth.json", "harnesses/pi/web-search.json", "harnesses/pi/models-store.json", "harnesses/pi/sessions/a.jsonl", "data/runs/a/meta.json"])
@@ -412,124 +421,131 @@ def test_public_extensions_comments_and_local_python_imports_are_allowed() -> No
 
 
 @pytest.mark.parametrize("text", [
-    "FROM node:24-bookworm-slim\nARG PI_VERSION=0.86.1\n",
-    "FROM node:24.21.0-bookworm-slim\nARG PI_VERSION=latest\n",
-    "FROM node:24.21.0-bookworm-slim\n",
+    "FROM node:24-bookworm-slim\n",
+    "FROM node:latest\n",
+    "ARG PI_VERSION=0.86.1\n",
 ])
-def test_floating_or_missing_worker_versions_fail(text: str) -> None:
+def test_floating_or_missing_worker_node_tag_fails(text: str) -> None:
     with pytest.raises(ValueError, match="exact"):
-        worker_versions(text)
+        worker_node_tag(text)
 
 
-def test_worker_version_comparison_detects_each_runtime_change() -> None:
-    original = "FROM node:24.21.0-bookworm-slim\nARG PI_VERSION=0.86.1\n"
-    assert worker_versions(original) != worker_versions(original.replace("24.21.0", "24.22.0"))
-    assert worker_versions(original) != worker_versions(original.replace("0.86.1", "0.87.0"))
+def test_generated_artifacts_match_the_pack_manifests() -> None:
+    """清单是唯一真源：Dockerfile ARG、templates.json 与 settings.json 必须等于生成结果。
 
-
-def test_prebaked_package_versions_are_exact_and_equal() -> None:
-    docker = worker_package_versions((ROOT / "docker/Dockerfile.worker").read_text())
-    e2b = worker_package_versions((ROOT / "docker/e2b/Dockerfile.e2b").read_text())
-    assert docker == e2b, "Docker/E2B prebaked package versions diverged"
-
-
-#: The ACP worker images' pinned upstream packages, per harness pack:
-#: ``pack -> (image ARG, npm package)``. The pack manifest carries the same
-#: pair; this mapping is the test's independent oracle, not a third source.
-ACP_PACK_PINS = {
-    "dsh": ("DSH_VERSION", "@deepseek-ai/dsh"),
-    "codex": ("CODEX_ACP_VERSION", "@agentclientprotocol/codex-acp"),
-    "opencode": ("OPENCODE_AI_VERSION", "opencode-ai"),
-}
-
-
-def acp_image_version(text: str, arg: str) -> str:
-    """One exact version ARG from an ACP Dockerfile (floating forms fail)."""
-    match = re.search(rf"^ARG\s+{arg}=(\S+)\s*$", text, re.MULTILINE)
-    if match is None:
-        raise ValueError(f"ACP Dockerfile needs an exact {arg}")
-    value = match.group(1)
-    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[\w.]+)?", value):
-        raise ValueError(f"{arg} must be an exact version; got {value!r}")
-    return value
-
-
-def harness_pack_manifest(name: str) -> dict:
-    import tomllib
-
-    path = ROOT / "harnesses" / name / "harness.toml"
-    return tomllib.loads(path.read_text(encoding="utf-8"))
-
-
-def test_acp_pack_pins_match_both_image_build_arguments() -> None:
-    """每个 ACP 包的 package/version 与两个镜像的同名 ARG 逐字一致。
-
-    GLINK-ARCH-6 把命令与上游 pin 收进包清单；镜像 ARG 仍是构建事实，两者
-    漂移会让包声明的版本与镜像实际装的版本不一致（或反之）。
+    修复方式是改 harnesses/<包>/harness.toml 后运行
+    ``python3 scripts/generate-pack-artifacts.py``，不是手改产物。
     """
-    docker = (ROOT / "docker" / "Dockerfile.acp-worker").read_text(encoding="utf-8")
-    e2b = (ROOT / "docker" / "e2b" / "Dockerfile.acp-e2b").read_text(encoding="utf-8")
-    for pack, (arg, package) in ACP_PACK_PINS.items():
-        manifest = harness_pack_manifest(pack)
-        assert manifest["name"] == pack and manifest["family"] == "acp"
-        assert manifest["package"] == package, pack
-        assert manifest["version"] == acp_image_version(docker, arg), pack
-        assert manifest["version"] == acp_image_version(e2b, arg), pack
-        assert f'"{package}@${{{arg}}}"' in docker, pack
-        assert f'"{package}@${{{arg}}}"' in e2b, pack
-        assert manifest["command"], f"{pack} 清单必须声明 agent argv"
+    module = pack_artifacts_module()
+    outputs = module.render_all(ROOT)
+    assert set(outputs) == set(_ARTIFACT_SOURCES)
+    assert module.drift(ROOT, outputs) == []
 
 
-def test_a_floating_acp_image_argument_fails_the_pin_rule() -> None:
-    with pytest.raises(ValueError, match="exact"):
-        acp_image_version("ARG DSH_VERSION=latest\n", "DSH_VERSION")
-    with pytest.raises(ValueError, match="exact"):
-        acp_image_version("ARG DSH_VERSION=0.1\n", "DSH_VERSION")
+def test_every_manifest_package_is_installed_from_its_build_argument() -> None:
+    """生成器只写 ARG 值；每个镜像的安装命令必须用 ``<package>@${ARG}`` 引用它。"""
+    module = pack_artifacts_module()
+    packs = module.load_packs(ROOT / "harnesses")
+    for pack in packs:
+        build = module.IMAGES[pack.image.target]
+        for relative in build.dockerfiles:
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            for item in pack.image.packages:
+                assert f"{item.package}@${{{item.arg}}}" in text, (pack.name, relative, item.arg)
 
 
-def test_template_package_pin_matches_the_image_build_argument() -> None:
-    """镜像与宿主声明来自同一份 pin：模板的 npm 版本必须等于对应镜像 ARG。"""
-    docker_web, docker_subagents = worker_package_versions(
-        (ROOT / "docker/Dockerfile.worker").read_text()
+def test_templates_json_carries_the_e2b_parameters_the_config_defaults_name() -> None:
+    from pi_glink import config
+
+    templates = json.loads((ROOT / "docker/e2b/templates.json").read_text(encoding="utf-8"))["templates"]
+    assert templates["pi-worker"]["alias"] == config._DEFAULT_E2B_TEMPLATE
+    assert templates["acp-worker"]["alias"] == config._DEFAULT_ACP_E2B_TEMPLATE
+    assert "--dockerfile docker/e2b/Dockerfile.acp-e2b" in templates["acp-worker"]["build_command"]
+
+
+def test_generator_detects_a_hand_edited_build_argument(tmp_path: Path) -> None:
+    module = pack_artifacts_module()
+    root = synthetic_repo(tmp_path)
+    assert module.drift(root, module.render_all(root)) == []
+    dockerfile = root / "docker/e2b/Dockerfile.acp-e2b"
+    dockerfile.write_text(
+        dockerfile.read_text(encoding="utf-8").replace("ARG DSH_VERSION=0.1.5-rc.3", "ARG DSH_VERSION=9.9.9"),
+        encoding="utf-8",
     )
-    e2b_web, e2b_subagents = worker_package_versions(
-        (ROOT / "docker/e2b/Dockerfile.e2b").read_text()
+    assert module.drift(root, module.render_all(root)) == ["docker/e2b/Dockerfile.acp-e2b"]
+
+
+def test_generator_detects_a_manifest_bump_until_regenerated(tmp_path: Path) -> None:
+    module = pack_artifacts_module()
+    root = synthetic_repo(tmp_path)
+    manifest = root / "harnesses/pi/harness.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace('version = "0.31.0"', 'version = "0.32.0"'),
+        encoding="utf-8",
     )
-    pins = template_package_pins()
-    # GLINK-SUB-02：模板从“只加载 pi-web-access”改为同时加载 pi-subagents
-    # （前台守卫扩展兜住 async）；两个 pin 都必须与镜像 ARG 对齐。
-    assert set(pins) == {"pi-web-access", "pi-subagents"}
-    assert pins["pi-web-access"] == docker_web == e2b_web, "pi-web-access pin 与镜像 ARG 漂移"
-    assert pins["pi-subagents"] == docker_subagents == e2b_subagents, "pi-subagents pin 与镜像 ARG 漂移"
+    outputs = module.render_all(root)
+    assert set(module.drift(root, outputs)) == {
+        "docker/Dockerfile.worker",
+        "docker/e2b/Dockerfile.e2b",
+        "docker/e2b/templates.json",
+        "harnesses/pi/settings.json",
+    }
+    assert "ARG PI_WEB_ACCESS_VERSION=0.32.0\n" in outputs["docker/Dockerfile.worker"]
+    assert "npm:pi-web-access@0.32.0" in outputs["harnesses/pi/settings.json"]
+
+
+def test_generator_refuses_an_undeclared_version_pin(tmp_path: Path) -> None:
+    module = pack_artifacts_module()
+    root = synthetic_repo(tmp_path)
+    dockerfile = root / "docker/Dockerfile.acp-worker"
+    dockerfile.write_text(
+        dockerfile.read_text(encoding="utf-8") + "ARG EXTRA_AGENT_VERSION=1.0.0\n", encoding="utf-8"
+    )
+    with pytest.raises(module.GenerationError, match="EXTRA_AGENT_VERSION"):
+        module.render_all(root)
+
+
+def test_generator_refuses_a_missing_or_duplicated_build_argument(tmp_path: Path) -> None:
+    module = pack_artifacts_module()
+    root = synthetic_repo(tmp_path)
+    dockerfile = root / "docker/e2b/Dockerfile.e2b"
+    original = dockerfile.read_text(encoding="utf-8")
+    dockerfile.write_text(original.replace("ARG PI_SUBAGENTS_VERSION=0.40.0\n", ""), encoding="utf-8")
+    with pytest.raises(module.GenerationError, match="PI_SUBAGENTS_VERSION"):
+        module.render_all(root)
+    dockerfile.write_text(original + "ARG PI_SUBAGENTS_VERSION=0.40.0\n", encoding="utf-8")
+    with pytest.raises(module.GenerationError, match="恰好出现一次"):
+        module.render_all(root)
+
+
+def test_generator_refuses_conflicting_declarations_in_one_image(tmp_path: Path) -> None:
+    module = pack_artifacts_module()
+    root = synthetic_repo(tmp_path)
+    manifest = root / "harnesses/codex/harness.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        + '\n[[image.packages]]\narg = "DSH_VERSION"\npackage = "@deepseek-ai/dsh"\n'
+        'version = "0.2.0"\nrole = "agent"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(module.GenerationError, match="冲突"):
+        module.render_all(root)
 
 
 def test_worker_dockerfiles_install_and_guard_the_prebaked_packages() -> None:
-    """两个镜像都要按 ARG 安装，并用同一个守卫脚本验证关键包存在。
+    """两个镜像都预装到同一路径，并用同一个守卫脚本验证关键包存在。
 
-    守卫脚本的包列表与 ``CONTAINER_LOCAL_PACKAGES`` 的完整对应关系（含 pi-subagents
+    按 ARG 安装由 :func:`test_every_manifest_package_is_installed_from_its_build_argument`
+    卡住；守卫脚本的包列表与 pi 包清单预装包名的完整对应关系（含 pi-subagents
     尚未被守卫覆盖的已知缺口）在 tests/test_kernel_docker_env.py 卡住。
     """
     for relative in ("docker/Dockerfile.worker", "docker/e2b/Dockerfile.e2b"):
         text = (ROOT / relative).read_text(encoding="utf-8")
-        assert "pi-web-access@${PI_WEB_ACCESS_VERSION}" in text, relative
-        assert "pi-subagents@${PI_SUBAGENTS_VERSION}" in text, relative
         assert "/opt/pi-packages" in text, relative
         # 与 pi 自己的 managed install 一致：不自动装 @earendil-works/pi-* peer。
         assert "npm install --prefix /opt/pi-packages --legacy-peer-deps" in text, relative
         assert "pi-web-access" in set(guard_packages(text)), relative
         assert "exec \"$@\"" in text, relative
-
-
-@pytest.mark.parametrize("text", [
-    "ARG PI_SUBAGENTS_VERSION=0.40.0\n",
-    "ARG PI_WEB_ACCESS_VERSION=0.31.0\n",
-    "ARG PI_WEB_ACCESS_VERSION=^0.31.0\nARG PI_SUBAGENTS_VERSION=0.40.0\n",
-    "ARG PI_WEB_ACCESS_VERSION=0.31.0\nARG PI_SUBAGENTS_VERSION=latest\n",
-    "ARG PI_WEB_ACCESS_VERSION=0.31.0\nARG PI_SUBAGENTS_VERSION=v0.40.0\n",
-])
-def test_floating_or_missing_prebaked_package_versions_fail(text: str) -> None:
-    with pytest.raises(ValueError, match="exact"):
-        worker_package_versions(text)
 
 
 def test_guard_package_list_is_not_optional() -> None:

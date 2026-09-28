@@ -23,6 +23,8 @@
 # docker/Dockerfile.worker 同一 tag：容器内 `node -v` 实测 v24.21.0。
 FROM node:24.21.0-bookworm-slim
 
+# 以下 *_VERSION 由 scripts/generate-pack-artifacts.py 从 harnesses/{dsh,codex,opencode}/harness.toml
+# 的 [[image.packages]] 生成（清单是唯一真源，手改会被 tests/test_repository_boundaries.py 判为漂移）。
 # @deepseek-ai/dsh：M2 实测版本（docs/acp-integration-notes.md §4.1）。
 ARG DSH_VERSION=0.1.5-rc.3
 # codex-acp：旧包已被 npm 标记 deprecated（"replaced by

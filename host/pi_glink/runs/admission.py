@@ -257,7 +257,8 @@ class RunAdmission:
         otherwise the follow-up is ``session_unavailable`` whatever the
         parent's status — a foreign parent is still ``unknown_run`` first, so
         existence is not disclosed across tenants. The family-specific facts
-        (ACP capability matrix, state root) follow in
+        (the pack's declared ``capabilities.resume``, then the ACP negotiated
+        capability matrix and state root) follow in
         :meth:`HarnessFamily.check_continuation`.
 
         One admission calls this twice: outside the lock, to fail fast before
@@ -273,6 +274,10 @@ class RunAdmission:
         if parent.spec.pack != spec.pack:
             # 同族不同包（例如 dsh → opencode）的会话不能续接：agent 自己的状态根
             # 与续接能力都是按包声明的，fail-closed 胜过猜一个映射。
+            raise FollowupUnavailable("session_unavailable")
+        if not self.config.pack.capabilities.resume:
+            # 包清单的能力矩阵声明本包会话不可续接（capabilities.resume=false）：
+            # 在读取父会话之前就拒绝，不交给族代码去猜。
             raise FollowupUnavailable("session_unavailable")
         if not parent.is_terminal:
             raise FollowupUnavailable("run_busy")

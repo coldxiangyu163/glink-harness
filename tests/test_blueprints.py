@@ -480,7 +480,7 @@ def test_unknown_and_malformed_blueprints_are_refused_before_any_run(
     if harness == "acp":
         overrides = {
             "PI_GLINK_HARNESS": "acp",
-            "PI_GLINK_ACP_COMMAND": acp_command(tmp_path, {}),
+            "TEST_ACP_COMMAND": acp_command(tmp_path, {}),
         }
     config = make_config(tmp_path, **overrides)
     store = RunStore(config.data_root / "runs")
@@ -530,7 +530,7 @@ def test_acp_blueprint_run_delivers_the_render_in_the_leading_block(tmp_path: Pa
     config = make_config(
         tmp_path,
         PI_GLINK_HARNESS="acp",
-        PI_GLINK_ACP_COMMAND=acp_command(
+        TEST_ACP_COMMAND=acp_command(
             tmp_path, {"FAKE_ACP_LOG": str(log), "FAKE_ACP_WRITE_REPORT": True}
         ),
     )
@@ -558,7 +558,7 @@ def test_acp_run_without_a_blueprint_delivers_only_the_working_agreement(tmp_pat
     config = make_config(
         tmp_path,
         PI_GLINK_HARNESS="acp",
-        PI_GLINK_ACP_COMMAND=acp_command(tmp_path, {"FAKE_ACP_LOG": str(log)}),
+        TEST_ACP_COMMAND=acp_command(tmp_path, {"FAKE_ACP_LOG": str(log)}),
     )
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)

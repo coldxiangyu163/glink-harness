@@ -1,7 +1,18 @@
 {
   "defaultThinkingLevel": "medium",
-  "packages": ["npm:pi-web-access@0.31.0", "npm:pi-subagents@0.40.0"],
+  "packages": [
+    "npm:pi-web-access@0.31.0",
+    "npm:pi-subagents@0.40.0"
+  ],
   "subagents": {
-    "watchdog": { "enabled": false, "main": { "enabled": false }, "children": { "enabled": false } }
+    "watchdog": {
+      "enabled": false,
+      "main": {
+        "enabled": false
+      },
+      "children": {
+        "enabled": false
+      }
+    }
   }
 }

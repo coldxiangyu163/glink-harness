@@ -65,7 +65,7 @@ SECRET = b"0123456789abcdef0123456789abcdef"
 def acp_command(
     tmp_path: Path, settings: Mapping[str, Any], *, name: str = "settings.json"
 ) -> str:
-    """The frozen ``PI_GLINK_ACP_COMMAND`` for one fake-agent configuration."""
+    """The frozen ``TEST_ACP_COMMAND`` for one fake-agent configuration."""
     path = tmp_path / name
     path.write_text(json.dumps(dict(settings), ensure_ascii=False), encoding="utf-8")
     return (
@@ -84,7 +84,7 @@ def make_config(
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "PI_GLINK_HARNESS": "acp",
-        "PI_GLINK_ACP_COMMAND": acp_command(tmp_path, settings or {}),
+        "TEST_ACP_COMMAND": acp_command(tmp_path, settings or {}),
     }
     values.update(overrides)
     apply_acp_pack(values, tmp_path)
@@ -196,7 +196,7 @@ def test_adapter_refuses_a_followup_the_agent_cannot_resume(tmp_path: Path) -> N
         sandbox=open_sandbox(
             "inproc", config=config, run_id=spec.run_id, workspace=spec.workspace
         ),
-        launch=Launch(argv=tuple(config.acp_command)),
+        launch=Launch(argv=tuple(config.pack.command)),
         on_frame=lambda _frame: None,
     )
     with pytest.raises(AcpError) as excinfo:

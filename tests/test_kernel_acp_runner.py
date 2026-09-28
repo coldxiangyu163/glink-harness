@@ -45,7 +45,7 @@ SESSION_ID = "fake-acp-session"
 
 
 def acp_command(tmp_path: Path, settings: Mapping[str, Any], *, name: str = "settings.json") -> str:
-    """The frozen ``PI_GLINK_ACP_COMMAND`` for one fake-agent configuration."""
+    """The frozen ``TEST_ACP_COMMAND`` for one fake-agent configuration."""
     path = tmp_path / name
     path.write_text(json.dumps(dict(settings), ensure_ascii=False), encoding="utf-8")
     return (
@@ -62,7 +62,7 @@ def make_config(tmp_path: Path, settings: Mapping[str, Any] | None = None, **ove
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "PI_GLINK_HARNESS": "acp",
-        "PI_GLINK_ACP_COMMAND": acp_command(tmp_path, settings or {}),
+        "TEST_ACP_COMMAND": acp_command(tmp_path, settings or {}),
     }
     values.update(overrides)
     apply_acp_pack(values, tmp_path)
@@ -603,7 +603,7 @@ def test_acp_permission_without_a_reject_option_is_cancelled(tmp_path: Path) -> 
 
 
 def test_acp_permission_allowlist_selects_the_narrow_allow_option(tmp_path: Path) -> None:
-    """``PI_GLINK_ACP_PERMISSION_ALLOW=allow_once`` is the smallest gate.
+    """``TEST_ACP_PERMISSION_ALLOW=allow_once`` is the smallest gate.
 
     dsh offers only ``allow-once``/``reject-once`` and its request carries no
     tool kind, so an option-kind allowlist is the narrowest policy that can
@@ -612,7 +612,7 @@ def test_acp_permission_allowlist_selects_the_narrow_allow_option(tmp_path: Path
     log = tmp_path / "agent.jsonl"
     settings = {"FAKE_ACP_PERMISSION": True, "FAKE_ACP_LOG": str(log)}
     _config, store, manager = build_manager(
-        tmp_path, settings, PI_GLINK_ACP_PERMISSION_ALLOW="allow_once"
+        tmp_path, settings, TEST_ACP_PERMISSION_ALLOW="allow_once"
     )
     record = manager.start("允许一次权限请求")
     final = manager.wait(record.run_id, timeout=30)
@@ -642,7 +642,7 @@ def test_acp_permission_allowlist_gates_on_the_tool_kind(tmp_path: Path) -> None
     _config, store, manager = build_manager(
         tmp_path,
         settings,
-        PI_GLINK_ACP_PERMISSION_ALLOW="allow_once,execute",
+        TEST_ACP_PERMISSION_ALLOW="allow_once,execute",
     )
     record = manager.start("工具类型不在白名单")
     final = manager.wait(record.run_id, timeout=30)
@@ -670,7 +670,7 @@ def test_acp_permission_allowlist_refuses_a_kindless_request_when_kinds_are_set(
     _config, store, manager = build_manager(
         tmp_path,
         settings,
-        PI_GLINK_ACP_PERMISSION_ALLOW="allow_once,execute",
+        TEST_ACP_PERMISSION_ALLOW="allow_once,execute",
     )
     record = manager.start("请求没有 tool kind")
     final = manager.wait(record.run_id, timeout=30)
@@ -706,7 +706,7 @@ def test_acp_permission_allowlist_resolves_the_kind_published_by_the_agent(
     _config, store, manager = build_manager(
         tmp_path,
         settings,
-        PI_GLINK_ACP_PERMISSION_ALLOW="allow_once,read,search,fetch,edit",
+        TEST_ACP_PERMISSION_ALLOW="allow_once,read,search,fetch,edit",
     )
     record = manager.start("通知里已经公布过 kind")
     final = manager.wait(record.run_id, timeout=30)
@@ -746,7 +746,7 @@ def test_acp_permission_allowlist_refuses_a_published_execute_kind(
     _config, store, manager = build_manager(
         tmp_path,
         settings,
-        PI_GLINK_ACP_PERMISSION_ALLOW="allow_once,read,search,fetch,edit",
+        TEST_ACP_PERMISSION_ALLOW="allow_once,read,search,fetch,edit",
     )
     record = manager.start("通知里公布的是 execute")
     final = manager.wait(record.run_id, timeout=30)
@@ -806,7 +806,7 @@ def test_acp_session_config_is_applied_and_recorded(tmp_path: Path) -> None:
         "FAKE_ACP_WRITE_REPORT": True,
     }
     _config, store, manager = build_manager(
-        tmp_path, settings, PI_GLINK_ACP_SESSION_CONFIG="mode=auto"
+        tmp_path, settings, TEST_ACP_SESSION_CONFIG="mode=auto"
     )
     record = manager.start("选择可写工作区的会话模式")
     final = manager.wait(record.run_id, timeout=30)
@@ -833,7 +833,7 @@ def test_acp_session_config_already_current_is_not_re_sent(tmp_path: Path) -> No
         "FAKE_ACP_WRITE_REPORT": True,
     }
     _config, _store, manager = build_manager(
-        tmp_path, settings, PI_GLINK_ACP_SESSION_CONFIG="reasoning_effort=high"
+        tmp_path, settings, TEST_ACP_SESSION_CONFIG="reasoning_effort=high"
     )
     record = manager.start("模式已经是目标值")
     final = manager.wait(record.run_id, timeout=30)
@@ -851,7 +851,7 @@ def test_acp_session_config_the_agent_does_not_advertise_fails_the_run(
         "FAKE_ACP_CONFIG_OPTIONS": CONFIG_OPTIONS,
     }
     _config, store, manager = build_manager(
-        tmp_path, settings, PI_GLINK_ACP_SESSION_CONFIG="mode=full-access"
+        tmp_path, settings, TEST_ACP_SESSION_CONFIG="mode=full-access"
     )
     record = manager.start("白名单外的模式值")
     final = manager.wait(record.run_id, timeout=30)
@@ -1071,7 +1071,7 @@ def test_acp_adapter_is_composed_through_the_same_contract(tmp_path: Path) -> No
     runtime = AcpRuntime(
         directory=tmp_path / "acp-agent",
         home=tmp_path / "acp-agent" / "home",
-        command=config.acp_command,
+        command=config.pack.command,
     )
     runtime.directory.mkdir(parents=True, exist_ok=True)
     runtime.home.mkdir(parents=True, exist_ok=True)
@@ -1110,7 +1110,7 @@ def test_acp_adapter_is_composed_through_the_same_contract(tmp_path: Path) -> No
         assert isinstance(adapter, ExecutionAdapter)
         assert isinstance(adapter, AcpExecutionAdapter)
         assert adapter.kind == executor and adapter.sandbox is sandbox
-        assert list(adapter.launch.argv) == list(config.acp_command)
+        assert list(adapter.launch.argv) == list(config.pack.command)
         expected_identity = (
             {"container": docker_env.container_name_for("contract-run")}
             if executor == "docker"

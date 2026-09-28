@@ -12,18 +12,16 @@
 #     默认 CMD 也能直接复验。
 #
 # 构建必须用 E2B CLI（历史事故：Python SDK 的 Template().from_dockerfile() 会
-# 丢多行 ENV，装出来的镜像残缺）：
-#   E2B_API_KEY=… npx -y @e2b/cli template create glink-acp-worker \
-#     --dockerfile docker/e2b/Dockerfile.acp-e2b --cpu-count 2 --memory-mb 4096
-#
-# 网络受限环境可覆盖基础源，仓库默认仍用官方源：
-#   … npx -y @e2b/cli template create glink-acp-worker --cpu-count 2 --memory-mb 4096 \
-#     --dockerfile docker/e2b/Dockerfile.acp-e2b   # 镜像内 ARG 见下
+# 丢多行 ENV，装出来的镜像残缺）。模板别名、CPU / 内存与完整 CLI 命令是生成产物，
+# 见 docker/e2b/templates.json 的 templates["acp-worker"].build_command
+# （E2B_API_KEY=… 前缀后执行）；网络受限环境可覆盖下方镜像源 ARG。
 #
 # Node 固定在官方镜像的精确版本 tag（与 docker/Dockerfile.worker、
 # docker/Dockerfile.acp-worker 同一 tag）：容器内 `node -v` 实测 v24.21.0。
 FROM node:24.21.0-bookworm-slim
 
+# 以下 *_VERSION 由 scripts/generate-pack-artifacts.py 从 harnesses/{dsh,codex,opencode}/harness.toml
+# 的 [[image.packages]] 生成（清单是唯一真源，手改会被 tests/test_repository_boundaries.py 判为漂移）。
 # @deepseek-ai/dsh：M2 实测版本（docs/acp-integration-notes.md §4.1）。
 ARG DSH_VERSION=0.1.5-rc.3
 # codex-acp：旧包已被 npm 标记 deprecated，M3a 起改用后继包并钉版

@@ -3,10 +3,10 @@
 
 The live probes take an arbitrary agent command line — often an npx-pinned
 version that deliberately differs from the image ARG. Since GLINK-ARCH-6 the
-host selects a harness by pack name and refuses the retired
-``PI_GLINK_ACP_COMMAND`` / ``PI_GLINK_ACP_SESSION_CONFIG`` /
-``PI_GLINK_ACP_PERMISSION_ALLOW`` variables, so a probe materializes the same
-facts as a temporary ``harness.toml`` and selects it with ``PI_GLINK_HARNESS``.
+host selects a harness by pack name only (the pack manifest is the single
+source of a harness's entry, capabilities and image pins), so a probe
+materializes the same facts as a temporary ``pi-glink-harness/v2``
+``harness.toml`` and selects it with ``PI_GLINK_HARNESS``.
 
 ``write_probe_pack`` returns the temporary harnesses root; callers set
 ``PI_GLINK_HARNESS=<name>`` and ``PI_GLINK_HARNESSES_DIR=<returned path>``.
@@ -38,20 +38,34 @@ def write_probe_pack(
     if not argv:
         raise ValueError("probe command must not be empty")
     lines = [
-        'format = "pi-glink-harness/v1"',
+        'format = "pi-glink-harness/v2"',
         f"name = {json.dumps(name)}",
         'family = "acp"',
+        "",
+        "[entry]",
         f"command = {json.dumps(argv)}",
-        f"package = {json.dumps(PROBE_PACKAGE)}",
-        f"version = {json.dumps(PROBE_VERSION)}",
+        "",
+        "[capabilities]",
+        "resume = true",
     ]
-    entries = parse_session_config(session_config)
-    if entries:
-        lines += ["", "[session_config]"]
-        lines += [f"{key} = {json.dumps(value)}" for key, value in entries]
     allow = parse_permission_allow(permission_allow)
     if allow:
-        lines += ["", f"permission_allow = {json.dumps(allow)}"]
+        lines.append(f"permission_allow = {json.dumps(allow)}")
+    entries = parse_session_config(session_config)
+    if entries:
+        lines += ["", "[capabilities.session_config]"]
+        lines += [f"{json.dumps(key)} = {json.dumps(value)}" for key, value in entries]
+    lines += [
+        "",
+        "[image]",
+        'target = "acp-worker"',
+        "",
+        "[[image.packages]]",
+        'arg = "PROBE_VERSION"',
+        f"package = {json.dumps(PROBE_PACKAGE)}",
+        f"version = {json.dumps(PROBE_VERSION)}",
+        'role = "agent"',
+    ]
     pack_dir = Path(root) / "harnesses" / name
     pack_dir.mkdir(parents=True, exist_ok=True)
     (pack_dir / "harness.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")

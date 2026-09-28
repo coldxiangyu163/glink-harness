@@ -29,7 +29,7 @@ from .harnesses import (
 )
 
 #: Re-exported from :mod:`pi_glink.harnesses`（清单解析器拥有这套词表）：ACP 权限白名单
-#: 只能命名这些取值，避免拼写错误静默失效。见 ``HarnessPack.permission_allow``。
+#: 只能命名这些取值，避免拼写错误静默失效。见 ``HarnessCapabilities.permission_allow``。
 __all__ = ["ACP_PERMISSION_OPTION_KINDS", "ACP_PERMISSION_TOOL_KINDS"]
 _ACP_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -110,26 +110,15 @@ class HostConfig:
     workspace_root: Path
     openai_base_url: str
     openai_model: str
-    #: Kernel adapter family for every run of this host: ``pi`` or ``acp``.
-    #: Derived from the selected harness pack's manifest and frozen at startup;
-    #: there is deliberately no per-run API/query parameter and no front-end
-    #: surface for it.
-    harness: str = "pi"
-    #: The selected harness pack name (``PI_GLINK_HARNESS``): the deployment's
-    #: one harness choice. The pack directory under :attr:`harnesses_dir` holds
-    #: the manifest, the optional capability prompt and (ACP) the HOME overlay.
-    harness_pack: str = "pi"
+    #: The selected harness pack (``PI_GLINK_HARNESS``), held as the parsed
+    #: manifest object itself: family, entry argv, capability matrix, capability
+    #: prompt, HOME overlay and image requirement are all read from here. Nothing
+    #: is copied field by field out of it, so the manifest stays the one source.
+    #: Frozen at startup; there is deliberately no per-run API/query parameter
+    #: and no front-end surface for it.
+    pack: HarnessPack
     #: Root of the pack directories (``PI_GLINK_HARNESSES_DIR``).
     harnesses_dir: Path = Path("harnesses")
-    #: The ACP agent's argv (the pack manifest's ``command``), executed without
-    #: a shell. Empty for the pi family.
-    acp_command: tuple[str, ...] = ()
-    #: The selected pack's capability prompt (``capabilities.md``), composed into
-    #: the system prompt after the work agreement. Bytes-stable repository text.
-    pack_capabilities: str = ""
-    #: The ACP pack's ``home/`` overlay directory: repository content copied into
-    #: each run's HOME before the credential files are injected.
-    pack_home: Path | None = None
     #: Credential files to copy into each run's exclusive ``HOME``
     #: (``PI_GLINK_ACP_CREDENTIAL_FILES``): ``source=dest`` entries separated by
     #: ``;``. ``source`` is read only (a leading ``~/`` expands to the operator's
@@ -143,23 +132,6 @@ class HostConfig:
     #: the per-run state root stays the isolation boundary. A value whose name
     #: looks credential-shaped joins the run's redaction boundary.
     acp_env: tuple[tuple[str, str], ...] = ()
-    #: Explicit allowlist for ACP permission answers, from the selected pack's
-    #: ``permission_allow`` (empty when the pack omits it). Empty keeps the
-    #: fail-closed answer. Tokens are ACP option kinds
-    #: (:data:`ACP_PERMISSION_OPTION_KINDS`) and/or tool kinds
-    #: (:data:`ACP_PERMISSION_TOOL_KINDS`). An allow answer needs a matching
-    #: option kind; when any tool kind is configured the request's tool kind
-    #: must match too (a request without a tool kind is refused).
-    acp_permission_allow: tuple[str, ...] = ()
-    #: ACP session configuration applied right after ``session/new``, from the
-    #: selected pack's ``session_config`` (empty when the pack omits it). An
-    #: agent that does not advertise the option/value fails the run: an
-    #: explicitly configured value is never silently dropped.
-    acp_session_config: tuple[tuple[str, str], ...] = ()
-    #: How the selected ACP pack's ``subagent`` tool reports dispatch (the
-    #: manifest's ``subagent_dispatch``: ``sync`` default, ``async`` for dsh).
-    #: The projector reads it instead of recognising any agent's reply text.
-    acp_subagent_dispatch: str = "sync"
     openai_api_key: str = field(repr=False, default="")
     context_window: int = _DEFAULT_CONTEXT_WINDOW
     max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS
@@ -258,6 +230,19 @@ class HostConfig:
     #: exist, addressing only the identity persisted with the run. ``0`` disables
     #: it; the offline ``--unreleased`` / ``--mark-released`` path still works.
     resource_reconcile_seconds: int = 60
+
+    @property
+    def harness(self) -> str:
+        """Kernel adapter family for every run (``pi`` | ``acp``): the pack's family.
+
+        The family (not the pack name) is the run record's ``harness`` value.
+        """
+        return self.pack.family
+
+    @property
+    def harness_pack(self) -> str:
+        """The selected harness pack name."""
+        return self.pack.name
 
     @property
     def multi_tenant(self) -> bool:
@@ -440,18 +425,13 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         host=host,
         port=port,
         executor=executor,
-        harness=pack.family,
-        harness_pack=pack.name,
+        pack=pack,
         harnesses_dir=harnesses_dir,
-        acp_command=pack.command,
         acp_credential_files=acp_credential_files,
         acp_env=acp_env,
-        acp_permission_allow=pack.permission_allow,
-        acp_session_config=pack.session_config,
-        acp_subagent_dispatch=pack.subagent_dispatch,
-        pack_capabilities=pack.capabilities_text(),
-        pack_home=pack.home,
-        pi_bin=_text(values, "PI_GLINK_PI_BIN", "pi"),
+        # The pi pack's entry names the kernel binary; the local override stays
+        # an inproc debugging knob (isolated faces always run the image's entry).
+        pi_bin=_text(values, "PI_GLINK_PI_BIN", pack.command[0]),
         agent_config_dir=agent_config_dir,
         methodology_dir=methodology_dir,
         blueprints_dir=blueprints_dir,
@@ -583,9 +563,9 @@ def validate_host_config(config: HostConfig) -> None:
         raise ConfigError(
             f"harness 族必须是 {' 或 '.join(HARNESS_FAMILIES)}；got {config.harness!r}"
         )
-    if config.harness == "acp" and not config.acp_command:
+    if not config.pack.command:
         raise ConfigError(
-            f"harness 包 {config.harness_pack!r} 缺少 command（ACP 族需要 agent 的 argv）"
+            f"harness 包 {config.harness_pack!r} 缺少 entry.command"
         )
     if config.tenancy_mode not in TENANCY_MODES:
         raise ConfigError(
@@ -774,27 +754,11 @@ def _acp_knobs_are_acp_only(config: HostConfig) -> None:
 def _select_harness_pack(values: Mapping[str, str], harnesses_dir: Path) -> HarnessPack:
     """The one harness pack this host runs, or the startup refusal.
 
-    ``PI_GLINK_HARNESS`` names a pack directory. The old ``acp`` value and the
-    old ACP knobs are refused outright (no compatibility mapping): the manifest
-    is the single place a harness's command, upstream pin and session options
-    live, and a half-migrated configuration must not boot into another harness.
+    ``PI_GLINK_HARNESS`` names a pack directory; anything else (including a
+    retired value) is refused with the list of available packs. The manifest is
+    the single place a harness's entry, capabilities and image pins live.
     """
     requested = _text(values, "PI_GLINK_HARNESS", "pi").lower()
-    if requested == "acp":
-        raise ConfigError(
-            "PI_GLINK_HARNESS=acp 已由 harness 包清单取代：请改用 PI_GLINK_HARNESS=dsh"
-            "（或 codex/opencode），agent 命令见 harnesses/<包名>/harness.toml 的 command"
-        )
-    for key, field in (
-        ("PI_GLINK_ACP_COMMAND", "command"),
-        ("PI_GLINK_ACP_SESSION_CONFIG", "session_config"),
-        ("PI_GLINK_ACP_PERMISSION_ALLOW", "permission_allow"),
-    ):
-        if _text(values, key, ""):
-            raise ConfigError(
-                f"{key} 已由 harnesses/<包名>/harness.toml 的 {field} 取代；"
-                "请从环境移除该变量"
-            )
     try:
         return load_pack(harnesses_dir, requested)
     except HarnessPackError as exc:

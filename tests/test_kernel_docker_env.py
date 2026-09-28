@@ -15,6 +15,7 @@ import pytest
 
 from harness_helpers import compose_launch, execution_spec, test_egress
 from pi_glink.config import build_config
+from pi_glink.harnesses import load_pack
 from pi_glink.kernel import agent_env, docker_env
 from pi_glink.kernel.sandbox import DockerSandbox
 
@@ -139,10 +140,10 @@ def test_the_image_guard_covers_every_prebaked_package() -> None:
 
     镜像守卫的初衷是“包缺失即明确失败”；它目前只覆盖 ``pi-web-access``。
     GLINK-SUB-02 让容器面也开始加载 ``pi-subagents``（镜像从 GLINK-PKG-01 起就无条件
-    装了它），但本任务不得修改 Dockerfile，所以守卫列表与 ``CONTAINER_LOCAL_PACKAGES``
-    不再完全相等：守卫必须是可加载包的真子集，且只差已记录的这一个包。
+    装了它），但本任务不得修改 Dockerfile，所以守卫列表与 pi 包清单的预装包名单
+    （``role = "pi-package"``）不再完全相等：守卫必须是可加载包的真子集，且只差已记录的这一个包。
 
-    原义务：守卫列表 == CONTAINER_LOCAL_PACKAGES（当时两边都只有 pi-web-access）。
+    原义务：守卫列表 == 预装包名单（当时两边都只有 pi-web-access）。
     新义务：守卫覆盖 pi-web-access；pi-subagents 缺失只退化为“没有 subagent 工具”
     （产品仍可自己取证），其缺口被固定在这里而不是放宽成无断言。
     """
@@ -152,7 +153,7 @@ def test_the_image_guard_covers_every_prebaked_package() -> None:
     match = re.search(r"for pkg in ([^;\n]+); do", text)
     assert match is not None, "Dockerfile 缺少预装包守卫脚本"
     guarded = set(match.group(1).split())
-    loadable = set(agent_env.CONTAINER_LOCAL_PACKAGES)
+    loadable = set(load_pack(REPO_ROOT / "harnesses", "pi").prebaked_pi_packages())
     assert "pi-web-access" in guarded
     assert guarded <= loadable, "守卫不得检查不可加载的包名"
     assert loadable - guarded == {"pi-subagents"}, "缺口被固定：只允许这一个未守卫的包"

@@ -1543,7 +1543,7 @@ def test_children_enrichment_marks_unmatched_honestly(tmp_path: Path) -> None:
 
 def test_children_enrichment_skips_the_acp_family(tmp_path: Path) -> None:
     """ACP 族没有 pi-subagents 布局：enrichment 保持 none，目录不被触碰。"""
-    manager, store = build_manager(tmp_path, PI_GLINK_HARNESS="acp", PI_GLINK_ACP_COMMAND="true")
+    manager, store = build_manager(tmp_path, PI_GLINK_HARNESS="acp", TEST_ACP_COMMAND="true")
     execution = open_execution(manager, store, tmp_path / "ws", "enrich3")
     execution.runtime = _pi_runtime(tmp_path, "enrich3")
     emit(manager, execution, "subagent_started", {"n": 0, "toolCallId": "call_1", "agent": "", "task": "调研"})

@@ -3,9 +3,9 @@
 The deployment selects one harness **pack** at configuration time: no API
 parameter, no per-run choice, no front-end surface; the default stays ``pi`` so
 every existing deployment is unchanged. A pack that cannot run is refused at
-startup rather than falling back to pi (which would mislabel runs), and the
-retired ``acp`` value plus the retired ACP knobs are refused outright instead of
-being silently mapped.
+startup rather than falling back to pi (which would mislabel runs). The config
+holds the parsed pack object itself (``config.pack``); there are no ``acp_*``
+fields copied out of the manifest and no legacy knobs are read any more.
 """
 
 from __future__ import annotations
@@ -36,24 +36,26 @@ def config(values: Mapping[str, str]):
 def test_the_default_harness_is_the_pi_pack() -> None:
     default = config({})
     assert default.harness == "pi" and default.harness_pack == "pi"
-    assert default.acp_command == ()
+    assert default.pack.command == ("pi",)
+    assert default.pi_bin == "pi"
     assert default.agent_config_dir == REPO_ROOT / "harnesses" / "pi"
 
 
 def test_an_acp_pack_derives_the_family_command_and_options() -> None:
     dsh = config({"PI_GLINK_HARNESS": "dsh"})
     assert dsh.harness == "acp" and dsh.harness_pack == "dsh"
-    assert dsh.acp_command == ("dsh", "--profile", "acp")
-    assert dsh.acp_session_config == () and dsh.acp_permission_allow == ()
+    assert dsh.pack.command == ("dsh", "--profile", "acp")
+    assert dsh.pack.capabilities.session_config == ()
+    assert dsh.pack.capabilities.permission_allow == ()
 
     codex = config({"PI_GLINK_HARNESS": "codex"})
-    assert codex.harness == "acp" and codex.acp_command == ("codex-acp",)
+    assert codex.harness == "acp" and codex.pack.command == ("codex-acp",)
     # The pinned 1.13.1 mode vocabulary has no "auto" (integration notes §14.5):
     # the pack deliberately declares no session_config instead.
-    assert codex.acp_session_config == ()
+    assert codex.pack.capabilities.session_config == ()
 
     opencode = config({"PI_GLINK_HARNESS": "opencode"})
-    assert opencode.harness == "acp" and opencode.acp_command == ("opencode", "acp")
+    assert opencode.harness == "acp" and opencode.pack.command == ("opencode", "acp")
 
 
 def test_the_pi_template_dir_defaults_to_the_selected_pack() -> None:
@@ -67,39 +69,31 @@ def test_the_harness_is_not_part_of_the_browser_visible_configuration() -> None:
     assert "harness" not in view and "harnessPack" not in view
 
 
-@pytest.mark.parametrize(
-    "values, fragment",
-    [
-        (
-            {"PI_GLINK_HARNESS": "acp"},
-            "PI_GLINK_HARNESS=acp 已由 harness 包清单取代",
-        ),
-        (
-            {"PI_GLINK_HARNESS": "gemini"},
-            "PI_GLINK_HARNESS='gemini' 不可用",
-        ),
-        (
-            {"PI_GLINK_HARNESS": "dsh", "PI_GLINK_ACP_COMMAND": "dsh --profile acp"},
-            "PI_GLINK_ACP_COMMAND 已由 harnesses/<包名>/harness.toml 的 command 取代",
-        ),
-        (
-            {"PI_GLINK_ACP_SESSION_CONFIG": "mode=auto"},
-            "PI_GLINK_ACP_SESSION_CONFIG 已由 harnesses/<包名>/harness.toml 的 "
-            "session_config 取代",
-        ),
-        (
-            {"PI_GLINK_ACP_PERMISSION_ALLOW": "allow_once"},
-            "PI_GLINK_ACP_PERMISSION_ALLOW 已由 harnesses/<包名>/harness.toml 的 "
-            "permission_allow 取代",
-        ),
-    ],
-)
-def test_retired_harness_configuration_is_refused_at_startup(
-    values: Mapping[str, str], fragment: str
-) -> None:
+@pytest.mark.parametrize("requested", ["acp", "gemini"])
+def test_a_harness_that_names_no_pack_is_refused_at_startup(requested: str) -> None:
+    """Only pack names are accepted; the retired family value ``acp`` is just
+    another unknown pack (no dedicated legacy branch, no mapping)."""
     with pytest.raises(ConfigError) as excinfo:
-        config(values)
-    assert fragment in str(excinfo.value)
+        config({"PI_GLINK_HARNESS": requested})
+    message = str(excinfo.value)
+    assert f"PI_GLINK_HARNESS={requested!r} 不可用" in message
+    assert "可用包" in message
+
+
+def test_retired_acp_knobs_are_not_read() -> None:
+    """The v1-era ``PI_GLINK_ACP_COMMAND`` etc. are no longer part of the config
+    surface: they neither override the pack nor get a dedicated refusal."""
+    selected = config(
+        {
+            "PI_GLINK_HARNESS": "dsh",
+            "PI_GLINK_ACP_COMMAND": "other-agent",
+            "PI_GLINK_ACP_SESSION_CONFIG": "mode=auto",
+            "PI_GLINK_ACP_PERMISSION_ALLOW": "allow_once",
+        }
+    )
+    assert selected.pack.command == ("dsh", "--profile", "acp")
+    assert selected.pack.capabilities.session_config == ()
+    assert selected.pack.capabilities.permission_allow == ()
 
 
 def test_the_acp_docker_combination_is_accepted_since_m3a() -> None:
@@ -146,20 +140,18 @@ def test_the_acp_e2b_combination_is_accepted_since_m3b() -> None:
 def test_the_harness_invariants_are_rechecked_after_construction() -> None:
     """A directly built/overridden config still passes the same gate."""
     base = config({})
-    with pytest.raises(ConfigError):
-        validate_host_config(dataclasses.replace(base, harness="acp", acp_command=()))
-    with pytest.raises(ConfigError):
-        validate_host_config(dataclasses.replace(base, harness="nope"))
+    dsh = config({"PI_GLINK_HARNESS": "dsh"})
+    with pytest.raises(ConfigError, match="entry.command"):
+        validate_host_config(
+            dataclasses.replace(dsh, pack=dataclasses.replace(dsh.pack, command=()))
+        )
+    with pytest.raises(ConfigError, match="harness 族"):
+        validate_host_config(
+            dataclasses.replace(base, pack=dataclasses.replace(base.pack, family="nope"))
+        )
     # ACP + docker/e2b 都是合法组合；直接构造的配置同样被接受。
     for executor in ("docker", "e2b"):
-        validate_host_config(
-            dataclasses.replace(
-                base,
-                harness="acp",
-                acp_command=("dsh", "--profile", "acp"),
-                executor=executor,
-            )
-        )
+        validate_host_config(dataclasses.replace(dsh, executor=executor))
     # The valid pi default is accepted unchanged.
     validate_host_config(base)
 
