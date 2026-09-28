@@ -143,7 +143,7 @@ harnesses/<pack>/
 ```
 
 清单格式 `format = "pi-glink-harness/v2"`（GLINK-ARCH P3 起；解析全有或全无，任何层级的未知键即拒绝）。
-**v1 清单不再可读**：`format = "pi-glink-harness/v1"` 启动即拒绝（「旧格式不再可读，不做迁移」），
+**v1 清单不再可读**（[ADR 0012](adr/0012-pack-manifest-v2-single-source.md)）：`format = "pi-glink-harness/v1"` 启动即拒绝（「旧格式不再可读，不做迁移」），
 v1 时期的顶层 `command`/`package`/`version`/`session_config`/`permission_allow`/`subagent_dispatch`
 全部移入下表的分组，没有兼容读取。
 

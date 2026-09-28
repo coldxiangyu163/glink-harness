@@ -60,9 +60,7 @@
 对象；此后族、执行面、追问门禁与 ACP 状态根继承一律读记录里的 spec，不读宿主当前配置。
 `family`/`pack`/`executor`/`credential_origin` 是必填非空字段；缺 `"spec"` 或缺字段的行按不可解析
 处理，读取即 fail-closed（见 §4「准入与资源」的不可解析行）。
-**旧数据不再可读**：S2 之前的 meta 把这些事实写成顶层 `harness` / `harness_pack` / `executor`
-三个键，重新设计后这种记录不再被解析，也没有迁移——升级前的历史 run 一律按不可读记录处理、
-不能被追问（经操作员裁决释放资源后可手工清理）。
+**旧数据不再可读**：没有 `"spec"` 的记录不被解析，也没有迁移（[ADR 0010](adr/0010-harness-sandbox-runspec.md)）。
 
 两个 harness 族 × 三种执行面共享同一套输入契约与同一套产品事件，因此浏览器、存储与报告下载
 路径完全一致。两个维度正交，各自只有一处实现：
@@ -81,8 +79,7 @@
   `remote` / `handle()` 事实，不按执行面名分支。
 
 组合只有一条路径：`HarnessFamily.build_adapter(spec, sandbox, ...)` 即
-`driver(sandbox.spawn(launch(spec)))`。旧的 `execution.build_adapter` 字符串分派、族上的 plan
-回调（`_unused_pi_plan` 与重复的 docker plan）已删除。`runs/` 编排层（RunManager 与生命周期管线）只依赖抽象
+`driver(sandbox.spawn(launch(spec)))`，不按执行面名字符串分派（[ADR 0010](adr/0010-harness-sandbox-runspec.md)）。`runs/` 编排层（RunManager 与生命周期管线）只依赖抽象
 （`HarnessFamily` / `HarnessRuntime` / `FrameProjector` / `Sandbox` / `ExecutionAdapter`），不导入
 任何具体族、执行面或 runtime 类型，也不承担任何单面的收尾逻辑（§5.1）；该规则由
 `tests/test_repository_boundaries.py` 的编排层导入白名单卡住。
@@ -331,6 +328,8 @@ child 在前端显示为普通「进行中」，不伪造进度。
 
 ### 3.6 事件 schema 与版本
 
+决定与来由见 [ADR 0011](adr/0011-versioned-event-schema.md)。
+
 **单一来源**：`host/pi_glink/event_schema.py` 声明全部产品事件类型、每个类型的 payload
 字段（名称、JSON 类型、是否必填、枚举、数组元素类型）以及 payload 版本 `v`（按类型、从 1
 起）。`events.py` 的类型常量与终帧集合在导入时与 schema 核对，不一致即启动失败；上表是
@@ -438,7 +437,7 @@ stop()/StopDecision、生命周期管线的**顺序控制**、`DecideStage` 的�
 （owner→`spec.family`/`spec.pack`→terminal→stale 的拒绝次序是生命周期策略）与 harness 无关的蓝图/命令
 门禁。
 
-**生命周期管线**（`runs/pipeline.py::RunPipeline`）：一个 run 依次经过 Admit → Prepare →
+**生命周期管线**（`runs/pipeline.py::RunPipeline`，[ADR 0013](adr/0013-run-lifecycle-pipeline.md)）：一个 run 依次经过 Admit → Prepare →
 Launch → Observe → Recover → Seal → Decide → Commit 八个阶段，每个阶段只接收上一阶段冻结的
 事实，次序由管线定义保证：
 
