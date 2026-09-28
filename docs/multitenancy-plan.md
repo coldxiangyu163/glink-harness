@@ -12,7 +12,7 @@
 |---|---|---|
 | 租户身份（gateway） | 本机认证网关注入 `X-Pi-Glink-Identity` 短时效 HMAC-SHA256 断言；宿主验签（constant-time）、校验 audience/过期/寿命 | `host/pi_glink/tenancy.py`、`web_security.py` |
 | 租户身份（accounts） | 邀请注册 + 站内登录 + SQLite 会话（只存摘要），cookie `HttpOnly`/`SameSite`，CSRF 头，停用/注销/过期即时失效；`/api/me` 与账号界面 | `host/pi_glink/accounts.py`、`auth.py`、`web_security.py`、`web/modules/{auth,account}.mjs` |
-| 请求授权 | 多租户下除健康探测外所有 `/api/*` 验签；未认证 401、权限不足 403、未知/异租户/legacy 同形 404；SSE 在响应头之前验权并在断言过期时结束 | `web_security.py`（RequestSecurityMixin；`app.py` 的 HostRequestHandler 只是 mixin 组合点，授权判定全部在 web_security） |
+| 请求授权 | 多租户下除健康探测外所有 `/api/*` 验签；未认证 401、权限不足 403、未知/异租户/无 owner 同形 404；SSE 在响应头之前验权并在断言过期时结束 | `web_security.py`（RequestSecurityMixin；`app.py` 的 HostRequestHandler 只是 mixin 组合点，授权判定全部在 web_security） |
 | run 归属 | 受理时原子写 `tenant_id`/`creator_user_id`；`get_for`/`list_for` 按租户过滤；同租户 creator/admin 才能取消 | `store.py`、`runs/runner.py` |
 | 并发准入 | 仅多租户 Docker/E2B 并发，默认全局 4 / 单租户 2，原子检查与预留，超额 429，无队列；未确认释放的持有计入 owner 租户与全局槽位，并可由宿主在线自动对账释放 | `runs/runner.py::RunManager._check_admission`、`runs/resource_ledger.py::ResourceLedger._probe_resource`（_probe_resource 是台账在线对账探测，不在 runner） |
 | 租户凭据 | 默认每租户条目提供 `modelApiKey`（必需）/`webSearchKey`（可选）；显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时改为宿主冻结的一套模型凭据，且不得配置/读取租户凭据文件 | `tenancy.py`、`kernel/agent_env.py` |
@@ -37,7 +37,7 @@
 - **不可伪造**：请求体、查询参数和其它请求头都不参与身份推导；重复断言头直接拒绝；宿主只监听
   loopback，由本机网关反代。网关必须清除客户端同名头（宿主以“重复即拒绝”兜底）。
 - **错误口径**：未认证 `401`；权限不足（同租户非 creator 的 member、租户未配置凭据）`403`；
-  未知 run、异租户 run、无 owner 的 legacy 记录统一 `404`；配额超额 `429`。健康端点无需身份，
+  未知 run、异租户 run、无 owner 的记录统一 `404`；配额超额 `429`。健康端点无需身份，
   但既不返回 run 标识，也不披露其他租户状态。
 - **SSE**：输出任何响应头之前完成 owner 校验；重放与实时两个阶段都按帧检查断言过期并结束该流。
 - **多轮追问**：`parentRunId` 的父 run 先过租户门禁；未知/异租户/无 owner 的父 run 在读取其状态、
@@ -76,7 +76,7 @@ outbox 模式，事务内写 `events` 后投递到共享流供多宿主 SSE 与�
 - 准入检查与槽位预留原子完成；超额立即拒绝（`429 quota_exceeded`，带 scope/limit，不含 run id），
   不设无限队列。
 - **资源持有的口径（已在 GLINK-RES-01 变更）**：未确认释放的终态 run 计入其 owner 租户的槽位与
-  全局槽位（无 owner 的 legacy/损坏记录只计全局），因此一个租户的泄漏不会挡住别的租户，但会持续
+  全局槽位（无 owner/损坏记录只计全局），因此一个租户的泄漏不会挡住别的租户，但会持续
   吞噬额度，持有达到全局上限时任何新准入都被拒绝（仍是 fail-closed）。`local` 单用户模式保持原
   口径：任一持有即 `409 resources_unreleased`（附 run id）。
 - **损坏记录**：run 目录存在但 `meta.json` 不可读时，读面一律隐藏它，资源台账计为全局持有
@@ -155,7 +155,7 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
 [验证矩阵](engineering.md#验证矩阵)）：
 
 1. **跨租户拒绝矩阵**：列表、详情、事件流、报告下载、取消、启动、凭据——owner 正例与另一租户反例，
-   同一 404 口径且无副作用；legacy 记录不可见。
+   同一 404 口径且无副作用；无 owner 记录不可见。
 2. **并发与配额**：租户/全局上限、超额 429、九请求竞争填满且不超过上限、未确认释放的持有计入
    租户与全局槽位、SSE 连接额度按租户分离、已受理取消优先。
 3. **凭据隔离**：每租户只渲染自己的 key；缺模型 key 拒绝准入；缺搜索 key 回退无 key；每 run
@@ -165,7 +165,7 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
 5. **认证边界**：伪造/篡改/过期/超长寿命/错误 audience/重复头 401；跨站 POST 拒绝；健康端点不
    泄露 run id。
 6. **多轮追问的租户隔离**：异租户父 run 在运行中/已有后续轮次/无会话等形态下都返回同一
-   `unknown_run`，不建立新 run、不创建会话目录、不改写父会话；legacy/未知父 run 同理；同租户
+   `unknown_run`，不建立新 run、不创建会话目录、不改写父会话；无 owner/未知父 run 同理；同租户
    追问保持 owner、私有会话副本与报告种子，旧轮分叉返回 `stale_run`。
 
 **账号模式（`PI_GLINK_AUTH_MODE=accounts`）另有合成矩阵**（`tests/test_accounts.py`、
@@ -176,7 +176,7 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
 2. **HTTP 边界**：未登录统一 401（带 mode）；未知账号与错误密码同形；按账号与按 socket peer
    两层登录限速（peer 拒绝发生在 scrypt 之前，轮换邮箱不能放大 CPU）；限速 429；跨站 Origin/
    Sec-Fetch-Site 与错误 Content-Type 拒绝；会话 POST 无 CSRF 头 403；`/api/me` 不回任何密钥。
-3. **跨租户与回退**：两租户登录后的列表/详情/报告/SSE/停止/追问矩阵与 legacy 不可见；accounts 模式
+3. **跨租户与回退**：两租户登录后的列表/详情/报告/SSE/停止/追问矩阵与无 owner 记录不可见；accounts 模式
    忽略断言头、gateway 模式忽略会话 cookie；登录失败不回退；缺本租户模型 key 仍拒绝准入。
 4. **实时失效**：注销/停用/绝对过期发生在 SSE 流动期间时，流在轮询间隔内结束，而 run 本身不被取消。
 5. **浏览器**：隔离 fixture（临时账号库 + fake 执行面）上人工用 ego-browser 走过登录/邀请注册/账号

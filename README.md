@@ -150,7 +150,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | GET | `/api/runs/{id}` | run 详情 |
 | GET | `/api/runs/{id}/events` | 事件流（SSE，支持 `Last-Event-ID` 重放；重放事实源是持久事件日志） |
 | POST | `/api/runs/{id}/stop` | 请求取消：受理 `200 {"requested": true}`（终态必为 `cancelled`）；已结束 `409 run_not_cancellable`（带已提交 `status`）；未知 `404` |
-| GET | `/api/runs/{id}/report` | 下载 `report.md`（宿主产物副本；旧版本的 `workspaces/<id>/report.md` 只读下载） |
+| GET | `/api/runs/{id}/report` | 下载 `report.md`（只认宿主产物副本 `runs/<id>/artifacts/report.md`） |
 | GET | `/api/me` | 当前身份：local 报 `{"mode":"local","authenticated":false}`；gateway/accounts 回展示字段与角色（accounts 另回 `csrfToken`），未认证 `401` 且带 `mode` |
 | POST | `/api/auth/login` | accounts 模式登录：邮箱+密码，成功设置 `HttpOnly` 会话 cookie 并回身份 |
 | POST | `/api/auth/register` | accounts 模式邀请注册：只接受绑定到邀请的邮箱，创建账号后回到登录（不静默授予会话） |
@@ -160,7 +160,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 本机（`local`）执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。以 `/` 开头的 prompt 只接受宿主解释的 `/<蓝图名> <题目>`（蓝图名从 `methodology/blueprints/` 推导，当前仅 `deepresearch`），其余返回 `400 unsupported_command`（错误体只给推导出的蓝图名列表，不回显被拒输入）——pi 对这类消息会先执行扩展命令，而 pi-subagents 注册了 `/run --bg`、`/subagents-detach` 等后台入口；拒绝在任何 run 目录/执行面创建之前，追问同样适用。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
 
-多租户模式（`PI_GLINK_TENANCY=multitenant`）下所有 `/api/*`（健康的存活性探测除外）都要求可信身份——网关断言或站内会话：未认证 `401`，权限不足 `403`，未知/异租户/legacy 记录统一 `404`，超过并发上限 `429 quota_exceeded`。下一节说明完整语义。`/api/blueprints` 是宿主级资源的只读目录：认证后各租户看到同一份列表（与 `/api/config` 同形）；空目录/缺失目录都返回 `200 {"blueprints": []}`，格式不合契约的文件不进列表（原因只进日志）。
+多租户模式（`PI_GLINK_TENANCY=multitenant`）下所有 `/api/*`（健康的存活性探测除外）都要求可信身份——网关断言或站内会话：未认证 `401`，权限不足 `403`，未知/异租户/无 owner 记录统一 `404`，超过并发上限 `429 quota_exceeded`。下一节说明完整语义。`/api/blueprints` 是宿主级资源的只读目录：认证后各租户看到同一份列表（与 `/api/config` 同形）；空目录/缺失目录都返回 `200 {"blueprints": []}`，格式不合契约的文件不进列表（原因只进日志）。
 
 ## 多租户（单宿主，`PI_GLINK_TENANCY=multitenant`）
 
@@ -180,9 +180,9 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   权限过宽或位于仓库内都拒绝启动，不会回落到无认证的本地模式。本模式只允许绑定 loopback，且
   执行面必须是 `docker`/`e2b`（`inproc` 共享宿主文件系统，只保留给本地单用户调试）。
 - **归属**：run 在受理时原子写入 `tenant_id` 与 `creator_user_id`。同租户成员可看列表、详情、SSE 与
-  报告；只有创建者或同租户 `admin` 能取消。其他租户、未知 run 与没有 owner 的旧记录（legacy
-  `meta.json`）在列表/详情/SSE/报告/取消上都得到同一个 404，且不产生副作用；旧数据不迁移、不修改。
-  追问（`parentRunId`）同样先过租户门禁：异租户/未知/legacy 父 run 统一 `404 unknown_run`，在确认
+  报告；只有创建者或同租户 `admin` 能取消。其他租户、未知 run 与没有 owner 的记录（单用户
+  面写入）在列表/详情/SSE/报告/取消上都得到同一个 404，且不产生副作用，记录不被修改。
+  追问（`parentRunId`）同样先过租户门禁：异租户/未知/无 owner 父 run 统一 `404 unknown_run`，在确认
   所有者之前不读取其 session、报告、状态或子 run 计数，也不会把它的会话或报告复制给新 run。
 - **凭据**：默认每 run 的模型 key（与可选搜索 key）来自该租户在 `tenants.json` 中的条目，缺
   `modelApiKey` 直接拒绝准入；绝不回退宿主全局 `OPENAI_API_KEY`、操作员 `~/.pi/web-search.json`

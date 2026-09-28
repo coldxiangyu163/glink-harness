@@ -11,6 +11,8 @@
 
 多租户实现已覆盖服务端可信身份、run/事件/报告/取消的归属过滤、每 run 凭据交付与脱敏边界、显式并发准入与 fail-closed 资源台账（未确认释放的持有计入 owner 租户与全局槽位，可由在线自动对账或离线人工裁决释放）；仍未覆盖多宿主租约、共享存储、真实网关与云环境的资源上限执行。单独容器/沙箱提供执行隔离，但不自动解决宿主 API 授权、存储隔离或凭据访问，也不构成本仓库对容器/沙箱实际隔离强度的保证。
 
+**旧数据不保证可读**：本次架构重设计（2026-09-28）起不再为旧 run 记录保留兼容分支；`meta.json` 缺少任一准入事实（`harness`、`harness_pack`、`executor`）的记录按不可读处理——不出现在列表与详情中，并作为不可读目录计入全局资源持有，直到人工裁决（[ADR 0001](adr/0001-required-run-admission-facts.md)）。不提供迁移。决策史统一记在 [`docs/adr/`](adr/)，本文只描述现行契约。
+
 具体接口与迁移在对应任务中决定，不预建无消费者的租户抽象；修改这些承诺遵循 [工程约束](engineering.md)。现有单 run 测试继续保护当前行为，将来的多租户变更在取得决定后同步替换相关断言，而不是把当前串行测试当作永久需求。
 
 另一个既定方向是**多 harness 平台化**：宿主保持 harness 无关，`kernel/` 泛化为 harness 适配层，云端保留 pi、deepseek-harness（dsh）、Codex 及一切开源 ACP 兼容 agent（2026-09-27 决定移除闭源 CLI；见 [多 harness 方案](multi-harness-plan.md) §1）。方向、架构与里程碑见 [多 harness 方案](multi-harness-plan.md)；当前仓库已落地两个 harness 族——pi 族（三个执行面均 `--mode rpc`，GLINK-ARCH-3 起 e2b 面也已收敛）与 ACP 族（dsh/codex/opencode 经 stdio JSON-RPC 双向桥接，dsh 0.1.7+ 为最快验证的 agent）；本文的进程拓扑、事件契约与追问门禁对两族统一描述，pi 特有的协议细节仍以 pi 为参照系，ACP 族的协议事实见 [ACP 集成笔记](acp-integration-notes.md)。
@@ -23,9 +25,10 @@
 | 宿主 | `host/pi_glink/` | 配置冻结、事件总线、HTTP/SSE、存储 | 不导入 pi，不实现研究方法论 |
 | 编排层 | `host/pi_glink/runs/` | run 准入、执行骨架与收尾顺序、终态提交、外部资源台账 | 不解析内核协议帧，不定制内核 |
 | 内核接入 | `host/pi_glink/kernel/` | 启动 pi、消费官方 headless 协议、事件归一化 | 不导入编排层或宿主编排模块，不定制内核 |
-| 内核配置与扩展 | `agent/` | pi 的可版本化配置：settings、工作约定、扩展 | 不放密钥，不放宿主实现 |
+| Harness 包 | `harnesses/<pack>/` | 各 harness 的可版本化配置与扩展（清单 `harness.toml`、pi 的 settings/扩展、ACP 的 home 覆盖层） | 不放密钥，不放宿主实现 |
+| 方法论 | `methodology/` | 研究工作约定与会话蓝图，由宿主拼入系统提示 | 不放 harness 专有配置 |
 
-依赖方向单向：`前端 → 宿主 HTTP → 编排层 → kernel → pi 进程`；`agent/` 只被 pi 读取。
+依赖方向单向：`前端 → 宿主 HTTP → 编排层 → kernel → pi 进程`；`harnesses/<pack>/` 与 `methodology/` 只作为只读模板被复制或拼入每 run 的运行期配置。
 `host/pi_glink/kernel/` 不得反向导入 `runs/`、`tenancy`、`ownership`、`blueprints`、
 `web_*`、`app`、`cli`；`store` 只在三个 harness 族模块
 （`harness.py` / `harness_pi.py` / `harness_acp.py`）中导入（族策略读 RunRecord 与会话种子），
@@ -307,7 +310,7 @@ child 在前端显示为普通「进行中」，不伪造进度。
    `/run --bg`、`/subagents-detach` 这类客户端可控输入能绕过 `tool_call` 守卫发起不随本 run
    收口的后台进程（见 pi-integration-notes.md §10.4）；命令集合现在来自宿主自己的蓝图目录，
    不再依赖 pi 的模板展开。
-   `parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。追问门禁的同族判定比 run 记录自身的事实：准入时 `meta.json` 原子写入本 run 的 `harness`（族：`pi`/`acp`）、`harness_pack`（`harnesses/<pack>/` 的包名）与 `executor`（来自冻结配置，与 run id/owner 同一次写入），session_ready 提交时写回 `agent`（ACP 为协商到的 agentInfo.name；pi 协议不报 agent 身份，不伪造）；父记录带 `harness` 字段时，跨族追问一律 `session_unavailable`（fail-closed），父记录还带 `harness_pack` 时要求与本包相同（不同即 `session_unavailable`），父记录无这些字段的旧数据维持原有证明路径。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
+   `parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。追问门禁的同族判定比 run 记录自身的事实：准入时 `meta.json` 原子写入本 run 的 `harness`（族：`pi`/`acp`）、`harness_pack`（`harnesses/<pack>/` 的包名）与 `executor`（来自冻结配置，与 run id/owner 同一次写入），session_ready 提交时写回 `agent`（ACP 为协商到的 agentInfo.name；pi 协议不报 agent 身份，不伪造）；三个准入事实都是必填字段；跨族追问一律 `session_unavailable`（fail-closed），同族但 `harness_pack` 与本包不同同样 `session_unavailable`；缺任一字段的 meta 按不可读处理，不会进入追问门禁（[ADR 0001](adr/0001-required-run-admission-facts.md)、[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)）。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
 2. 渲染**本 run 的**运行期配置目录与 session 目录（`runs/<id>/pi-agent`、会话根下的 `<id>/`），
    按 `LOCAL_WEB_EXECUTOR` 选择执行面（见 §5）；
 3. 事件投影 → `EventBus.commit`：先落 `events.jsonl`，再实时给 SSE（见 §3.1）；
@@ -384,7 +387,7 @@ abort、取消即毁沙箱的义务已随 GLINK-ARCH-3 删除，见 §5.1/§5.2�
 清空台账。
 
 * **local 单用户**：任一持有未确认释放即 `409 resources_unreleased`（附 run id），且保持全局单 run 槽位。
-* **multitenant**：持有计入其 owner 租户的并发槽位**和**全局槽位（无 owner 的 legacy 记录只计全局），
+* **multitenant**：持有计入其 owner 租户的并发槽位**和**全局槽位（无 owner 的记录——单用户面写入——只计全局），
   与 `PI_GLINK_MAX_TENANT_RUNS` / `PI_GLINK_MAX_GLOBAL_RUNS` 一同比较，超额返回
   `429 quota_exceeded`（scope/limit，不含 run id）；持有不会被遗忘，达到全局上限时所有新准入都被拒绝
   （fail-closed）。
@@ -494,9 +497,9 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 
 渲染每个模板条目都是「先删再拷」，并且每次渲染都会重建（或删除）`auth.json` /
 `web-search.json`；因此上一 run 的扩展、skill 或凭据不会因增量拷贝而残留。共享项只限于
-仓库 `agent/` 模板目录（只读输入）和 `data_root` 本身。
+仓库 `harnesses/<pack>/` 与 `methodology/` 模板目录（只读输入）和 `data_root` 本身。
 
-**多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。E2B 面的续接身份验证时点与另两面相同（GLINK-ARCH-3 起）：pi 以 `--session /home/user/sessions/continued.jsonl` 原地打开续接会话（保持原 session id），RPC `get_state` 在 `session_ready` 即知会话身份，追问身份不符在**回合前、第一次模型调用前**拒 `session_unavailable`；e2b 面 `session_ready` 也从回合后补发改为回合前发布（回收后 `recovered_session()` 仍会补发一帧带宿主 `session_file` 的 `session_ready`）。旧义务（沙箱面流中才发现 session id、只能回合后由驱动线程比对 `expected_session_id`，模型调用已发生）随旧 `--mode json` 适配器整体删除。ACP 追问的状态根继承按**父 run 记录的 `executor`** 推导：父记录带该字段时 e2b 指向 `acp-agent/recovered`、其余执行面指向 `acp-agent/home`，宿主切换执行面后历史 e2b run 的合法追问仍可受理；旧记录无 `executor` 字段时回退为按宿主当前配置推导（原行为）。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
+**多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。E2B 面的续接身份验证时点与另两面相同（GLINK-ARCH-3 起）：pi 以 `--session /home/user/sessions/continued.jsonl` 原地打开续接会话（保持原 session id），RPC `get_state` 在 `session_ready` 即知会话身份，追问身份不符在**回合前、第一次模型调用前**拒 `session_unavailable`；e2b 面 `session_ready` 也从回合后补发改为回合前发布（回收后 `recovered_session()` 仍会补发一帧带宿主 `session_file` 的 `session_ready`）。（决策史见 [ADR 0004](adr/0004-pi-e2b-rpc-convergence.md)。）ACP 追问的状态根继承按**父 run 记录的 `executor`** 推导：e2b 指向 `acp-agent/recovered`、其余执行面指向 `acp-agent/home`，宿主切换执行面后历史 e2b run 的合法追问仍可受理（[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)）。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
 
 **子代理副产物**：pi-subagents 的分支会话与主会话同名同目录（只能按会话头区分，见上表），产物目录由 `artifactDir: "session"` 落在会话目录的 `subagent-artifacts/`。E2B 面在沙箱销毁前把这些有界镜像到宿主拥有的 `runs/<id>/subagents/`（分支会话进 `sessions/`、产物进 `artifacts/`；深度/文件数/单文件/总量限幅，链接不跟随，失败记 `artifactFailures`），inproc/Docker 面的同类文件本就在宿主会话目录内、不另拷贝；两路的会话目录与镜像目录都在收尾时过 run 的脱敏边界（与 §6.1 会话文件同一条规则）。R1 起每个子代理另有权威文档 `runs/<id>/children/<n>/child.json`（§3.5）：它是协议可见事实的落地，与 P0 的 `subagents/` 原始镜像各自独立——镜像是回收基质（保持原样、不改写）；R2 起收尾时按序数启发式把产物关联复制进 `children/<n>/`（§3.5「R2 增强与关联」），未关联的文件留在基质里并记日志。
 
@@ -612,7 +615,7 @@ Dockerfile 的边界约束，缺 `pi-subagents` 只会退化成“没有子代�
 | ACP 状态根 | 收尾扫描范围与处置由运行时契约声明：agent 自己的会话存储（`acp-agent/home`，E2B 回收后 `acp-agent/recovered`）**只读扫描**——凭据形状值并入本 run 边界，文件字节不改写（改写会破坏追问要续接的会话，与 §10.2 继承口径同一义务）；**注入凭据副本**（`PI_GLINK_ACP_CREDENTIAL_FILES` 的 dest）在扫描之后逐个删除（只删已知相对路径：不按模式匹配、不跟随链接、必须在根内；追问会从源重新注入，继承已 skip 这些目标）；删除失败记入终帧 `artifactFailures` 并告警，不改变终态；缺失的根按「无可扫之物」处理 | `kernel/sweep.py::SessionSweep`、`kernel/acp_env.py::AcpRuntime.session_sweeps`、`runs/runner.py::_sanitize_session`、`_absorb_session_secrets`、`_remove_credential_copies`、`artifacts.py::ArtifactTree.remove` |
 | 子代理镜像 | E2B 面回收的 `runs/<id>/subagents/`（分支会话 + 产物）收尾时经目录句柄清扫，与 §5.2 同一条边界 | `runs/runner.py::_sanitize_workspace`、`kernel/e2b_env.py::recover_subagent_files` |
 | 子代理文档 | `runs/<id>/children/<n>/child.json` 只由已过两道脱敏的事件载荷构造（投影 → 提交前再脱敏），`GET /api/runs/{id}/children` 按存储原样下发，不引入新秘密；`children/<n>/<file>` 产物下载按报告下载同一套规则（服务前再脱敏、`X-Redacted`） | `runs/runner.py::_emit`、`store.py::read_children`、`web_routes.py` |
-| 报告下载 | `report_path` 不是下载能力：只认两个固定位置——宿主产物 `runs/<id>/artifacts/report.md`，以及旧版本写下的本 run 工作区 `workspaces/<id>/report.md`（只读，从不改写历史）；其他路径一律视为无报告。服务前再脱敏，响应头 `X-Redacted` 标明是否发生；`hasReport` 用同一位置规则与同一拒绝条件计算 | `store.py::report_location`、`web_routes.py::_send_report`、`artifacts.py` |
+| 报告下载 | `report_path` 不是下载能力：只认一个固定位置——宿主产物副本 `runs/<id>/artifacts/report.md`；工作区 `workspaces/<id>/report.md` 及其他路径一律视为无报告（[ADR 0007](adr/0007-report-served-only-from-host-artifact.md)）。服务前再脱敏，响应头 `X-Redacted` 标明是否发生；`hasReport` 用同一位置规则与同一拒绝条件计算 | `store.py::report_location`、`web_routes.py::_send_report`、`artifacts.py` |
 
 **产物路径安全**（`artifacts.py::ArtifactTree`）：宿主从不「先 realpath 校验、再按路径打开」。
 每次操作持有 run 根目录的目录句柄（根的父目录是宿主配置，可信；根本身及其下每一级都以
@@ -672,11 +675,9 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 所以并发 run 不会互写凭据或扩展。ACP 族的对应物是 `runs/<id>/acp-agent/home`（子进程的
 `HOME`）：先铺 `harnesses/<pack>/home/` 覆盖层、再只读复制注入凭据（凭据目标优先，不被覆盖层
 覆盖）且值并入该 run 脱敏边界；**run 收尾在只读扫描之后按 `credential_dests` 删除宿主
-一侧的注入凭据副本**（`home` 与 `recovered` 两处；原义务是随 run 目录生命周期保留，
-新义务见 [ACP 集成笔记](acp-integration-notes.md) §18.4）；e2b 面在沙箱销毁前有界回收为
+一侧的注入凭据副本**（`home` 与 `recovered` 两处，[ADR 0003](adr/0003-acp-credential-copies-removed-at-close-out.md)）；e2b 面在沙箱销毁前有界回收为
 `acp-agent/recovered`，追问时灌回新沙箱。追问继承哪一个状态根按父 run 记录的 `executor`
-推导（e2b→`recovered`，其余→`home`），不随宿主当前执行面配置漂移；无 `executor` 字段的
-旧记录回退为按当前配置推导（详见 [ACP 集成笔记](acp-integration-notes.md)）。
+推导（e2b→`recovered`，其余→`home`），不随宿主当前执行面配置漂移（[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)）。
 
 宿主 HTTP 层的职责边界：路由只决定请求含义（`web_routes`），身份与请求防护集中在
 `web_security`，事件流与连接额度在 `web_sse`，字节读写与静态资源在 `web_http`；`app.py` 只做
@@ -733,7 +734,7 @@ owner 校验、配额、凭据与脱敏边界完全共用；客户端在任一�
   HMAC 校验，并检查 audience、过期与寿命上限（默认 300 秒）。重复断言头直接拒绝——这是宿主侧的
   “网关必须清除客户端同名头”。
 - 请求体、查询参数与其它请求头不参与身份推导：多租户下除 `/api/health` 外所有 `/api/*` 先验签；
-  未认证 401，权限不足 403，未知/异租户/无 owner 的 legacy 记录统一同形 404。
+  未认证 401，权限不足 403，未知/异租户/无 owner 的记录统一同形 404。
 - 事件流在写出任何响应头之前用同一 owner 规则验权；断言过期在**重放与实时两个阶段**都按帧检查：
   持久 `events.jsonl` 的每一帧、实时订阅的每次等待都先确认断言未过期，过期即干净结束该流（实时
   等待用 `EventBus.subscribe(idle_poll=…)` 返回控制流，不改变持久事件语义）。过期没有宽限窗口：
@@ -744,7 +745,7 @@ owner 校验、配额、凭据与脱敏边界完全共用；客户端在任一�
 ### 10.2 owner 与历史数据
 
 `RunStore.create` 在受理时用同一次 `meta.json` 原子写 `tenant_id` / `creator_user_id`；`get_for` /
-`list_for` 按 tenant 过滤。没有 owner 的旧记录不匹配任何租户，因此在多租户读面上始终不可见/不可下载/
+`list_for` 按 tenant 过滤。没有 owner 的记录（单用户面写入）不匹配任何租户，因此在多租户读面上始终不可见/不可下载/
 不可 SSE/不可取消，也不会被迁移或改写；`local` 模式仍按旧口径可读。取消在同一把 run 锁内先做
 owner/role 判定再受理：其他租户得到与未知 run 相同的 404 且无副作用，同租户非创建者的 member 得到 403。
 
@@ -783,7 +784,7 @@ owner/role 判定再受理：其他租户得到与未知 run 相同的 404 且�
 
 只有多租户 + Docker/E2B 可并发：默认全局上限 4、单租户上限 2；准入检查与槽位预留（写入执行表 +
 打开事件流）在同一把 manager 锁内完成，超额立即返回 `429 quota_exceeded`（带 scope 与 limit，不含
-任何 run id），不排队。未确认释放的资源持有**计入槽位**（owner 租户 + 全局；无 owner 的 legacy 与
+任何 run id），不排队。未确认释放的资源持有**计入槽位**（owner 租户 + 全局；无 owner 的记录与
 损坏记录只计全局），因此一个租户的泄漏不会挡住别的租户，但会持续吃掉额度；持有达到全局上限时任何
 新准入都被拒绝（fail-closed）。恢复额度靠宿主在线自动对账或离线 `--unreleased` / `--mark-released`
 （§4）。已受理的取消仍与终帧提交在同一线性化点上裁决。`inproc` 在两种模式下都维持全局单 run；

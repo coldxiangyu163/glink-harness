@@ -102,7 +102,7 @@ pi、dsh、codex（codex-acp）、opencode（均开源），**Claude（claude-ag
 
 ## 2. 现状接缝（为什么可行）
 
-宿主约 12k 行中 harness 专有的部分全部集中在 `kernel/` 与包目录，边界清晰：
+宿主中 harness 专有的部分全部集中在 `kernel/` 与包目录，边界清晰：
 
 | 已 harness 无关（不动） | harness 专有（进 `harnesses/<pack>/` 或其族） | 包/族的形态 |
 |---|---|---|
