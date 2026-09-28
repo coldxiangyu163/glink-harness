@@ -34,6 +34,20 @@ function makeClassList() {
   };
 }
 
+/** Whether the browser would let this node take focus.
+ *
+ * A hidden, inert or disabled control cannot be focused, and neither can a
+ * control inside a hidden container (``display: none`` on an ancestor). The
+ * stub only knows the ancestors a test linked with ``appendChild``; that is
+ * exactly what the focus-return regression needs (F-1).
+ */
+function isFocusable(node) {
+  for (let current = node; current; current = current.parentElement) {
+    if (current.hidden || current.inert || current.disabled) return false;
+  }
+  return true;
+}
+
 export function createDomStub({
   width = 1280,
   height = 900,
@@ -41,6 +55,9 @@ export function createDomStub({
   hidden = false,
 } = {}) {
   const byId = new Map();
+  //: The last element a successful ``focus()`` moved to, like the browser's
+  //: ``document.activeElement``. Starts unset (the browser reports ``body``).
+  let activeElement = null;
   const observers = [];
   const documentListeners = new Map();
   const windowListeners = new Map();
@@ -172,8 +189,16 @@ export function createDomStub({
       listenerCount(type) {
         return listeners.get(type)?.size ?? 0;
       },
-      focus() {},
-      blur() {},
+      focus() {
+        // Mirror the browser: a control that cannot take focus is a no-op, so
+        // the previous ``activeElement`` is kept instead of pretending focus
+        // moved to an element the reader can never reach.
+        if (!isFocusable(this)) return;
+        activeElement = this;
+      },
+      blur() {
+        if (activeElement === this) activeElement = null;
+      },
       click() {},
       setPointerCapture() {},
       releasePointerCapture() {},
@@ -236,6 +261,9 @@ export function createDomStub({
     location,
     createElement: (tag) => makeElement(tag),
     createTextNode: (text) => ({ nodeType: 3, textContent: String(text) }),
+    get activeElement() {
+      return activeElement ?? body;
+    },
     getElementById,
     querySelector: () => null,
     querySelectorAll: () => [],

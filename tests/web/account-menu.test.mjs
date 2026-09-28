@@ -31,6 +31,15 @@ function harness({ createInvitation = null } = {}) {
     onLogout: () => logouts.push(true),
     onNotice: (message, level) => notices.push({ message, level }),
   });
+  // Nest the account shell the way index.html does, so the stub can model the
+  // rule behind F-1 — a control inside a hidden container cannot take focus —
+  // instead of treating every element as focusable. The menu starts hidden, as
+  // in the markup.
+  const shellArea = dom.getElement('account-area');
+  const menu = dom.getElement('account-menu');
+  menu.hidden = true;
+  menu.append(dom.getElement('account-invite'), dom.getElement('account-logout'));
+  shellArea.append(dom.getElement('account-button'), menu);
   return { dom, area, api, calls, notices, logouts };
 }
 
@@ -171,6 +180,43 @@ test('invitation failures explain the reason without leaking anything else', asy
   h.dom.getElement('invite-form').dispatch('submit', { preventDefault() {} });
   await tick();
   assert.match(h.dom.getElement('invite-error').textContent, /请填写/);
+});
+
+test('Escape closes the invite dialog and returns focus to the entry that opened it (F-1)', (t) => {
+  const h = harness();
+  t.after(() => h.dom.restore());
+  h.area.setIdentity(ACCOUNTS_ADMIN);
+  // The path a person takes: account menu → 邀请成员 → Esc.
+  h.dom.getElement('account-button').dispatch('click', { stopPropagation() {} });
+  h.dom.getElement('account-invite').dispatch('click', { stopPropagation() {} });
+  assert.equal(h.area.dialogOpen, true);
+  assert.equal(h.area.menuOpen, false, 'opening the dialog puts the menu away');
+
+  h.dom.document.dispatch('keydown', { key: 'Escape' });
+  assert.equal(h.area.dialogOpen, false);
+  assert.equal(
+    h.dom.document.activeElement?.id,
+    'account-invite',
+    'focus must land back on the 邀请成员 entry, not on <body>',
+  );
+  assert.equal(
+    h.dom.getElement('account-menu').hidden,
+    false,
+    'a hidden entry cannot hold focus, so the menu has to be shown again',
+  );
+});
+
+test('the explicit close control hands focus back to the same entry (F-1)', (t) => {
+  const h = harness();
+  t.after(() => h.dom.restore());
+  h.area.setIdentity(ACCOUNTS_ADMIN);
+  h.dom.getElement('account-button').dispatch('click', { stopPropagation() {} });
+  h.dom.getElement('account-invite').dispatch('click', { stopPropagation() {} });
+  assert.equal(h.area.dialogOpen, true);
+
+  h.dom.getElement('invite-cancel').dispatch('click', {});
+  assert.equal(h.area.dialogOpen, false);
+  assert.equal(h.dom.document.activeElement?.id, 'account-invite');
 });
 
 test('dispose detaches the document listeners', (t) => {

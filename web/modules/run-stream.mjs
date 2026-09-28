@@ -118,6 +118,11 @@ export function createRunSubscription({
  * `initialState` (default: `createRunState(run)`) is what the owner already
  * rendered before the stream opened.
  * `isActive()` lets the owner drop late frames from a run it no longer shows.
+ * `lazy` hands the moment of connection to the owner: `open()` starts the
+ * subscription (idempotently) instead of the constructor doing it. History
+ * replay uses it so a long follow-up chain never opens one live stream per
+ * ancestor and crowds out the run the reader is actually watching (the host
+ * bounds concurrent streams and answers `429 stream_limit` past the ceiling).
  */
 export function createRunFeed({
   run,
@@ -132,45 +137,63 @@ export function createRunFeed({
   retryDelaysMs,
   schedule,
   cancelSchedule,
+  lazy = false,
 }) {
   let state = initialState;
   let frames = 0;
-  const subscription = createRunSubscription({
-    runId: run.runId,
-    eventsUrl,
-    eventSourceFactory,
-    retryDelaysMs,
-    schedule,
-    cancelSchedule,
-    onEvent: (event) => {
-      if (!isActive()) return;
-      frames += 1;
-      state = reduce(state, event);
-      onState?.(state, event);
-      if (event && TERMINAL_EVENT_TYPES.has(event.type)) {
-        subscription.close();
-        onTerminal?.(state);
-      }
-    },
-    onStatus: (status) => {
-      if (!isActive()) return;
-      onStatus?.(status);
-    },
-    onError,
-  });
+  let subscription = null;
+  let closed = false;
+  let terminal = false;
+
+  const start = () => {
+    if (subscription !== null || closed || terminal) return;
+    subscription = createRunSubscription({
+      runId: run.runId,
+      eventsUrl,
+      eventSourceFactory,
+      retryDelaysMs,
+      schedule,
+      cancelSchedule,
+      onEvent: (event) => {
+        if (!isActive()) return;
+        frames += 1;
+        state = reduce(state, event);
+        onState?.(state, event);
+        if (event && TERMINAL_EVENT_TYPES.has(event.type)) {
+          terminal = true;
+          subscription.close();
+          onTerminal?.(state);
+        }
+      },
+      onStatus: (status) => {
+        if (!isActive()) return;
+        onStatus?.(status);
+      },
+      onError,
+    });
+  };
+
+  if (!lazy) start();
+
   return {
     get state() {
       return state;
     },
     get status() {
-      return subscription.status;
+      if (subscription !== null) return subscription.status;
+      return closed ? 'closed' : 'idle';
     },
     /** Frames delivered to the reducer (applied, ignored or rejected). */
     get frames() {
       return frames;
     },
+    /** Connect now (a no-op once started, terminal or closed). */
+    open() {
+      start();
+    },
     close() {
-      subscription.close();
+      closed = true;
+      subscription?.close();
     },
   };
 }

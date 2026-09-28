@@ -278,3 +278,49 @@ test('a malformed frame reaches onError and leaves the state untouched', () => {
   assert.equal(feed.frames, 0);
   assert.equal(feed.state.lastSeq, 0);
 });
+
+test('a lazy feed connects only when the owner asks, and never twice', () => {
+  const frames = load('subagents');
+  const { sources, factory } = fakeSourceFactory();
+  const states = [];
+  const terminals = [];
+  const feed = createRunFeed({
+    run: { runId: 'fx-sub' },
+    eventsUrl: (runId) => `/api/runs/${runId}/events`,
+    eventSourceFactory: factory,
+    lazy: true,
+    onState: (_state, event) => states.push(event.seq),
+    onTerminal: (state) => terminals.push(state),
+  });
+  assert.equal(sources.length, 0, '构造时不建立连接');
+  assert.equal(feed.status, 'idle');
+
+  feed.open();
+  assert.equal(sources.length, 1, 'open() 建立唯一连接');
+  feed.open();
+  assert.equal(sources.length, 1, 'open() 幂等');
+
+  for (const frame of frames) sources[0].emit(frame);
+  assert.equal(states.length, frames.length);
+  assert.equal(terminals.length, 1);
+  assert.equal(sources[0].closed, true, '终帧后关闭流');
+  assert.equal(feed.status, 'closed');
+
+  // A finished feed must never reopen the stream.
+  feed.open();
+  assert.equal(sources.length, 1);
+});
+
+test('a lazy feed closed before it opens never connects', () => {
+  const { sources, factory } = fakeSourceFactory();
+  const feed = createRunFeed({
+    run: { runId: 'fx-lazy' },
+    eventsUrl: () => '/events',
+    eventSourceFactory: factory,
+    lazy: true,
+  });
+  feed.close();
+  assert.equal(feed.status, 'closed');
+  feed.open();
+  assert.equal(sources.length, 0, '关闭后 open() 不得再建立连接');
+});

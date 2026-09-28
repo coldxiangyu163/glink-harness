@@ -527,6 +527,8 @@ h1, h2, h3, h4, p { margin: 0; }
 }
 .nav-item[data-status="running"] .nav-meta { color: var(--primary-link); }
 .nav-item[data-status="failed"] .nav-meta { color: var(--destructive-text); }
+/* 「显示更多」是分页入口，不是一条研究行：沿用导航行外形，只补一点间距 */
+.nav-more { margin-top: var(--space-1); }
 
 .sidebar-foot { flex-shrink: 0; padding: var(--space-5) var(--space-4) 0; }
 /* 服务告警：只在真的出问题时出现（未配置 / 连不上 / 研究引擎不可用），平时侧栏页脚是空的 */

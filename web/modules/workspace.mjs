@@ -24,6 +24,7 @@ import { createNavGuard } from './nav-guard.mjs';
 import { createRunState } from './run-reducer.mjs';
 import { createRunFeed } from './run-stream.mjs';
 import { renderRunLists } from './run-list-view.mjs';
+import { emptyRunList, groupRunChains, mergeRunPage } from './run-list-state.mjs';
 import { createRunView } from './run-view.mjs';
 import { createProgressPanel } from './progress-panel.mjs';
 import { installTooltips } from './tooltip.mjs';
@@ -102,6 +103,9 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
   const isOverlay = () => shell.classList.contains('slot-overlay');
 
   let current = null; // { runId, model, feed, view, prompt (root), history }
+  /** The accumulated research history: `/api/runs` is a page, not the whole list. */
+  let runListState = emptyRunList();
+  let loadingMoreRuns = false;
   let latestRuns = [];
   let slot = null; // null | 'report' | 'progress'
   let conversationCollapsed = false;
@@ -414,27 +418,101 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
 
   // -- research records ------------------------------------------------------
 
-  function renderRunList(runs) {
-    latestRuns = runs;
-    renderRunLists({ runList, homeRunList, homeReportList }, runs, {
+  /** One request's worth of history; the sidebar's «显示更多» asks for the next. */
+  const RUN_PAGE_LIMIT = 50;
+  /** How many missing ancestors one refresh may resolve (a page cuts chains). */
+  const MAX_CHAIN_ANCESTORS = 25;
+
+  function renderRunList(state = runListState) {
+    runListState = state;
+    latestRuns = state.runs;
+    renderRunLists({ runList, homeRunList, homeReportList }, state.runs, {
       currentRunId: current?.runId ?? null,
       onOpen: (runId, options) => openRun(runId, options),
+      hasMore: state.hasMore,
+      loadingMore: loadingMoreRuns,
+      onLoadMore: () => {
+        loadMoreRuns();
+      },
     });
   }
 
+  /**
+   * Resolve the chain roots a page boundary left out.
+   *
+   * The list is newest-first, so a page can cut a follow-up chain before its
+   * first turn. Fetching the missing parents (bounded) lets the row keep the
+   * root's title instead of surfacing an intermediate turn as a research of its
+   * own; a parent that is gone (404, another tenant) simply ends the walk and
+   * the newest loaded turn stays visible.
+   */
+  async function completeFetchedChains(generation) {
+    const known = new Set(runListState.runs.map((run) => run.runId));
+    const asked = new Set();
+    const queue = groupRunChains(runListState.runs).unresolvedParents.filter((id) => !known.has(id));
+    let hops = 0;
+    while (queue.length && hops < MAX_CHAIN_ANCESTORS) {
+      const parentId = queue.shift();
+      if (asked.has(parentId)) continue;
+      asked.add(parentId);
+      hops += 1;
+      let run = null;
+      try {
+        ({ run } = await api.getRun(parentId));
+      } catch {
+        run = null; // unknown, other tenant or unavailable: keep the fallback title
+      }
+      if (identityStale(generation)) return;
+      if (!run?.runId) continue;
+      renderRunList(mergeRunPage(runListState, { runs: [run] }));
+      known.add(run.runId);
+      for (const id of groupRunChains(runListState.runs).unresolvedParents) {
+        if (!known.has(id) && !asked.has(id) && !queue.includes(id)) queue.push(id);
+      }
+    }
+  }
+
+  /** Re-read the newest page, replacing whatever this session had loaded. */
   async function refreshRuns() {
     const generation = identityGeneration;
     try {
-      const { runs } = await api.listRuns();
+      const page = await api.listRuns({ limit: RUN_PAGE_LIMIT });
       if (identityStale(generation)) return [];
-      renderRunList(runs);
-      return runs;
+      renderRunList(mergeRunPage(emptyRunList(), page));
+      await completeFetchedChains(generation);
+      return runListState.runs;
     } catch (error) {
       if (identityStale(generation)) return [];
       if (handleSessionFailure(error)) return [];
       showToast('研究记录暂时读取失败，请稍后刷新。', 'error');
       return [];
     }
+  }
+
+  /** Append the next page the host named; the already-loaded history is kept. */
+  async function loadMoreRuns() {
+    if (loadingMoreRuns || !runListState.hasMore) return;
+    const generation = identityGeneration;
+    loadingMoreRuns = true;
+    renderRunList(runListState);
+    let failed = false;
+    try {
+      const page = await api.listRuns({ limit: RUN_PAGE_LIMIT, cursor: runListState.cursor });
+      if (identityStale(generation)) return;
+      runListState = mergeRunPage(runListState, page);
+    } catch (error) {
+      if (identityStale(generation)) return;
+      if (handleSessionFailure(error)) return;
+      failed = true;
+    } finally {
+      loadingMoreRuns = false;
+    }
+    renderRunList(runListState);
+    if (failed) {
+      showToast('研究记录暂时读取失败，请稍后刷新。', 'error');
+      return;
+    }
+    await completeFetchedChains(generation);
   }
 
   // -- run lifecycle ---------------------------------------------------------
@@ -521,6 +599,23 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
     current = { runId, model, feed: null, view,
       prompt: ancestors[0]?.prompt ?? run.prompt, history: [] };
     earlierTurns.replaceChildren();
+    const owner = current;
+    /* A 20-turn chain must not open 21 `EventSource`s: the host bounds
+     * concurrent streams and would refuse the live run's own stream once the
+     * ceiling is hit, so the history would never appear. Ancestors therefore
+     * replay one at a time — each from the durable log, closing on its terminal
+     * frame before the next connects. */
+    const historyQueue = [];
+    let historyCursor = 0;
+    function openNextHistory() {
+      if (disposed || current !== owner) return;
+      historyQueue[historyCursor]?.feed.open();
+    }
+    function advanceHistory() {
+      if (disposed || current !== owner) return;
+      historyCursor += 1;
+      openNextHistory();
+    }
     for (const ancestor of ancestors) {
       const exchange = document.createElement('section');
       exchange.className = 'pi-exchange';
@@ -538,13 +633,20 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       current.history.push(past);
       past.view.render(past.model);
       past.feed = createRunFeed({ run: ancestor, initialState: past.model, eventsUrl: api.eventsUrl,
-        eventSourceFactory, isActive: () => !disposed && current?.runId === runId,
+        eventSourceFactory, lazy: true,
+        isActive: () => !disposed && current === owner,
         onState: (state) => {
           past.model = state;
           past.view.render(state);
-        }, onStatus: (status) => {
-          if (status === 'failed') past.feed?.close();
+        },
+        onTerminal: () => advanceHistory(),
+        onStatus: (status) => {
+          if (status === 'failed') {
+            past.feed?.close();
+            advanceHistory();
+          }
         } });
+      historyQueue.push(past);
     }
     question.textContent = run.prompt;
     showView('chat');
@@ -558,7 +660,10 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       }
     }
 
-    const owner = current;
+    // History first, then the live run: the ancestor connection is the only one
+    // open beside the current run, and the current run connects synchronously
+    // right after it.
+    openNextHistory();
     current.feed = createRunFeed({
       run,
       initialState: model,
@@ -918,8 +1023,8 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
   function sessionExpired(notice) {
     identityGeneration += 1;
     closeCurrent();
-    latestRuns = [];
-    renderRunList([]);
+    loadingMoreRuns = false;
+    renderRunList(emptyRunList());
     setSlot(null);
     earlierTurns.replaceChildren();
     previewArticle.replaceChildren();

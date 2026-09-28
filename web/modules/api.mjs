@@ -76,7 +76,18 @@ export function createApi({ fetchImpl = globalThis.fetch } = {}) {
     config: () => call('/api/config', options),
     /** Current identity, or a 401 whose payload names the identity mode. */
     me: () => call('/api/me', options),
-    listRuns: () => call('/api/runs', options),
+    /**
+     * The research history, newest first. `limit`/`cursor` ask for one page;
+     * the answer carries `nextCursor`/`hasMore` when the host has more to
+     * give (`workspace.mjs` keeps the loaded pages and shows «显示更多»).
+     */
+    listRuns: ({ limit = null, cursor = null } = {}) => {
+      const query = new URLSearchParams();
+      if (limit) query.set('limit', String(limit));
+      if (cursor) query.set('cursor', cursor);
+      const suffix = query.toString();
+      return call(`/api/runs${suffix ? `?${suffix}` : ''}`, options);
+    },
     getRun: (runId) => call(`/api/runs/${encodeURIComponent(runId)}`, options),
     startRun: (prompt, parentRunId) => call('/api/runs', {
       ...options, method: 'POST', body: { prompt, ...(parentRunId ? { parentRunId } : {}) },

@@ -5,9 +5,14 @@
  * the owner (`onOpen(runId, options)`); navigation and state stay in
  * `workspace.mjs`. A follow-up chain is shown once, under its root's prompt;
  * a report row opens the chain's latest turn with that report in the slot.
+ *
+ * The list is a page, not the whole history: when the host says there is more
+ * (`hasMore`), the sidebar ends with a «显示更多» entry that asks the owner for
+ * the next page. The merge itself lives in `run-list-state.mjs`.
  */
 
 import { formatDuration, relativeTime, researchTitle, statusLabel } from './present.mjs';
+import { groupRunChains } from './run-list-state.mjs';
 
 /* Only the two states that need the reader get a word in the sidebar. */
 const NAV_META = { running: '进行中', failed: '未完成' };
@@ -34,7 +39,11 @@ function emptyState({ title, description, size = 'sm' }) {
   return wrap;
 }
 
-export function renderRunLists({ runList, homeRunList, homeReportList }, runs, { currentRunId = null, onOpen }) {
+export function renderRunLists(
+  { runList, homeRunList, homeReportList },
+  runs,
+  { currentRunId = null, onOpen, hasMore = false, loadingMore = false, onLoadMore = null } = {},
+) {
   runList.replaceChildren();
   homeRunList.replaceChildren();
   homeReportList.replaceChildren();
@@ -44,37 +53,16 @@ export function renderRunLists({ runList, homeRunList, homeReportList }, runs, {
     homeReportList.append(emptyState({ title: '还没有报告', description: '研究完成后生成的报告会出现在这里' }));
     return;
   }
-  const children = new Set(runs.map((run) => run.parentRunId).filter(Boolean));
-  const byId = new Map(runs.map((run) => [run.runId, run]));
-  const nextByParent = new Map(runs.filter((run) => run.parentRunId)
-    .map((run) => [run.parentRunId, run.runId]));
-  const latestOf = (run) => {
-    const seen = new Set();
-    let leaf = run.runId;
-    while (nextByParent.has(leaf) && !seen.has(leaf)) {
-      seen.add(leaf);
-      leaf = nextByParent.get(leaf);
-    }
-    return leaf;
-  };
-  const titleOf = (run) => {
-    const seen = new Set();
-    let root = run;
-    while (root.parentRunId && byId.has(root.parentRunId) && !seen.has(root.runId)) {
-      seen.add(root.runId);
-      root = byId.get(root.parentRunId);
-    }
-    return root.prompt;
-  };
-  for (const run of runs.filter((item) => !children.has(item.runId))) {
-    runList.append(navRow(run, titleOf(run), currentRunId, onOpen));
-    homeRunList.append(homeRow(run, titleOf(run), onOpen));
+  const { rows, reports } = groupRunChains(runs);
+  for (const { run, title } of rows) {
+    runList.append(navRow(run, title, currentRunId, onOpen));
+    homeRunList.append(homeRow(run, title, onOpen));
   }
-  const reports = runs.filter((run) => run.hasReport);
+  if (hasMore) runList.append(loadMoreRow({ onLoadMore, loading: loadingMore }));
   if (!reports.length) {
     homeReportList.append(emptyState({ title: '还没有报告', description: '研究完成后生成的报告会出现在这里' }));
   }
-  for (const run of reports) homeReportList.append(reportRow(run, latestOf(run), onOpen));
+  for (const { run, latestRunId } of reports) homeReportList.append(reportRow(run, latestRunId, onOpen));
 }
 
 function iconNode(name) {
@@ -90,6 +78,22 @@ function span(className, text) {
   node.className = className;
   node.textContent = text;
   return node;
+}
+
+function loadMoreRow({ onLoadMore, loading }) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.id = 'run-list-more';
+  // The same row shape as a research entry: the collapsed sidebar already
+  // turns `.nav-title` into an accessible name and centers the icon.
+  button.className = 'nav-item nav-more';
+  button.append(iconNode('chevron-down'), span('nav-title', loading ? '正在加载…' : '显示更多'));
+  if (loading) button.disabled = true;
+  button.addEventListener('click', () => {
+    if (loading || typeof onLoadMore !== 'function') return;
+    onLoadMore();
+  });
+  return button;
 }
 
 function navRow(run, title, currentRunId, onOpen) {

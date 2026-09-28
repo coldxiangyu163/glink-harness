@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 
 import { createWorkspace } from '../../web/modules/workspace.mjs';
 import { ApiError, getCsrfToken, setCsrfToken } from '../../web/modules/api.mjs';
+import { EVENT_VERSIONS } from '../../web/modules/event-schema.gen.mjs';
 import { createDomStub } from './dom-stub.mjs';
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -468,4 +469,78 @@ test('a run accepted for an ended session never opens on the login screen', asyn
   assert.equal(h.workspace.identity, null);
   assert.equal(h.dom.getElement('app-shell').hidden, true);
   assert.equal(h.dom.location.pathname, '/login');
+});
+
+test('a long follow-up chain never opens one stream per ancestor', async (t) => {
+  // The regression: `openRun` built a feed per ancestor and `createRunFeed`
+  // connected in its constructor, so a 20-turn chain asked the host for 21
+  // concurrent streams at once. Past the global `StreamLimits` ceiling every
+  // history replay came back `429 stream_limit` and those turns never appeared.
+  // History now replays one ancestor at a time, so the live run keeps its slot.
+  const depth = 8;
+  const chain = new Map();
+  for (let index = 0; index < depth; index += 1) {
+    chain.set(`past-${index}`, {
+      ...runView(`past-${index}`, `第 ${index} 轮`),
+      status: 'finished',
+      parentRunId: index > 0 ? `past-${index - 1}` : null,
+    });
+  }
+  chain.set('current', {
+    ...runView('current', '最新一轮'),
+    status: 'running',
+    parentRunId: `past-${depth - 1}`,
+  });
+
+  const sources = [];
+  const h = harness({
+    api: {
+      getRun: async (runId) => ({ run: chain.get(runId) }),
+    },
+    eventSourceFactory: (url) => {
+      const source = {
+        url,
+        readyState: 0,
+        closed: false,
+        listeners: new Map(),
+        addEventListener(type, handler) {
+          this.listeners.set(type, handler);
+        },
+        close() {
+          this.closed = true;
+          this.readyState = 2;
+        },
+      };
+      sources.push(source);
+      return source;
+    },
+  });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  await h.workspace.openRun('current');
+
+  const openSources = () => sources.filter((source) => !source.closed);
+  assert.equal(h.dom.getElement('earlier-turns').children.length, depth, '整条父链都渲染');
+  assert.ok(openSources().length <= 2, `同时打开的流不得超过 2 条，实际 ${openSources().length}`);
+
+  // 逐条驱动终帧：每收口一条才允许打开下一条，过程中并发数始终 <= 2。
+  let peak = openSources().length;
+  for (let index = 0; index < depth; index += 1) {
+    const ancestor = `past-${index}`;
+    const source = openSources().find((candidate) => candidate.url.endsWith(`/${ancestor}/events`));
+    assert.ok(source, `第 ${index} 条祖先流应已按序打开`);
+    source.listeners.get('run_finished')({
+      data: JSON.stringify({
+        v: EVENT_VERSIONS.run_finished,
+        seq: 1,
+        type: 'run_finished',
+        runId: ancestor,
+        payload: { status: 'finished' },
+      }),
+    });
+    peak = Math.max(peak, openSources().length);
+    assert.ok(peak <= 2, `回放过程中同时打开的流不得超过 2 条，实际 ${peak}`);
+  }
+  assert.equal(openSources().length, 1, '祖先回放结束后只剩当前 run 的流');
+  assert.equal(sources.length, depth + 1, '每条祖先最多建立一条连接');
 });

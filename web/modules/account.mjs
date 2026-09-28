@@ -49,6 +49,9 @@ export function createAccountArea({ api, onLogout = null, onNotice = null } = {}
   let dialogOpen = false;
   let busy = false;
   let created = false;
+  //: The account-menu entry the dialog was opened from, so focus can be handed
+  //: back to it on close (F-1).
+  let dialogTrigger = null;
 
   const isAdmin = () => identity?.role === 'admin' || identity?.user?.role === 'admin';
   const isAccounts = () => identity?.mode === 'accounts';
@@ -164,6 +167,7 @@ export function createAccountArea({ api, onLogout = null, onNotice = null } = {}
   function openDialog() {
     closeMenu();
     if (!dialog) return;
+    dialogTrigger = inviteItem;
     dialogOpen = true;
     created = false;
     setError('');
@@ -178,6 +182,21 @@ export function createAccountArea({ api, onLogout = null, onNotice = null } = {}
     if (emailInput && typeof emailInput.focus === 'function') emailInput.focus();
   }
 
+  /**
+   * Hand focus back to the entry that opened the dialog (F-1).
+   *
+   * Opening the dialog puts the account menu away, and the browser cannot move
+   * focus to an element inside a hidden container: focusing the still-hidden
+   * 「邀请成员」 entry silently dropped focus to `<body>`. Reveal the menu first
+   * — exactly where the reader left it — so the entry can actually take focus.
+   */
+  function restoreDialogFocus() {
+    const trigger = dialogTrigger ?? inviteItem;
+    if (!trigger || typeof trigger.focus !== 'function') return;
+    if (menu && menu.hidden) openMenu();
+    trigger.focus();
+  }
+
   function closeDialog({ focus = false } = {}) {
     if (!dialog || !dialogOpen) return;
     dialogOpen = false;
@@ -187,7 +206,7 @@ export function createAccountArea({ api, onLogout = null, onNotice = null } = {}
     setError('');
     if (form) form.hidden = false;
     if (result) result.hidden = true;
-    if (inviteItem && focus && typeof inviteItem.focus === 'function') inviteItem.focus();
+    if (focus) restoreDialogFocus();
   }
 
   async function submitInvite(event) {
