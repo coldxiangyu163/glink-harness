@@ -1769,3 +1769,51 @@ def test_finalize_drives_its_steps_in_the_contract_order(
 
     assert calls == ["observe", "recover", "close", "sweep", "enrich", "report", "commit"]
     assert execution.finalized.is_set()
+
+
+def test_close_out_guard_commits_a_terminal_state_when_a_stage_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H1 尾巴：某个 stage 未预期抛异常时，run 仍以终态+理由结束。
+
+    对基线红：``seal.run`` 抛异常时异常直接冒穿 ``close_out``，
+    ``execution.finalized`` 永不置位、终帧缺失，run 卡在 running。修复后异常
+    折进 ``execution_facts.failure``，仍经同一 Decide/Commit 提交
+    ``execution_error`` 终态。
+    """
+    manager, store = build_manager(tmp_path)
+    execution = open_execution(manager, store, tmp_path / "ws", "guardfail1")
+
+    def explode(execution_, recovery):
+        raise RuntimeError("seal exploded")
+
+    monkeypatch.setattr(manager._pipeline.seal, "run", explode)  # noqa: SLF001
+
+    manager._pipeline.close_out(execution)  # noqa: SLF001 - must not raise
+
+    assert execution.finalized.is_set()
+    record = store.get("guardfail1")
+    assert record is not None and record.is_terminal
+    terminal = store.committed_terminal("guardfail1")
+    assert terminal["type"] == "run_failed"
+    assert terminal["payload"]["stopReason"] == "execution_error"
+    assert "seal exploded" in (terminal["payload"]["error"] or "")
+
+
+def test_close_out_guard_finalizes_even_when_the_commit_itself_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """护栏的兜底：连提交都失败时也不得抛穿或卡住；理由记进 event_log_error。"""
+    manager, store = build_manager(tmp_path)
+    execution = open_execution(manager, store, tmp_path / "ws", "guardfail2")
+
+    def explode(execution_):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(manager._pipeline.commit, "run", explode)  # noqa: SLF001
+
+    manager._pipeline.close_out(execution)  # noqa: SLF001 - must not raise
+
+    assert execution.finalized.is_set()
+    assert execution.verdict is None, "提交失败时不得伪造终态"
+    assert "store down" in (execution.execution_facts.event_log_error or "")

@@ -41,7 +41,7 @@ from .stages import (
     SealStage,
     StageServices,
 )
-from .state import LOGGER_NAME, RunExecution
+from .state import COMMITTED, LOGGER_NAME, RunExecution
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .admission import RunAdmission
@@ -162,7 +162,27 @@ class RunPipeline:
             self.close_out(execution)
 
     def close_out(self, execution: RunExecution) -> None:
-        """Observe's finish → Recover → Seal → Decide/Commit, in contract order."""
+        """Observe's finish → Recover → Seal → Decide/Commit, in contract order.
+
+        The whole body sits behind one guard: one stage raising an *unexpected*
+        exception must not leave the run ``running`` with ``finalized`` unset.
+        The failure is folded into the run's own facts
+        (``execution_facts.failure``) and the normal Decide/Commit path still
+        decides a terminal state; only when even that commit fails does the run
+        stay for restart reconciliation (the existing uncommitted-verdict
+        contract) — always loudly recorded, never silently swallowed.
+        """
+        run_id = execution.record.run_id
+        try:
+            self._finalize(execution)
+        except Exception as exc:  # noqa: BLE001 - every run must end with a reason
+            logger.exception("close-out 未预期失败 run=%s", run_id)
+            self._commit_close_out_failure(execution, exc)
+        finally:
+            execution.finalized.set()
+
+    def _finalize(self, execution: RunExecution) -> None:
+        """The contract-ordered close-out body (see :meth:`close_out`)."""
         run_id = execution.record.run_id
         self.observe.finish(execution)
         recovery = self.recover.run(execution, execution.adapter)
@@ -192,4 +212,26 @@ class RunPipeline:
             execution.artifact_facts.report_path or "<none>",
             recovery.resources.cleanup.released,
         )
-        execution.finalized.set()
+
+    def _commit_close_out_failure(self, execution: RunExecution, exc: Exception) -> None:
+        """Fold a close-out crash into the run's facts and still commit a verdict.
+
+        The already-decided/committed case only lost the tail: the durable
+        terminal state stands. Otherwise the failure becomes
+        ``execution_facts.failure`` (the same field the execution face uses) and
+        the verdict is committed through the normal Decide path — a raise here
+        can only come from the commit itself, and the run then stays for restart
+        reconciliation with the reason recorded in ``event_log_error``.
+        """
+        run_id = execution.record.run_id
+        detail = f"close-out 未预期失败: {type(exc).__name__}: {exc}"
+        facts = execution.execution_facts
+        if not facts.failure:
+            facts.failure = detail
+        if execution.phase == COMMITTED:
+            return
+        try:
+            self.commit.run(execution)
+        except Exception:  # noqa: BLE001 - the run stays for restart reconciliation
+            logger.exception("close-out 护栏未能提交终态 run=%s", run_id)
+            facts.event_log_error = facts.event_log_error or detail
