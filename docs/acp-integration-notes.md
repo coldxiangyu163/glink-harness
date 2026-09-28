@@ -7,7 +7,9 @@
 > **GLINK-ARCH-6（2026-09-27）起的现行配置面**：harness 选择与 agent 命令/会话选项/权限白名单
 > 都在 harness 包清单（`harnesses/<pack>/harness.toml`）；本文以下历史章节里的
 > `PI_GLINK_HARNESS=acp`、`PI_GLINK_ACP_COMMAND`、`PI_GLINK_ACP_SESSION_CONFIG`、
-> `PI_GLINK_ACP_PERMISSION_ALLOW` 都是当时实测用的配置面，已由包清单取代（启动即拒绝旧变量）。
+> `PI_GLINK_ACP_PERMISSION_ALLOW` 都是当时实测用的配置面，已由包清单取代（GLINK-ARCH P3 起
+> 这些变量不再被读取，清单为 `pi-glink-harness/v2`：`[entry].command`、
+> `[capabilities.session_config]`、`[capabilities].permission_allow`；v1 清单不再可读）。
 > 逐 agent 的实测事实与证据不受影响。
 
 | 来源标记 | 含义 |
@@ -1771,8 +1773,9 @@ p4 方案（GLINK-SUB 可见性）遗留的未验证项：ACP 面是否暴露子
   仍以失败收口。同步派发的 ACP agent 行为不变。
 * 判定来源（2026-09-27 follow-up 修订）：初版在 ACP 公共投影里用正则识别 dsh 的回复文本
   `^\s*started\s+subagent\s+\S+`，把 dsh 特有语义写进了公共层、且依赖上游措辞。现改为
-  **包清单声明**：`harnesses/dsh/harness.toml` 的 `subagent_dispatch = "async"`（ACP 包可选键，
-  缺省 `sync`；pi 包出现即拒绝），经 `HostConfig.acp_subagent_dispatch` 交给 `AcpProjector`；
+  **包清单声明**：`harnesses/dsh/harness.toml` 的 `[capabilities].subagent_dispatch = "async"`（ACP 包可选键，
+  缺省 `sync`；pi 包出现即拒绝），经 `HostConfig.pack.capabilities.subagent_dispatch` 交给 `AcpProjector`
+  （P3 起不再有抄来的 `acp_subagent_dispatch` 字段）；
   投影不再读任何 agent 的回复措辞。
 * 回归：`tests/test_kernel_acp_projection.py`（async 包 completed 不发 finished、迟到的占位
   更新仍抑制、async 包 failed 仍以失败收口、sync 包即使回复长得像派发确认也照常收口）、

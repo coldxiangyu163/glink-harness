@@ -368,7 +368,9 @@ child 在前端显示为普通「进行中」，不伪造进度。
 的族取自**它自己记录里的** `spec.family`（`family_of`），不读当前配置做族分支——准入时
 `RunSpec` 随记录原子写入是冻结点本身，留在 runner；GLINK-ARCH-6 起 `select_family` 的输入是
 `harnesses/<pack>/harness.toml` 解析出的包清单：`family` 决定实现，包的能力提示与 ACP 包的
-`home/` 覆盖层由该包提供，包名随 `spec.pack` 写入 run 记录）。族接口覆盖六面职责：(a) 准入
+`home/` 覆盖层由该包提供，包名随 `spec.pack` 写入 run 记录；P3 起 `HostConfig.pack` 直接持有
+`HarnessPack` 对象，族代码只读其 `[capabilities]` 能力矩阵——`resume`、`subagent_dispatch`、
+`child_progress`、`session_config`、`permission_allow`——不再按包名特判）。族接口覆盖六面职责：(a) 准入
 ——凭据要求（`/` 命令门禁与斜杠解释自 GLINK-ARCH-6 起是宿主级、harness 无关，不再由族提供白名单）；
 (b) 追问准入与续接种子——族追加门禁、工作区复用、会话种子与 `resume_session` 值、会话身份
 的校验时机；(c) runtime 渲染与 projector 工厂（渲染中新知的秘密经 `PreparedRuntime` 交出，
@@ -608,17 +610,19 @@ E2B live 冒烟未做**。配置交付带有 `(相对路径, sha256)` 清单，`
   未列入预装名单的声明原样保留（本仓当前两个 `npm:` 声明都已列名：`pi-web-access` 与
   `pi-subagents`）。
 
-版本一致性由发布物与仓库测试共同约束：两个 Dockerfile 用 `ARG PI_WEB_ACCESS_VERSION` /
-`ARG PI_SUBAGENTS_VERSION` 精确 pin 并安装到 `/opt/pi-packages`，
-`tests/test_repository_boundaries.py` 卡住两个 Dockerfile、模板 pin 三者一致（与 `PI_VERSION`
-同一口径）。预装安装用 `--legacy-peer-deps`，与 pi 自己的 npm 托管安装一致：否则 npm 会自动装入
+版本一致性以包清单为唯一真源（GLINK-ARCH P3）：`harnesses/pi/harness.toml` 的
+`[[image.packages]]` 声明 pi 内核与两个预装包的精确版本，`scripts/generate-pack-artifacts.py`
+生成两个 Dockerfile 的 `ARG PI_VERSION` / `ARG PI_WEB_ACCESS_VERSION` / `ARG PI_SUBAGENTS_VERSION`
+与模板的 `packages`，`tests/test_repository_boundaries.py` 检查生成产物与清单一致；容器面的
+预装名单也取自同一清单（`HarnessPack.prebaked_pi_packages()`）。预装安装用 `--legacy-peer-deps`，与 pi 自己的 npm 托管安装一致：否则 npm 会自动装入
 一份版本可能不同的 `@earendil-works/pi-*` peer，扩展会从副本解析宿主 API 并改变工具的激活方式。
 
-**harness 包 pin（GLINK-ARCH-6）**：ACP 包（dsh/codex/opencode）的 `package` + `version` 写在各自的
-`harnesses/<pack>/harness.toml`，同一测试另卡住它们与 `docker/Dockerfile.acp-worker`、
-`docker/e2b/Dockerfile.acp-e2b` 的同名 ARG 逐字一致（与 `PI_VERSION` 同一口径）；闭源适配器
-及其 CLI 层已随 GLINK-ARCH-6 从这两个镜像删除。pi 包的版本固定点不变（`ARG PI_VERSION` +
-`harnesses/pi/settings.json` 的两个包 pin）。
+**harness 包 pin（GLINK-ARCH-6，P3 起改为生成）**：ACP 包（dsh/codex/opencode）的上游包与精确版本
+写在各自 `harnesses/<pack>/harness.toml` 的 `[[image.packages]]`（`role = "agent"`），
+`docker/Dockerfile.acp-worker` 与 `docker/e2b/Dockerfile.acp-e2b` 的同名 ARG 以及
+`docker/e2b/templates.json` 的 `acp-worker` 条目（别名 `glink-acp-worker`、CPU/内存、
+E2B CLI 构建命令）都由生成脚本写出，同一测试比对产物与清单；闭源适配器及其 CLI 层已随
+GLINK-ARCH-6 从这两个镜像删除。
 
 **包缺失必须是明确失败。** pi 对不存在的本地包路径完全静默，所以两个镜像都带
 `/opt/pi-packages/check-packages.sh`：Docker 面把它作为容器的 `--entrypoint`（镜像早于宿主时
@@ -741,7 +745,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `host/pi_glink/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env` / `subagent_artifacts`（pi-subagents 产物布局解析与关联，R2）；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）；两族的 run 生命周期策略：`harness` / `harness_pi` / `harness_acp`。不导入 `runs/` 或宿主编排模块 |
 | `host/pi_glink/runs/` | 编排层 | run 准入与执行骨架、收尾顺序、终态提交与资源台账：`runner`（RunManager 公共 API 与准入锁）/ `admission`（两段式准入）/ `pipeline` + `stages`（生命周期管线与各阶段）/ `state`（阶段事实类型）/ `channel`（事件提交路径）/ `secrets`（run 秘密边界）/ `plugins`（子代理文档/进度/增强插件）/ `errors` / `limits` / `resource_ledger`（外部资源台账、重启对账、人工裁决与在线身份探测扫描）/ `child_progress_observer`（R3a 每 run 进度观察者） |
 | `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
-| `harnesses/<pack>/` | Harness 包 | `harness.toml`（清单：`family`、ACP 的 `command` 与上游 `package`/`version`、可选 `session_config`/`permission_allow`）、可选 `capabilities.md`（能力提示，拼入系统提示）、ACP 包的 `home/`（每 run HOME 覆盖层，先于凭据注入）；pi 包另有 `settings.json`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
+| `harnesses/<pack>/` | Harness 包 | `harness.toml`（`pi-glink-harness/v2` 清单：`family`、`[entry].command`、`[capabilities]` 能力矩阵、`[image]` 镜像需求与上游包精确版本；Dockerfile ARG、`docker/e2b/templates.json` 与 pi 的 `settings.json` 包列表由 `scripts/generate-pack-artifacts.py` 从它生成）、可选 `capabilities.md`（能力提示，拼入系统提示）、ACP 包的 `home/`（每 run HOME 覆盖层，先于凭据注入）；pi 包另有 `settings.json`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
 | `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |
 | `docker/` | 执行面 | `Dockerfile.worker`（pi 容器）、`Dockerfile.acp-worker`（ACP 容器）、`e2b/Dockerfile.e2b`（pi 模板）、`e2b/Dockerfile.acp-e2b`（ACP dev 模板） |
 | `methodology/` | 方法论（harness 无关，唯一真源） | `work-agreement.md`（工作约定）、`blueprints/*.md`（蓝图：阶段/产出契约/检查点），格式契约见 `docs/blueprint-templates.md` |

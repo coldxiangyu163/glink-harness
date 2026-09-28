@@ -142,25 +142,42 @@ harnesses/<pack>/
 └─ …                   # pi 包：settings.json / extensions/ / agents/ / skills/
 ```
 
-清单字段（`format = "pi-glink-harness/v1"`，解析全有或全无，未知键即拒绝）：
+清单格式 `format = "pi-glink-harness/v2"`（GLINK-ARCH P3 起；解析全有或全无，任何层级的未知键即拒绝）。
+**v1 清单不再可读**：`format = "pi-glink-harness/v1"` 启动即拒绝（「旧格式不再可读，不做迁移」），
+v1 时期的顶层 `command`/`package`/`version`/`session_config`/`permission_allow`/`subagent_dispatch`
+全部移入下表的分组，没有兼容读取。
 
 | 字段 | 出现于 | 规则 |
 |---|---|---|
-| `format` | 所有包 | 固定 `"pi-glink-harness/v1"`；未知取值拒绝 |
+| `format` | 所有包 | 固定 `"pi-glink-harness/v2"`；其他取值（含 v1）拒绝 |
 | `name` | 所有包 | 非空 slug，必须等于目录名（标识与目录不允许漂移） |
 | `family` | 所有包 | `pi` 或 `acp`；`select_family` 据此构造族实例 |
-| `command` | ACP 包 | argv 数组（非空字符串）；直接 exec，不经 shell |
-| `package` | ACP 包 | 上游包名（如 `@deepseek-ai/dsh`） |
-| `version` | ACP 包 | 精确版本，与两个 ACP 镜像的同名 ARG 逐字一致（回归卡住） |
-| `session_config` | ACP 包（可选） | `id → value` 表（如 codex 的 `mode = "auto"`），`session/new` 后应用；agent 未声明该选项/取值时 run 失败闭环 |
-| `permission_allow` | ACP 包（可选） | ACP option/tool kind 的子集；缺省空 = fail-closed 全拒 |
-| `subagent_dispatch` | ACP 包（可选） | `sync`（缺省：派发调用的终态即子代理结果）或 `async`（派发被接受即 completed，子代理继续运行，由 run 终帧收口；dsh 声明）；投影据此判定，不识别 agent 回复措辞 |
+| `[entry].command` | 所有包（必填） | argv 数组（非空字符串）。ACP：agent 的 argv，直接 exec、不经 shell。pi：只有一项，即镜像内的内核可执行名（宿主拼 `--mode rpc` 等参数；`PI_GLINK_PI_BIN` 缺省取它） |
+| `[capabilities].resume` | 所有包（必填 bool） | `false`：准入层对该包的每个追问一律 `session_unavailable`，不读父会话；`true`：继续交给族的运行期事实（ACP 还要看协商出的 `sessionCapabilities.resume`/`loadSession`）。四个随仓库包都声明 `true` |
+| `[capabilities].subagent_dispatch` | ACP 包（可选） | `sync`（缺省：派发调用的终态即子代理结果）或 `async`（派发被接受即 completed，子代理继续运行，由 run 终帧收口；dsh 声明）；投影据此判定，不识别 agent 回复措辞 |
+| `[capabilities].child_progress` | ACP 包（可选） | 运行中子代理进度源；目前只有 `dsh-session-zstd`（状态根下 `.dsh/sessions` 的私有会话文件，dsh 声明）。未声明 = 该包如实没有进度源，族代码不按包名或目录猜 |
+| `[capabilities.session_config]` | ACP 包（可选） | `id → value` 表，`session/new` 后应用；agent 未声明该选项/取值时 run 失败闭环 |
+| `[capabilities].permission_allow` | ACP 包（可选） | ACP option/tool kind 的子集；缺省空 = fail-closed 全拒 |
+| `[image].target` | 所有包（必填） | 承载该包的 worker 镜像：pi 族只能是 `pi-worker`，ACP 族只能是 `acp-worker` |
+| `[image].cpu_count` / `memory_mb` | 所有包（可选，缺省 2 / 4096） | E2B 模板资源下限；同一镜像取成员包的最大值 |
+| `[[image.packages]]` | 所有包（至少一条） | `arg`（Dockerfile ARG 名，`*_VERSION`）、`package`（npm 包名）、`version`（精确版本）、`role`。pi 族 role ∈ `kernel`（恰好一个）/`pi-package`（预装进 `/opt/pi-packages`，并写入 `settings.json`）；ACP 族 role = `agent` |
 
-* pi 包不声明 `command`/`package`/`version`/`session_config`/`permission_allow`/`subagent_dispatch`——出现即拒绝
-  （这些键对 pi 族没有消费者）。pi 的版本固定点仍是 `docker/Dockerfile.worker` /
-  `docker/e2b/Dockerfile.e2b` 的 `ARG PI_VERSION` 与 `harnesses/pi/settings.json` 的包 pin。
+* ACP 专属能力（`subagent_dispatch`/`child_progress`/`session_config`/`permission_allow`）出现在
+  pi 包即拒绝（这些键对 pi 族没有消费者）。
+* **族代码只读能力声明**：`config.pack`（`HarnessPack` 对象本身）是运行期唯一入口，`HostConfig`
+  不再有从清单抄来的 `acp_command`/`acp_session_config`/`acp_permission_allow`/
+  `acp_subagent_dispatch`/`pack_capabilities`/`pack_home` 字段；容器面预装包名单来自
+  `pack.prebaked_pi_packages()`，不再有代码内的第二份列表。
+* **镜像构建产物由清单生成并入库**：`python3 scripts/generate-pack-artifacts.py` 改写四个
+  Dockerfile 的 `ARG <NAME>_VERSION=` 行、`docker/e2b/templates.json`（每个 worker 镜像的
+  E2B 别名、Dockerfile、CPU/内存、构建参数与构建命令）以及 pi 包 `settings.json` 的
+  `packages`；`--check` 只比对。规则：已声明的 ARG 在所属镜像的每个 Dockerfile 里恰好
+  出现一次；Dockerfile 中未被任何清单声明的 `ARG *_VERSION` 拒绝（不许手写第二处真源）；
+  同一镜像内同名 ARG 声明冲突拒绝。`tests/test_repository_boundaries.py` 检查生成产物与
+  清单一致（不再逐字比对三处）。升版流程：只改 `harness.toml` → 运行生成脚本 → 提交产物；
+  生成与校验都不构建镜像、不访问网络。Node 基础镜像 tag 与镜像源 ARG 不是包属性，仍手写。
 * `capabilities.md` 只写**已知成立**的事实（例如 pi 包的子代理工具面）；不确定的 agent 可以
-  不提供该文件，宁缺不臆造工具名。
+  不提供该文件，宁缺不臆造工具名。解析时读入 `HarnessPack.prompt`，宿主生命周期内字节稳定。
 * `home/` 覆盖层是仓库内容：渲染每 run HOME 时**先铺覆盖层、再按现有规则注入凭据**
   （凭据目标优先、不被覆盖层覆盖）。dsh 的覆盖层自 GLINK-DSH-02 起承载每 run 的 ACP
   profile 清单（把 `web.fetchProvider` 指向 out-of-tree 的 Jina fetch bundle；bundle 代码
@@ -176,14 +193,11 @@ harnesses/<pack>/
 * 族由清单的 `family` 推导，`select_family` 按清单构造族实例（`harness_pi.py` /
   `harness_acp.py`）；每个 run 的族取自其记录的 `RunSpec.family`（§3.4），runner 不读
   harness 字符串做分支，也不导入具体族（导入白名单见 `tests/test_repository_boundaries.py`）。
-* **旧变量启动即拒绝**（不做兼容映射）：
-
-| 旧变量 | 新写法 |
-|---|---|
-| `PI_GLINK_HARNESS=acp` | `PI_GLINK_HARNESS=<包名>`；agent 命令进该包 `harness.toml` 的 `command` |
-| `PI_GLINK_ACP_COMMAND` | `harnesses/<包>/harness.toml` 的 `command`（argv 数组） |
-| `PI_GLINK_ACP_SESSION_CONFIG` | `harnesses/<包>/harness.toml` 的 `session_config` |
-| `PI_GLINK_ACP_PERMISSION_ALLOW` | `harnesses/<包>/harness.toml` 的 `permission_allow` |
+* **旧变量不再读取**（P3 起删除专用拒绝分支，不做兼容映射）：`PI_GLINK_HARNESS=acp` 只是一个
+  不存在的包名，按「不可用」拒绝并列出可用包；`PI_GLINK_ACP_COMMAND` /
+  `PI_GLINK_ACP_SESSION_CONFIG` / `PI_GLINK_ACP_PERMISSION_ALLOW` 不再是配置面，设置了也不会
+  覆盖包清单（对应写法是 `[entry].command`、`[capabilities.session_config]`、
+  `[capabilities].permission_allow`）。
 
 * `PI_GLINK_ACP_CREDENTIAL_FILES` 与 `PI_GLINK_ACP_ENV` 是**部署秘密**，仍留在环境配置：
   只有选中包的族是 ACP 时才生效，非 ACP 族下设置即拒绝启动（沿用现有非空即报错的语义）。

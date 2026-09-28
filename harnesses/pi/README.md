@@ -18,7 +18,7 @@
 
 | 位置 | 用途 |
 |---|---|
-| `harness.toml` | 包清单：`format`/`name`/`family`（fail-closed 解析，未知键拒绝） |
+| `harness.toml` | 包清单（`pi-glink-harness/v2`）：`[entry]`、`[capabilities]`、`[image]`（fail-closed 解析，未知键拒绝） |
 | `capabilities.md` | 能力提示：拼进系统提示（工作约定之后、蓝图之前）；只写已知成立的事实 |
 | `settings.json` | pi 的官方设置（模型、思考档位、工具开关等） |
 | `AGENTS.md` | 目录级运行约定：工作区路径、报告产出位置、检索纪律 |
@@ -38,7 +38,7 @@
 
 | 文件 | 内容 |
 |---|---|
-| `harness.toml` | 包清单：`format = "pi-glink-harness/v1"`、`name = "pi"`、`family = "pi"`；pi 的版本不在清单里（见 `docker/Dockerfile.worker` 的 `ARG PI_VERSION` 与 `settings.json`） |
+| `harness.toml` | 包清单：`format = "pi-glink-harness/v2"`、`name = "pi"`、`family = "pi"`；`[entry].command = ["pi"]`、`[capabilities].resume = true`；`[image]` 的 `[[image.packages]]` 是 pi 内核与预装包版本的唯一真源（Dockerfile ARG 与本目录 `settings.json` 的 `packages` 由 `scripts/generate-pack-artifacts.py` 生成） |
 | `capabilities.md` | pi 包能力提示（拼进系统提示，不落进运行期目录）：`subagent` / `researcher` 委派与子代理结论亲自核实 |
 | `settings.json` | `defaultThinkingLevel`、两个精确 pin 的包声明（`npm:pi-web-access@0.31.0`、`npm:pi-subagents@0.40.0`）与关闭的 watchdog 设置 `subagents.watchdog`。本机（inproc）面按此在 run 启动时安装到运行期配置目录；Docker/E2B 面由宿主渲染成镜像内本地包 `/opt/pi-packages/node_modules/<name>`（`docs/architecture.md` §5.3），不在 run 里联网安装 |
 | `agents/researcher.md` | 取证子代理定义：自包含任务、一手来源优先、打开原文核对、产物落工作区约定文件名、只回报要点与来源；`tools` 白名单里没有委派工具，子代理不得再派 |

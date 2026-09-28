@@ -17,7 +17,7 @@
 |---|---|---|
 | Python | ≥ 3.12 | 宿主与内核接入层只用标准库，无运行时依赖 |
 | Node.js | 宿主开发 **v24.16.0**（nvm 固定，本机实测）；Docker / E2B 镜像 **v24.21.0**（`node:24.21.0-bookworm-slim` 精确 tag，实测） | 前端与 pi 的运行时；宿主用 nvm：`nvm install 24.16.0 && nvm use 24.16.0`；镜像/模板的 Node 版本在各自 Dockerfile 里 pin 到精确 tag（不用浮动 `node:24-bookworm-slim`） |
-| pi | 0.86.1（已实测） | `npm install -g @earendil-works/pi-coding-agent@0.86.1`；Docker / E2B 面的版本固定在各自 Dockerfile 的 `ARG PI_VERSION` |
+| pi | 0.86.1（已实测） | `npm install -g @earendil-works/pi-coding-agent@0.86.1`；Docker / E2B 面的版本声明在 `harnesses/pi/harness.toml` 的 `[[image.packages]]`，Dockerfile 的 `ARG PI_VERSION` 由 `scripts/generate-pack-artifacts.py` 生成 |
 | pi 包 | `pi-web-access@0.31.0`（检索，三面）；`pi-subagents@0.40.0`（委派，三面；前台强制，见「委派与子代理」） | `harnesses/pi/settings.json` 是包声明真源（两个精确 pin）；Docker / E2B 从镜像内 `/opt/pi-packages` 本地加载，不在 run 里 `npm install`；一致性由 `tests/test_repository_boundaries.py` 卡住 |
 | pytest | ≥ 8（仅开发） | `uv pip install -e ".[dev]"` |
 | e2b SDK | ≥ 2（仅 E2B 执行面） | `uv pip install -e ".[e2b]"`（含代理网络需要的 `httpx[socks]`） |
@@ -342,7 +342,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | `host/pi_glink/` | 宿主：配置解析、事件总线、HTTP/SSE 服务、静态资源 |
 | `host/pi_glink/runs/` | 编排层：run 准入、执行骨架与收尾顺序、终态提交、外部资源台账 |
 | `host/pi_glink/kernel/` | pi 接入层：headless 协议客户端（RPC / JSON）、事件投影、运行期配置渲染、三执行面适配；不得反向导入编排层或宿主编排模块 |
-| `harnesses/<pack>/` | Harness 包：`harness.toml`（`family`；ACP 的 `command`/`session_config`/`permission_allow`/上游 `package`+`version`）、可选 `capabilities.md`（拼入系统提示）、ACP 的 `home/` 覆盖层；pi 包另含 `settings.json` 与 `extensions/`、`agents/`（前台守卫与 `researcher.md`），每次 run 先删再拷到 `runs/<id>/pi-agent/` |
+| `harnesses/<pack>/` | Harness 包：`harness.toml`（`pi-glink-harness/v2`：`family`、`[entry].command`、`[capabilities]` 能力矩阵、`[image]` 镜像需求与上游包版本；镜像 ARG 与 `docker/e2b/templates.json` 由它生成）、可选 `capabilities.md`（拼入系统提示）、ACP 的 `home/` 覆盖层；pi 包另含 `settings.json` 与 `extensions/`、`agents/`（前台守卫与 `researcher.md`），每次 run 先删再拷到 `runs/<id>/pi-agent/` |
 | `web/` | 前端：按百鉴 UI 标准库逐值对齐的静态 ESM 资源（token 层 + 组件层 + 外壳） |
 | `docs/` | `architecture.md`（进程拓扑、事件契约、执行器契约）、`pi-boundary.md`（扩展点与禁止项）、`multitenancy-plan.md`（下一阶段设计与决策点） |
 | `tests/` | 宿主与内核的回归 |
