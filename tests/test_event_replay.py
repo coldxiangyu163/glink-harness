@@ -2,7 +2,7 @@
 
 The audit reproduced two failure modes:
 
-* ``_emit`` published to the live bus *before* appending to ``events.jsonl``: a
+* ``_emit`` published to the live bus *before* appending to the event log: a
   failed append left a frame the browser had seen and the log did not;
 * ``is_open`` stayed true after a run closed and replay came from the in-memory
   ring, so a small ring silently served a suffix of the real history.
@@ -16,9 +16,8 @@ the slow-subscriber bound.
 
 from __future__ import annotations
 
-import errno
 import json
-import os
+import sqlite3
 import sys
 import threading
 import time
@@ -29,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from pi_glink import events as events_module
+from pi_glink import store as store_module
 from pi_glink.app import PiGlinkServer, create_server
 from pi_glink.config import build_config
 from pi_glink.events import RUN_STARTED, EventBus
@@ -85,14 +85,7 @@ def wait_for(predicate, *, timeout: float = 20.0) -> bool:
 
 
 def read_log(store: RunStore, run_id: str) -> list[dict]:
-    path = store.events_path(run_id)
-    if not path.is_file():
-        return []
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    return list(store.iter_events(run_id))
 
 
 def sse_frames(port: int, run_id: str, *, last_event_id: str | None = None) -> list[dict]:
@@ -389,7 +382,7 @@ def test_last_event_id_resumes_without_replaying_committed_frames(tmp_path: Path
 
 
 def test_all_readers_observe_the_same_committed_facts(tmp_path: Path) -> None:
-    """events.jsonl, the run view and the SSE replay agree frame for frame."""
+    """The stored event log, the run view and the SSE replay agree frame for frame."""
     config = make_config(tmp_path)
     server = build_server(config)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -433,7 +426,6 @@ def test_restart_reconciles_a_run_left_running_by_a_previous_process(tmp_path: P
     store.create("上一次进程遗留", run_id="abandoned", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     store.update(
         "abandoned",
-        status=RUNNING,
         container_name="pi-glink-abandoned",
         sandbox_id="sandbox-xyz",
     )
@@ -589,14 +581,12 @@ def test_a_terminal_frame_is_only_published_once_every_reader_sees_it(tmp_path: 
         thread.join(timeout=5)
 
 
-def test_settle_failure_and_restart_keep_every_surface_on_the_committed_fact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """R7 with a mid-way I/O failure: the settled copy is never written.
+def test_a_restart_keeps_every_surface_on_the_committed_fact(tmp_path: Path) -> None:
+    """R7: detail, list, report and replay agree before and after a restart.
 
-    Detail, list, report and replay agree before the restart (projected from
-    the committed frame) and after it (settled by the next owner) — and the
-    committed ``finished`` verdict is not rewritten as interrupted.
+    The terminal frame and the terminal record are one transaction, so there
+    is no settled copy to lag behind: a fresh process reads the same facts and
+    never rewrites the committed ``finished`` verdict as interrupted.
     """
     config = make_config(tmp_path)
 
@@ -611,15 +601,12 @@ def test_settle_failure_and_restart_keep_every_surface_on_the_committed_fact(
         )
 
     server = create_server(config, client_factory=fake_factory())
-    monkeypatch.setattr(server.store, "settle", lambda run_id: (_ for _ in ()).throw(OSError("disk full")))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = server.server_address[1]
     try:
-        run_id = _post(port, "/api/runs", {"prompt": "落定副本写失败"})[1]["run"]["runId"]
+        run_id = _post(port, "/api/runs", {"prompt": "重启前后一致"})[1]["run"]["runId"]
         assert wait_for(lambda: server.manager.active_run_id is None)
-        meta = json.loads((server.store.run_dir(run_id) / "meta.json").read_text(encoding="utf-8"))
-        assert meta["status"] == RUNNING
         before = surfaces(port, run_id)
         assert before[:6] == ("finished", "finished", "finished", True, True, 200)
         assert before[6] == before[7]
@@ -633,8 +620,6 @@ def test_settle_failure_and_restart_keep_every_surface_on_the_committed_fact(
     thread.start()
     port = restarted.server_address[1]
     try:
-        meta = json.loads((restarted.store.run_dir(run_id) / "meta.json").read_text(encoding="utf-8"))
-        assert meta["status"] == "finished", "the next owner settles the committed verdict"
         assert surfaces(port, run_id) == before
         assert [f["type"] for f in sse_frames(port, run_id)].count("run_failed") == 0
     finally:
@@ -680,85 +665,94 @@ def test_report_write_failure_is_a_consistent_rejection(
 
 # -- the terminal commit point (PI-GLINK-STREAM-DURABILITY-20260923) ------------
 #
-# The terminal line was written, then fsync'ed; readers could see it in between,
-# and a failed fsync truncated it away again. A terminal state must become
-# visible only once it is durable, and a failure must leave it never visible.
+# A terminal state must become visible only once its transaction commits, and a
+# failed commit must leave it never visible. The gate below holds the durable
+# (``synchronous=FULL``) COMMIT of a terminal transaction — the only durable
+# write the store makes — and optionally fails it the way a disk I/O error
+# would; SQLite then rolls the transaction back. Visibility is observed through
+# an independent connection, which only ever sees committed rows.
 
 
-def _fd_path(fd: int) -> str:
-    try:
-        return os.readlink(f"/proc/self/fd/{fd}")
-    except OSError:
-        import fcntl  # noqa: PLC0415 - macOS
+class _GatedConnection:
+    """Delegates to a real connection; holds (and may fail) the first durable COMMIT."""
 
-        return fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0].decode()
+    def __init__(self, inner: sqlite3.Connection, gate: "_CommitGate") -> None:
+        self._inner = inner
+        self._gate = gate
+        self._durable = False
+
+    def execute(self, sql: str, *args: object):
+        statement = sql.strip().upper()
+        if statement == "PRAGMA SYNCHRONOUS=FULL":
+            self._durable = True
+        elif statement == "PRAGMA SYNCHRONOUS=NORMAL":
+            self._durable = False
+        elif statement == "COMMIT" and self._durable and not self._gate.entered.is_set():
+            self._gate.entered.set()
+            assert self._gate.release.wait(30), "the test never released the commit gate"
+            if self._gate.fail:
+                raise sqlite3.OperationalError("disk I/O error (synthetic)")
+        return self._inner.execute(sql, *args)
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
 
 
-class _FsyncGate:
-    """Blocks the first fsync of an ``events.jsonl`` descriptor until released."""
+class _CommitGate:
+    """Wraps every store connection opened after installation."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, *, fail: bool) -> None:
         self.entered = threading.Event()
         self.release = threading.Event()
         self.fail = fail
-        self._original = os.fsync
-        monkeypatch.setattr(os, "fsync", self._fsync)
-
-    def _fsync(self, fd: int) -> None:
-        if not self.entered.is_set() and _fd_path(fd).endswith("events.jsonl"):
-            self.entered.set()
-            assert self.release.wait(30), "the test never released the fsync gate"
-            if self.fail:
-                raise OSError(errno.EIO, "synthetic fsync failure")
-        self._original(fd)
+        original = store_module._open_database  # noqa: SLF001
+        monkeypatch.setattr(
+            store_module, "_open_database", lambda path: _GatedConnection(original(path), self)
+        )
 
 
 def _has_terminal(store: RunStore, run_id: str) -> bool:
     return any(e["type"] in events_module.TERMINAL_EVENT_TYPES for e in store.iter_events(run_id))
 
 
-@pytest.mark.parametrize("fail", [False, True], ids=["fsync-ok", "fsync-fails"])
-def test_a_verdict_is_invisible_until_its_fsync_returns(
+@pytest.mark.parametrize("fail", [False, True], ids=["commit-ok", "commit-fails"])
+def test_a_verdict_is_invisible_until_its_commit_returns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail: bool
 ) -> None:
     config = make_config(tmp_path)
+    gate = _CommitGate(monkeypatch, fail=fail)
     server = create_server(config, client_factory=fake_factory())
+    observer = RunStore(config.data_root / "runs")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = server.server_address[1]
-    gate = _FsyncGate(monkeypatch, fail=fail)
     samples: list[tuple[str, bool]] = []
     stop = threading.Event()
     try:
-        run_id = _post(port, "/api/runs", {"prompt": "终帧落盘窗口"})[1]["run"]["runId"]
+        run_id = _post(port, "/api/runs", {"prompt": "终帧提交窗口"})[1]["run"]["runId"]
 
         def observe() -> None:
             while not stop.is_set():
-                status = _get_json(port, f"/api/runs/{run_id}")[1]["run"]["status"]
-                samples.append((status, _has_terminal(server.store, run_id)))
+                samples.append((observer.get(run_id).status, _has_terminal(observer, run_id)))
                 time.sleep(0.005)
 
-        observer = threading.Thread(target=observe, daemon=True)
-        observer.start()
-        assert gate.entered.wait(30), "the terminal commit never reached fsync"
+        sampler = threading.Thread(target=observe, daemon=True)
+        sampler.start()
+        assert gate.entered.wait(30), "the terminal commit never reached COMMIT"
 
-        # The terminal line is written and fsync has not returned: nothing may show it.
-        assert server.store.get(run_id).status == RUNNING
-        assert server.store.committed_terminal(run_id) is None
-        assert not _has_terminal(server.store, run_id)
-        detail = _get_json(port, f"/api/runs/{run_id}")[1]["run"]
-        listed = next(r for r in _get_json(port, "/api/runs")[1]["runs"] if r["runId"] == run_id)
-        assert (detail["status"], listed["status"]) == (RUNNING, RUNNING)
-        assert detail["hasReport"] is False and listed["hasReport"] is False
-        assert _get_status(port, f"/api/runs/{run_id}/report") == 404
+        # The terminal rows are written and COMMIT has not returned: nothing shows them.
+        assert observer.get(run_id).status == RUNNING
+        assert observer.committed_terminal(run_id) is None
+        assert not _has_terminal(observer, run_id)
         seen_while_blocked = len(samples)
         gate.release.set()
 
-        execution = server.manager._executions[run_id]  # noqa: SLF001 - wait for the finalizer
-        assert execution.finalized.wait(30)
+        execution = server.manager._executions.get(run_id)  # noqa: SLF001 - wait for the finalizer
+        if execution is not None:
+            assert execution.finalized.wait(30)
         time.sleep(0.1)
         stop.set()
-        observer.join(5)
+        sampler.join(5)
         assert seen_while_blocked and all(
             status == RUNNING and not terminal for status, terminal in samples[:seen_while_blocked]
         )
@@ -775,14 +769,13 @@ def test_a_verdict_is_invisible_until_its_fsync_returns(
             )
         else:
             assert all(status == RUNNING and not terminal for status, terminal in samples), (
-                "a verdict whose fsync failed was never visible"
+                "a verdict whose commit failed was never visible"
             )
             assert server.store.get(run_id).status == RUNNING
             assert not _has_terminal(server.store, run_id)
             assert _get_status(port, f"/api/runs/{run_id}/report") == 404
             log = read_log(server.store, run_id)
             assert server.bus.last_seq(run_id) == log[-1]["seq"], "no sequence was burned"
-            assert server.store.events_path(run_id).read_bytes().endswith(b"\n")
     finally:
         stop.set()
         gate.release.set()
@@ -802,12 +795,12 @@ def test_a_verdict_is_invisible_until_its_fsync_returns(
             restarted.server_close()
 
 
-@pytest.mark.parametrize("fail", [False, True], ids=["fsync-ok", "fsync-fails"])
-def test_a_reconciled_interruption_is_invisible_until_its_fsync_returns(
+@pytest.mark.parametrize("fail", [False, True], ids=["commit-ok", "commit-fails"])
+def test_a_reconciled_interruption_is_invisible_until_its_commit_returns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail: bool
 ) -> None:
-    """Restart path over a torn tail: the repair newline and the interrupted
-    frame become visible together, after fsync — or not at all."""
+    """Restart path: the interrupted frame and state become visible together
+    once the reconcile transaction commits — or not at all."""
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
     store.create("上一个进程遗留", run_id="orphan", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
@@ -815,10 +808,8 @@ def test_a_reconciled_interruption_is_invisible_until_its_fsync_returns(
         "orphan",
         {"type": "run_started", "runId": "orphan", "seq": 1, "ts": time.time(), "payload": {}},
     )
-    with store.events_path("orphan").open("a", encoding="utf-8") as handle:
-        handle.write('{"type": "assistant_delta", "runId": "orph')  # a crash left half a line
-    before = store.events_path("orphan").read_bytes()
-    gate = _FsyncGate(monkeypatch, fail=fail)
+    observer = RunStore(config.data_root / "runs")
+    gate = _CommitGate(monkeypatch, fail=fail)
     started: dict[str, object] = {}
 
     def start_host() -> None:
@@ -830,8 +821,7 @@ def test_a_reconciled_interruption_is_invisible_until_its_fsync_returns(
     host = threading.Thread(target=start_host, daemon=True)
     host.start()
     try:
-        assert gate.entered.wait(30), "reconciliation never reached fsync"
-        observer = RunStore(config.data_root / "runs")
+        assert gate.entered.wait(30), "reconciliation never reached COMMIT"
         assert observer.get("orphan").status == RUNNING
         assert observer.committed_terminal("orphan") is None
         assert [e["type"] for e in observer.iter_events("orphan")] == ["run_started"]
@@ -845,7 +835,7 @@ def test_a_reconciled_interruption_is_invisible_until_its_fsync_returns(
         else:
             assert observer.get("orphan").status == RUNNING
             assert observer.committed_terminal("orphan") is None
-            assert store.events_path("orphan").read_bytes() == before, "the repair was rolled back too"
+            assert [e["type"] for e in observer.iter_events("orphan")] == ["run_started"]
     finally:
         gate.release.set()
         host.join(5)

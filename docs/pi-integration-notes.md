@@ -48,7 +48,7 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
 ## 3. 配置目录重定向
 
 - `PI_CODING_AGENT_DIR` 覆盖 pi 配置目录（默认 `~/.pi/agent`）；指向项目 `agent/` 后，用户个人配置（packages、models、extensions）不再加载，这正是本仓库需要的隔离语义。
-- `PI_CODING_AGENT_SESSION_DIR` 或 `--session-dir` 覆盖会话目录；宿主把它指向**每个 run 自己的**会话子目录（`PI_CODING_AGENT_SESSION_DIR/<runId>`，默认 `<data>/sessions/<runId>`），run 与 session 文件一一对应，且不会与其他 run 混写。
+- `PI_CODING_AGENT_SESSION_DIR` 或 `--session-dir` 覆盖会话目录；宿主把它指向**每个 run 自己的**会话目录（`<data>/runs/<runId>/sessions`，不再可配置基目录），run 与 session 文件一一对应，且不会与其他 run 混写。
 - `--provider <id> --model <含斜杠的完整 id>` 可正常工作（实测 `--provider frontier --model openai/gpt-5.6-sol`，`get_state` 返回该 id）。
 - **pi 会往配置目录写运行时状态**：实测 pi 会在其中生成 `models-store.json`、`npm/`（插件安装目录）等；`auth.json` 则是 pi 官方凭据存储，本仓库由**宿主在运行期渲染**（模型 key，0600），不是 pi 写出的空对象。因此仓库里的 `agent/` **只能作为模板**，不能直接当成 `PI_CODING_AGENT_DIR` 使用；运行期目录必须由宿主渲染到每个 run 自己的 `runs/<runId>/pi-agent`，`.gitignore` 保留第二道防线。
 

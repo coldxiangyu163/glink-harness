@@ -172,7 +172,7 @@ def read_log(path: Path) -> list[Mapping[str, Any]]:
 
 def run_dirs(config: HostConfig) -> list[str]:
     runs = config.data_root / "runs"
-    return sorted(path.name for path in runs.glob("*")) if runs.is_dir() else []
+    return sorted(path.name for path in runs.glob("*") if path.is_dir()) if runs.is_dir() else []
 
 
 # -- the repository blueprint and the format contract -------------------------

@@ -38,7 +38,7 @@ from .. import events
 from ..config import HostConfig
 from ..ownership import DataRootOwnership, OwnershipRequired
 from ..redaction import SecretRedactor
-from ..store import FAILED, RunRecord, RunStore
+from ..store import FAILED, RunAlreadyTerminal, RunRecord, RunStore
 from ..kernel.docker_env import confirm_absent as docker_confirm_absent
 from ..kernel.e2b_env import confirm_sandbox_absent as e2b_confirm_sandbox_absent
 
@@ -99,9 +99,9 @@ class ResourceLedger:
         """Close out runs a previous host process left ``running``.
 
         Requires proof that this process owns the data root: without it, a
-        run of a live host would be rewritten. A run whose terminal frame is
-        committed is only settled. A run without one is interrupted: a
-        ``run_failed(interrupted)`` frame is committed with the resource state
+        run of a live host would be rewritten. A run row that is still
+        ``running`` has, by the store's transaction, no terminal frame; it is
+        interrupted: a ``run_failed(interrupted)`` frame is committed with the resource state
         ``released: null`` (unknown), so it keeps holding capacity until an
         operator adjudicates it. External resources are never touched.
         Returns the ids that were interrupted.
@@ -110,16 +110,11 @@ class ResourceLedger:
         with self._admission_lock:
             executing = self._execution_ids()
         interrupted: list[str] = []
-        for run_id in self.store.unsettled():
+        for run_id in self.store.running_ids():
             if run_id in executing:
                 continue
-            if self.store.committed_terminal(run_id) is None:
-                if self._commit_interrupted(run_id):
-                    interrupted.append(run_id)
-            try:
-                self.store.settle(run_id)
-            except Exception:  # noqa: BLE001 - the committed frame still answers readers
-                logger.exception("遗留 run 的元数据收口失败 run=%s", run_id)
+            if self._commit_interrupted(run_id):
+                interrupted.append(run_id)
         if interrupted:
             logger.warning(
                 "识别到 %d 个上次进程遗留的 running run，已按中断收口: %s",
@@ -161,10 +156,7 @@ class ResourceLedger:
                 "external": external,
             },
         }
-        seq = max(
-            (event["seq"] for event in self.store.iter_events(run_id) if isinstance(event.get("seq"), int)),
-            default=0,
-        ) + 1
+        seq = self.store.last_seq(run_id) + 1
         try:
             self.store.commit_terminal(
                 run_id,
@@ -176,7 +168,7 @@ class ResourceLedger:
                     "payload": payload,
                 },
             )
-        except OSError as exc:
+        except (OSError, RunAlreadyTerminal) as exc:
             logger.error("遗留 run 的中断终帧写入失败 run=%s: %s", run_id, exc)
             return False
         return True
@@ -184,12 +176,7 @@ class ResourceLedger:
     def unreleased_resources(self) -> list[dict[str, Any]]:
         """Runs whose resources are not confirmed released, for operator review.
 
-        Readable holds carry their persisted identity and cleanup facts. Run
-        directories whose ``meta.json`` cannot be read are listed with
-        ``corrupt: true`` and no identity: they count as global holds, and the
-        operator decides them through the same ``--mark-released`` path (the
-        decision goes into the run directory's own sidecar file, never into the
-        unreadable metadata).
+        Every hold carries its persisted identity and cleanup facts.
         """
         holds = set(self.resource_holds())
         entries = [
@@ -204,30 +191,14 @@ class ResourceLedger:
             for record in self.store.holding_records()
             if record.run_id in holds
         ]
-        entries.extend(
-            {
-                "runId": run_id,
-                "status": None,
-                "stopReason": None,
-                "container": None,
-                "sandbox": None,
-                "cleanup": None,
-                "corrupt": True,
-            }
-            for run_id in self.store.unreadable_holds()
-        )
         return entries
 
-    def adjudicate_release(self, run_id: str, note: str) -> RunRecord | None:
+    def adjudicate_release(self, run_id: str, note: str) -> RunRecord:
         """Record an operator's decision that a run's resources are released.
 
         This is the only way besides a confirmed cleanup to return capacity. It
         requires data-root ownership (the host is not running) and a note
         describing how the release was verified; nothing is cleaned up here.
-
-        A run whose ``meta.json`` cannot be read has no record to update; its
-        decision is written to the run directory's sidecar file and ``None`` is
-        returned. The unreadable metadata itself is never rewritten.
         """
         self._require_ownership()
         reason = (note or "").strip()
@@ -238,18 +209,7 @@ class ResourceLedger:
                 raise RunBusy(run_id)
             record = self.store.get(run_id)
             if record is None:
-                if run_id not in self.store.unreadable_holds():
-                    raise KeyError(run_id)
-                self.store.adjudicate_unreadable(
-                    run_id,
-                    {
-                        "decision": "released",
-                        "source": "operator",
-                        "note": self._redactor.redact(reason),
-                        "at": time.time(),
-                    },
-                )
-                return None
+                raise KeyError(run_id)
             if not record.is_terminal:
                 raise ValueError(f"run {run_id} 尚未终态，不能裁决资源")
             if not record.holds_resources:
@@ -269,7 +229,7 @@ class ResourceLedger:
     def reconcile_resources(self) -> list[str]:
         """Confirm persisted resources are gone and release the verified holds.
 
-        Only the identity stored in the run's own ``meta.json`` is addressed —
+        Only the identity stored in the run's own record is addressed —
         a container name or a sandbox id — and the probe is run against the
         face that created it. No name pattern is guessed, no other resource is
         listed, created or touched. A confirmation records a *separate* fact
@@ -278,8 +238,7 @@ class ResourceLedger:
         ``cleanup`` facts and the committed terminal frame stay untouched.
 
         Fail-closed in every other direction: a missing identity, a probe error,
-        a timeout or an unclear answer leaves the hold exactly where it was. An
-        unreadable record has no identity at all, so it is never probed.
+        a timeout or an unclear answer leaves the hold exactly where it was.
 
         Never called while the admission lock is held (the ticket bound is per
         probe call) and never overlapping itself: a tick that finds the previous

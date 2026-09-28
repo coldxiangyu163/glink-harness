@@ -28,6 +28,7 @@ from pi_glink.kernel.acp_env import ACP_HOME_DIRNAME, prepare_acp_runtime
 from pi_glink.kernel.harness import FollowupUnavailable
 from pi_glink.runs.runner import RunManager
 from pi_glink.store import FINISHED, RunStore, RunSpec
+from store_helpers import finish, stored_record
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPO_PACKS = REPO_ROOT / "harnesses"
@@ -344,9 +345,7 @@ def test_a_run_record_carries_the_pack_and_a_foreign_pack_cannot_continue(
         run_id="parent-run",
         spec=RunSpec(family="acp", pack="demo", executor="inproc"),
     )
-    written = json.loads(
-        (store.run_dir(record.run_id) / "meta.json").read_text(encoding="utf-8")
-    )
+    written = stored_record(store, record.run_id)
     assert written["spec"]["family"] == "acp" and written["spec"]["pack"] == "demo"
     assert not {"harness", "harness_pack", "executor"} & written.keys()
 
@@ -361,7 +360,7 @@ def test_a_run_record_carries_the_pack_and_a_foreign_pack_cannot_continue(
         run_id="foreign-run",
         spec=RunSpec(family="acp", pack="opencode", executor="inproc"),
     )
-    store.update("foreign-run", status=FINISHED)
+    finish(store, "foreign-run", FINISHED)
     with pytest.raises(FollowupUnavailable) as excinfo:
         manager._admission.resumable_parent(None, "foreign-run", manager._admission.spec(None))  # noqa: SLF001
     assert excinfo.value.code == "session_unavailable"

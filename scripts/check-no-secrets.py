@@ -6,11 +6,15 @@
     .venv/bin/python scripts/check-no-secrets.py [--data-root ~/.pi-glink]
 
 凭据来源与宿主一致：`.env` 的 `OPENAI_API_KEY` / `E2B_API_KEY` /
-`PI_GLINK_WEB_SEARCH_KEY`，以及每个 run 自己的运行期
-`runs/<id>/pi-agent/web-search.json`（旧共享路径 `pi-agent/web-search.json`
-也会读取，方便扫描升级前的数据）。
+`PI_GLINK_WEB_SEARCH_KEY`。
 另外按形状扫描（sk-…、e2b_…、exa-…、NAME=value、Bearer …），
 因此即使是宿主从未见过的第三方 token 也会被检出。
+
+run 记录与事件存放在 SQLite（`runs/runs.db`）。数据库文件按页组织，较大的
+记录会被拆到 overflow page（每页开头有页指针），WAL 也按页记录；直接把文件当
+文本扫描会让跨页的凭据被截断而漏报。因此数据库以只读方式经 sqlite3 打开，
+逐行扫描 `runs.record` 与 `events.body` 的完整值（WAL 由 SQLite 自身合并），
+不直接读取 `runs.db` / `runs.db-wal` 的字节。
 
 命中即 exit 1，并打印**脱敏后**的片段（不回声真实值）。
 """
@@ -18,7 +22,9 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -32,15 +38,19 @@ from pi_glink.redaction import (  # noqa: E402
     is_placeholder_value,
 )
 
-#: File names worth scanning inside the data root.
+#: The run database, relative to the data root (``store.DATABASE_NAME``).
+_DATABASE = "runs/runs.db"
+#: Stored text columns of the run database, scanned value by value.
+_DATABASE_COLUMNS = (
+    ("runs", "record", "run_id"),
+    ("events", "body", "run_id || '#' || seq"),
+)
+#: Plain-text files worth scanning inside the data root.
 _TARGET_GLOBS = (
-    "runs/*/events.jsonl",
-    "runs/*/meta.json",
     "runs/*/artifacts/*.md",
     "runs/*/sessions/**/*.jsonl",
     "workspaces/*/*.md",
     "workspaces/*/*.txt",
-    "sessions/**/*.jsonl",  # pre-hardening shared session directory
 )
 
 
@@ -53,6 +63,37 @@ def build_redactor(repo_root: Path, data_root: Path) -> SecretRedactor:
     # Rendered run files carry only revoked egress tokens (docs/adr/0008); the
     # real keys to look for are the host configuration's own.
     return redactor
+
+
+def _database_values(path: Path) -> Iterator[tuple[str, str]]:
+    """Yield ``(location, text)`` for every stored record and event body.
+
+    Opened read-only through SQLite so overflow pages and WAL frames are
+    reassembled into whole values; raw file bytes are never matched.
+    """
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        for table, column, key in _DATABASE_COLUMNS:
+            query = f"SELECT {key}, {column} FROM {table}"  # noqa: S608 - fixed names
+            for row_key, value in connection.execute(query):
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8", errors="replace")
+                yield f"{path}[{table}.{column} {row_key}]", str(value)
+    finally:
+        connection.close()
+
+
+def _file_values(data_root: Path) -> Iterator[tuple[str, str]]:
+    for pattern in _TARGET_GLOBS:
+        for path in sorted(data_root.glob(pattern)):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                print(f"  读取失败 {path}: {exc}")
+                continue
+            yield str(path), text
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,30 +117,36 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     scanned = 0
-    leaks: list[tuple[Path, int, str, str]] = []      # 真实凭据值
-    shapes: list[tuple[Path, int, str, str]] = []     # 形态命中（占位符）
-    for pattern in _TARGET_GLOBS:
-        for path in sorted(data_root.glob(pattern)):
-            if not path.is_file():
+    leaks: list[tuple[str, int, str, str]] = []      # 真实凭据值
+    shapes: list[tuple[str, int, str, str]] = []     # 形态命中（占位符）
+
+    def scan(location: str, text: str) -> None:
+        for number, line in enumerate(text.splitlines(), start=1):
+            # 1) 真实凭据值：最硬的判据，直接命中即失败。
+            if any(value in line for value in known_values):
+                leaks.append((location, number, "value", redactor.redact(line)[:160]))
                 continue
-            scanned += 1
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError as exc:
-                print(f"  读取失败 {path}: {exc}")
-                continue
-            for number, line in enumerate(text.splitlines(), start=1):
-                # 1) 真实凭据值：最硬的判据，直接命中即失败。
-                if any(value in line for value in known_values):
-                    leaks.append((path, number, "value", redactor.redact(line)[:160]))
-                    continue
-                # 2) 形态命中：排除文档/示例占位符（agent 读 README 会产生很多）。
-                for candidate in find_credential_shapes(line):
-                    if is_placeholder_value(candidate):
-                        shapes.append((path, number, "placeholder", redactor.redact(line)[:120]))
-                    else:
-                        leaks.append((path, number, "shape", redactor.redact(line)[:160]))
-                    break
+            # 2) 形态命中：排除文档/示例占位符（agent 读 README 会产生很多）。
+            for candidate in find_credential_shapes(line):
+                if is_placeholder_value(candidate):
+                    shapes.append((location, number, "placeholder", redactor.redact(line)[:120]))
+                else:
+                    leaks.append((location, number, "shape", redactor.redact(line)[:160]))
+                break
+
+    database = data_root / _DATABASE
+    if database.is_file():
+        scanned += 1
+        try:
+            for location, text in _database_values(database):
+                scan(location, text)
+        except sqlite3.Error as exc:
+            # 读不了数据库就不能声称无泄漏：按失败处理。
+            print(f"  数据库读取失败 {database}: {exc}")
+            return 1
+    for location, text in _file_values(data_root):
+        scanned += 1
+        scan(location, text)
 
     print(
         f"凭据来源 {len(known_values)} 条 · 扫描文件 {scanned} 个 · "

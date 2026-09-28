@@ -51,6 +51,7 @@ from pi_glink.kernel.sandbox import Launch, open_sandbox
 from pi_glink.runs.runner import FollowupUnavailable, RunManager
 from pi_glink.store import FAILED, FINISHED, RunStore, RunSpec
 from pi_glink.tenancy import TenantContext, TenantCredentialStore
+from store_helpers import events_text, finish
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"
@@ -100,12 +101,10 @@ def build_manager(
 
 
 def read_events(store: RunStore, run_id: str) -> list[Mapping[str, Any]]:
-    path = store.events_path(run_id)
-    if not path.is_file():
-        return []
+    text = events_text(store, run_id)
     return [
         json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
+        for line in text.splitlines()
         if line.strip()
     ]
 
@@ -404,7 +403,7 @@ def test_acp_followup_refuses_a_parent_that_is_not_an_acp_run(tmp_path: Path) ->
         workspace_root=config.workspace_root,
         spec=RunSpec(family="pi", pack="pi", executor="inproc"),
     )
-    session_file = Path(config.session_dir) / record.run_id / "pi-session.jsonl"
+    session_file = (config.data_root / "runs" / record.run_id / "sessions") / "pi-session.jsonl"
     session_file.parent.mkdir(parents=True, exist_ok=True)
     session_file.write_text('{"type":"message"}\n', encoding="utf-8")
     store.update(record.run_id, session_id="pi-session", session_file=str(session_file))
@@ -613,7 +612,7 @@ def test_inherited_state_secrets_join_the_child_redaction_boundary(tmp_path: Pat
     child_final = manager.wait(child.run_id, timeout=30)
     assert child_final is not None and child_final.status == FINISHED
 
-    raw_events = store.events_path(child.run_id).read_text(encoding="utf-8")
+    raw_events = events_text(store, child.run_id)
     assert inherited_secret not in raw_events
     assert "[REDACTED]" in raw_events
     # The value never reaches the child's stream in readable form.
@@ -683,31 +682,15 @@ def craft_parent(
     session_id: str | None = SESSION_ID,
     capabilities: Mapping[str, Any] | None = None,
 ) -> Any:
-    """手写一份 ACP 追问门禁能消费的父记录（不真的执行、不经过 create）。
-
-    手写 meta.json 以便直接给出终态、session id 与准入事实（族、包、执行面）。
-    """
+    """经 store 公共 API 造一份 ACP 追问门禁能消费的已终结父记录（不真的执行）。"""
     directory = store.run_dir(run_id)
-    meta: dict[str, Any] = {
-        "run_id": run_id,
-        "prompt": "第一轮",
-        "status": FINISHED,
-        "created_at": time.time(),
-        "workspace": str(directory / "workspace"),
-        "session_id": session_id,
-        "finished_at": time.time(),
-        "spec": {
-            "family": harness,
-            "pack": harness_pack,
-            "executor": executor,
-            "blueprint": None,
-            "credential_origin": "host",
-        },
-    }
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    (directory / "meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False) + "\n", encoding="utf-8"
+    store.create(
+        "第一轮",
+        run_id=run_id,
+        workspace=directory / "workspace",
+        spec=RunSpec(family=harness, pack=harness_pack, executor=executor),
     )
+    store.update(run_id, session_id=session_id)
     payload: dict[str, Any] = {
         "sessionId": session_id,
         "agentCapabilities": (
@@ -718,6 +701,7 @@ def craft_parent(
         "harness": harness,
     }
     store.append_event(run_id, {"type": "session_ready", "seq": 1, "payload": payload})
+    finish(store, run_id, FINISHED)
     root = directory / "acp-agent" / state_root
     root.mkdir(parents=True, exist_ok=True)
     return store.get(run_id)
@@ -740,7 +724,7 @@ def test_agent_identity_is_written_back_at_session_ready(tmp_path: Path) -> None
 
 
 def test_agent_identity_is_redacted_and_capped_on_writeback(tmp_path: Path) -> None:
-    """内核自报的 agent 身份过 run 脱敏边界并限幅后才落 meta.json。
+    """内核自报的 agent 身份过 run 脱敏边界并限幅后才落 run 记录。
 
     与事件载荷同一边界：``agentInfo.name`` 里拼进模型凭据时写回值必须被
     掩码，超长名字截断到 128 字符。红→绿机制：旧代码原样写回——凭据

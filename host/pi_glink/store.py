@@ -1,48 +1,44 @@
-"""Run metadata and event log persistence — files, no database.
+"""Run records, event logs and the resource ledger — one SQLite database.
 
-A run owns one directory:
+Structured run state lives in ``<data_root>/runs/runs.db`` (standard-library
+:mod:`sqlite3`, WAL). Files a run produces stay files, all under the run's own
+directory:
 
-    <data_root>/runs/<run_id>/
-    ├── meta.json          admission facts, in-flight facts, settled terminal copy
-    ├── events.jsonl       every committed event, one JSON object per line
-    ├── pi-agent/          the run's runtime configuration (PI_CODING_AGENT_DIR)
-    ├── children/<n>/child.json  authoritative document of one dispatched subagent
-    └── artifacts/report.md  the host-owned, redacted report copy
+    <data_root>/runs/
+    ├── runs.db              run records + events (+ -wal / -shm sidecars)
+    └── <run_id>/
+        ├── pi-agent/ | acp-agent/   the run's rendered runtime configuration
+        ├── sessions/            PI_CODING_AGENT_SESSION_DIR of a pi run
+        ├── subagents/           E2B-recovered subagent mirror
+        ├── children/<n>/child.json  authoritative document of one subagent
+        └── artifacts/report.md  the host-owned, redacted report copy
 
-**Readers see only the committed prefix of a log.** The owning process keeps a
-commit watermark per event log (:class:`_CommitWatermarks`): bytes past it are
-being written and are invisible to every reader in the process. An ordinary
-frame moves the watermark once its line is completely written; the terminal
-frame moves it only after ``fsync`` returned. A failed write or sync is
-truncated away below the watermark, so no reader ever saw it. After a restart
-there is no watermark and the file itself is the committed record.
+**Two tables, one transaction per fact.**
 
-**The terminal frame is the terminal commit.** A run becomes terminal at exactly
-one point: the watermark passing its durably synced ``run_finished`` /
-``run_failed`` / ``run_cancelled`` line (:meth:`RunStore.commit_terminal`), after
-which the log is sealed — nothing can follow the terminal frame. That frame's
-payload is the terminal record (verdict, report, cleanup). ``meta.json`` carries
-the admission and in-flight facts; its terminal fields are only a *settled copy*
-written after the commit. :meth:`RunStore.get` therefore projects a committed
-terminal frame onto a record whose ``meta.json`` still says ``running``: every
-reader — run detail, run list, report download, SSE replay — sees the same
-committed fact, never before it is durable, and never taken back.
+* ``runs`` holds one row per run: the full :class:`RunRecord` (JSON) plus the
+  columns every query filters on (``created_at``, ``tenant_id``, ``status``
+  and ``holds`` — whether the run's execution resources are unconfirmed).
+* ``events`` holds every committed frame keyed by ``(run_id, seq)``. A reader
+  sees a frame exactly when its insert committed; there is no partial line,
+  no watermark and no repair.
 
-**The in-process index is an accelerator, never a second source.** One run
-record is one directory with its own ``meta.json``; listing runs, listing one
-tenant's runs and deriving the resource ledger used to walk and re-parse every
-one of them on every call — inside the admission lock. The data root has exactly
-one owning process (:mod:`pi_glink.ownership`), so :class:`_RunIndex` builds
-that projection once from disk and every write path (``create``, ``update``,
-``settle``, terminal commit) refreshes its own entry. Reads keep their exact
-semantics: the committed-prefix rule, the terminal projection, the newest-first
-order and the multi-tenant owner filter all come from the same helpers the disk
-scan uses, and :meth:`RunStore.scan_all` is the uncached reference the
-regressions compare the index against.
+**The terminal frame is the terminal commit.** :meth:`RunStore.commit_terminal`
+inserts the ``run_finished`` / ``run_failed`` / ``run_cancelled`` frame and
+rewrites the run row to its terminal record *in the same transaction*, and
+that transaction is committed with ``synchronous=FULL``. Before it returns no
+reader can see either half; after it returns every reader — run detail, run
+list, report download, SSE replay, the resource ledger — sees both. A run row
+that is already terminal refuses any further frame, inside the same
+transaction, so nothing can follow the terminal frame.
 
-The store is deliberately small. The workbench needs run history, reconnect
-support and an auditable event log, none of which require a database yet; when
-multi-user or multi-tenant lands, this module is the seam that changes.
+**Admission reads the ledger it writes.** :meth:`RunStore.create` takes an
+``admission_check``: the callback sees the holding rows read inside the
+``BEGIN IMMEDIATE`` transaction that then inserts the new row, so the quota
+count and the insert cannot interleave with another writer of the same
+database.
+
+Records written before this layout (``meta.json`` / ``events.jsonl`` files)
+are not read: there is no migration.
 """
 
 from __future__ import annotations
@@ -50,12 +46,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
+import stat
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from .artifacts import ArtifactError, ArtifactTree
 from .events import TERMINAL_EVENT_TYPES
@@ -69,10 +68,15 @@ FAILED = "failed"
 CANCELLED = "cancelled"
 TERMINAL_STATUSES = frozenset({FINISHED, FAILED, CANCELLED})
 
+#: The run database, inside the runs root.
+DATABASE_NAME = "runs.db"
 #: Artifact the research contract asks pi to produce.
 REPORT_FILENAME = "report.md"
 #: Host-owned artifact directory inside the run directory.
 ARTIFACTS_DIRNAME = "artifacts"
+#: A pi run's session directory (``PI_CODING_AGENT_SESSION_DIR``), inside the
+#: run directory: one run owns exactly one, created with the run's runtime.
+SESSIONS_DIRNAME = "sessions"
 #: Host-owned mirror of a run's subagent sessions and artifacts (recovered
 #: out of the sandbox before it is destroyed; other faces keep theirs in the
 #: session directory). Recovered raw, then swept by the run's redactor.
@@ -88,26 +92,52 @@ CHILD_DOC_NAME = "child.json"
 #: shares this bound.
 CHILD_READ_LIMIT = 64
 
-_META_NAME = "meta.json"
-_EVENTS_NAME = "events.jsonl"
+#: Schema version stored in ``PRAGMA user_version``. A database carrying any
+#: other version is refused at open (no migration).
+SCHEMA_VERSION = 1
 #: Bound on one child document. The projection already clips ``task`` and
 #: ``resultPreview``; this is the store's own backstop, not the editorial limit.
 _CHILD_DOC_MAX_BYTES = 64 * 1024
 #: Candidate files ``read_children`` visits before stopping. Corruption in the
 #: host-owned tree must not turn a bounded read into an unbounded one.
 _CHILD_VISIT_LIMIT = 4 * CHILD_READ_LIMIT
-#: Bounded retries when a generated run id collides with an existing directory.
+#: Bounded retries when a generated run id collides with an existing run.
 _RUN_ID_ATTEMPTS = 5
-#: ``meta.json`` fields a record must carry as non-empty strings to be read.
+#: Record fields a stored row must carry as non-empty strings.
 _REQUIRED_TEXT_FIELDS = ("run_id", "prompt", "status", "workspace")
 #: ``RunSpec`` fields a record's ``spec`` object must carry as non-empty strings.
 _REQUIRED_SPEC_FIELDS = ("family", "pack", "executor", "credential_origin")
-_TAIL_CHUNK = 64 * 1024
+#: Events one replay query fetches before yielding them (no lock is held
+#: while the caller consumes a page).
+_EVENT_PAGE = 500
+#: Record fields only :meth:`RunStore.commit_terminal` may change.
+_TERMINAL_FIELDS = frozenset({"status", "finished_at", "cleanup", "event_count"})
 _STATUS_BY_EVENT = {
     "run_finished": FINISHED,
     "run_failed": FAILED,
     "run_cancelled": CANCELLED,
 }
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS runs (
+  run_id     TEXT PRIMARY KEY,
+  created_at REAL NOT NULL,
+  tenant_id  TEXT,
+  status     TEXT NOT NULL,
+  holds      INTEGER NOT NULL CHECK (holds IN (0, 1)),
+  record     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS runs_by_created ON runs(created_at DESC, run_id);
+CREATE INDEX IF NOT EXISTS runs_by_tenant ON runs(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS runs_holding ON runs(holds) WHERE holds = 1;
+CREATE TABLE IF NOT EXISTS events (
+  run_id TEXT NOT NULL REFERENCES runs(run_id),
+  seq    INTEGER NOT NULL CHECK (seq > 0),
+  type   TEXT NOT NULL,
+  body   TEXT NOT NULL,
+  PRIMARY KEY (run_id, seq)
+) WITHOUT ROWID;
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,8 +145,8 @@ class RunSpec:
     """What one run executes with, resolved once at admission (docs/architecture.md §2).
 
     The runner resolves it from the frozen host configuration when it admits
-    the run and writes it inside the same atomic ``meta.json`` write as the run
-    id and owner; everything after admission — the harness family, the
+    the run and writes it inside the same admission insert as the run id and
+    owner; everything after admission — the harness family, the
     sandbox face, the follow-up gate, the ACP state root a continuation
     inherits — reads it from the record, never from the host's current
     configuration (docs/adr/0002).
@@ -138,7 +168,7 @@ class RunSpec:
 
     @classmethod
     def from_mapping(cls, data: Any) -> "RunSpec | None":
-        """Parse ``meta.json``'s ``spec`` object; ``None`` when it is unusable."""
+        """Parse a stored record's ``spec`` object; ``None`` when it is unusable."""
         if not isinstance(data, Mapping):
             return None
         if any(
@@ -220,8 +250,8 @@ class RunRecord:
     def __post_init__(self) -> None:
         """Canonicalize the stage list whatever representation reached us.
 
-        ``meta.json`` carries the stages as a JSON array, so a record read back
-        from disk holds a list; the in-memory record must still compare equal to
+        The stored record carries the stages as a JSON array, so a record read
+        back from the database holds a list; the in-memory record must still compare equal to
         the one ``create`` returned. Coercing here keeps that true for every
         construction path (admission, update, load).
         """
@@ -252,123 +282,21 @@ class RunRecord:
         return self.cleanup.get("released") is not True
 
 
-class LogSealed(RuntimeError):
-    """The run's log already holds a committed terminal frame."""
+class StoreError(RuntimeError):
+    """The run database cannot be opened or holds a row that is not a record."""
 
 
-class _CommitWatermarks:
-    """Committed length of every event log this process appends to.
+class StoreWriteError(OSError):
+    """A write to the run database failed; nothing of it is visible.
 
-    Process-wide on purpose: the data root has one owning process
-    (:mod:`pi_glink.ownership`), and every reader in it must agree on what is
-    committed. A log without an entry was not touched by this process; its
-    committed length is the file size observed together with the lookup, which
-    is safe because a writer registers the pre-append length (under the same
-    lock) before writing a single byte.
+    An :class:`OSError` on purpose: the event channel turns every failed
+    persist into ``event_log_failed`` through the same ``except OSError`` path
+    it always used for the disk.
     """
 
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._lengths: dict[str, int] = {}
-        self._sealed: set[str] = set()
 
-    def committed_end(self, path: Path) -> int | None:
-        key = os.path.abspath(path)
-        with self._lock:
-            length = self._lengths.get(key)
-            if length is not None:
-                return length
-            try:
-                return os.stat(key).st_size
-            except FileNotFoundError:
-                return None
-
-    def begin(self, path: Path, length: int) -> None:
-        with self._lock:
-            self._lengths[os.path.abspath(path)] = length
-
-    def advance(self, path: Path, length: int, *, seal: bool) -> None:
-        key = os.path.abspath(path)
-        with self._lock:
-            self._lengths[key] = length
-            if seal:
-                self._sealed.add(key)
-
-    def seal(self, path: Path) -> None:
-        with self._lock:
-            self._sealed.add(os.path.abspath(path))
-
-    def is_sealed(self, path: Path) -> bool:
-        with self._lock:
-            return os.path.abspath(path) in self._sealed
-
-    def is_tracked(self, path: Path) -> bool:
-        with self._lock:
-            return os.path.abspath(path) in self._lengths
-
-
-_WATERMARKS = _CommitWatermarks()
-
-
-@dataclass(frozen=True, slots=True)
-class _IndexEntry:
-    """One run as written to disk plus the projection every reader must see.
-
-    ``raw`` is the ``meta.json`` record; ``projected`` additionally carries a
-    committed terminal frame that the settled copy has not caught up with yet.
-    """
-
-    raw: RunRecord
-    projected: RunRecord
-
-
-class _RunIndex:
-    """Process-wide projection of one runs root (built once, then incremental).
-
-    The data root has a single owning process, so every :class:`RunStore` in
-    this process must agree on the same records; a per-instance cache would let
-    two stores disagree after one of them wrote. Readers therefore share one
-    index per root, and a fresh process rebuilds it from disk on first use.
-
-    ``lock`` guards the in-memory index state (a reader copies its snapshot
-    there). ``record_lock`` is the shared per-root write lock: the metadata
-    replacement and the index update happen inside it, so two writers of the
-    same record cannot leave the index ordered opposite to disk — and no reader
-    blocks behind a writer's disk write. ``append_lock`` serializes appends to
-    the shared event logs for the same reason on the log side.
-
-    ``unreadable`` holds run directories whose ``meta.json`` cannot be read:
-    they are excluded from every record read (a corrupt record must never be
-    served, least of all cross-tenant) but the ledger counts them as global
-    holds until an operator adjudicates them in their own sidecar file.
-    """
-
-    def __init__(self) -> None:
-        self.lock = threading.RLock()
-        self.record_lock = threading.RLock()
-        self.append_lock = threading.RLock()
-        self.entries: dict[str, _IndexEntry] = {}
-        self.unreadable: dict[str, Mapping[str, Any] | None] = {}
-        self.loaded = False
-
-
-#: Per-run sidecar recording an operator decision for a run whose ``meta.json``
-#: cannot be parsed. The corrupt file itself is never rewritten.
-UNREADABLE_ADJUDICATION_NAME = "resource-adjudication.json"
-
-
-_INDEXES: dict[str, _RunIndex] = {}
-_INDEXES_LOCK = threading.Lock()
-
-
-def _index_for(root: Path) -> _RunIndex:
-    key = os.path.abspath(root)
-    with _INDEXES_LOCK:
-        index = _INDEXES.get(key)
-        if index is None:
-            index = _RunIndex()
-            _INDEXES[key] = index
-        return index
+class RunAlreadyTerminal(RuntimeError):
+    """The run's terminal frame is committed: no frame can follow it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,32 +321,91 @@ class ChildDocuments:
     skipped: int = 0
 
 
+#: Called inside the admission transaction with the holding records (newest
+#: first); raising refuses the admission and rolls the transaction back.
+AdmissionCheck = Callable[[Sequence["RunRecord"]], None]
+
+
 class RunStore:
-    """Thread-safe run metadata store rooted at one directory."""
+    """Thread-safe run store: one SQLite database plus per-run directories."""
 
     def __init__(self, root: Path) -> None:
         self._root = root
-        self._index = _index_for(root)
-        # The per-root shared locks: the meta replacement and the index update
-        # are one critical section, and a second RunStore over the same root
-        # cannot interleave with the first on the same record.
-        self._lock = self._index.record_lock
-        self._events_lock = self._index.append_lock
         # The runs root is host-owned data: create it private (0700).
         self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._db_path = self._root / DATABASE_NAME
+        self._lock = threading.RLock()
+        self._connection = _open_database(self._db_path)
 
     @property
     def root(self) -> Path:
         return self._root
 
+    @property
+    def database_path(self) -> Path:
+        return self._db_path
+
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
+
     def run_dir(self, run_id: str) -> Path:
         return self._root / run_id
 
-    def events_path(self, run_id: str) -> Path:
-        return self.run_dir(run_id) / _EVENTS_NAME
+    def session_dir(self, run_id: str) -> Path:
+        """The run's own pi session directory (``runs/<id>/sessions``)."""
+        return self.run_dir(run_id) / SESSIONS_DIRNAME
 
     def report_artifact_path(self, run_id: str) -> Path:
         return self.run_dir(run_id) / ARTIFACTS_DIRNAME / REPORT_FILENAME
+
+    # -- transactions ---------------------------------------------------------
+
+    @contextmanager
+    def _transaction(self, *, durable: bool = False) -> Iterator[sqlite3.Connection]:
+        """One ``BEGIN IMMEDIATE`` write transaction (all or nothing).
+
+        ``durable`` commits with ``synchronous=FULL`` (the WAL is synced before
+        the commit returns); ordinary frames use ``NORMAL``, which WAL keeps
+        consistent but may lose on power failure. Any SQLite failure is raised
+        as :class:`StoreWriteError` after the rollback.
+        """
+        with self._lock:
+            connection = self._connection
+            try:
+                if durable:
+                    connection.execute("PRAGMA synchronous=FULL")
+                connection.execute("BEGIN IMMEDIATE")
+            except sqlite3.Error as exc:
+                self._restore_sync(durable)
+                raise StoreWriteError(f"run 数据库不可写: {exc}") from exc
+            try:
+                yield connection
+                connection.execute("COMMIT")
+            except BaseException as exc:
+                try:
+                    connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                if isinstance(exc, sqlite3.Error):
+                    raise StoreWriteError(f"run 数据库写入失败: {exc}") from exc
+                raise
+            finally:
+                self._restore_sync(durable)
+
+    def _restore_sync(self, durable: bool) -> None:
+        if durable:
+            try:
+                self._connection.execute("PRAGMA synchronous=NORMAL")
+            except sqlite3.Error:
+                logger.warning("恢复 synchronous=NORMAL 失败", exc_info=True)
+
+    def _query(self, sql: str, parameters: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
+        with self._lock:
+            try:
+                return self._connection.execute(sql, parameters).fetchall()
+            except sqlite3.Error as exc:
+                raise StoreError(f"run 数据库读取失败: {exc}") from exc
 
     # -- records --------------------------------------------------------------
 
@@ -434,59 +421,79 @@ class RunStore:
         creator_user_id: str | None = None,
         parent_run_id: str | None = None,
         blueprint_stages: Sequence[Mapping[str, Any]] = (),
+        admission_check: AdmissionCheck | None = None,
     ) -> RunRecord:
-        """Admit a run and write its assignment facts in one atomic meta write.
+        """Admit a run: one transaction checks the ledger and inserts the row.
 
-        The run directory is created **exclusively** (``exist_ok=False``): a new
-        run never adopts or overwrites an existing record. A generated id that
-        collides is regenerated a bounded number of times; an explicitly given
-        ``run_id`` that already exists is refused (the caller owns that
-        contract). ``workspace_root`` derives the run's workspace from the
-        generated id, so the store stays the one place that allocates ids.
+        ``admission_check`` (when given) sees the holding records read inside
+        the same ``BEGIN IMMEDIATE`` transaction that inserts the new row; it
+        refuses by raising, which rolls the transaction back and propagates.
 
-        The owner labels (``tenant_id`` / ``creator_user_id``) are part of the
-        same replacement as the run id and created-at stamp, so no reader can
-        observe an ownerless run that an authenticated request must hide. The
-        optional ``parent_run_id`` records the follow-up chain in the same write.
-        ``spec`` (:class:`RunSpec`: family, pack, sandbox face, blueprint,
-        credential origin) and ``blueprint_stages`` are facts decided before
-        admission, never progression state, required and written in this same
-        atomic admission write; ``agent`` is not a create parameter because it is only known after the run starts (the
-        ``session_id`` precedent: written back at the session_ready commit).
+        The run id is the row's primary key and the run directory is created
+        **exclusively** inside the transaction: a new run never adopts an
+        existing row or directory. A generated id that collides is regenerated
+        a bounded number of times; an explicitly given ``run_id`` that already
+        exists raises :class:`FileExistsError`. ``workspace_root`` derives the
+        run's workspace from the generated id, so the store stays the one place
+        that allocates ids.
+
+        The owner labels, ``parent_run_id``, ``spec`` and ``blueprint_stages``
+        are facts decided before admission and land in this same insert, so no
+        reader can observe an ownerless or spec-less run. ``agent`` is written
+        back at the session_ready commit (it is only known after the start).
         """
-        identifier, directory = self._create_run_directory(run_id)
-        if workspace is not None:
-            workspace_path = str(workspace)
-        elif workspace_root is not None:
-            workspace_path = str(workspace_root / identifier)
-        else:
-            workspace_path = str(directory / "workspace")
-        record = RunRecord(
-            run_id=identifier,
-            prompt=prompt,
-            status=RUNNING,
-            created_at=time.time(),
-            workspace=workspace_path,
-            tenant_id=tenant_id,
-            creator_user_id=creator_user_id,
-            parent_run_id=parent_run_id,
-            blueprint_stages=tuple(blueprint_stages),
-            spec=spec,
-        )
-        return self._write(record)
+        with self._transaction() as connection:
+            if admission_check is not None:
+                admission_check(self._holding(connection, None))
+            identifier, directory = self._allocate(connection, run_id)
+            try:
+                if workspace is not None:
+                    workspace_path = str(workspace)
+                elif workspace_root is not None:
+                    workspace_path = str(workspace_root / identifier)
+                else:
+                    workspace_path = str(directory / "workspace")
+                record = RunRecord(
+                    run_id=identifier,
+                    prompt=prompt,
+                    status=RUNNING,
+                    created_at=time.time(),
+                    workspace=workspace_path,
+                    tenant_id=tenant_id,
+                    creator_user_id=creator_user_id,
+                    parent_run_id=parent_run_id,
+                    blueprint_stages=tuple(blueprint_stages),
+                    spec=spec,
+                )
+                connection.execute(
+                    "INSERT INTO runs(run_id, created_at, tenant_id, status, holds, record)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        record.run_id,
+                        record.created_at,
+                        record.tenant_id,
+                        record.status,
+                        int(record.holds_resources),
+                        _encode(record),
+                    ),
+                )
+            except BaseException:
+                _remove_empty(directory)
+                raise
+        return record
 
-    def _create_run_directory(self, run_id: str | None) -> tuple[str, Path]:
-        """Exclusively create one run directory; returns ``(id, path)``.
-
-        The 0700 mode is the host's own data: run records, event logs and the
-        rendered credentials of one run live under this directory.
-        """
+    def _allocate(self, connection: sqlite3.Connection, run_id: str | None) -> tuple[str, Path]:
+        """Pick an unused id and create its directory exclusively (0700)."""
         if run_id is not None:
+            if _row_exists(connection, run_id):
+                raise FileExistsError(f"run {run_id} 已存在")
             directory = self.run_dir(run_id)
             directory.mkdir(parents=True, exist_ok=False, mode=0o700)
             return run_id, directory
         for _attempt in range(_RUN_ID_ATTEMPTS):
             candidate = uuid.uuid4().hex[:12]
+            if _row_exists(connection, candidate):
+                continue
             directory = self.run_dir(candidate)
             try:
                 directory.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -496,27 +503,37 @@ class RunStore:
         raise RuntimeError("无法生成唯一的 run id（连续冲突）")
 
     def update(self, run_id: str, **changes: Any) -> RunRecord:
-        """Change facts in ``meta.json`` (in-flight facts, adjudication)."""
-        with self._lock:
-            record = self._read_meta(run_id)
+        """Change in-flight facts or the adjudication of one run.
+
+        The terminal fields (``status``, ``finished_at``, ``cleanup``,
+        ``event_count``) are refused: a run becomes terminal only through
+        :meth:`commit_terminal`, together with its terminal frame.
+        """
+        allowed = {field.name for field in fields(RunRecord)}
+        unknown = set(changes) - allowed
+        if unknown:
+            raise ValueError(f"unknown run fields: {sorted(unknown)}")
+        forbidden = set(changes) & (_TERMINAL_FIELDS | {"run_id"})
+        if forbidden:
+            raise ValueError(f"终态字段只能随终帧提交: {sorted(forbidden)}")
+        with self._transaction() as connection:
+            record = self._read(connection, run_id)
             if record is None:
                 raise KeyError(run_id)
-            allowed = {field.name for field in fields(RunRecord)}
-            unknown = set(changes) - allowed
-            if unknown:
-                raise ValueError(f"unknown run fields: {sorted(unknown)}")
-            return self._write(replace(record, **changes))
+            updated = replace(record, **changes)
+            _write_row(connection, updated)
+        return updated
 
     def get(self, run_id: str) -> RunRecord | None:
-        """The run as every reader must see it (committed terminal projected)."""
-        entry = self._entries().get(run_id)
-        return entry.projected if entry is not None else None
+        """The committed run record (terminal once its terminal frame committed)."""
+        with self._lock:
+            return self._read(self._connection, run_id)
 
     def get_for(self, run_id: str, tenant_id: str) -> RunRecord | None:
         """The run only when it belongs to ``tenant_id``.
 
-        An unknown run, another tenant's run and an ownerless
-        (single-user) record are all ``None``: the HTTP layer turns every one of them into the
+        An unknown run, another tenant's run and an ownerless (single-user)
+        record are all ``None``: the HTTP layer turns every one of them into the
         same 404, so existence is not disclosed across tenants.
         """
         record = self.get(run_id)
@@ -526,109 +543,26 @@ class RunStore:
 
     def list_for(self, tenant_id: str, limit: int | None = 50) -> list[RunRecord]:
         """Runs of exactly one tenant, newest first (ownerless records excluded)."""
-        records = [record for record in self._records() if record.tenant_id == tenant_id]
-        return records if limit is None else records[:limit]
+        return self._select("WHERE tenant_id = ?", (tenant_id,), limit)
 
     def list(self, limit: int | None = 50) -> list[RunRecord]:
-        records = self._records()
-        return records if limit is None else records[:limit]
+        """Every run, newest first (ties broken by run id)."""
+        return self._select("", (), limit)
 
     def holding_records(self, tenant_id: str | None = None) -> list[RunRecord]:
         """Records whose execution resources are not confirmed released.
 
         ``tenant_id`` selects one tenant's holds; ``None`` returns every hold,
-        including records without an owner (single-user runs and reconciled leftovers),
-        because those still consume the global capacity. Newest first, like
-        :meth:`list`.
-
-        Run directories whose metadata cannot be read are not records at all;
-        they are reported separately by :meth:`unreadable_holds` and count as
-        global holds there.
-        """
-        return [
-            record
-            for record in self._records()
-            if record.holds_resources and (tenant_id is None or record.tenant_id == tenant_id)
-        ]
-
-    def unsettled(self) -> list[str]:
-        """Run ids whose ``meta.json`` still says ``running`` (no settled copy)."""
-        entries = self._entries()
-        return [run_id for run_id in sorted(entries) if entries[run_id].raw.status == RUNNING]
-
-    def unreadable_holds(self) -> list[str]:
-        """Run directories whose metadata cannot be read and are not adjudicated.
-
-        Such a directory is hidden from every record read (a corrupt record must
-        not be listed, downloaded or replayed, least of all across tenants), but
-        it is **not** evidence that its container or sandbox is gone: the
-        resource ledger counts it as a global hold until an operator records a
-        decision via :meth:`adjudicate_unreadable`.
-        """
-        return [
-            run_id
-            for run_id, adjudication in sorted(self._unreadable().items())
-            if adjudication is None
-        ]
-
-    def adjudicate_unreadable(self, run_id: str, adjudication: Mapping[str, Any]) -> None:
-        """Record the operator decision for a run whose ``meta.json`` is unreadable.
-
-        The corrupt ``meta.json`` is left byte-for-byte untouched; the decision
-        lives in :data:`UNREADABLE_ADJUDICATION_NAME` next to it, which is what
-        the index reads back on a restart. Raises ``KeyError`` when the directory
-        is unknown and ``ValueError`` when its metadata is actually readable (the
-        normal record path owns that decision).
+        including records without an owner (single-user runs), because those
+        still consume the global capacity. Newest first, like :meth:`list`.
         """
         with self._lock:
-            entries, unreadable = self._scan()
-            if run_id in {entry.raw.run_id for entry in entries}:
-                raise ValueError(f"run {run_id} 的 meta.json 可读，应使用普通裁决")
-            if run_id not in unreadable:
-                raise KeyError(run_id)
-            directory = self.run_dir(run_id)
-            temporary = directory / f".{UNREADABLE_ADJUDICATION_NAME}.tmp"
-            temporary.write_text(
-                json.dumps(dict(adjudication), ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            temporary.replace(directory / UNREADABLE_ADJUDICATION_NAME)
-            with self._index.lock:
-                self._index.unreadable[run_id] = dict(adjudication)
+            return self._holding(self._connection, tenant_id)
 
-    def scan_all(self) -> list[RunRecord]:
-        """Uncached reference read: walk every run directory, project each record.
-
-        This is what the index is built from and the comparison the regressions
-        use; production reads must not call it per request.
-        """
-        entries, _unreadable = self._scan()
-        records = [entry.projected for entry in entries]
-        records.sort(key=lambda item: item.created_at, reverse=True)
-        return records
-
-    def scan_unreadable(self) -> list[str]:
-        """Uncached reference read of the unreadable, unadjudicated run ids."""
-        _entries, unreadable = self._scan()
-        return [run_id for run_id, value in sorted(unreadable.items()) if value is None]
-
-    def settle(self, run_id: str) -> RunRecord | None:
-        """Copy the committed terminal record into ``meta.json``.
-
-        Returns the settled record, or ``None`` when nothing is committed yet.
-        The copy is an optimisation for readers, never a second source: it is
-        derived from the committed frame and may be rewritten at any time.
-        """
-        with self._lock:
-            record = self._read_meta(run_id)
-            if record is None:
-                return None
-            if record.status != RUNNING:
-                return record
-            terminal = self.committed_terminal(run_id)
-            if terminal is None:
-                return None
-            return self._write(_apply_terminal(record, terminal))
+    def running_ids(self) -> list[str]:
+        """Run ids whose row is still ``running`` (no terminal frame committed)."""
+        rows = self._query("SELECT run_id FROM runs WHERE status = ? ORDER BY run_id", (RUNNING,))
+        return [row[0] for row in rows]
 
     def report_location(self, record: RunRecord) -> ReportLocation | None:
         """The only place a record's ``report_path`` may point to.
@@ -644,104 +578,109 @@ class RunStore:
             self.run_dir(record.run_id), f"{ARTIFACTS_DIRNAME}/{REPORT_FILENAME}"
         )
 
+    def _select(
+        self, where: str, parameters: Sequence[Any], limit: int | None
+    ) -> list[RunRecord]:
+        sql = f"SELECT record FROM runs {where} ORDER BY created_at DESC, run_id ASC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            parameters = (*parameters, max(0, int(limit)))
+        return [_decode(row[0]) for row in self._query(sql, parameters)]
+
+    def _holding(self, connection: sqlite3.Connection, tenant_id: str | None) -> list[RunRecord]:
+        sql = "SELECT record FROM runs WHERE holds = 1"
+        parameters: tuple[Any, ...] = ()
+        if tenant_id is not None:
+            sql += " AND tenant_id = ?"
+            parameters = (tenant_id,)
+        sql += " ORDER BY created_at DESC, run_id ASC"
+        try:
+            rows = connection.execute(sql, parameters).fetchall()
+        except sqlite3.Error as exc:
+            raise StoreError(f"run 数据库读取失败: {exc}") from exc
+        return [_decode(row[0]) for row in rows]
+
+    @staticmethod
+    def _read(connection: sqlite3.Connection, run_id: str) -> RunRecord | None:
+        try:
+            row = connection.execute(
+                "SELECT record FROM runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise StoreError(f"run 数据库读取失败: {exc}") from exc
+        return _decode(row[0]) if row is not None else None
+
     # -- events ---------------------------------------------------------------
 
     def iter_events(self, run_id: str, after: int = 0) -> Iterator[dict[str, Any]]:
-        """Yield committed events with ``seq > after``, in file order.
+        """Yield committed events with ``seq > after``, in ``seq`` order.
 
         The in-memory bus only knows runs started by the current host process;
-        after a restart this file is the only record of a run's timeline, so
-        history replay reads it. Only the committed prefix is read. Malformed
-        lines are skipped, not fatal: a torn last line from a crash must not
-        hide the rest of the timeline.
+        after a restart the database is the only record of a run's timeline,
+        so history replay reads it. Pages are fetched under the lock and
+        yielded without it, so a slow consumer never blocks a writer.
         """
-        path = self.events_path(run_id)
-        end = _WATERMARKS.committed_end(path)
-        if end is None:
-            return
-        try:
-            handle = path.open("rb")
-        except FileNotFoundError:
-            return
-        with handle:
-            consumed = 0
-            for raw in handle:
-                consumed += len(raw)
-                if consumed > end:
-                    break
-                try:
-                    event = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    continue
-                if not isinstance(event, dict) or not isinstance(event.get("type"), str):
-                    continue
-                seq = event.get("seq")
-                if isinstance(seq, int) and seq <= after:
-                    continue
-                yield event
+        cursor = max(0, int(after))
+        while True:
+            rows = self._query(
+                "SELECT seq, body FROM events WHERE run_id = ? AND seq > ?"
+                " ORDER BY seq LIMIT ?",
+                (run_id, cursor, _EVENT_PAGE),
+            )
+            for seq, body in rows:
+                cursor = seq
+                yield json.loads(body)
+            if len(rows) < _EVENT_PAGE:
+                return
+
+    def last_seq(self, run_id: str) -> int:
+        """The highest committed ``seq`` of one run (0 without events)."""
+        rows = self._query("SELECT MAX(seq) FROM events WHERE run_id = ?", (run_id,))
+        return int(rows[0][0] or 0)
 
     def append_event(self, run_id: str, event: Mapping[str, Any]) -> None:
-        """Commit one ordinary frame: visible once its whole line is written."""
+        """Commit one ordinary frame: visible exactly when its insert commits."""
         if event.get("type") in TERMINAL_EVENT_TYPES:
             raise ValueError("终帧只能经 commit_terminal 提交")
-        self._append(run_id, event, durable=False)
+        with self._transaction() as connection:
+            self._require_running(connection, run_id)
+            _insert_event(connection, run_id, event)
 
-    def commit_terminal(self, run_id: str, event: Mapping[str, Any]) -> None:
-        """Commit the run's terminal frame; the run is terminal once this returns.
+    def commit_terminal(self, run_id: str, event: Mapping[str, Any]) -> RunRecord:
+        """Commit the run's terminal frame and terminal record in one transaction.
 
-        The line is written and synced before the watermark passes it, so no
-        reader can observe a terminal state that a failed sync would take back.
-        A failure truncates the line (and any torn-tail repair) and raises,
-        leaving every reader where it was. Success seals the log.
+        The frame insert and the row rewrite are one ``synchronous=FULL``
+        transaction: either both are durable and visible, or neither is and the
+        run stays ``running`` for every reader. The terminal record is the
+        frame's payload projected onto the admission record
+        (:func:`_apply_terminal`). Returns the terminal record.
         """
         if event.get("type") not in TERMINAL_EVENT_TYPES:
             raise ValueError("commit_terminal 只接受终帧")
-        self._append(run_id, event, durable=True)
-
-    def _append(self, run_id: str, event: Mapping[str, Any], *, durable: bool) -> None:
-        path = self.events_path(run_id)
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        line = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
-        with self._events_lock:
-            descriptor = os.open(
-                path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o666
-            )
-            try:
-                size = os.fstat(descriptor).st_size
-                if not _WATERMARKS.is_tracked(path) and _terminal_line(path, size) is not None:
-                    _WATERMARKS.seal(path)  # committed by an earlier process
-                if _WATERMARKS.is_sealed(path):
-                    raise LogSealed(f"run {run_id} 已提交终帧，事件日志不再追加")
-                # Readers stay at the pre-append length until the line is committed.
-                _WATERMARKS.begin(path, size)
-                if size and os.pread(descriptor, 1, size - 1) != b"\n":
-                    line = b"\n" + line  # close a torn tail left by a crash
-                try:
-                    view = memoryview(line)
-                    while view:
-                        written = os.write(descriptor, view)
-                        view = view[written:]
-                    if durable:
-                        os.fsync(descriptor)
-                except BaseException:
-                    try:
-                        os.ftruncate(descriptor, size)
-                    except OSError:
-                        pass
-                    raise
-                _WATERMARKS.advance(path, size + len(line), seal=durable)
-                if durable:
-                    # The index must never run ahead of the committed prefix:
-                    # refresh it only after the watermark passed the new line.
-                    self._refresh_projection(run_id)
-            finally:
-                os.close(descriptor)
+        with self._transaction(durable=True) as connection:
+            record = self._require_running(connection, run_id)
+            _insert_event(connection, run_id, event)
+            terminal = _apply_terminal(record, event)
+            _write_row(connection, terminal)
+        return terminal
 
     def committed_terminal(self, run_id: str) -> dict[str, Any] | None:
-        """The run's committed terminal frame, if its log holds one."""
-        path = self.events_path(run_id)
-        end = _WATERMARKS.committed_end(path)
-        return _terminal_line(path, end) if end else None
+        """The run's committed terminal frame, if it has one."""
+        placeholders = ", ".join("?" for _ in TERMINAL_EVENT_TYPES)
+        rows = self._query(
+            f"SELECT body FROM events WHERE run_id = ? AND type IN ({placeholders})"
+            " ORDER BY seq DESC LIMIT 1",
+            (run_id, *sorted(TERMINAL_EVENT_TYPES)),
+        )
+        return json.loads(rows[0][0]) if rows else None
+
+    def _require_running(self, connection: sqlite3.Connection, run_id: str) -> RunRecord:
+        record = self._read(connection, run_id)
+        if record is None:
+            raise KeyError(run_id)
+        if record.is_terminal:
+            raise RunAlreadyTerminal(f"run {run_id} 已提交终帧，不再接受事件")
+        return record
 
     # -- children (authoritative subagent documents, §3.5) ---------------------
 
@@ -884,195 +823,131 @@ class RunStore:
             summary.append(entry)
         return summary
 
-    # -- internals ------------------------------------------------------------
 
-    def _project(self, record: RunRecord) -> RunRecord:
-        if record.status != RUNNING:
-            return record
-        terminal = self.committed_terminal(record.run_id)
-        return _apply_terminal(record, terminal) if terminal is not None else record
+# -- database helpers ---------------------------------------------------------
 
-    def _entries(self) -> dict[str, _IndexEntry]:
-        """Snapshot of the readable records (built once from disk on first use)."""
-        index = self._index
-        if not index.loaded:
-            self._load_index()
-        with index.lock:
-            return dict(index.entries)
 
-    def _unreadable(self) -> dict[str, Mapping[str, Any] | None]:
-        """Snapshot of the unreadable run directories and their adjudications."""
-        index = self._index
-        if not index.loaded:
-            self._load_index()
-        with index.lock:
-            return dict(index.unreadable)
+def _open_database(path: Path) -> sqlite3.Connection:
+    """Open (creating 0600 when absent) the run database and check its schema.
 
-    def _load_index(self) -> None:
-        """Build the index from disk exactly once per process and root."""
-        index = self._index
-        with index.lock:
-            if index.loaded:
-                return
-            entries, unreadable = self._scan()
-            for entry in entries:
-                index.entries[entry.raw.run_id] = entry
-            index.unreadable.update(unreadable)
-            index.loaded = True
-
-    def _records(self) -> list[RunRecord]:
-        """Projected records newest first (stable by directory name on ties)."""
-        entries = self._entries()
-        records = [entries[run_id].projected for run_id in sorted(entries)]
-        records.sort(key=lambda item: item.created_at, reverse=True)
-        return records
-
-    def _scan(self) -> tuple[list[_IndexEntry], dict[str, Mapping[str, Any] | None]]:
-        """Read every run directory (index build and the uncached reference).
-
-        A directory whose ``meta.json`` cannot be read produces no record: it is
-        returned as an unreadable entry together with the operator adjudication
-        sidecar, if any. A directory without ``meta.json`` at all is not a run.
-        """
-        if not self._root.is_dir():
-            return [], {}
-        entries: list[_IndexEntry] = []
-        unreadable: dict[str, Mapping[str, Any] | None] = {}
-        for entry in sorted(self._root.iterdir(), key=lambda item: item.name):
-            if not entry.is_dir():
-                continue
-            record, problem = self._load_meta(entry.name)
-            if problem:
-                unreadable[entry.name] = self._read_unreadable_adjudication(entry.name)
-                logger.warning(
-                    "run 记录不可读，已计入全局资源持有直至人工裁决 run=%s", entry.name
-                )
-            elif record is not None:
-                entries.append(_IndexEntry(raw=record, projected=self._project(record)))
-        return entries, unreadable
-
-    def _refresh_projection(self, run_id: str) -> None:
-        """Fold a just-committed terminal frame into the run's index entry."""
-        index = self._index
-        with index.lock:
-            entry = index.entries.get(run_id)
-            if entry is None:
-                return
-            terminal = self.committed_terminal(run_id)
-            if terminal is None:
-                return
-            index.entries[run_id] = _IndexEntry(
-                raw=entry.raw,
-                projected=_apply_terminal(entry.raw, terminal),
+    The file must be a regular file owned by nothing but this path: a symlink
+    is refused (``O_NOFOLLOW``), as is any non-regular file. A database whose
+    ``user_version`` is neither 0 (fresh) nor :data:`SCHEMA_VERSION` is refused
+    — there is no migration.
+    """
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise StoreError(f"无法打开 run 数据库 {path}: {exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise StoreError(f"run 数据库不是普通文件: {path}")
+    finally:
+        os.close(descriptor)
+    try:
+        connection = sqlite3.connect(
+            str(path), timeout=30.0, isolation_level=None, check_same_thread=False
+        )
+    except sqlite3.Error as exc:
+        raise StoreError(f"无法打开 run 数据库 {path}: {exc}") from exc
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+        mode = connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        if str(mode).lower() != "wal":
+            raise StoreError(f"run 数据库无法启用 WAL（journal_mode={mode}）")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        connection.execute("PRAGMA foreign_keys=ON")
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        if version not in (0, SCHEMA_VERSION):
+            raise StoreError(
+                f"run 数据库版本 {version} 与当前版本 {SCHEMA_VERSION} 不符（不做迁移）"
             )
-
-    def _load_meta(self, run_id: str) -> tuple[RunRecord | None, bool]:
-        """``(record, unreadable)`` for one run directory.
-
-        ``unreadable`` is true only when ``meta.json`` exists but cannot be used:
-        a missing file is simply not a run record. Corruption is never silently
-        equal to absence — the resource ledger must keep holding for it (B.7).
-        """
-        path = self.run_dir(run_id) / _META_NAME
-        if not path.is_file():
-            return None, False
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None, True
-        if not isinstance(data, dict):
-            return None, True
-        if any(not isinstance(data.get(name), str) or not data[name] for name in _REQUIRED_TEXT_FIELDS):
-            # A record without the admission facts (written before they were
-            # required) is not served: the follow-up gate and the ledger would
-            # otherwise have to guess them. It counts as unreadable (a global
-            # hold until adjudicated), like any other unusable meta.json.
-            return None, True
-        spec = RunSpec.from_mapping(data.get("spec"))
-        if spec is None:
-            # Same rule for the run spec: a record without a usable ``spec``
-            # object (including every record written before RunSpec existed —
-            # no migration is performed) is unreadable, never guessed.
-            return None, True
-        known = {field.name for field in fields(RunRecord)}
-        try:
-            values = {key: value for key, value in data.items() if key in known}
-            values["spec"] = spec
-            record = RunRecord(**values)
-        except TypeError:
-            return None, True
-        return record, False
-
-    def _read_meta(self, run_id: str) -> RunRecord | None:
-        return self._load_meta(run_id)[0]
-
-    def _read_unreadable_adjudication(self, run_id: str) -> Mapping[str, Any] | None:
-        path = self.run_dir(run_id) / UNREADABLE_ADJUDICATION_NAME
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        return data if isinstance(data, dict) else None
-
-    def _write(self, record: RunRecord) -> RunRecord:
-        """Atomically replace ``meta.json`` and refresh the index entry.
-
-        Both steps run in one per-root critical section, so two writers of the
-        same run cannot leave the index describing an older meta than the file.
-        """
-        directory = self.run_dir(record.run_id)
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        payload = asdict(record)
-        temporary = directory / f".{_META_NAME}.tmp"
-        with self._lock:
-            temporary.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-            )
-            temporary.replace(directory / _META_NAME)
-            projected = self._project(record)
-            with self._index.lock:
-                self._index.entries[record.run_id] = _IndexEntry(
-                    raw=record, projected=projected
-                )
-            return projected
+        if version == 0:
+            connection.execute("BEGIN IMMEDIATE")
+            for statement in _SCHEMA.split(";"):
+                if statement.strip():
+                    connection.execute(statement)
+            connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            connection.execute("COMMIT")
+    except sqlite3.Error as exc:
+        connection.close()
+        raise StoreError(f"run 数据库初始化失败 {path}: {exc}") from exc
+    except BaseException:
+        connection.close()
+        raise
+    return connection
 
 
-def _terminal_line(path: Path, end: int) -> dict[str, Any] | None:
-    """The last complete line in ``path[:end]``, if it is a terminal frame.
+def _encode(record: RunRecord) -> str:
+    return json.dumps(asdict(record), ensure_ascii=False, separators=(",", ":"))
 
-    A sealed log ends with its terminal frame, so the last committed line is
-    the only place one can be. A trailing fragment without a newline is not a
-    committed line.
+
+def _decode(text: str) -> RunRecord:
+    """Parse one ``runs.record`` value; anything unusable is a :class:`StoreError`.
+
+    The database is host-owned: a row that is not a complete record is not
+    guessed around (fail closed — every reader, including admission, stops).
     """
     try:
-        handle = path.open("rb")
-    except OSError:
-        return None
-    with handle:
-        data = b""
-        position = end
-        line: bytes | None = None
-        while position > 0:
-            step = min(_TAIL_CHUNK, position)
-            position -= step
-            handle.seek(position)
-            data = handle.read(step) + data
-            last = data.rfind(b"\n")
-            if last == -1:
-                continue  # no committed line end yet in this window
-            start = data.rfind(b"\n", 0, last)
-            if start != -1 or position == 0:
-                line = data[start + 1 : last]
-                break
-        if line is None:
-            return None
+        data = json.loads(text)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise StoreError(f"run 记录不是 JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise StoreError("run 记录不是对象")
+    for name in _REQUIRED_TEXT_FIELDS:
+        if not isinstance(data.get(name), str) or not data[name]:
+            raise StoreError(f"run 记录缺少字段 {name}")
+    spec = RunSpec.from_mapping(data.get("spec"))
+    if spec is None:
+        raise StoreError(f"run 记录 {data['run_id']} 的 spec 不可用")
+    known = {field.name for field in fields(RunRecord)}
+    values = {key: value for key, value in data.items() if key in known}
+    values["spec"] = spec
     try:
-        event = json.loads(line.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(event, dict) or event.get("type") not in TERMINAL_EVENT_TYPES:
-        return None
-    return event
+        return RunRecord(**values)
+    except TypeError as exc:
+        raise StoreError(f"run 记录 {data['run_id']} 字段不完整: {exc}") from exc
+
+
+def _row_exists(connection: sqlite3.Connection, run_id: str) -> bool:
+    row = connection.execute("SELECT 1 FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+    return row is not None
+
+
+def _write_row(connection: sqlite3.Connection, record: RunRecord) -> None:
+    connection.execute(
+        "UPDATE runs SET status = ?, holds = ?, tenant_id = ?, record = ? WHERE run_id = ?",
+        (
+            record.status,
+            int(record.holds_resources),
+            record.tenant_id,
+            _encode(record),
+            record.run_id,
+        ),
+    )
+
+
+def _insert_event(connection: sqlite3.Connection, run_id: str, event: Mapping[str, Any]) -> None:
+    """Insert one frame; its ``seq`` must be a positive int, unique per run."""
+    seq = event.get("seq")
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq <= 0:
+        raise ValueError(f"事件 seq 必须是正整数: {seq!r}")
+    kind = event.get("type")
+    if not isinstance(kind, str) or not kind:
+        raise ValueError("事件缺少 type")
+    body = json.dumps(dict(event), ensure_ascii=False)
+    connection.execute(
+        "INSERT INTO events(run_id, seq, type, body) VALUES (?, ?, ?, ?)",
+        (run_id, seq, kind, body),
+    )
+
+
+def _remove_empty(directory: Path) -> None:
+    try:
+        directory.rmdir()
+    except OSError:
+        logger.warning("回滚 run 目录失败 %s", directory, exc_info=True)
 
 
 def _apply_terminal(record: RunRecord, event: Mapping[str, Any]) -> RunRecord:

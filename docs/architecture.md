@@ -11,7 +11,7 @@
 
 多租户实现已覆盖服务端可信身份、run/事件/报告/取消的归属过滤、每 run 凭据交付与脱敏边界、显式并发准入与 fail-closed 资源台账（未确认释放的持有计入 owner 租户与全局槽位，可由在线自动对账或离线人工裁决释放）；仍未覆盖多宿主租约、共享存储、真实网关与云环境的资源上限执行。单独容器/沙箱提供执行隔离，但不自动解决宿主 API 授权、存储隔离或凭据访问，也不构成本仓库对容器/沙箱实际隔离强度的保证。
 
-**旧数据不保证可读**：本次架构重设计（2026-09-28）起不再为旧 run 记录保留兼容分支；`meta.json` 缺少任一准入事实（`harness`、`harness_pack`、`executor`）的记录按不可读处理——不出现在列表与详情中，并作为不可读目录计入全局资源持有，直到人工裁决（[ADR 0001](adr/0001-required-run-admission-facts.md)）。不提供迁移。决策史统一记在 [`docs/adr/`](adr/)，本文只描述现行契约。
+**旧数据不可读**：本次架构重设计（2026-09-28）起不再为旧 run 记录保留兼容分支。run 记录、事件与资源台账迁入 `runs/runs.db`（SQLite，[ADR 0009](adr/0009-sqlite-run-store.md)）后，此前的 `runs/<id>/meta.json` / `events.jsonl` 文件与 `<数据根>/sessions/<id>/` 会话目录**一律不再被读取**：旧 run 不出现在列表、详情、重放与资源台账中，也不能被追问；`runs.db` 的 schema 版本不符时宿主拒绝打开。不提供迁移，需要旧历史的操作员自行保留旧数据根。决策史统一记在 [`docs/adr/`](adr/)，本文只描述现行契约。
 
 具体接口与迁移在对应任务中决定，不预建无消费者的租户抽象；修改这些承诺遵循 [工程约束](engineering.md)。现有单 run 测试继续保护当前行为，将来的多租户变更在取得决定后同步替换相关断言，而不是把当前串行测试当作永久需求。
 
@@ -42,10 +42,10 @@
                        │
                        ├─ DataRootOwnership（data_root/host.lock 独占；先证明所有权再对账）
                        ├─ EventBus（每 run 单调 seq；先落盘再发布；有界实时队列）
-                       ├─ RunStore（meta.json / events.jsonl / artifacts；终帧即终态提交）
+                       ├─ RunStore（runs/runs.db：run 记录 + 事件，SQLite WAL；artifacts 等仍是文件；终帧即终态提交）
                        └─ RunManager（`runs/`：准入 / 执行 / 收尾 / 终态提交）
                           └─ 准入：RunSpec{family, pack, executor, blueprint, credential_origin}
-                             随 RunRecord 原子写入 meta.json 的 "spec"
+                             随 RunRecord 在同一事务内写入 runs 行的 "spec"
                               └─ adapter = harness.driver(sandbox.spawn(harness.launch(spec)))
                                   ├─ Harness（what）：pi 族 stdio RPC / ACP 族 stdio JSON-RPC
                                   └─ Sandbox（where）：inproc 子进程 / docker run -i /
@@ -56,10 +56,10 @@
 （`family`：`pi`/`acp`）、harness 包（`pack`：`harnesses/<pack>/`）、执行面（`executor`：
 `inproc`/`docker`/`e2b`）、会话蓝图名（`blueprint`，无蓝图为 `null`）与凭据来源
 （`credential_origin`：`host`/`tenant`/`shared`，只记来源，不含凭据值）。RunManager 在准入时
-由冻结配置解析一次（`RunAdmission.spec`），与 run id、owner 同一次原子写入 `meta.json` 的 `"spec"`
+由冻结配置解析一次（`RunAdmission.spec`），与 run id、owner 在同一个数据库事务内写入 run 记录的 `"spec"`
 对象；此后族、执行面、追问门禁与 ACP 状态根继承一律读记录里的 spec，不读宿主当前配置。
-`family`/`pack`/`executor`/`credential_origin` 是必填非空字段，缺 `"spec"` 或缺字段的 meta 按不可读
-处理（列表/详情/重放隐藏，资源台账按损坏记录计入全局持有，见 §4「准入与资源」）。
+`family`/`pack`/`executor`/`credential_origin` 是必填非空字段；缺 `"spec"` 或缺字段的行按不可解析
+处理，读取即 fail-closed（见 §4「准入与资源」的不可解析行）。
 **旧数据不再可读**：S2 之前的 meta 把这些事实写成顶层 `harness` / `harness_pack` / `executor`
 三个键，重新设计后这种记录不再被解析，也没有迁移——升级前的历史 run 一律按不可读记录处理、
 不能被追问（经操作员裁决释放资源后可手工清理）。
@@ -121,32 +121,35 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 
 ### 3.1 提交先于发布
 
-`EventBus.commit` 是唯一写入路径：分配 `seq` → 调用持久化回调追加 `events.jsonl` →
+`EventBus.commit` 是唯一写入路径：分配 `seq` → 调用持久化回调把帧插入 `events` 表 →
 才写入内存环形窗口并通知实时订阅者。同一 run 的提交由每 run 的提交锁串行；持久化回调
 （可能等待磁盘同步）不持有总线全局锁，所以 `is_open`/`last_seq` 与新订阅永远不等磁盘，
 且只反映持久化已经返回的帧。因此：
 
-* **已提交的持久事件是重放事实源**。写盘失败的那一帧在浏览器、SSE 与日志里都不存在，
+* **已提交的持久事件是重放事实源**。写库失败的那一帧在浏览器、SSE 与日志里都不存在，
   并且不消耗 `seq`（不会制造缺口）；运行会以 `event_log_failed` 诚实失败，而不是让
   浏览器看到一条日志里没有的帧。
-* **读者只看已提交前缀**（`store.py::_CommitWatermarks`）：持有数据目录的宿主进程为每个它
-  追加的日志维护提交水位；水位之外的字节正在写入，对进程内所有读者（详情、列表、报告、
-  SSE 重放、重启对账）都不可见。普通帧整行写完后水位前移；写入失败截回原长度，崩溃留下的
-  半行先补换行再追加，读者不会看到半帧。重启后没有水位，文件本身就是已提交记录。
-* **终帧就是终态提交**：`RunStore.commit_terminal()` 先写入并 `fsync` 终帧，**成功之后**水位才
-  越过它，此时 run 才算终态，日志随即封存（终帧之后不能再追加）；写入或 `fsync` 失败则截回、
-  抛错，任何读者从未看到过该终帧，run 保持同一个未提交状态。普通帧不能经 `append_event`
-  写终帧。终帧载荷就是终态记录（结论、报告、清理结果）。`meta.json` 只保存受理与运行中事实，
-  终态字段是提交**之后**写入的落定副本。`RunStore.get()` 在 `meta.json` 仍为 `running` 时投影
-  已提交的终帧，因此详情、列表、报告下载与 SSE 重放在终帧发布的瞬间、落定副本写失败之后、
-  重启之后都读到同一个已提交事实，且不会先出现再撤回；`event_count` 取终帧 `seq`。
-  耐久性以日志文件的 `fsync` 为界（不额外做目录 `fsync` 或 macOS `F_FULLFSYNC`）。
-* **进程内索引只是加速器**：宿主为每个 data_root 维护一份 run 记录索引，列表、按租户列表、
-  `unsettled` 与资源台账都从它读取，准入在 manager 锁内不再遍历 run 目录。它不是第二条事实源：
-  终帧只在 `fsync` 与提交水位越过之后才进入索引，写入失败时不产生任何可见投影；`scan_all()`
-  保留全量扫描作为对照；重启时先从磁盘重建，语义与逐目录读取完全一致。
+* **存储是一个 SQLite 数据库**（`store.py`，标准库 `sqlite3`）：`<data_root>/runs/runs.db`，
+  WAL 模式、`synchronous=NORMAL`，由宿主以 0600 普通文件打开（拒绝符号链接），`user_version`
+  不符即拒绝打开（不迁移）。两张表：`runs(run_id 主键, created_at, tenant_id, status, holds, record)`
+  保存完整 `RunRecord`（JSON）与查询要过滤的列；`events` 以 **`(run_id, seq)` 为主键**保存每个已提交帧。
+  读者看见一帧当且仅当它的插入事务已提交：没有半行、没有提交水位、没有截尾修复，也没有进程内
+  索引或模块级缓存——列表、按租户列表、资源台账与准入都直接查询同一个库。报告、子代理产物与
+  会话文件仍是 `runs/<id>/` 下的文件（§5.2）。
+* **终帧就是终态提交**：`RunStore.commit_terminal()` 在**同一个事务**里插入终帧并把 run 行改写为
+  终态记录（结论、报告、清理结果、`event_count` = 终帧 `seq`），该事务以 `synchronous=FULL` 提交。
+  提交返回之前任何读者都看不到其中任一半；返回之后详情、列表、报告下载、SSE 重放与资源台账
+  都读到同一个已提交事实，且不会先出现再撤回。事务失败（含约束或磁盘错误）整体回滚并抛
+  `StoreWriteError`，run 保持同一个未提交的 `running` 状态。run 行已是终态时，同一事务内拒绝再写
+  任何帧（`RunAlreadyTerminal`），因此终帧之后什么都不能追加；普通帧不能经 `append_event` 写终帧，
+  `update()` 也拒绝终态字段（`status`/`finished_at`/`cleanup`/`event_count` 只能随终帧提交）。
+  耐久性以 SQLite 的提交为界（不额外做目录 `fsync` 或 macOS `F_FULLFSYNC`）。
+* **准入读它写的台账**：`RunStore.create(admission_check=…)` 在 `BEGIN IMMEDIATE` 事务内读出持有资源
+  的行（`holds = 1`）交给配额检查，检查通过才在同一事务内插入新行；拒绝时整体回滚，不留行也不留
+  run 目录。配额计数与插入因此不会与同库的另一个写者交错。
 * 环形窗口只是「读完日志 → 挂上实时尾」之间的交接缓冲，不是历史来源；run 关闭时即释放，
-  不会让所有 run 的历史常驻内存。用户历史（`events.jsonl`）不因任何 TTL 被删除。
+  不会让所有 run 的历史常驻内存。用户历史（`events` 表）不因任何 TTL 被删除。
+* 单机单宿主：`runs.db` 只被持有 `host.lock` 的进程写入，不是多主机共享存储（见 §4 所有权）。
 
 ### 3.2 重放与慢消费者
 
@@ -154,7 +157,7 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 
 * 活跃 run：日志里的已提交帧先写出，实时帧按 `seq > 已写出水位` 继续；读取期间关闭的 run
   也不会丢终帧（终帧已在日志里，或在订阅队列里）。
-* 已结束/上次进程的 run：只读 `events.jsonl`，因此重放不受内存窗口容量影响，也无需重新启动 pi。
+* 已结束/上次进程的 run：只读 `events` 表（按 `seq` 分页），因此重放不受内存窗口容量影响，也无需重新启动 pi。
 * 每个实时订阅者有一个**有界队列**（默认 2000 帧）。停止读取的客户端会被主动断开，而不是让
   队列无限增长；浏览器按 `Last-Event-ID` 重连并从日志补齐，因此断开不丢已提交历史。
 * **连接数有界**：全局上限 `PI_GLINK_MAX_GLOBAL_STREAMS`（默认 64），多租户下每个租户另有
@@ -208,7 +211,7 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
   bash 更新长度 `0 → 53 → 495`，见 `docs/evidence/tool-stream-semantics.txt`）。
 * **权威回答帧可能被截断，截断时会声明**：`assistant_message.text` 只保留
   `ASSISTANT_TEXT_LIMIT`（16000 字符）并带上 `truncated: true`；保留上限而不取消，是因为回答、
-  脚本与工具输出都可能很长，单帧不受限会让 `events.jsonl` 与重放环形窗口膨胀（事件日志是
+  脚本与工具输出都可能很长，单帧不受限会让 `events` 表与重放环形窗口膨胀（事件日志是
   历史事实源，不因 TTL 删除），而流式 delta 已经把完整正文交给浏览器。前端因此只在
   **非截断**的权威帧上用 pi 的副本覆盖流式正文；截断帧且流式正文更长时保留流式正文，
   仅关闭该内容块并标记 `truncated`（重放历史亦然），避免“终帧比流式更短”把回答改短。
@@ -327,7 +330,7 @@ child 在前端显示为普通「进行中」，不伪造进度。
 ## 4. run 生命周期
 
 1. `POST /api/runs {prompt, parentRunId?, blueprint?}` → 准入（见下）→ 生成 `runId`（run 目录**排他**创建，
-   生成的 id 碰撞则有限重试重新生成；既有记录绝不被覆盖），写 `meta.json`（status=running）。准入先过
+   生成的 id 与已有行或目录碰撞则有限重试重新生成；既有记录绝不被覆盖），在同一事务内插入 run 行（status=running）。准入先过
    **宿主级 `/` 命令门禁**（与 harness 无关，GLINK-ARCH-6）：去掉前导空白的 prompt 若以 `/` 开头，
    只有 `/<蓝图名> <题目>` 这一种形式被接受——宿主把它解释为 `blueprint=<蓝图名>` +
    `prompt=<题目>`（与显式 `blueprint` 字段同一条解析；两者同时给出即拒绝，不猜优先级），
@@ -339,10 +342,10 @@ child 在前端显示为普通「进行中」，不伪造进度。
    `/run --bg`、`/subagents-detach` 这类客户端可控输入能绕过 `tool_call` 守卫发起不随本 run
    收口的后台进程（见 pi-integration-notes.md §10.4）；命令集合现在来自宿主自己的蓝图目录，
    不再依赖 pi 的模板展开。
-   `parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。追问门禁的同族判定比 run 记录自身的事实：准入时 `meta.json` 原子写入本 run 的 `RunSpec`（`"spec"` 对象，见 §2：`family`、`pack`、`executor`、`blueprint`、`credential_origin`，来自冻结配置，与 run id/owner 同一次写入），session_ready 提交时写回 `agent`（ACP 为协商到的 agentInfo.name；pi 协议不报 agent 身份，不伪造）；`spec.family` 不同的跨族追问一律 `session_unavailable`（fail-closed），同族但 `spec.pack` 与本包不同同样 `session_unavailable`；缺 `"spec"` 或缺必填字段的 meta（含 S2 之前顶层 `harness`/`harness_pack`/`executor` 形态的旧记录）按不可读处理，不会进入追问门禁（[ADR 0001](adr/0001-required-run-admission-facts.md)、[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)）。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
-2. 渲染**本 run 的**运行期配置目录与 session 目录（`runs/<id>/pi-agent`、会话根下的 `<id>/`），
+   `parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。追问门禁的同族判定比 run 记录自身的事实：准入时 run 行在同一事务内写入本 run 的 `RunSpec`（`"spec"` 对象，见 §2：`family`、`pack`、`executor`、`blueprint`、`credential_origin`，来自冻结配置，与 run id/owner 同一次写入），session_ready 提交时写回 `agent`（ACP 为协商到的 agentInfo.name；pi 协议不报 agent 身份，不伪造）；`spec.family` 不同的跨族追问一律 `session_unavailable`（fail-closed），同族但 `spec.pack` 与本包不同同样 `session_unavailable`；缺 `"spec"` 或缺必填字段的行按不可解析处理（fail-closed），不会进入追问门禁；旧 `meta.json` 记录根本不被读取（[ADR 0001](adr/0001-required-run-admission-facts.md)、[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)）。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
+2. 渲染**本 run 的**运行期配置目录与 session 目录（`runs/<id>/pi-agent`、`runs/<id>/sessions/`），
    按 `LOCAL_WEB_EXECUTOR` 选择执行面（见 §5）；
-3. 事件投影 → `EventBus.commit`：先落 `events.jsonl`，再实时给 SSE（见 §3.1）；
+3. 事件投影 → `EventBus.commit`：先插入 `events` 表，再实时给 SSE（见 §3.1）；
 4. 执行面把冻结输入交给内核，等待「落定」或超时/取消/进程退出；
 5. 收尾把四类事实分开，各有唯一 owner 与提交点（`runs/pipeline.py` 与 `runs/stages.py`，见下「生命周期管线」）：
 
@@ -445,9 +448,9 @@ abort、取消即毁沙箱的义务已随 GLINK-ARCH-3 删除，见 §5.1/§5.2�
   与 `PI_GLINK_MAX_TENANT_RUNS` / `PI_GLINK_MAX_GLOBAL_RUNS` 一同比较，超额返回
   `429 quota_exceeded`（scope/limit，不含 run id）；持有不会被遗忘，达到全局上限时所有新准入都被拒绝
   （fail-closed）。
-* **损坏记录**：run 目录存在但 `meta.json` 不可读/不可解析时，列表、详情与重放一律隐藏它（不向租户
-  暴露），但资源台账把它计为**全局持有**（owner 未知），`--unreleased` 列出并标注 `corrupt`；裁决写入
-  该 run 目录内的 `resource-adjudication.json` 侧车，损坏的 `meta.json` 字节不变。
+* **不可解析行**：`runs.db` 由宿主独占写入，某行的 `record` 不是完整记录（非 JSON、缺必填字段或
+  `spec`）时不绕过猜测：读到它的列表、详情、资源台账与准入一律抛 `StoreError`（fail-closed，新准入
+  全部拒绝），直到操作员修复数据库。不再有 `corrupt` 标注与 `resource-adjudication.json` 侧车。
 
 释放容量有三条路：执行面清理确认 `released: true`、在线自动对账确认，或操作员在宿主**停止时**以
 `python -m pi_glink.app --mark-released <runId> --note "<核对说明>"` 记录人工裁决（`--unreleased`
@@ -468,16 +471,16 @@ Docker/E2B，也不删除任何资源。
 
 **所有权、重启对账与关闭**：宿主先取得 `data_root/host.lock` 的独占 `flock`（进程存活期间
 持有、退出即释放；同进程二次获取也被拒），**再**对账和绑定端口。`data_root` 由宿主以 0700 创建，
-`runs/`、`sessions/`、`workspaces/` 与各 run 子目录（含 `pi-agent/`、`artifacts/`）同样；已存在的
+`runs/`、`workspaces/` 与各 run 子目录（含 `pi-agent/`、`sessions/`、`artifacts/`）同样；已存在的
 data_root 若是符号链接、不是目录或带组/其他人写权限，宿主拒绝启动并提示操作员自行 `chmod 700`
 （不自动改动已有目录权限，参照账号库的 fail-closed 口径）。同一 data_root 的第二个宿主
 ——无论同端口还是不同端口——在读任何记录前以 `DataRootBusy` 退出，不改动活跃 owner 的 run。
-`RunManager.reconcile()` 要求持有所有权：遗留 `running` 记录若已有提交的终帧，只写落定副本；
-否则提交 `run_failed(interrupted)`，资源状态为 `released: null`（未知），并持续占用容量直至裁决。
+`RunManager.reconcile()` 要求持有所有权：终帧与终态同一事务提交，遗留 `running` 行因此必然没有终帧，
+一律提交 `run_failed(interrupted)`，资源状态为 `released: null`（未知），并持续占用容量直至裁决。
 容器名/沙箱 id 在拿到时即持久化，`unreleased_resources()` 供操作员做有界对账。除在线自动对账按已持久化
 身份执行的那一次幂等删除/终止（上文）之外，宿主不操作任何其他遗留资源：没有身份、探测不确定或
 不属于本记录的容器/沙箱永远不会被触碰。进程退出时 `RunManager.shutdown()` 取消并等待本进程 run，
-返回所有「终态未提交或资源未确认释放」的 run id（包括更早遗留的持有与不可读记录），进程返回码非零。
+返回所有「终态未提交或资源未确认释放」的 run id（包括更早遗留的持有），进程返回码非零。
 `flock` 只覆盖单机本地文件系统，不是多宿主租约（见 [多租户方案](multitenancy-plan.md) §3.2）。
 
 ## 5. 三种执行面对照
@@ -490,7 +493,7 @@ data_root 若是符号链接、不是目录或带组/其他人写权限，宿主
 | 运行时来源 | 宿主安装的 Node v24.16.0 / pi | 镜像自包含（`pi-glink-worker:latest`，node v24.21.0 + pi 0.86.1 + `/opt/pi-packages` 预装 pi 包；镜像名在启动时冻结） | 模板自包含（`pi-glink-worker`，node v24.21.0 + pi 0.86.1 + `/opt/pi-packages` 预装 pi 包） |
 | 运行期配置 | `runs/<id>/pi-agent`（本 run 独占） | 同目录挂到 `/config` | 同一目录整棵上传到沙箱 `/home/user/config` |
 | 工作区 | `<data>/workspaces/<runId>` | 同左（挂到 `/workspace`） | 沙箱内 `/home/user/workspace`，结束后拉回宿主 |
-| 会话文件 | 会话根下的 `<id>/`（宿主可查） | 该目录挂到 `/sessions`；宿主按挂载映射回本 run 目录后脱敏 | 销毁前按会话头判别回收主会话到本 run 目录（分支会话头部带 `parentSession`，主会话不带），供下一轮使用；主会话无法唯一确定或回收失败不可续接 |
+| 会话文件 | `runs/<id>/sessions/`（宿主可查） | 该目录挂到 `/sessions`；宿主按挂载映射回本 run 目录后脱敏 | 销毁前按会话头判别回收主会话到本 run 目录（分支会话头部带 `parentSession`，主会话不带），供下一轮使用；主会话无法唯一确定或回收失败不可续接 |
 | 模型凭据 | 真实 key 不进执行环境；本 run 的 `auth.json` 只含出口代理 token（§6），`baseUrl` 指向 `http://127.0.0.1:<port>/model` | 同一 token 随 `/config` 挂载；`baseUrl` 走 `host.docker.internal`（`--add-host …:host-gateway`）或 `PI_GLINK_EGRESS_PUBLIC_URL` | 同一 token 随运行期配置上传；必须配置 `PI_GLINK_EGRESS_PUBLIC_URL`，否则启动即拒绝 |
 | 搜索凭据 | 有检索 grant 时 `web-search.json`（600）只含 token 与代理 `/search` 地址 | 同左；Docker 带检索 key 需 https 的 public URL | 同左（随沙箱消失） |
 | 隔离强度 | 进程级 | 容器级 | 云端沙箱级 |
@@ -531,7 +534,7 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
   补发 `session_ready` 的会话事实」（pi 沙箱面在 `session_ready` 即知会话身份、回收带回会话文件后
   补发一帧带宿主 `session_file` 的 `session_ready`、ACP 沙箱面的 state-root 回收结论）；
   其余面在 run 开始前已知会话，恒返回 `None`。
-* **持久执行身份**：`identity()` 给出容器名或沙箱 id。身份在资源一存在时就写入 `meta.json`：
+* **持久执行身份**：`identity()` 给出容器名或沙箱 id。身份在资源一存在时就写入 run 记录：
   Docker 面在 `docker run` 之前的容器名确定后写入，E2B 面在拿到 `sandbox_id` 后、上传配置/续接之前
   写入；创建后的失败清理不会抹掉已拿到的身份，终态 `cleanup.external` 也带上它。它是重启对账（§4）
   与在线自动对账唯一的资源归属凭据，不靠猜名字。
@@ -542,10 +545,10 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 
 ```
 <data_root>/runs/<runId>/
-├── meta.json / events.jsonl      run 记录与持久事件
 ├── pi-agent/                     PI_CODING_AGENT_DIR（models.json、auth.json、模板副本）
+├── sessions/                     PI_CODING_AGENT_SESSION_DIR（每 run 一个，随 run 目录创建）
 └── artifacts/report.md           宿主拥有的脱敏产物副本
-<data_root>/sessions/<runId>/      PI_CODING_AGENT_SESSION_DIR（基目录可配置，每 run 一个子目录）
+<data_root>/runs/runs.db          run 记录与持久事件（SQLite，§3.1）
 <data_root>/workspaces/<runId>/   内核工作目录
 ```
 
@@ -689,7 +692,7 @@ run 只拿到宿主凭据出口代理（`host/pi_glink/egress.py::EgressProxy`�
 | 出口 | 处理 | 代码 |
 |---|---|---|
 | 事件投影 | 载荷里每个字符串递归脱敏；delta 走尾部暂存（§3.3） | `kernel/projection.py::project_event(frame, redactor)`、`redaction.py::StreamRedactor` |
-| 事件总线 / `events.jsonl` | 提交（先落盘）前再脱敏一次 | `runs/channel.py::RunChannel.emit` |
+| 事件总线 / `events` 表 | 提交（先落盘）前再脱敏一次 | `runs/channel.py::RunChannel.emit` |
 | 报告文件 | 经工作区目录句柄读取、脱敏、在 run 目录句柄内原子写入 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `runs/stages.py::SealStage.report` |
 | 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源；子代理分支会话与 `subagent-artifacts/` 同目录被同一边界清扫 | `runs/secrets.py::RunSecretBoundary.sanitize_session_file`、`sandbox.DockerSandbox.host_path`（`docker_env.translate_container_path`） |
 | ACP 状态根 | 收尾扫描范围与处置由运行时契约声明：agent 自己的会话存储（`acp-agent/home`，E2B 回收后 `acp-agent/recovered`）**只读扫描**——凭据形状值并入本 run 边界，文件字节不改写（改写会破坏追问要续接的会话，与 §10.2 继承口径同一义务）；**注入凭据副本**（`PI_GLINK_ACP_CREDENTIAL_FILES` 的 dest）在扫描之后逐个删除（只删已知相对路径：不按模式匹配、不跟随链接、必须在根内；追问会从源重新注入，继承已 skip 这些目标）；删除失败记入终帧 `artifactFailures` 并告警，不改变终态；缺失的根按「无可扫之物」处理 | `kernel/sweep.py::SessionSweep`、`kernel/acp_env.py::AcpRuntime.session_sweeps`、`runs/secrets.py::RunSecretBoundary.seal_sessions`、`absorb`、`remove_credential_copies`、`artifacts.py::ArtifactTree.remove` |
@@ -708,7 +711,10 @@ run 只拿到宿主凭据出口代理（`host/pi_glink/egress.py::EgressProxy`�
 检测同时覆盖**值**（宿主知道的 key）与**形状**（`sk-…`、`e2b_…`、`exa-…`、`NAME=value`、
 `Bearer …`），所以宿主从未见过的第三方 token 也会被掉包；跨 delta 的分割由 §3.3 的暂存覆盖。
 `scripts/check-no-secrets.py` 用同一套规则扫描运行态产物，并把**文档占位符**
-（如 README 里的 `sk-ant-...`）与真实值分开计数。
+（如 README 里的 `sk-ant-...`）与真实值分开计数。run 数据库经 SQLite 只读打开，逐行扫描
+`runs.record` 与 `events.body` 的完整值（WAL 由 SQLite 合并）；不把 `runs.db` / `runs.db-wal`
+当文本扫描——大值会被拆到 overflow page、WAL 也按页组织，跨页的凭据在字节层面会被截断而漏报。
+数据库无法打开时扫描判失败，不报告 0 命中（`tests/test_check_no_secrets.py`）。
 
 **脱敏不是安全沙箱**：它处理的是「宿主已能把值交付给内核、内核又把它回显到产品面」这一层的
 回显保护；任意编码、分拆到不同工具输出、写入二进制或直接网络外传不在承诺范围。需要更强隔离
@@ -748,7 +754,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `scripts/` | 运维 | 启动、测试、真实 run 冒烟、E2B 模板构建；`spikes/`（ACP 各面的 live 探针） |
 | `docs/` | 文档与证据 | 架构、边界、集成笔记、`evidence/` |
 | `tests/` | 回归 | `test_*.py`（宿主/内核）、`web/*.test.mjs`（前端模型）、`browser/`（真实浏览器） |
-| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/<id>/{meta.json,events.jsonl,pi-agent/ 或 acp-agent/,artifacts/,subagents/,children/}`（按本 run 的 harness 渲染；`subagents/` 为 E2B 面回收的子代理镜像；`children/<n>/child.json` 为子代理权威文档，§3.5）、`sessions/<id>/`、`workspaces/<id>/`；目录由宿主以 0700 创建，已存在的符号链接或组/其他人可写目录拒绝启动（不自动 chmod） |
+| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/runs.db`（run 记录与事件，SQLite WAL，含 `-wal`/`-shm`）、`runs/<id>/{pi-agent/ 或 acp-agent/,sessions/,artifacts/,subagents/,children/}`（按本 run 的 harness 渲染；`subagents/` 为 E2B 面回收的子代理镜像；`children/<n>/child.json` 为子代理权威文档，§3.5）、`workspaces/<id>/`；目录由宿主以 0700 创建，已存在的符号链接或组/其他人可写目录拒绝启动（不自动 chmod） |
 
 运行期配置目录 `runs/<id>/pi-agent/` 是 pi 的 `PI_CODING_AGENT_DIR`：宿主在其中渲染
 `models.json` 与 `web-search.json`，复制 `harnesses/pi/` 的可版本化配置，pi 自己往里写 `auth.json` /
@@ -817,7 +823,7 @@ owner 校验、配额、凭据与脱敏边界完全共用；客户端在任一�
 - 请求体、查询参数与其它请求头不参与身份推导：多租户下除 `/api/health` 外所有 `/api/*` 先验签；
   未认证 401，权限不足 403，未知/异租户/无 owner 的记录统一同形 404。
 - 事件流在写出任何响应头之前用同一 owner 规则验权；断言过期在**重放与实时两个阶段**都按帧检查：
-  持久 `events.jsonl` 的每一帧、实时订阅的每次等待都先确认断言未过期，过期即干净结束该流（实时
+  持久 `events` 表的每一帧、实时订阅的每次等待都先确认断言未过期，过期即干净结束该流（实时
   等待用 `EventBus.subscribe(idle_poll=…)` 返回控制流，不改变持久事件语义）。过期没有宽限窗口：
   通过验证的上下文绝不会已经过期，`clock_skew` 只容忍签发时间略快于宿主时钟的网关。
 - POST 检查 `Origin` / `Referer` / `Sec-Fetch-Site`：任何表示跨站的元数据都会在启动执行面之前被拒绝；
@@ -825,7 +831,7 @@ owner 校验、配额、凭据与脱敏边界完全共用；客户端在任一�
 
 ### 10.2 owner 与历史数据
 
-`RunStore.create` 在受理时用同一次 `meta.json` 原子写 `tenant_id` / `creator_user_id`；`get_for` /
+`RunStore.create` 在受理时于同一事务内写 `tenant_id` / `creator_user_id`；`get_for` /
 `list_for` 按 tenant 过滤。没有 owner 的记录（单用户面写入）不匹配任何租户，因此在多租户读面上始终不可见/不可下载/
 不可 SSE/不可取消，也不会被迁移或改写；`local` 模式仍按旧口径可读。取消在同一把 run 锁内先做
 owner/role 判定再受理：其他租户得到与未知 run 相同的 404 且无副作用，同租户非创建者的 member 得到 403。

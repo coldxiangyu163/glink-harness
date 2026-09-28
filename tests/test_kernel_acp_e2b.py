@@ -48,6 +48,7 @@ from pi_glink.kernel.sandbox import E2BSandbox, open_sandbox
 from pi_glink.runs.runner import FollowupUnavailable, RunManager
 from pi_glink.store import FAILED, FINISHED, RunStore
 from pi_glink.tenancy import TenantContext, TenantCredentialStore
+from store_helpers import events_text, stored_record
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"
@@ -341,10 +342,10 @@ def fake_agent_command(tmp_path: Path, settings: dict[str, Any], *, name: str = 
 
 
 def event_kinds(store: RunStore, run_id: str) -> list[str]:
-    path = store.events_path(run_id)
+    text = events_text(store, run_id)
     return [
         json.loads(line)["type"]
-        for line in path.read_text(encoding="utf-8").splitlines()
+        for line in text.splitlines()
         if line.strip()
     ]
 
@@ -695,7 +696,7 @@ def test_an_acp_run_finishes_on_the_sandbox_face(tmp_path: Path) -> None:
     assert "session_ready" in kinds and "assistant_delta" in kinds and "turn_finished" in kinds
     events = [
         json.loads(line)
-        for line in store.events_path(record.run_id).read_text(encoding="utf-8").splitlines()
+        for line in events_text(store, record.run_id).splitlines()
         if line.strip()
     ]
     session_ready = next(event for event in events if event["type"] == "session_ready")
@@ -746,7 +747,7 @@ def _state_path(sandbox: FakeSandbox, relative: str) -> Path:
 def _payloads(store: RunStore, run_id: str, event_type: str) -> list[dict[str, Any]]:
     events = [
         json.loads(line)
-        for line in store.events_path(run_id).read_text(encoding="utf-8").splitlines()
+        for line in events_text(store, run_id).splitlines()
         if line.strip()
     ]
     return [event["payload"] for event in events if event["type"] == event_type]
@@ -921,8 +922,7 @@ def test_acp_followup_refused_when_the_state_recovery_failed(tmp_path: Path) -> 
     # The failure is recorded honestly in the run's terminal frame, the
     # post-recovery frame carries the negative verdict, and no recovered root
     # (nor a leftover staging directory) exists.
-    meta = json.loads((store.run_dir(record.run_id) / "meta.json").read_text(encoding="utf-8"))
-    assert meta["status"] == FINISHED
+    assert stored_record(store, record.run_id)["status"] == FINISHED
     ready = _payloads(store, record.run_id, "session_ready")
     assert ready[-1]["stateRootRecovered"] is False
     run_acp_dir = store.run_dir(record.run_id) / "acp-agent"
@@ -989,7 +989,7 @@ def test_state_recovery_bounds_refuse_the_whole_mirror(
             event["payload"]["artifactFailures"]
             for event in (
                 json.loads(line)
-                for line in store.events_path(record.run_id).read_text(encoding="utf-8").splitlines()
+                for line in events_text(store, record.run_id).splitlines()
                 if line.strip()
             )
             if event["type"] == "run_finished"
@@ -1039,7 +1039,7 @@ def test_inherited_state_secrets_join_the_child_redaction_boundary(tmp_path: Pat
     child = manager.start("RECALL 复述代号", parent_run_id=parent.run_id)
     child_final = manager.wait(child.run_id, timeout=120)
     assert child_final is not None and child_final.status == FINISHED
-    raw_events = store.events_path(child.run_id).read_text(encoding="utf-8")
+    raw_events = events_text(store, child.run_id)
     assert inherited_secret not in raw_events
     assert "[REDACTED]" in raw_events
     assert inherited_secret not in _assistant_text(store, child.run_id)
@@ -1271,8 +1271,8 @@ def test_the_credential_value_stays_in_the_sandbox_file(tmp_path: Path) -> None:
     assert sandbox.written[target] == source.read_bytes(), "凭据以文件形态进入沙箱"
     assert secret not in sandbox.command, "凭据值不得进入沙箱命令"
     assert secret not in " ".join(sandbox.agent_envs.values()), "凭据值不得进入命令环境"
-    events_text = store.events_path(record.run_id).read_text(encoding="utf-8")
-    assert secret not in events_text
+    stored_events = events_text(store, record.run_id)
+    assert secret not in stored_events
     # The fake agent's HOME write lands inside the run's sandbox HOME.
     assert (translate(SANDBOX_ACP_HOME, sandbox.root) / "fake-acp-state.json").is_file()
 

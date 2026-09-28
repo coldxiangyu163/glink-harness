@@ -9,9 +9,7 @@
 
 from __future__ import annotations
 
-import json
 import sys
-import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -23,7 +21,9 @@ from acp_pack import apply_acp_pack
 from pi_glink.kernel.harness import FollowupUnavailable, select_family
 from pi_glink.kernel.harness_acp import AcpHarnessFamily
 from pi_glink.redaction import SecretRedactor
-from pi_glink.store import FINISHED, RunStore
+from pi_glink.store import FINISHED, RunSpec, RunStore
+
+from store_helpers import finish
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"
@@ -65,36 +65,19 @@ def write_parent(
     capabilities: Mapping[str, Any] | None = None,
     leading_events: int = 0,
 ) -> None:
-    """手写一份 ACP 追问门禁能消费的父记录（同 test_kernel_acp_resume 的先例）。
+    """经 store 公共 API 造一份 ACP 追问门禁能消费的已终结父记录。
 
-    手写 meta.json 以便直接给出终态与 session id；
     ``state_root=None`` 模拟状态根缺失（或未回收）的父 run；
     ``leading_events`` 在 session_ready 帧之前垫事件，用于扫描上限断言。
-
-    注意：RunStore 的记录索引每个 root 只建一次，同一 store 里手写多份父
-    记录时必须先全部写完再 ``store.get``（见 craft_parent 的注释）。
     """
     directory = store.run_dir(run_id)
-    meta: dict[str, Any] = {
-        "run_id": run_id,
-        "prompt": "第一轮",
-        "status": FINISHED,
-        "created_at": time.time(),
-        "workspace": str(directory / "workspace"),
-        "session_id": session_id,
-        "finished_at": time.time(),
-        "spec": {
-            "family": harness,
-            "pack": harness_pack,
-            "executor": executor,
-            "blueprint": None,
-            "credential_origin": "host",
-        },
-    }
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    (directory / "meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False) + "\n", encoding="utf-8"
+    store.create(
+        "第一轮",
+        run_id=run_id,
+        workspace=directory / "workspace",
+        spec=RunSpec(family=harness, pack=harness_pack, executor=executor),
     )
+    store.update(run_id, session_id=session_id)
     for index in range(leading_events):
         store.append_event(
             run_id, {"type": "kernel_status", "seq": index + 1, "payload": {}}
@@ -111,17 +94,14 @@ def write_parent(
     store.append_event(
         run_id, {"type": "session_ready", "seq": leading_events + 1, "payload": payload}
     )
+    finish(store, run_id, FINISHED)
     if state_root is not None:
         root = directory / "acp-agent" / state_root
         root.mkdir(parents=True, exist_ok=True)
 
 
 def craft_parent(store: RunStore, run_id: str, **kwargs: Any) -> Any:
-    """write_parent + store.get（单父记录的便捷封装）。
-
-    RunStore 的记录索引每个 root 只在首次读取时建一次：同一 store 需要
-    多份手写父记录的测试必须先用 write_parent 全部落盘，再逐个 get。
-    """
+    """write_parent + store.get（单父记录的便捷封装）。"""
     write_parent(store, run_id, **kwargs)
     return store.get(run_id)
 

@@ -38,6 +38,36 @@ DEFAULT_PROMPT = (
 )
 
 
+def _run_record(run_dir: Path) -> dict:
+    """run 记录：存于 ``<runs>/runs.db``（ADR 0009），只读打开；不存在时返回空对象。"""
+    import sqlite3
+    from contextlib import closing
+
+    database = run_dir.parent / "runs.db"
+    if not database.is_file():
+        return {}
+    with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as connection:
+        row = connection.execute(
+            "SELECT record FROM runs WHERE run_id = ?", (run_dir.name,)
+        ).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def _run_events(run_dir: Path) -> list[dict]:
+    """run 的已提交事件（``events`` 表按 seq 顺序），只读打开。"""
+    import sqlite3
+    from contextlib import closing
+
+    database = run_dir.parent / "runs.db"
+    if not database.is_file():
+        return []
+    with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as connection:
+        rows = connection.execute(
+            "SELECT body FROM events WHERE run_id = ? ORDER BY seq", (run_dir.name,)
+        ).fetchall()
+    return [json.loads(body) for (body,) in rows]
+
+
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -201,12 +231,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # -- facts from the run directory (read-only) -----------------------------
     run_dir = data_root / "runs" / run_id
-    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
-    events = [
-        json.loads(line)
-        for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    meta = _run_record(run_dir)
+    events = _run_events(run_dir)
     first_at = next((frame["at"] for frame in frames if frame["event"] != "sse_error"), None)
     kinds: dict[str, int] = {}
     for event in events:
@@ -223,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  SSE 帧数: {len(frames)}")
 
     print()
-    print("事件类型统计（events.jsonl）")
+    print("事件类型统计（runs.db events）")
     print("  " + " · ".join(f"{name} {count}" for name, count in sorted(kinds.items())))
     print()
     print("事件时间线（seq/相对秒/type/摘要）")
@@ -238,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {event.get('seq'):4} {event['ts'] - t0:6.2f}s {event['type']:18} {summary}")
 
     print()
-    print("终态与清理事实（meta.json）")
+    print("终态与清理事实（runs.db 记录）")
     print(f"  status={meta.get('status')} modelStopReason={meta.get('model_stop_reason')} "
           f"reportStatus={meta.get('report_status')}")
     print(f"  sandbox_id={meta.get('sandbox_id')} container_name={meta.get('container_name')!r}")

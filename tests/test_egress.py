@@ -585,6 +585,6 @@ def test_a_run_calls_the_model_and_search_through_the_proxy_end_to_end(
         if path.is_file():
             text = path.read_text(encoding="utf-8", errors="replace")
             assert MODEL_KEY not in text and SEARCH_KEY not in text, path
-    for path in (config.session_dir / record.run_id).rglob("*"):
+    for path in ((config.data_root / "runs" / record.run_id / "sessions")).rglob("*"):
         if path.is_file():
             assert MODEL_KEY not in path.read_text(encoding="utf-8", errors="replace")

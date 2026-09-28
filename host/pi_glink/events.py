@@ -22,9 +22,9 @@ already consumes::
 caller's persist callback, and only then stores the frame in the ring and hands
 it to live subscribers. A frame that could not be persisted therefore exists
 nowhere: the browser cannot show a frame that is missing from
-``events.jsonl``, and no sequence number is burned for it. The durable log is
+the store's ``events`` table, and no sequence number is burned for it. The durable log is
 the replay source of truth; the ring is only the window between "the reader
-reached the end of the file" and "the reader is attached to the live tail".
+reached the end of the table" and "the reader is attached to the live tail".
 Commits of one run are serialized by a per-run lock; the persist callback (which
 may wait for a disk sync) runs outside the bus-wide lock, so queries such as
 ``is_open``/``last_seq`` and new subscriptions never wait on disk and only ever
@@ -208,7 +208,7 @@ class EventBus:
         """Mark end-of-stream, wake live subscribers and drop the ring.
 
         The closed flag also ends later subscriptions: a client that connects
-        after the run finished replays from ``events.jsonl`` instead of waiting
+        after the run finished replays from the store's ``events`` table instead of waiting
         on a queue nobody will write to again. The ring exists only for the
         replay→live handover, so it is released here; the durable log is not
         touched.

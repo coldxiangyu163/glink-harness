@@ -36,6 +36,7 @@ from pi_glink.runs.runner import (
 )
 from pi_glink.store import CANCELLED, FAILED, FINISHED, RUNNING, RunStore, RunSpec
 from pi_glink.tenancy import TenantContext
+from store_helpers import events_text, finish, stored_record
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
@@ -81,10 +82,8 @@ def build_manager(tmp_path: Path, *, write_report: bool = False, **overrides: st
 
 
 def read_events(store: RunStore, run_id: str) -> list[Mapping[str, Any]]:
-    path = store.events_path(run_id)
-    if not path.is_file():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    text = events_text(store, run_id)
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
 def wait_for(predicate, *, timeout: float = 20.0) -> bool:
@@ -128,7 +127,7 @@ def test_report_path_is_recorded_in_run_metadata(tmp_path: Path) -> None:
     manager, store = build_manager(tmp_path, write_report=True)
     record = manager.start("生成报告")
     final = manager.wait(record.run_id, timeout=30)
-    meta = json.loads((store.run_dir(record.run_id) / "meta.json").read_text(encoding="utf-8"))
+    meta = stored_record(store, record.run_id)
     assert meta["report_path"] == final.report_path
     assert meta["status"] == FINISHED
     assert meta["session_file"] == "/tmp/fake-session.jsonl"
@@ -207,7 +206,7 @@ def test_docker_session_file_is_mapped_back_to_the_host_and_sanitized(
         # does it: by the run id carried in the container/name arguments.
         match = re.search(r"pi-glink-([0-9a-f]{12})", " ".join(argv))
         assert match is not None, argv
-        session_dir = config.session_dir / match.group(1)
+        session_dir = config.data_root / "runs" / match.group(1) / "sessions"
         session_dir.mkdir(parents=True, exist_ok=True)
         session_file = session_dir / "fake-session.jsonl"
         session_file.write_text(
@@ -251,7 +250,7 @@ def test_subagent_files_in_the_session_dir_are_sanitized_too(
         merged["FAKE_PI_SESSION_FILE"] = "/sessions/fake-session.jsonl"
         match = re.search(r"pi-glink-([0-9a-f]{12})", " ".join(argv))
         assert match is not None, argv
-        session_dir = config.session_dir / match.group(1)
+        session_dir = config.data_root / "runs" / match.group(1) / "sessions"
         (session_dir / "subagent-artifacts").mkdir(parents=True, exist_ok=True)
         (session_dir / "fake-session.jsonl").write_text(
             f'{{"role":"tool","text":"OPENAI_API_KEY={secret}"}}\n', encoding="utf-8"
@@ -403,7 +402,7 @@ def test_prompt_reaches_the_kernel_verbatim_and_never_through_argv(tmp_path: Pat
 
 def _run_dirs(config: HostConfig) -> list[str]:
     runs = config.data_root / "runs"
-    return sorted(path.name for path in runs.glob("*")) if runs.is_dir() else []
+    return sorted(path.name for path in runs.glob("*") if path.is_dir()) if runs.is_dir() else []
 
 
 def _write_blueprint(directory: Path, name: str) -> None:
@@ -576,9 +575,9 @@ def test_two_runs_do_not_share_runtime_configuration_or_credentials(tmp_path: Pa
         "a credential removed from the configuration must not survive in another run"
     )
     # Session directories are per run too (subdirectory of the configured root).
-    assert without_key.session_dir / run_a.run_id != without_key.session_dir / run_b.run_id
-    assert (without_key.session_dir / run_a.run_id).is_dir()
-    assert (without_key.session_dir / run_b.run_id).is_dir()
+    assert (without_key.data_root / "runs" / run_a.run_id / "sessions") != (without_key.data_root / "runs" / run_b.run_id / "sessions")
+    assert ((without_key.data_root / "runs" / run_a.run_id / "sessions")).is_dir()
+    assert ((without_key.data_root / "runs" / run_b.run_id / "sessions")).is_dir()
     # The rendered model credential is a per-run egress token, never the
     # real key, and two runs never share one.
     tokens = []
@@ -674,57 +673,6 @@ def test_shutdown_cancels_and_releases_an_active_run(tmp_path: Path) -> None:
     assert manager.active_run_id is None
     final = manager.wait(record.run_id, timeout=5)
     assert final is not None and final.status == CANCELLED
-
-
-def test_settle_failure_still_releases_the_slot_and_the_stream(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Audit regression (A3) on the committed-terminal model.
-
-    The verdict is committed by the terminal frame; copying it into meta.json
-    afterwards may fail without keeping the slot or the stream, and without
-    changing what any reader sees. Reconciliation settles the committed verdict
-    instead of rewriting it as ``interrupted``.
-    """
-    from pi_glink.ownership import DataRootOwnership  # noqa: PLC0415
-
-    config = make_config(tmp_path)
-    store = RunStore(config.data_root / "runs")
-    ownership = DataRootOwnership.acquire(config.data_root)
-    try:
-        manager = RunManager(
-            config, EventBus(), store,
-            client_factory=fake_factory(write_report=True), ownership=ownership,
-        )
-
-        def failing_settle(run_id: str):
-            raise OSError("simulated disk failure")
-
-        original_settle = store.settle
-        monkeypatch.setattr(store, "settle", failing_settle)
-        record = manager.start("收尾写盘失败也要释放槽位")
-        assert wait_for(lambda: manager.active_run_id is None, timeout=30)
-
-        # The slot is released at the commit point, before settle (which fails
-        # here and logs) and before the stream is closed: wait for the close
-        # itself instead of assuming it already happened.
-        assert wait_for(
-            lambda: manager.bus.is_open(record.run_id) is False, timeout=30
-        ), "the live stream must be closed"
-        meta = json.loads((store.run_dir(record.run_id) / "meta.json").read_text(encoding="utf-8"))
-        assert meta["status"] == "running", "the settled copy was never written"
-        seen = store.get(record.run_id)
-        assert seen.status == FINISHED and seen.report_path, "readers see the committed verdict"
-        assert read_events(store, record.run_id)[-1]["type"] == "run_finished"
-
-        monkeypatch.setattr(store, "settle", original_settle)
-        assert manager.reconcile() == [], "a committed verdict is never interrupted"
-        meta = json.loads((store.run_dir(record.run_id) / "meta.json").read_text(encoding="utf-8"))
-        assert meta["status"] == FINISHED
-        assert [event["type"] for event in read_events(store, record.run_id)].count("run_finished") == 1
-        assert not any(event["type"] == "run_failed" for event in read_events(store, record.run_id))
-    finally:
-        ownership.release()
 
 
 def test_cleanup_failure_is_recorded_not_hidden(tmp_path: Path) -> None:
@@ -1093,13 +1041,6 @@ def test_two_concurrent_followups_of_one_parent_admit_exactly_one_child(
 
     # 父 run：一个已终态、带会话文件的历史轮次（不需要真的执行）。
     parent_id = "parentrun001"
-    session_dir = config.session_dir / parent_id
-    session_dir.mkdir(parents=True, exist_ok=True)
-    session_file = session_dir / "parent.jsonl"
-    session_file.write_text(
-        json.dumps({"id": "same-session", "text": f"OPENAI_API_KEY={secret}"}) + "\n",
-        encoding="utf-8",
-    )
     workspace = config.workspace_root / parent_id
     workspace.mkdir(parents=True, exist_ok=True)
     store.create(
@@ -1110,13 +1051,15 @@ def test_two_concurrent_followups_of_one_parent_admit_exactly_one_child(
         creator_user_id=context.user_id,
         spec=RunSpec(family="pi", pack="pi", executor="inproc"),
     )
-    store.update(
-        parent_id,
-        status=FINISHED,
-        session_id="same-session",
-        session_file=str(session_file),
-        finished_at=time.time(),
+    session_dir = store.session_dir(parent_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session_file = session_dir / "parent.jsonl"
+    session_file.write_text(
+        json.dumps({"id": "same-session", "text": f"OPENAI_API_KEY={secret}"}) + "\n",
+        encoding="utf-8",
     )
+    store.update(parent_id, session_id="same-session", session_file=str(session_file))
+    finish(store, parent_id, FINISHED, finished_at=time.time())
 
     both_snapshotting = threading.Barrier(2, timeout=10)
     # 锁边界在 pi 族的种子读取上：RunAdmission.resume_seed 只做共享门禁与委托，
@@ -1171,7 +1114,7 @@ def test_two_concurrent_followups_of_one_parent_admit_exactly_one_child(
     # 被接受的追问照常继续：子 run 拿到的是脱敏后的父会话快照。
     final = manager.wait(admitted[0], timeout=30)
     assert final.status == FINISHED and final.session_id == "same-session"
-    seeded_file = config.session_dir / admitted[0] / "continued.jsonl"
+    seeded_file = (config.data_root / "runs" / admitted[0] / "sessions") / "continued.jsonl"
     seeded = seeded_file.read_text(encoding="utf-8")
     assert secret not in seeded and "[REDACTED]" in seeded
     assert manager.shutdown(timeout=10) == []
@@ -1190,7 +1133,7 @@ def test_run_data_directories_are_created_private(tmp_path: Path) -> None:
     for path in (
         Path(final.workspace),
         run_dir / "pi-agent",
-        Path(manager.config.session_dir) / record.run_id,
+        (manager.config.data_root / "runs" / record.run_id / "sessions"),
         manager.config.workspace_root,
     ):
         assert stat.S_IMODE(path.stat().st_mode) == 0o700, f"{path} 应为 0700"
@@ -1584,47 +1527,42 @@ def _write_parent_meta(
     parent_id: str,
     *,
     with_session_file: bool = True,
+    status: str = FINISHED,
     **meta_fields: Any,
 ) -> None:
-    """手写一份父记录的 meta.json（与合法 pi 会话文件），不经过 store.create。
+    """准备一份父记录（与合法 pi 会话文件），不经过 RunManager 的准入。
 
     准入事实默认 spec = pi/pi/inproc；``family`` / ``pack`` / ``executor`` 覆盖
-    ``spec`` 的对应字段，``status`` 等其余键覆盖 meta 顶层。
+    ``spec`` 的对应字段，``tenant_id`` / ``creator_user_id`` 随 create 写入。
+    ``status`` 为终态时提交对应终帧（终态只能随终帧进入记录）；``RUNNING``
+    则保持未终态。
     """
-    session_dir = config.session_dir / parent_id
-    directory = store.run_dir(parent_id)
-    meta: dict[str, Any] = {
-        "run_id": parent_id,
-        "prompt": "第一轮",
-        "status": FINISHED,
-        "created_at": time.time(),
-        "workspace": str(directory / "workspace"),
-        "finished_at": time.time(),
-        "spec": {
-            "family": "pi",
-            "pack": "pi",
-            "executor": "inproc",
-            "blueprint": None,
-            "credential_origin": "host",
-        },
-    }
+    spec = {"family": "pi", "pack": "pi", "executor": "inproc"}
+    for name in ("family", "pack", "executor"):
+        if name in meta_fields:
+            spec[name] = meta_fields.pop(name)
+    store.create(
+        "第一轮",
+        run_id=parent_id,
+        spec=RunSpec(**spec),
+        tenant_id=meta_fields.pop("tenant_id", None),
+        creator_user_id=meta_fields.pop("creator_user_id", None),
+    )
+    changes: dict[str, Any] = dict(meta_fields)
     if with_session_file:
+        session_dir = store.session_dir(parent_id)
         session_dir.mkdir(parents=True, exist_ok=True)
         session_file = session_dir / "parent.jsonl"
         session_file.write_text(
             json.dumps({"id": "same-session", "text": "第一轮"}) + "\n",
             encoding="utf-8",
         )
-        meta["session_id"] = "same-session"
-        meta["session_file"] = str(session_file)
-    for name in ("family", "pack", "executor"):
-        if name in meta_fields:
-            meta["spec"][name] = meta_fields.pop(name)
-    meta.update(meta_fields)
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    (directory / "meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+        changes["session_id"] = "same-session"
+        changes["session_file"] = str(session_file)
+    if changes:
+        store.update(parent_id, **changes)
+    if status != RUNNING:
+        finish(store, parent_id, status, cleanup={"released": True})
 
 
 def test_same_family_pi_parent_follow_up_is_admitted_unchanged(
@@ -1643,20 +1581,15 @@ def test_same_family_pi_parent_follow_up_is_admitted_unchanged(
         lambda spec, **kwargs: _ResumingAdapter(spec.expected_session_id),
     )
     parent_id = "parentrun001"
-    session_dir = config.session_dir / parent_id
+    store.create("第一轮", run_id=parent_id, spec=RunSpec(family="pi", pack="pi", executor="inproc"))
+    session_dir = store.session_dir(parent_id)
     session_dir.mkdir(parents=True, exist_ok=True)
     session_file = session_dir / "parent.jsonl"
     session_file.write_text(
         json.dumps({"id": "same-session", "text": "第一轮"}) + "\n", encoding="utf-8"
     )
-    store.create("第一轮", run_id=parent_id, spec=RunSpec(family="pi", pack="pi", executor="inproc"))
-    store.update(
-        parent_id,
-        status=FINISHED,
-        session_id="same-session",
-        session_file=str(session_file),
-        finished_at=time.time(),
-    )
+    store.update(parent_id, session_id="same-session", session_file=str(session_file))
+    finish(store, parent_id, FINISHED, finished_at=time.time())
 
     child = manager.start("追问", parent_run_id=parent_id)
     final = manager.wait(child.run_id, timeout=30)

@@ -32,6 +32,7 @@ from pi_glink.events import EventBus
 from pi_glink.kernel.rpc import PiRpcClient
 from pi_glink.runs.runner import RunManager
 from pi_glink.store import FINISHED, RunStore
+from store_helpers import events_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
@@ -352,7 +353,7 @@ def test_symlinked_report_is_rejected_and_the_target_is_untouched(tmp_path: Path
     )
     events = [
         json.loads(line)
-        for line in store.events_path(record.run_id).read_text(encoding="utf-8").splitlines()
+        for line in events_text(store, record.run_id).splitlines()
         if line.strip()
     ]
     warnings = [

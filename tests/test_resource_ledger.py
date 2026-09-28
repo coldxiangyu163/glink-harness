@@ -34,8 +34,9 @@ from pi_glink.kernel.execution import (
 )
 from pi_glink.runs.runner import ResourcesUnreleased, RunManager, RunQuotaExceeded
 from pi_glink.ownership import DataRootOwnership
-from pi_glink.store import FAILED, FINISHED, RUNNING, RunStore, RunSpec
+from pi_glink.store import FAILED, FINISHED, RUNNING, RunSpec, RunStore, StoreError
 from pi_glink.tenancy import TenantContext
+from store_helpers import finish
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -96,22 +97,8 @@ def record_hold(
 ) -> None:
     """A terminal record whose cleanup did not confirm the release."""
     store.create("泄漏的 run", run_id=run_id, tenant_id=tenant_id, spec=RunSpec(family="pi", pack="pi", executor="inproc"))
-    store.update(
-        run_id,
-        status=FINISHED,
-        finished_at=time.time(),
-        container_name=container,
-        sandbox_id=sandbox,
-        cleanup={"released": released, "failures": ["synthetic"], "external": {}},
-    )
-
-
-def write_corrupt_record(store: RunStore, run_id: str) -> Path:
-    directory = store.run_dir(run_id)
-    directory.mkdir(parents=True, exist_ok=True)
-    meta = directory / "meta.json"
-    meta.write_text("{ this is not JSON", encoding="utf-8")
-    return meta
+    store.update(run_id, container_name=container, sandbox_id=sandbox)
+    finish(store, run_id, FINISHED, finished_at=time.time(), cleanup={"released": released, "failures": ["synthetic"], "external": {}})
 
 
 # -- the ledger counts instead of blocking ------------------------------------
@@ -128,15 +115,15 @@ def test_a_leak_consumes_its_tenant_and_the_global_slots(tmp_path: Path) -> None
     manager = RunManager(config, EventBus(), store)
 
     with pytest.raises(RunQuotaExceeded) as tenant_hit:
-        manager._check_admission(context("tenant-a"))  # noqa: SLF001
+        manager._check_admission(context("tenant-a"), manager.store.holding_records())  # noqa: SLF001
     assert (tenant_hit.value.scope, tenant_hit.value.limit) == ("tenant", 2)
 
     # Another tenant is not blocked by tenant A's leftovers: global 3/4 is free.
-    manager._check_admission(context("tenant-b"))  # noqa: SLF001
+    manager._check_admission(context("tenant-b"), manager.store.holding_records())  # noqa: SLF001
 
     record_hold(store, "leak-b1", tenant_id="tenant-b", container="pi-glink-leak-b1")
     with pytest.raises(RunQuotaExceeded) as global_hit:
-        manager._check_admission(context("tenant-b"))  # noqa: SLF001
+        manager._check_admission(context("tenant-b"), manager.store.holding_records())  # noqa: SLF001
     assert (global_hit.value.scope, global_hit.value.limit) == ("global", 4)
     # A refusal names the ceiling, never another tenant's run.
     assert "leak" not in str(global_hit.value)
@@ -149,7 +136,7 @@ def test_local_mode_still_refuses_on_any_hold(tmp_path: Path) -> None:
     manager = RunManager(config, EventBus(), store)
 
     with pytest.raises(ResourcesUnreleased) as refusal:
-        manager._check_admission(None)  # noqa: SLF001
+        manager._check_admission(None, manager.store.holding_records())  # noqa: SLF001
     assert refusal.value.run_ids == ["leak"]
 
 
@@ -160,82 +147,32 @@ def test_the_ledger_survives_a_restart(tmp_path: Path) -> None:
 
     restarted = RunManager(config, EventBus(), RunStore(config.data_root / "runs"))
     with pytest.raises(RunQuotaExceeded):
-        restarted._check_admission(context("tenant-b"))  # noqa: SLF001
+        restarted._check_admission(context("tenant-b"), restarted.store.holding_records())  # noqa: SLF001
     assert [entry["runId"] for entry in restarted.unreleased_resources()] == ["leak"]
 
 
 # -- corrupt records are a global hold ----------------------------------------
 
 
-def test_a_corrupt_record_is_hidden_from_lists_but_holds_globally(tmp_path: Path) -> None:
+def test_an_unparseable_row_fails_admission_closed(tmp_path: Path) -> None:
+    """A row the store cannot parse never frees capacity: admission refuses.
+
+    Red→green mechanism: counting holds by skipping unparseable rows would
+    admit the run; the store raises ``StoreError`` inside the admission
+    transaction instead, which rolls the insert back.
+    """
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
-    store.create("正常", run_id="good", tenant_id="tenant-a", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
-    store.update(
-        "good",
-        status=FINISHED,
-        finished_at=time.time(),
-        cleanup={"released": True, "failures": [], "external": {}},
-    )
-    meta = write_corrupt_record(store, "broken")
-    before = meta.read_bytes()
-
-    assert [record.run_id for record in store.list(limit=None)] == ["good"]
-    assert store.get("broken") is None, "a corrupt record must not be served"
-    assert store.unreadable_holds() == ["broken"]
-    assert store.scan_all() == store.list(limit=None)
-    assert store.scan_unreadable() == ["broken"]
-
-    manager = RunManager(config, EventBus(), store)
-    assert manager.unreleased_resources() == [
-        {
-            "runId": "broken",
-            "status": None,
-            "stopReason": None,
-            "container": None,
-            "sandbox": None,
-            "cleanup": None,
-            "corrupt": True,
-        }
-    ]
-    with pytest.raises(ResourcesUnreleased) as refusal:
-        manager._check_admission(None)  # noqa: SLF001
-    assert refusal.value.run_ids == ["broken"]
-
-    ownership = DataRootOwnership.acquire(config.data_root)
-    try:
-        adjudicating = RunManager(config, EventBus(), store, ownership=ownership)
-        assert adjudicating.adjudicate_release("broken", "已在控制台确认资源不存在") is None
-    finally:
-        ownership.release()
-    assert meta.read_bytes() == before, "the unreadable metadata is never rewritten"
-    sidecar = json.loads(
-        (store.run_dir("broken") / "resource-adjudication.json").read_text(encoding="utf-8")
-    )
-    assert sidecar["decision"] == "released" and sidecar["source"] == "operator"
-    assert "控制台" in sidecar["note"]
-    assert store.unreadable_holds() == []
-    assert manager.unreleased_resources() == []
-    manager._check_admission(None)  # noqa: SLF001 - released, admission proceeds
-
-
-def test_a_corrupt_record_consumes_the_global_ceiling(tmp_path: Path) -> None:
-    config = make_multitenant_config(tmp_path, PI_GLINK_MAX_GLOBAL_RUNS="1")
-    store = RunStore(config.data_root / "runs")
-    write_corrupt_record(store, "broken")
+    record_hold(store, "broken")
+    with store._lock:  # noqa: SLF001 - synthetic corruption of one row
+        store._connection.execute(  # noqa: SLF001
+            "UPDATE runs SET record = '{ not JSON' WHERE run_id = 'broken'"
+        )
     manager = RunManager(config, EventBus(), store)
 
-    with pytest.raises(RunQuotaExceeded) as refusal:
-        manager._check_admission(context("tenant-b"))  # noqa: SLF001
-    assert (refusal.value.scope, refusal.value.limit) == ("global", 1)
-
-    ownership = DataRootOwnership.acquire(config.data_root)
-    try:
-        adjudicating = RunManager(config, EventBus(), store, ownership=ownership)
-        adjudicating.adjudicate_release("broken", "已核对")
-    finally:
-        ownership.release()
-    manager._check_admission(context("tenant-b"))  # noqa: SLF001
+    with pytest.raises(StoreError):
+        manager.start("不可解析的行不能让准入放行")
+    assert [row[0] for row in store._connection.execute("SELECT run_id FROM runs")] == ["broken"]  # noqa: SLF001
 
 
 def test_adjudicating_a_readable_record_still_uses_the_record_path(tmp_path: Path) -> None:
@@ -253,26 +190,6 @@ def test_adjudicating_a_readable_record_still_uses_the_record_path(tmp_path: Pat
     assert updated is not None
     assert updated.resource_adjudication["source"] == "operator"
     assert store.holding_records() == []
-    assert not (store.run_dir("leak") / "resource-adjudication.json").exists()
-
-
-def test_the_operator_command_lists_and_releases_a_corrupt_record(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from pi_glink.app import _resource_command  # noqa: PLC0415
-
-    config = make_config(tmp_path)
-    store = RunStore(config.data_root / "runs")
-    write_corrupt_record(store, "broken")
-
-    assert _resource_command(config, None, None) == 0
-    out = capsys.readouterr().out
-    assert '"runId": "broken"' in out
-    assert '"corrupt": true' in out
-
-    assert _resource_command(config, "broken", "已在控制台确认没有遗留资源") == 0
-    assert RunStore(config.data_root / "runs").unreadable_holds() == []
-    assert _resource_command(config, "broken", "重复裁决") == 1
 
 
 # -- online reconciliation ----------------------------------------------------

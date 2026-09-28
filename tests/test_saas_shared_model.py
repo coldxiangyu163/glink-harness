@@ -60,6 +60,7 @@ from pi_glink.tenancy import (
     issue_assertion,
     load_identity_material,
 )
+from store_helpers import events_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -432,7 +433,7 @@ def test_shared_e2b_run_redacts_the_host_key_and_reconciles_the_sandbox_id(tmp_p
     assert final.usage and final.usage.get("source") == "egress"
     assert final.usage.get("requests") == 0
     assert manager.egress.grant_for(grant.token) is None, "终帧后 token 已吊销"
-    events = storage.events_path(record.run_id).read_text(encoding="utf-8")
+    events = events_text(storage, record.run_id)
     assert SHARED_KEY not in events and grant.token not in events
     assert "[REDACTED]" in events
     assert sandbox.killed is True
@@ -723,7 +724,7 @@ def test_shared_mode_serves_two_tenants_from_one_host_model(
     assert final.usage.get("requests") == 0
     terminal = [
         json.loads(line)
-        for line in server.store.events_path(run_id).read_text(encoding="utf-8").splitlines()
+        for line in events_text(server.store, run_id).splitlines()
         if line.strip()
     ][-1]
     assert terminal["payload"]["kernelUsage"]["requests"] == 1
@@ -740,7 +741,7 @@ def test_shared_mode_serves_two_tenants_from_one_host_model(
     assert SHARED_KEY not in behavior.created[-1].auth_key
     assert behavior.created[-1].web_search_present is True
     # The credential is redacted on every product surface.
-    events = server.store.events_path(run_id).read_text(encoding="utf-8")
+    events = events_text(server.store, run_id)
     assert SHARED_KEY not in events and "[REDACTED]" in events
     assert SHARED_KEY not in final.prompt
     status, _headers, raw = alpha.raw(f"/api/runs/{run_id}/report")

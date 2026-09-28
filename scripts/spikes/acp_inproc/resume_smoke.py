@@ -49,6 +49,36 @@ TERMINAL = base.TERMINAL
 DIGEST_MAX_BYTES = 16 * 1024 * 1024
 
 
+def _run_record(run_dir: Path) -> dict:
+    """run 记录：存于 ``<runs>/runs.db``（ADR 0009），只读打开；不存在时返回空对象。"""
+    import sqlite3
+    from contextlib import closing
+
+    database = run_dir.parent / "runs.db"
+    if not database.is_file():
+        return {}
+    with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as connection:
+        row = connection.execute(
+            "SELECT record FROM runs WHERE run_id = ?", (run_dir.name,)
+        ).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def _run_events(run_dir: Path) -> list[dict]:
+    """run 的已提交事件（``events`` 表按 seq 顺序），只读打开。"""
+    import sqlite3
+    from contextlib import closing
+
+    database = run_dir.parent / "runs.db"
+    if not database.is_file():
+        return []
+    with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as connection:
+        rows = connection.execute(
+            "SELECT body FROM events WHERE run_id = ? ORDER BY seq", (run_dir.name,)
+        ).fetchall()
+    return [json.loads(body) for (body,) in rows]
+
+
 def codename() -> str:
     rng = random.SystemRandom()
     word = "".join(rng.choice(string.ascii_uppercase) for _ in range(5))
@@ -372,14 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     child_dir = data_root / "runs" / child["runId"]
 
     def events_of(run_dir: Path) -> list[dict]:
-        path = run_dir / "events.jsonl"
-        if not path.is_file():
-            return []
-        return [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        return _run_events(run_dir)
 
     parent_events = events_of(parent_dir)
     child_events = events_of(child_dir)
@@ -409,15 +432,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    … 其余 {len(frames) - 30} 帧；类型序列尾部: {types[-6:]}")
 
     print()
-    print("续接事实（events.jsonl）")
+    print("续接事实（runs.db events）")
     ready = payloads(child_events, "session_ready")
     child_ready = ready[0] if ready else {}
     print(f"  child session_ready: {sanitize(json.dumps({k: child_ready.get(k) for k in ('sessionId', 'resumed', 'resumeMethod', 'cwd')}, ensure_ascii=False), data_root)}")
     parent_ready = payloads(parent_events, "session_ready")
     parent_session = parent_ready[0].get("sessionId") if parent_ready else None
     print(f"  parent sessionId: {parent_session}")
-    parent_meta = json.loads((parent_dir / "meta.json").read_text(encoding="utf-8"))
-    child_meta = json.loads((child_dir / "meta.json").read_text(encoding="utf-8"))
+    parent_meta = _run_record(parent_dir)
+    child_meta = _run_record(child_dir)
     print(
         "  工作区: parent=%s · child=%s（ACP 会话 cwd 跨轮稳定，应相同）"
         % (sanitize(str(parent_meta.get("workspace")), data_root), sanitize(str(child_meta.get("workspace")), data_root))
@@ -459,9 +482,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  child HOME 文件（前 20）: {child_files[:20]}")
 
     print()
-    print("终态与清理事实（meta.json）")
+    print("终态与清理事实（runs.db 记录）")
     for label, run_dir in (("parent", parent_dir), ("child", child_dir)):
-        meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+        meta = _run_record(run_dir)
         print(
             f"  [{label}] status={meta.get('status')} modelStopReason={meta.get('model_stop_reason')} "
             f"reportStatus={meta.get('report_status')} session_id={meta.get('session_id')}"
@@ -485,13 +508,13 @@ def main(argv: list[str] | None = None) -> int:
         parent.get("status") == "finished"
         and results["parent"]["reportStatus"] == 200
         and bool(results["parent"]["report"])
-        and bool((json.loads((parent_dir / "meta.json").read_text(encoding="utf-8")).get("cleanup") or {}).get("released"))
+        and bool((_run_record(parent_dir).get("cleanup") or {}).get("released"))
     )
     child_ok = (
         child.get("status") == "finished"
         and results["child"]["reportStatus"] == 200
         and bool(results["child"]["report"])
-        and bool((json.loads((child_dir / "meta.json").read_text(encoding="utf-8")).get("cleanup") or {}).get("released"))
+        and bool((_run_record(child_dir).get("cleanup") or {}).get("released"))
         and child.get("sessionId") == parent.get("sessionId")
         and child_ready.get("resumed") is True
         and bool(resumed_notices)

@@ -50,9 +50,10 @@
 
 ### 3.1 单机事务存储（当前）
 
-本期明确**不**把 run/events 存储切到 SQLite/Postgres/outbox，也不引入多宿主租约：继续使用
-`meta.json` 原子替换、`events.jsonl` 追加与终帧提交协议；owner 过滤与原子准入都落在现有模块内部。
-旧记录保持原样，不写真实历史。
+run 记录、事件与资源台账存于单机 SQLite（`<数据根>/runs/runs.db`，WAL；[ADR 0009](adr/0009-sqlite-run-store.md)）：
+终帧与终态同一事务提交，准入配额检查与插入同一事务。本期仍**不**引入 Postgres/outbox 或多宿主租约；
+owner 过滤与原子准入都落在 `store.py` / `runs/admission.py` 内部。此前的 `meta.json` / `events.jsonl`
+旧记录不再被读取，不提供迁移。
 
 `accounts` 身份入口另有一个**独立**的 SQLite 库（`<data_root>/accounts/accounts.db`，stdlib + WAL）：
 它只存租户/用户/邀请/会话，与 run 存储互不迁移、互不共享，也不改变上述 run 事务协议；停用账号
@@ -77,12 +78,11 @@ outbox 模式，事务内写 `events` 后投递到共享流供多宿主 SSE 与�
 - 准入检查与槽位预留原子完成；超额立即拒绝（`429 quota_exceeded`，带 scope/limit，不含 run id），
   不设无限队列。
 - **资源持有的口径（已在 GLINK-RES-01 变更）**：未确认释放的终态 run 计入其 owner 租户的槽位与
-  全局槽位（无 owner/损坏记录只计全局），因此一个租户的泄漏不会挡住别的租户，但会持续
+  全局槽位（无 owner 记录只计全局），因此一个租户的泄漏不会挡住别的租户，但会持续
   吞噬额度，持有达到全局上限时任何新准入都被拒绝（仍是 fail-closed）。`local` 单用户模式保持原
   口径：任一持有即 `409 resources_unreleased`（附 run id）。
-- **损坏记录**：run 目录存在但 `meta.json` 不可读时，读面一律隐藏它，资源台账计为全局持有
-  （`--unreleased` 标注 `corrupt`）；人工裁决写入 run 目录内的 `resource-adjudication.json`
-  侧车，不改写损坏文件。
+- **不可解析行**：`runs.db` 某行记录不可解析时，读取（含准入）一律抛错 fail-closed，由操作员
+  修复数据库；不再有 `corrupt` 标注与 `resource-adjudication.json` 侧车。
 - **释放容量的三条路**：执行面清理确认 `released: true`；宿主在线自动对账；宿主停止时的
   `--mark-released` 人工裁决。自动对账只按 run 记录里持久化的身份探测（Docker 按容器名 inspect，
   必要时幂等删除后确认；E2B 按 `sandbox_id` 终止/查询，凭据取自冻结配置），不猜名字也不批量

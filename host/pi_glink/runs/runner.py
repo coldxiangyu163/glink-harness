@@ -38,7 +38,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from ..config import HostConfig
 from ..egress import EgressProxy
@@ -234,8 +234,9 @@ class RunManager:
             prompt, context, parent_run_id=parent_run_id, blueprint=blueprint
         )
         with self._lock:
-            self._check_admission(context)
-            admitted = self._admission.admit(request)
+            admitted = self._admission.admit(
+                request, lambda holding: self._check_admission(context, holding)
+            )
             execution = RunExecution.from_admitted(admitted)
             run_id = admitted.record.run_id
             self._executions[run_id] = execution
@@ -256,19 +257,25 @@ class RunManager:
         """The redaction boundary appropriate for an already-persisted run."""
         return self._admission.redactor_for_record(record)
 
-    def _check_admission(self, context: TenantContext | None) -> None:
-        """Authorize concurrency and reserve the slot (caller holds the lock).
+    def _check_admission(
+        self, context: TenantContext | None, holding: Sequence[RunRecord]
+    ) -> None:
+        """Authorize concurrency (caller holds the lock; the store its transaction).
 
-        Two durable facts drive the decision — never a wall-clock guess: the
-        runs executing in this process, and the runs whose execution resources
-        are not confirmed released.
+        Called by :meth:`RunStore.create` with ``holding`` — the records whose
+        execution resources are not confirmed released, read inside the same
+        ``BEGIN IMMEDIATE`` transaction that then inserts the new record. The
+        quota count and the ledger it counts are therefore one transaction;
+        raising refuses the admission and rolls the insert back. Two durable
+        facts drive the decision — never a wall-clock guess: the runs executing
+        in this process, and the holding records.
 
         In multi-tenant Docker/E2B mode the ceilings are global 4 / per-tenant 2
         by default and an over-limit request is refused immediately (no
         unbounded queue). An unreleased hold **consumes slots** instead of
         blocking everyone: it counts against its owner tenant's ceiling and
-        against the global one (an ownerless single-user or unreadable record has no
-        tenant and therefore only consumes the global ceiling). A leak is never
+        against the global one (an ownerless single-user record has no tenant
+        and therefore only consumes the global ceiling). A leak is never
         forgotten — it keeps eating capacity, and once the holds reach the global
         ceiling every new admission is refused — but one tenant's leftover no
         longer stops another tenant from making progress.
@@ -285,23 +292,20 @@ class RunManager:
             for execution in self._executions.values()
             if execution.phase != COMMITTED
         ]
+        # Holds that are still in flight in this process already occupy a
+        # concurrency slot below, so they are counted exactly once. (A run past
+        # its terminal commit is no longer active: its unconfirmed release
+        # already counts as a hold.)
+        in_flight = {execution.record.run_id for execution in active}
         if not self.config.multi_tenant:
-            holds = [*self._ledger.resource_holds(), *self.store.unreadable_holds()]
+            holds = [record.run_id for record in holding if record.run_id not in in_flight]
             if holds:
                 raise ResourcesUnreleased(holds)
             if active:
                 raise RunBusy(active[0].record.run_id)
             return
-        # Holds that are still in flight in this process already occupy a
-        # concurrency slot below, so they are counted exactly once.
-        in_flight = {execution.record.run_id for execution in active}
-        holds = [
-            record
-            for record in self.store.holding_records()
-            if record.run_id not in in_flight
-        ]
-        # An unreadable record has no owner: it only consumes global capacity.
-        global_total = len(active) + len(holds) + len(self.store.unreadable_holds())
+        holds = [record for record in holding if record.run_id not in in_flight]
+        global_total = len(active) + len(holds)
         # Refuse on the most specific ceiling first: a tenant already at its own
         # limit should be told about its own quota, not about the host total.
         tenant_id = context.tenant_id if context is not None else None
@@ -430,7 +434,7 @@ class RunManager:
         with self._lock:
             pending = set(self._executions)
         unconfirmed = sorted(
-            pending | set(self._ledger.resource_holds()) | set(self.store.unreadable_holds())
+            pending | set(self._ledger.resource_holds())
         )
         if unconfirmed:
             logger.error(
@@ -454,7 +458,7 @@ class RunManager:
         """Runs whose resources are not confirmed released, for operator review."""
         return self._ledger.unreleased_resources()
 
-    def adjudicate_release(self, run_id: str, note: str) -> RunRecord | None:
+    def adjudicate_release(self, run_id: str, note: str) -> RunRecord:
         """Record an operator's decision that a run's resources are released."""
         return self._ledger.adjudicate_release(run_id, note)
 

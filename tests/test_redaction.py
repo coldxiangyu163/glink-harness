@@ -3,7 +3,7 @@
 The completion audit reproduced a leak: a `tool_execution_end` frame carrying
 ``OPENAI_API_KEY=AUDIT_DUMMY_SECRET_…`` survived projection verbatim, which means
 a bash `env` call (or a config-file read, or the model quoting a key back) would
-reach `events.jsonl`, the SSE stream and the browser. These tests pin the fix at
+reach the stored events, the SSE stream and the browser. These tests pin the fix at
 every egress: projection, the runner's emit path, the report download and the
 repo scanner.
 """
@@ -28,6 +28,7 @@ from pi_glink.runs.runner import RunManager
 from pi_glink.runs.secrets import RunSecretBoundary
 from pi_glink.redaction import REPLACEMENT, SecretRedactor, redactor_from_config
 from pi_glink.store import RunStore, RunSpec
+from store_helpers import events_text, finish, stored_record, stored_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
@@ -163,7 +164,7 @@ def test_runner_redacts_a_tool_echo_before_the_log_and_the_bus(tmp_path: Path) -
     collector.join(timeout=5)
 
     assert final.status == "finished"
-    log_text = store.events_path(record.run_id).read_text(encoding="utf-8")
+    log_text = events_text(store, record.run_id)
     assert AUDIT_SECRET not in log_text, "event log leaked the model credential"
     assert REPLACEMENT in log_text, "redaction marker missing: was the echo even emitted?"
     stream_text = json.dumps(seen, ensure_ascii=False)
@@ -373,7 +374,7 @@ def test_runner_stream_never_reassembles_a_structured_secret_on_any_surface(
     assert final.status == "finished"
     persisted = [
         json.loads(line)
-        for line in store.events_path(record.run_id).read_text(encoding="utf-8").splitlines()
+        for line in events_text(store, record.run_id).splitlines()
         if line.strip()
     ]
     expected = SecretRedactor([secret]).redact("".join(pieces))
@@ -505,7 +506,7 @@ def test_minimal_child_environment_does_not_inherit_host_credentials(
 
 
 def test_pasted_credential_in_the_prompt_is_not_stored_in_metadata(tmp_path: Path) -> None:
-    """A user-pasted key must not land in meta.json (the kernel still gets it)."""
+    """A user-pasted key must not land in the stored run record (the kernel still gets it)."""
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
     received: list[str] = []
@@ -532,7 +533,7 @@ def test_pasted_credential_in_the_prompt_is_not_stored_in_metadata(tmp_path: Pat
     final = manager.wait(record.run_id, timeout=30)
 
     assert final.status == "finished"
-    meta_text = (store.run_dir(record.run_id) / "meta.json").read_text(encoding="utf-8")
+    meta_text = stored_text(store)
     assert AUDIT_SECRET not in meta_text, "metadata must not persist a pasted credential"
     assert REPLACEMENT in meta_text
     assert received and AUDIT_SECRET in received[0], "the kernel still receives the user's instruction"
@@ -619,7 +620,7 @@ def test_workspace_sweep_cannot_be_redirected_by_an_ancestor_swap(
 
 
 def test_run_error_in_metadata_is_redacted(tmp_path: Path) -> None:
-    """A kernel error carrying a credential must not leak into meta.json."""
+    """A kernel error carrying a credential must not leak into the stored run record."""
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
     manager = RunManager(
@@ -630,8 +631,8 @@ def test_run_error_in_metadata_is_redacted(tmp_path: Path) -> None:
     final = manager.wait(record.run_id, timeout=30)
 
     assert final.status == "failed"
-    meta = json.loads((store.run_dir(record.run_id) / "meta.json").read_text(encoding="utf-8"))
-    rendered = json.dumps(meta, ensure_ascii=False)
+    meta = stored_record(store, record.run_id)
+    rendered = stored_text(store)
     assert AUDIT_SECRET not in rendered, "run metadata leaked the credential"
     assert REPLACEMENT in (meta.get("error") or ""), "the error should be visibly redacted"
 
@@ -666,7 +667,7 @@ def test_report_download_is_redacted_and_flagged(tmp_path: Path) -> None:
         artifact.write_text(
             f"# 报告\n\n调试时我看到了 OPENAI_API_KEY={AUDIT_SECRET}\n", encoding="utf-8"
         )
-        store.update("leakreport", status="finished", report_path=str(artifact))
+        finish(store, "leakreport", "finished", report_path=str(artifact))
 
         status, headers, body = _get(server, "/api/runs/leakreport/report")
         text = body.decode("utf-8")
@@ -692,7 +693,7 @@ def test_clean_report_is_not_flagged(tmp_path: Path) -> None:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact = artifact_dir / "report.md"
         artifact.write_text("# 干净报告\n\n没有凭据。\n", encoding="utf-8")
-        store.update("cleanreport", status="finished", report_path=str(artifact))
+        finish(store, "cleanreport", "finished", report_path=str(artifact))
 
         status, headers, body = _get(server, "/api/runs/cleanreport/report")
         assert status == 200
@@ -717,14 +718,14 @@ def test_report_download_refuses_paths_outside_the_run_directory(tmp_path: Path)
         outside.write_text(original, encoding="utf-8")
         # Direct escape: the stored path points outside the run directory.
         store.create("越界", run_id="escape", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
-        store.update("escape", status="finished", report_path=str(outside))
+        finish(store, "escape", "finished", report_path=str(outside))
         assert _get(server, "/api/runs/escape/report")[0] == 404
         # Symlink escape: a link inside the run directory is refused too.
         store.create("链接", run_id="linked", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
         artifact_dir = store.run_dir("linked") / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         (artifact_dir / "report.md").symlink_to(outside)
-        store.update("linked", status="finished", report_path=str(artifact_dir / "report.md"))
+        finish(store, "linked", "finished", report_path=str(artifact_dir / "report.md"))
         assert _get(server, "/api/runs/linked/report")[0] == 404
         # Neither read nor redaction may have touched the external bytes.
         assert outside.read_text(encoding="utf-8") == original
@@ -831,7 +832,7 @@ def test_the_stream_recovers_after_a_fail_closed_block() -> None:
 
 @pytest.mark.parametrize("length", [8193, 8194])
 def test_runner_never_emits_a_long_known_value(tmp_path: Path, length: int) -> None:
-    """Real path: fake pi deltas → Projector → RunManager → events.jsonl, bus, SSE."""
+    """Real path: fake pi deltas → Projector → RunManager → stored events, bus, SSE."""
     from pi_glink.app import PiGlinkServer  # noqa: PLC0415
     from pi_glink.static_files import WebAssets  # noqa: PLC0415
 
@@ -867,7 +868,7 @@ def test_runner_never_emits_a_long_known_value(tmp_path: Path, length: int) -> N
 
         persisted = [
             json.loads(line)
-            for line in store.events_path(record.run_id).read_text(encoding="utf-8").splitlines()
+            for line in events_text(store, record.run_id).splitlines()
             if line.strip()
         ]
         port = server.server_address[1]

@@ -38,7 +38,7 @@ from ..config import HostConfig
 from ..kernel.agent_env import RunCredentials
 from ..kernel.harness import FollowupUnavailable, HarnessFamily, select_family
 from ..redaction import SecretRedactor
-from ..store import RunRecord, RunSpec, RunStore
+from ..store import AdmissionCheck, RunRecord, RunSpec, RunStore
 from ..tenancy import TenantContext, TenantCredentialStore, TenantNotConfigured
 from .errors import BlueprintUnavailable, UnsupportedCommand
 from .secrets import RunSecretBoundary
@@ -384,8 +384,15 @@ class RunAdmission:
             session_seed=seed,
         )
 
-    def admit(self, request: AdmissionRequest) -> AdmittedRun:
-        """Create the record (caller holds the admission lock, gate passed)."""
+    def admit(
+        self, request: AdmissionRequest, admission_check: AdmissionCheck | None = None
+    ) -> AdmittedRun:
+        """Create the record (caller holds the admission lock).
+
+        ``admission_check`` is the concurrency/ledger gate: the store runs it
+        inside the same database transaction that inserts the record, so the
+        holds it counts and the insert cannot interleave with another writer.
+        """
         context = request.context
         parent_run_id = request.parent_run_id
         continuation_workspace: Path | None = None
@@ -425,6 +432,7 @@ class RunAdmission:
             # 此后族、执行面、追问门禁与状态根都读它，不用当前配置反推历史 run
             # （docs/adr/0002）。
             spec=request.spec,
+            admission_check=admission_check,
         )
         request.secrets.run_id = record.run_id
         return AdmittedRun(

@@ -1,6 +1,7 @@
 # 0001 run 记录的准入事实必填，旧数据不保证可读
 
-- 状态：已接受（2026-09-28，架构重设计 S1）
+- 状态：已接受（2026-09-28，架构重设计 S1）；读取与裁决口径已被 [0009](0009-sqlite-run-store.md) 替代
+  （记录迁入 SQLite，缺字段的行 fail-closed，不再计入不可读持有）
 - 范围：`host/pi_glink/store.py`（`RunRecord`、`RunStore.create`、`_load_meta`）
 
 ## 背景
