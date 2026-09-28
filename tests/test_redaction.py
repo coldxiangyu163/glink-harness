@@ -28,7 +28,7 @@ from pi_glink.runs.runner import RunManager
 from pi_glink.runs.secrets import RunSecretBoundary
 from pi_glink.redaction import REPLACEMENT, SecretRedactor, redactor_from_config
 from pi_glink.store import RunStore, RunSpec
-from store_helpers import events_text, finish, stored_bytes, stored_record
+from store_helpers import events_text, finish, stored_record, stored_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
@@ -533,7 +533,7 @@ def test_pasted_credential_in_the_prompt_is_not_stored_in_metadata(tmp_path: Pat
     final = manager.wait(record.run_id, timeout=30)
 
     assert final.status == "finished"
-    meta_text = stored_bytes(store).decode("utf-8", "replace")
+    meta_text = stored_text(store)
     assert AUDIT_SECRET not in meta_text, "metadata must not persist a pasted credential"
     assert REPLACEMENT in meta_text
     assert received and AUDIT_SECRET in received[0], "the kernel still receives the user's instruction"
@@ -632,7 +632,7 @@ def test_run_error_in_metadata_is_redacted(tmp_path: Path) -> None:
 
     assert final.status == "failed"
     meta = stored_record(store, record.run_id)
-    rendered = stored_bytes(store).decode("utf-8", "replace")
+    rendered = stored_text(store)
     assert AUDIT_SECRET not in rendered, "run metadata leaked the credential"
     assert REPLACEMENT in (meta.get("error") or ""), "the error should be visibly redacted"
 

@@ -39,7 +39,7 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | 把密钥写进仓库 | 安全事故 | `.gitignore` + 密钥扫描 |
 | 容器/沙箱依赖宿主运行时 | 隔离面会失去意义 | 镜像与模板自包含（`docker/Dockerfile.worker`、`docker/e2b/Dockerfile.e2b`） |
 | 前端解析终端输出 | 事件契约的基础前提 | `tests/web/run-stream.test.mjs` 的断言 |
-| 凭据不经脱敏边界进入产品面 | 工具回显/env dump 会把 key 带进事件流、报告与会话文件 | 所有出站出口均过 `redaction.py`（含跨 delta 暂存）；`scripts/check-no-secrets.py` 扫描运行态产物；`tests/test_redaction.py` |
+| 凭据不经脱敏边界进入产品面 | 工具回显/env dump 会把 key 带进事件流、报告与会话文件 | 所有出站出口均过 `redaction.py`（含跨 delta 暂存）；`scripts/check-no-secrets.py` 扫描运行态产物（run 数据库按列经 SQLite 读取）；`tests/test_redaction.py`、`tests/test_check_no_secrets.py` |
 | 把宿主整份环境变量交给 pi | 会把操作员 shell 里的其他凭据一并带入 | `kernel/agent_env.py` 的白名单 `_PASSTHROUGH_ENV` |
 
 ### 私有格式观察者例外

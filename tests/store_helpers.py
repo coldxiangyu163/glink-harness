@@ -3,8 +3,10 @@
 The run database is host-owned; tests read committed frames with
 ``iter_events`` and reach a terminal state only by committing a terminal frame
 (``commit_terminal``), exactly like the runner — never by writing ``status``.
-``stored_bytes`` returns the database files as they lie on disk, for the leak
-checks that must see every byte the store persisted.
+``stored_text`` returns every stored record and event body read back through
+SQLite, for the leak checks that must see every value the store persisted
+(raw database bytes split large values across overflow pages, so a substring
+check on them can miss a credential).
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import json
 import time
 from typing import Any, Mapping
 
-from pi_glink.store import DATABASE_NAME, RunRecord, RunStore
+from pi_glink.store import RunRecord, RunStore
 
 _TERMINAL_TYPE = {"finished": "run_finished", "failed": "run_failed", "cancelled": "run_cancelled"}
 
@@ -32,14 +34,13 @@ def events_text(store: RunStore, run_id: str) -> str:
     return "".join(row[0] + "\n" for row in rows)
 
 
-def stored_bytes(store: RunStore) -> bytes:
-    """The database file plus its WAL, as bytes on disk (leak checks)."""
-    chunks = []
-    for suffix in ("", "-wal"):
-        path = store.root / f"{DATABASE_NAME}{suffix}"
-        if path.is_file():
-            chunks.append(path.read_bytes())
-    return b"".join(chunks)
+def stored_text(store: RunStore) -> str:
+    """Every stored run record and event body, whole, one per line (leak checks)."""
+    with store._lock:  # noqa: SLF001 - raw stored values, read-only
+        rows = store._connection.execute(  # noqa: SLF001
+            "SELECT record FROM runs UNION ALL SELECT body FROM events"
+        ).fetchall()
+    return "".join(row[0] + "\n" for row in rows)
 
 
 def finish(

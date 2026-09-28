@@ -711,7 +711,10 @@ run 只拿到宿主凭据出口代理（`host/pi_glink/egress.py::EgressProxy`�
 检测同时覆盖**值**（宿主知道的 key）与**形状**（`sk-…`、`e2b_…`、`exa-…`、`NAME=value`、
 `Bearer …`），所以宿主从未见过的第三方 token 也会被掉包；跨 delta 的分割由 §3.3 的暂存覆盖。
 `scripts/check-no-secrets.py` 用同一套规则扫描运行态产物，并把**文档占位符**
-（如 README 里的 `sk-ant-...`）与真实值分开计数。
+（如 README 里的 `sk-ant-...`）与真实值分开计数。run 数据库经 SQLite 只读打开，逐行扫描
+`runs.record` 与 `events.body` 的完整值（WAL 由 SQLite 合并）；不把 `runs.db` / `runs.db-wal`
+当文本扫描——大值会被拆到 overflow page、WAL 也按页组织，跨页的凭据在字节层面会被截断而漏报。
+数据库无法打开时扫描判失败，不报告 0 命中（`tests/test_check_no_secrets.py`）。
 
 **脱敏不是安全沙箱**：它处理的是「宿主已能把值交付给内核、内核又把它回显到产品面」这一层的
 回显保护；任意编码、分拆到不同工具输出、写入二进制或直接网络外传不在承诺范围。需要更强隔离
