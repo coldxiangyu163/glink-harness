@@ -20,7 +20,8 @@
 | pi | 0.86.1（已实测） | `npm install -g @earendil-works/pi-coding-agent@0.86.1`；Docker / E2B 面的版本声明在 `harnesses/pi/harness.toml` 的 `[[image.packages]]`，Dockerfile 的 `ARG PI_VERSION` 由 `scripts/generate-pack-artifacts.py` 生成 |
 | pi 包 | `pi-web-access@0.31.0`（检索，三面）；`pi-subagents@0.40.0`（委派，三面；前台强制，见「委派与子代理」） | `harnesses/pi/settings.json` 是包声明真源（两个精确 pin）；Docker / E2B 从镜像内 `/opt/pi-packages` 本地加载，不在 run 里 `npm install`；一致性由 `tests/test_repository_boundaries.py` 卡住 |
 | pytest | ≥ 8（仅开发） | `uv pip install -e ".[dev]"` |
-| e2b SDK | ≥ 2（仅 E2B 执行面） | `uv pip install -e ".[e2b]"`（含代理网络需要的 `httpx[socks]`） |
+| e2b SDK | ≥ 2（E2B 执行面；交付门禁要求可导入） | `uv pip install -e ".[e2b]"`（含代理网络需要的 `httpx[socks]`） |
+| zstandard | ≥ 0.22（`acp-progress` extra；交付门禁要求可导入） | `uv pip install -e ".[acp-progress]"`；单独运行 ACP 进度测试时缺失仍可 skip |
 
 本机执行面用宿主安装的 pi；换版本做演练时用 `PI_GLINK_PI_BIN` 指向另一个二进制，无需改 PATH（见 [docs/pi-boundary.md](docs/pi-boundary.md) §3）。
 
@@ -396,7 +397,7 @@ ACP 族的送达通道、凭据注入与体积边界见 [ACP 集成笔记](docs/
 
 ## 验证
 
-默认无模型交付检查（预先准备 Python ≥3.12、pytest 和 Node ≥24，不自动安装依赖）：
+默认无模型交付检查（预先准备 Python ≥3.12、pytest、Node ≥24，以及 `.[e2b]` 和 `.[acp-progress]` 中的 e2b、zstandard；缺任一 extra 时失败并给出安装命令，不自动安装依赖）：
 
 ```bash
 bash scripts/check.sh

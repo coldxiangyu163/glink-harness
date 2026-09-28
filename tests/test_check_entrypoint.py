@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,7 +14,7 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/check.sh"
 
 
-def check_fixture(tmp_path: Path, *, python_status: int = 0, node_status: int = 0, preflight_status: int = 0):
+def check_fixture(tmp_path: Path, *, python_status: int = 0, node_status: int = 0, preflight_status: int = 0, optional_status: int = 0):
     repo = tmp_path / "checkout with spaces"
     for directory in (
         "scripts",
@@ -40,6 +41,7 @@ def check_fixture(tmp_path: Path, *, python_status: int = 0, node_status: int = 
     python.write_text(
         "#!/bin/sh\n"
         f'if [ "$1" = "-c" ]; then exit {preflight_status}; fi\n'
+        f'if [ "$1" = "-" ]; then exit {optional_status}; fi\n'
         f'/usr/bin/env > {quote(str(repo / "python-env.txt"))}\n'
         f'printf "%s\\n" "$@" > {quote(str(repo / "python-args.txt"))}\n'
         f'printf "%s " "$@" >> {quote(str(repo / "python-calls.txt"))}\n'
@@ -73,6 +75,38 @@ def check_fixture(tmp_path: Path, *, python_status: int = 0, node_status: int = 
         "NODE_OPTIONS": "--inspect",
     }
     return repo, env, temp
+
+
+def optional_preflight_function():
+    """执行 check.sh 内嵌的同一份 Python 预检逻辑，不触及真实依赖安装。"""
+    script = SCRIPT.read_text()
+    match = re.search(r"check_optional_deps\(\) \{\n.*?<<'PY'\n(.*?)\nPY\n\}", script, re.S)
+    assert match, "check.sh 必须在隔离环境下定义可复用的可选依赖预检"
+    namespace = {"__name__": "check_optional_deps_test"}
+    exec(compile(match.group(1), str(SCRIPT), "exec"), namespace)
+    assert script.index("check_optional_deps") < script.index("run_check '事件 schema")
+    assert "if ! check_optional_deps; then" in script
+    return namespace["missing_optional_dependencies"]
+
+
+def test_optional_preflight_fails_closed_on_missing_extras() -> None:
+    check = optional_preflight_function()
+
+    def fake_import(name: str):
+        if name in {"zstandard", "e2b"}:
+            raise ModuleNotFoundError(name)
+        return object()
+
+    assert check(fake_import) == ["zstandard", "e2b"]
+    for absent in ("zstandard", "e2b"):
+        def import_one_missing(name: str):
+            if name == absent:
+                raise ModuleNotFoundError(name)
+            return object()
+        assert check(import_one_missing) == [absent]
+    assert check(lambda _: object()) == []
+    assert "acp-progress" in SCRIPT.read_text()
+    assert '".[e2b]"' in SCRIPT.read_text()
 
 
 def invoke(repo: Path, env: dict[str, str], *args: str):
@@ -155,6 +189,16 @@ def test_missing_dependencies_stop_without_installing_or_running_suites(tmp_path
     result = invoke(repo, env)
     assert result.returncode == 2
     assert "前置检查失败" in result.stderr
+    assert not (repo / "python-env.txt").exists()
+    assert not (repo / "node-env.txt").exists()
+    assert list(temp.iterdir()) == []
+
+
+def test_missing_optional_deps_fail_before_suites_without_installation(tmp_path: Path) -> None:
+    repo, env, temp = check_fixture(tmp_path, optional_status=2)
+    result = invoke(repo, env)
+    assert result.returncode == 2
+    assert "可选依赖预检失败" in result.stderr
     assert not (repo / "python-env.txt").exists()
     assert not (repo / "node-env.txt").exists()
     assert list(temp.iterdir()) == []

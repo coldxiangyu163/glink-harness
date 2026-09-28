@@ -53,6 +53,42 @@ if ! "${clean_env[@]}" "$node" -e 'if (Number(process.versions.node.split(".")[0
   exit 2
 fi
 
+# pytest.importorskip 对单跑友好；门禁必须先确认完整覆盖所需 extras 已安装。
+# 使用随后跑 pytest 的同一个解释器与隔离环境，不自动安装或访问网络。
+check_optional_deps() {
+  "${clean_env[@]}" "$python" - <<'PY'
+import importlib
+import sys
+
+
+def missing_optional_dependencies(import_module=importlib.import_module):
+    missing = []
+    for module in ("zstandard", "e2b"):
+        try:
+            import_module(module)
+        except ImportError:
+            missing.append(module)
+    return missing
+
+
+if __name__ == "__main__":
+    missing = missing_optional_dependencies()
+    instructions = {
+        "zstandard": 'uv pip install -e ".[acp-progress]"',
+        "e2b": 'uv pip install -e ".[e2b]"',
+    }
+    for module in missing:
+        print(f"[FAIL] 缺少 {module}（{instructions[module]}）", file=sys.stderr)
+    if missing:
+        sys.exit(2)
+    print("[PASS] 可选依赖预检：zstandard、e2b 可导入")
+PY
+}
+if ! check_optional_deps; then
+  echo '[FAIL] 可选依赖预检失败；请在运行门禁的 Python 环境安装以上 extras。' >&2
+  exit 2
+fi
+
 shopt -s nullglob
 # 前端事件模型（tests/web）与 agent 扩展的纯逻辑单元测试（tests/extensions；
 # GLINK-SUB-02 强制前台守卫）。两者都不启动真实 pi、模型或浏览器。
