@@ -18,6 +18,7 @@ from typing import Any, Mapping
 from urllib.parse import parse_qs
 
 from .events import IDLE_POLL
+from .runs import read_model
 from .tenancy import TenantContext
 from .web_security import assertion_expired
 
@@ -138,7 +139,8 @@ class SseMixin:
         # Authorization happens before a single response header is written. An
         # unknown run, another tenant's run and an ownerless (single-user) record all
         # answer the same 404, so the stream cannot be used to probe existence.
-        if context is not None and store.get_for(run_id, context.tenant_id) is None:
+        record = read_model.visible_record(store, run_id, context)
+        if record is None and context is not None:
             self._send_json(
                 HTTPStatus.NOT_FOUND, {"error": "unknown_run", "runId": run_id},
                 head_only=False,
@@ -149,8 +151,7 @@ class SseMixin:
         # started by this host process and is used for the live tail. A run from
         # an earlier process is replayed from the run database — otherwise
         # every history entry would 404 after a restart.
-        persisted = store.get(run_id) is not None
-        if not live and not persisted:
+        if not live and record is None:
             self._send_json(
                 HTTPStatus.NOT_FOUND, {"error": "unknown_run", "runId": run_id},
                 head_only=False,

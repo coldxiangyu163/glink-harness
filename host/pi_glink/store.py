@@ -549,6 +549,31 @@ class RunStore:
         """Every run, newest first (ties broken by run id)."""
         return self._select("", (), limit)
 
+    def page_for(
+        self,
+        tenant_id: str | None,
+        *,
+        limit: int,
+        before: tuple[float, str] | None = None,
+    ) -> list[RunRecord]:
+        """One keyset page of runs, newest first (M9).
+
+        ``before`` is the ``(created_at, run_id)`` of the last row the caller
+        already has; ``None`` starts at the newest run. Keyset paging (not
+        ``OFFSET``) keeps the window stable while runs are being admitted: a run
+        created between two requests is never counted twice and never pushes an
+        older row out of sight. ``tenant_id`` filters in the same predicate as
+        the cursor, so a page can only contain the caller's own runs.
+        """
+        where = "WHERE tenant_id = ?" if tenant_id is not None else ""
+        parameters: list[Any] = [tenant_id] if tenant_id is not None else []
+        if before is not None:
+            created_at, run_id = before
+            clause = "(created_at < ? OR (created_at = ? AND run_id > ?))"
+            where = f"{where} AND {clause}" if where else f"WHERE {clause}"
+            parameters.extend((created_at, created_at, run_id))
+        return self._select(where, tuple(parameters), limit)
+
     def holding_records(self, tenant_id: str | None = None) -> list[RunRecord]:
         """Records whose execution resources are not confirmed released.
 

@@ -9,26 +9,27 @@ Identity comes from :mod:`pi_glink.web_security`; bytes are written with
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import re
 import shutil
 from http import HTTPStatus
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
-from .artifacts import ArtifactError, ArtifactTree
 from .blueprints import Blueprint, list_blueprints
 from .config import ConfigError
 from .contracts import FollowupUnavailable
 from .runs import (
-    REPORT_MAX_BYTES,
     BlueprintUnavailable,
     ResourcesUnreleased,
     RunBusy,
     RunQuotaExceeded,
     UnsupportedCommand,
+    read_model,
 )
-from .store import CHILDREN_DIRNAME, RunRecord
+from .store import RunRecord
 from .tenancy import TenantContext, TenantNotConfigured
 from .web_security import AUTH_POST_PATHS
 
@@ -43,6 +44,39 @@ _RUN_CHILD_FILE_RE = re.compile(
     r"/(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,63})$"
 )
 _RUN_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})$")
+
+#: ``GET /api/runs`` page size (M9). The default is the window the endpoint
+#: always returned, so an old client sees no change; the ceiling bounds one
+#: request. A page is one cache-less SQLite read.
+_RUNS_PAGE_DEFAULT = 100
+_RUNS_PAGE_MAX = 200
+
+
+def _encode_run_cursor(record: RunRecord) -> str:
+    """Opaque keyset cursor: the last row's ``(created_at, run_id)`` (M9).
+
+    The list order is ``created_at DESC, run_id ASC``; "the rest" is everything
+    strictly after this pair, so the cursor is a pair and not an offset — a run
+    admitted between two requests is never skipped or repeated.
+    """
+    payload = json.dumps([record.created_at, record.run_id], separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _decode_run_cursor(value: str) -> tuple[float, str] | None:
+    """Parse a cursor from :func:`_encode_run_cursor`; ``None`` when malformed.
+
+    Anything a client can make up is refused rather than silently treated as a
+    position: a wrong cursor must not answer with an arbitrary page.
+    """
+    try:
+        payload = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        created_at, run_id = json.loads(payload.decode("utf-8"))
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return None
+    if not isinstance(created_at, (int, float)) or not isinstance(run_id, str) or not run_id:
+        return None
+    return float(created_at), run_id
 
 #: Run-body fields a client must never use to pick a model or supply a
 #: credential. The provider is a server-side decision in every mode (the local
@@ -261,16 +295,9 @@ class RoutesMixin:
             )
             return
         if path == "/api/runs":
-            records = (
-                self.server.store.list_for(context.tenant_id, limit=100)
-                if context is not None
-                else self.server.store.list(limit=100)
-            )
-            self._send_json(
-                HTTPStatus.OK,
-                {"runs": [self._run_view_live(record) for record in records]},
-                head_only=head_only,
-            )
+            page = self._runs_page(query, context, head_only=head_only)
+            if page is not None:
+                self._send_json(HTTPStatus.OK, page, head_only=head_only)
             return
         events_match = _RUN_EVENTS_RE.match(path)
         if events_match is not None:
@@ -521,6 +548,61 @@ class RoutesMixin:
                 head_only=False,
             )
 
+    def _runs_page(
+        self, query: str, context: TenantContext | None, *, head_only: bool
+    ) -> dict[str, Any] | None:
+        """One page of research history, newest first (M9).
+
+        Backwards compatible with the old ``{"runs": [...]}``: without
+        parameters the first page is the same newest-100 window, now carrying
+        the metadata that says whether it is the whole history (``hasMore`` /
+        ``nextCursor``). The endpoint used to clamp the list to 100 rows with no
+        way to continue, so older history simply disappeared from the browser.
+        """
+        values = parse_qs(query, keep_blank_values=True)
+        limit = _RUNS_PAGE_DEFAULT
+        raw_limit = (values.get("limit") or [None])[0]
+        if raw_limit:
+            try:
+                limit = int(raw_limit)
+            except ValueError:
+                limit = 0
+            if not 1 <= limit <= _RUNS_PAGE_MAX:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {
+                        "error": "invalid_limit",
+                        "message": f"limit 必须是 1..{_RUNS_PAGE_MAX} 之间的整数",
+                    },
+                    head_only=head_only,
+                )
+                return None
+        cursor = None
+        raw_cursor = (values.get("cursor") or [None])[0]
+        if raw_cursor:
+            cursor = _decode_run_cursor(raw_cursor)
+            if cursor is None:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "invalid_cursor", "message": "cursor 不是有效的分页游标"},
+                    head_only=head_only,
+                )
+                return None
+        # Read one row past the page: `hasMore` is then an observation, not a
+        # guess that happens to be true when the history is an exact multiple.
+        records = self.server.store.page_for(
+            context.tenant_id if context is not None else None,
+            limit=limit + 1,
+            before=cursor,
+        )
+        has_more = len(records) > limit
+        visible = records[:limit]
+        return {
+            "runs": [self._run_view_live(record) for record in visible],
+            "nextCursor": _encode_run_cursor(visible[-1]) if has_more and visible else None,
+            "hasMore": has_more,
+        }
+
     def _run_view_live(self, record: RunRecord) -> dict[str, Any]:
         """Run view with the live event count while the run is still open.
 
@@ -544,24 +626,12 @@ class RoutesMixin:
         The flag and the download use the same location rule and the same
         refusals, so ``hasReport`` never promises a file the endpoint refuses.
         """
-        location = self.server.store.report_location(record)
-        if location is None:
-            return False
-        try:
-            with ArtifactTree(location.root) as tree:
-                tree.size(location.relative, max_bytes=REPORT_MAX_BYTES)
-        except (ArtifactError, OSError):
-            return False
-        return True
+        return read_model.report_available(self.server.store, record)
 
     def _send_run(
         self, run_id: str, context: TenantContext | None, *, head_only: bool
     ) -> None:
-        record = (
-            self.server.store.get_for(run_id, context.tenant_id)
-            if context is not None
-            else self.server.store.get(run_id)
-        )
+        record = read_model.visible_record(self.server.store, run_id, context)
         if record is None:
             self._send_json(
                 HTTPStatus.NOT_FOUND,
@@ -586,11 +656,7 @@ class RoutesMixin:
         instead of equating an unreadable document with absence; it appears
         only when it is non-zero.
         """
-        record = (
-            self.server.store.get_for(run_id, context.tenant_id)
-            if context is not None
-            else self.server.store.get(run_id)
-        )
+        record = read_model.visible_record(self.server.store, run_id, context)
         if record is None:
             self._send_json(
                 HTTPStatus.NOT_FOUND,
@@ -598,20 +664,13 @@ class RoutesMixin:
                 head_only=head_only,
             )
             return
-        page = self.server.store.read_children(run_id)
+        page = read_model.read_child_documents(self.server.store, record)
         payload: dict[str, Any] = {
             "children": [dict(document) for document in page.documents]
         }
         if page.skipped:
             payload["skipped"] = page.skipped
         self._send_json(HTTPStatus.OK, payload, head_only=head_only)
-
-    #: Content types for the children artifact download, by file extension.
-    _CHILD_FILE_TYPES = {
-        ".md": "text/markdown; charset=utf-8",
-        ".json": "application/json; charset=utf-8",
-        ".jsonl": "application/x-ndjson; charset=utf-8",
-    }
 
     def _send_child_file(
         self,
@@ -630,82 +689,55 @@ class RoutesMixin:
         a link, and redacted again on the way out with the record's own
         boundary (``X-Redacted`` records whether that happened).
         """
-        record = (
-            self.server.store.get_for(run_id, context.tenant_id)
-            if context is not None
-            else self.server.store.get(run_id)
-        )
+        record = read_model.visible_record(self.server.store, run_id, context)
         not_found = {"error": "no_artifact", "runId": run_id}
         if record is None:
             self._send_json(HTTPStatus.NOT_FOUND, not_found, head_only=head_only)
             return
-        try:
-            with ArtifactTree(self.server.store.run_dir(run_id)) as tree:
-                data = tree.read(
-                    f"{CHILDREN_DIRNAME}/{int(n_text)}/{name}", max_bytes=REPORT_MAX_BYTES
-                )
-        except (ArtifactError, OSError, ValueError) as exc:
-            logger.warning("child artifact refused run=%s n=%s name=%r: %s", run_id, n_text, name, exc)
+        artifact = read_model.read_child_file(
+            self.server.store,
+            record,
+            n_text,
+            name,
+            self.server.manager.redactor_for_record,
+        )
+        if artifact is None:
             self._send_json(HTTPStatus.NOT_FOUND, not_found, head_only=head_only)
             return
-        original = data.decode("utf-8", errors="replace")
-        redactor = self.server.manager.redactor_for_record(record)
-        redacted = redactor.redact(original)
-        content_type = self._CHILD_FILE_TYPES.get(
-            "." + name.rsplit(".", 1)[-1], "application/octet-stream"
-        )
         self._send_bytes(
-            redacted.encode("utf-8"),
-            content_type,
+            artifact.content,
+            artifact.content_type,
             "no-cache",
             head_only=head_only,
-            extra_headers={"X-Redacted": "true" if redacted != original else "false"},
+            extra_headers={"X-Redacted": "true" if artifact.redacted else "false"},
         )
 
     def _send_report(
         self, run_id: str, context: TenantContext | None, *, head_only: bool
     ) -> None:
-        record = (
-            self.server.store.get_for(run_id, context.tenant_id)
-            if context is not None
-            else self.server.store.get(run_id)
-        )
+        record = read_model.visible_record(self.server.store, run_id, context)
         # ``report_path`` is not a download capability: only the run's own
         # host artifact may be served — read-only, through a directory handle
         # that never follows a link. An unknown run, another tenant's run and an
         # ownerless (single-user) record all answer the same 404.
-        location = self.server.store.report_location(record) if record else None
-        if location is None:
-            self._send_json(
-                HTTPStatus.NOT_FOUND,
-                {"error": "no_report", "runId": run_id},
-                head_only=head_only,
-            )
+        not_found = {"error": "no_report", "runId": run_id}
+        if record is None:
+            self._send_json(HTTPStatus.NOT_FOUND, not_found, head_only=head_only)
             return
-        try:
-            with ArtifactTree(location.root) as tree:
-                data = tree.read(location.relative, max_bytes=REPORT_MAX_BYTES)
-        except (ArtifactError, OSError) as exc:
-            logger.warning(
-                "report refused run=%s: %s", run_id, exc
-            )
-            self._send_json(
-                HTTPStatus.NOT_FOUND,
-                {"error": "no_report", "runId": run_id},
-                head_only=head_only,
-            )
+        artifact = read_model.read_report(
+            self.server.store, record, self.server.manager.redactor_for_record
+        )
+        if artifact is None:
+            self._send_json(HTTPStatus.NOT_FOUND, not_found, head_only=head_only)
             return
         # The report is a product surface too: a credential the model echoed into
         # it must not reach the browser. The header records whether it happened.
         # The redaction boundary is the record's own tenant credentials, so one
         # tenant's report is never compared against another tenant's secrets.
-        original = data.decode("utf-8", errors="replace")
-        redactor = self.server.manager.redactor_for_record(record)
-        redacted = redactor.redact(original)
         self._send_bytes(
-            redacted.encode("utf-8"),
-            "text/markdown; charset=utf-8",
+            artifact.content,
+            artifact.content_type,
             "no-cache",
             head_only=head_only,
-            extra_headers={"X-Redacted": "true" if redacted != original else "false"},
+            extra_headers={"X-Redacted": "true" if artifact.redacted else "false"},
         )

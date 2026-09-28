@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 from http.client import HTTPConnection
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -709,3 +710,161 @@ def test_child_artifact_download_serves_only_the_child_directory(server: PiGlink
     (child_dir / "child.json").write_text('{"n": 0}', encoding="utf-8")
     status, _h, raw = request(server, f"/api/runs/{run_id}/children/0/child.json")
     assert status == 200 and json.loads(raw) == {"n": 0}
+
+
+# -- research history pagination (M9) -----------------------------------------
+
+
+def _seed_history(
+    server: PiGlinkServer, count: int, *, prefix: str = "hist", tenant_id: str | None = None
+) -> list[str]:
+    """Commit ``count`` finished runs, oldest first, and return their ids.
+
+    ``created_at`` is the store's own clock (newest last); ids are zero-padded so
+    the ``created_at DESC, run_id ASC`` order is the same as creation order.
+    """
+    spec = RunSpec(family="pi", pack="pi", executor="inproc")
+    run_ids: list[str] = []
+    for index in range(count):
+        run_id = f"{prefix}{index:03d}"
+        server.store.create(
+            f"第 {index} 项研究",
+            run_id=run_id,
+            workspace=server.config.workspace_root / run_id,
+            tenant_id=tenant_id,
+            spec=spec,
+        )
+        finish(server.store, run_id, "finished")
+        run_ids.append(run_id)
+    return run_ids
+
+
+def _page(server: PiGlinkServer, query: str = "") -> dict:
+    status, _headers, raw = request(server, f"/api/runs{query}")
+    assert status == 200, raw
+    return json.loads(raw)
+
+
+def _cursor_query(cursor: str, limit: int = 50) -> str:
+    return f"?limit={limit}&cursor={quote(cursor, safe='')}"
+
+
+def test_run_history_is_paged_newest_first_with_a_stable_keyset_cursor(
+    server: PiGlinkServer,
+) -> None:
+    """First/tail page and cursor stability: every run appears exactly once.
+
+    Before M9 the endpoint hard-clamped the list to its newest 100 rows with no
+    way to continue; these assertions fail on that shape (page two is not
+    reachable at all).
+    """
+    _seed_history(server, 130)
+    expected = [record.run_id for record in server.store.list(limit=None)]
+
+    first = _page(server, "?limit=50")
+    assert [item["runId"] for item in first["runs"]] == expected[:50]
+    assert first["hasMore"] is True
+    assert isinstance(first["nextCursor"], str) and first["nextCursor"]
+
+    collected = [item["runId"] for item in first["runs"]]
+    cursor = first["nextCursor"]
+    pages = 1
+    while cursor is not None:
+        page = _page(server, _cursor_query(cursor))
+        pages += 1
+        collected += [item["runId"] for item in page["runs"]]
+        assert page["hasMore"] is (page["nextCursor"] is not None)
+        cursor = page["nextCursor"]
+    assert pages == 3
+    assert collected == expected, "every row once, in order"
+    assert len(set(collected)) == len(expected)
+
+
+def test_without_parameters_the_first_page_is_the_window_it_always_was(
+    server: PiGlinkServer,
+) -> None:
+    """Backwards compatibility: no `limit`/`cursor` still means newest-100."""
+    _seed_history(server, 130)
+    expected = [record.run_id for record in server.store.list(limit=None)]
+
+    page = _page(server)
+    assert [item["runId"] for item in page["runs"]] == expected[:100]
+    assert page["hasMore"] is True and page["nextCursor"]
+
+
+def test_a_run_created_between_pages_never_shifts_the_window(server: PiGlinkServer) -> None:
+    """Keyset, not offset: a new run at the top must not re-count the second page."""
+    _seed_history(server, 120)
+    expected = [record.run_id for record in server.store.list(limit=None)]
+
+    first = _page(server, "?limit=50")
+    assert [item["runId"] for item in first["runs"]] == expected[:50]
+
+    spec = RunSpec(family="pi", pack="pi", executor="inproc")
+    server.store.create(
+        "分页之间新建的研究",
+        run_id="fresh000001",
+        workspace=server.config.workspace_root / "fresh000001",
+        spec=spec,
+    )
+    finish(server.store, "fresh000001", "finished")
+
+    second = _page(server, _cursor_query(first["nextCursor"]))
+    assert [item["runId"] for item in second["runs"]] == expected[50:100]
+    assert "fresh000001" not in [item["runId"] for item in second["runs"]]
+    # …and a fresh first page sees it, exactly once.
+    fresh = _page(server, "?limit=50")
+    assert fresh["runs"][0]["runId"] == "fresh000001"
+
+
+def test_pagination_edges_empty_single_and_one_row_pages(server: PiGlinkServer) -> None:
+    empty = _page(server)
+    assert empty == {"runs": [], "nextCursor": None, "hasMore": False}
+
+    _seed_history(server, 2, prefix="edge")
+    expected = [record.run_id for record in server.store.list(limit=None)]
+
+    first = _page(server, "?limit=1")
+    assert [item["runId"] for item in first["runs"]] == expected[:1]
+    assert first["hasMore"] is True and first["nextCursor"]
+
+    tail = _page(server, _cursor_query(first["nextCursor"], limit=1))
+    assert [item["runId"] for item in tail["runs"]] == expected[1:]
+    assert tail["hasMore"] is False and tail["nextCursor"] is None
+
+
+@pytest.mark.parametrize("query", ["?limit=0", "?limit=-3", "?limit=abc", "?limit=100000"])
+def test_an_out_of_range_page_size_is_refused(server: PiGlinkServer, query: str) -> None:
+    status, _headers, raw = request(server, f"/api/runs{query}")
+    assert status == 400
+    assert json.loads(raw)["error"] == "invalid_limit"
+
+
+@pytest.mark.parametrize("query", ["?cursor=not-a-cursor", "?cursor=!!", "?cursor=e30"])
+def test_a_malformed_cursor_is_refused(server: PiGlinkServer, query: str) -> None:
+    status, _headers, raw = request(server, f"/api/runs{query}")
+    assert status == 400
+    assert json.loads(raw)["error"] == "invalid_cursor"
+
+
+def test_a_blank_cursor_is_the_first_page(server: PiGlinkServer) -> None:
+    _seed_history(server, 3, prefix="blank")
+    expected = [record.run_id for record in server.store.list(limit=None)]
+    assert [item["runId"] for item in _page(server, "?limit=2&cursor=")["runs"]] == expected[:2]
+
+
+def test_paging_never_crosses_a_tenant_boundary(server: PiGlinkServer) -> None:
+    """The cursor and the tenant filter share one WHERE clause (M9)."""
+    _seed_history(server, 4, prefix="alpha", tenant_id="tenant-alpha")
+    _seed_history(server, 3, prefix="beta", tenant_id="tenant-beta")
+
+    seen: list[str] = []
+    cursor = None
+    while True:
+        page = server.store.page_for("tenant-alpha", limit=2, before=cursor)
+        if not page:
+            break
+        assert all(record.tenant_id == "tenant-alpha" for record in page)
+        seen += [record.run_id for record in page]
+        cursor = (page[-1].created_at, page[-1].run_id)
+    assert sorted(seen) == ["alpha000", "alpha001", "alpha002", "alpha003"]
