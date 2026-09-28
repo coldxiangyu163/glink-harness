@@ -2,7 +2,7 @@
 
 ACP 族的策略面：空命令白名单、凭据准入空实现、追问追加门禁（能力矩阵、
 session id、续接通道、状态根）、状态根继承与 ``AcpProjector``、
-inproc/Docker/E2B 面的 adapter 组装、ACP stopReason 词汇归一化，以及
+与执行面无关的 launch 描述和 ACP 驱动、ACP stopReason 词汇归一化，以及
 call_id 进度配对与累计快照替换的 usage 语义。
 """
 
@@ -17,7 +17,6 @@ from typing import Any, Callable, Mapping, TYPE_CHECKING
 from .. import events
 from ..config import ConfigError
 from ..store import CANCELLED, FAILED, FINISHED, RunRecord
-from .acp_e2b_env import E2BAcpSandboxClient
 from .acp_env import (
     ACP_HOME_DIRNAME,
     ACP_RECOVERED_DIRNAME,
@@ -25,24 +24,19 @@ from .acp_env import (
     AcpRuntime,
     AcpStateInheritError,
     build_acp_argv,
-    build_acp_env,
     prepare_acp_runtime,
 )
-from .acp_execution import acp_resume_method
+from .acp_execution import AcpExecutionAdapter, acp_resume_method
 from .acp_projection import ACP_STOP_REASONS, AcpProjector
-from .docker_env import (
-    build_acp_plan as build_acp_docker_plan,
-    is_available as docker_available,
-    stop_argv as docker_stop_argv,
-)
+from .docker_env import acp_worker_image
 from .execution import ExecutionAdapter, ExecutionSpec
-from .execution import build_adapter as compose_adapter
 from .harness import (
     FollowupUnavailable,
     HarnessFamily,
     PreparedRuntime,
     Verdict,
 )
+from .sandbox import Launch, Mount, Sandbox
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only
     from ..redaction import SecretRedactor
@@ -55,12 +49,6 @@ logger = logging.getLogger("pi_glink.kernel.harness_acp")
 #: published right after a run opens, so the scan is independent of how long the
 #: parent's transcript grew afterwards.
 _ACP_CAPABILITY_SCAN_EVENTS = 50
-
-
-def _unused_pi_plan(spec: ExecutionSpec) -> Any:  # pragma: no cover - 防御性兜底
-    # ``execution.build_adapter`` 的签名对两族一致（本步不改其签名）；ACP
-    # 分派永远不会触达 pi 面的 plan，真触达即 bug，fail-closed。
-    raise ConfigError("ACP 族不使用 pi 面的 plan")
 
 
 class AcpHarnessFamily(HarnessFamily):
@@ -85,8 +73,8 @@ class AcpHarnessFamily(HarnessFamily):
         from the host's own record of the parent rather than from the caller:
 
         * the parent ran the **same harness** — proven by the runner's shared
-          gate from the parent record's own ``harness`` field (written at
-          admission from the frozen config), never from the current
+          gate from the parent record's own ``spec.family`` (the RunSpec
+          frozen at admission), never from the current
           configuration alone (a host switched from ``pi`` to ``acp`` must not
           present a pi run as resumable);
         * the parent recorded a **session id** (an ACP run without one has
@@ -121,7 +109,7 @@ class AcpHarnessFamily(HarnessFamily):
         admission lock in :meth:`prepare_runtime` and fails the run closed if
         it cannot complete.
         """
-        # 族已由 runner 共享门禁按父记录 ``harness`` 字段证明；能力矩阵（协商
+        # 族已由 runner 共享门禁按父记录 ``spec.family`` 证明；能力矩阵（协商
         # 快照，不进 RunRecord）从 session_ready 帧取得，扫不到即无续接通道。
         capabilities = self.recorded_capabilities(parent)
         if capabilities is None:
@@ -143,7 +131,7 @@ class AcpHarnessFamily(HarnessFamily):
     ) -> Mapping[str, Any] | None:
         """The capability matrix a parent ACP run recorded, or ``None``.
 
-        The family is a record fact (``parent.harness``): a parent that is not
+        The family is a record fact (``parent.spec.family``): a parent that is not
         an ACP run has no capability matrix to offer and answers ``None``
         without a scan. The parent's ``session_ready`` frame is the only
         capability source that exists before the child's agent process starts;
@@ -152,7 +140,7 @@ class AcpHarnessFamily(HarnessFamily):
         without such a frame is refused as a run without a continuation
         channel.
         """
-        if parent.harness != "acp":
+        if parent.spec.family != self.name:
             return None
         for index, event in enumerate(self._store.iter_events(parent.run_id)):
             if index >= _ACP_CAPABILITY_SCAN_EVENTS:
@@ -176,12 +164,12 @@ class AcpHarnessFamily(HarnessFamily):
         derived from the run record like the other one — never from caller
         input — and its existence is the recovered-state fact itself.
 
-        Which of the two applies follows the run's own recorded ``executor``
+        Which of the two applies follows the run's own ``spec.executor``
         (frozen at admission), never the host's current face: a host that
         switched faces still resumes its earlier runs (docs/adr/0002).
         """
         base = self._store.run_dir(run.run_id) / ACP_RUNTIME_DIRNAME
-        if run.executor == "e2b":
+        if run.spec.executor == "e2b":
             return base / ACP_RECOVERED_DIRNAME
         return base / ACP_HOME_DIRNAME
 
@@ -207,7 +195,7 @@ class AcpHarnessFamily(HarnessFamily):
         # against the state root inherited in ``prepare_runtime``.
         return parent.session_id if parent else None
 
-    def verifies_continuation_before_turn(self, executor: str) -> bool:
+    def verifies_continuation_before_turn(self) -> bool:
         # The ACP faces — including the sandbox one — know the resumed session
         # id right after ``session/resume``, so the child's session identity
         # is proven against the parent's before the turn starts.
@@ -223,6 +211,7 @@ class AcpHarnessFamily(HarnessFamily):
         parent: RunRecord | None,
         session_seed: bytes | None,
         credentials: "RunCredentials | None",
+        sandbox: Sandbox,
     ) -> PreparedRuntime:
         # A follow-up inherits the authorized parent's agent state root into
         # this run's own HOME. The parent gate ran at admission and the runner
@@ -259,98 +248,61 @@ class AcpHarnessFamily(HarnessFamily):
             redactor, subagent_dispatch=self._config.acp_subagent_dispatch
         )
 
-    # -- (d) adapter 组装 --------------------------------------------------------
+    # -- (d) launch 与驱动 ------------------------------------------------------
 
-    def build_adapter(
+    def launch(self, spec: ExecutionSpec, sandbox: Sandbox) -> Launch:
+        """What the ACP agent process needs, independent of where it runs.
+
+        The argv is the frozen ``PI_GLINK_ACP_COMMAND`` verbatim and is never
+        shell-expanded; on an isolated sandbox it names an image-local command.
+        ``HOME`` is this run's own agent state root as the sandbox places it
+        (host path in-process, :data:`CONTAINER_HOME` in Docker, the uploaded
+        state root on E2B), so ``~/.codex`` / ``~/.dsh`` live in the run
+        directory and never in the operator's home. ``PI_GLINK_ACP_ENV``
+        entries are the face's explicit process-environment channel and travel
+        as ``secret_env`` (by name on the Docker CLI, never in argv); the
+        configuration refuses ``HOME`` among them, and the credential material
+        itself stays in files. A mounting sandbox mounts the state root
+        writable and each injected credential ``:ro`` on top of it.
+        """
+        runtime = spec.runtime
+        if not isinstance(runtime, AcpRuntime):
+            raise ConfigError("ACP harness 的运行期配置没有按 AcpRuntime 渲染")
+        config = spec.config
+        home = sandbox.place("home", runtime.home)
+        mounts = (
+            Mount(runtime.home, home),
+            *(
+                Mount(runtime.home / dest, f"{home}/{dest}", read_only=True)
+                for dest in runtime.credential_dests
+            ),
+        )
+        return Launch(
+            argv=tuple(build_acp_argv(config)),
+            env={"HOME": home},
+            secret_env={name: value for name, value in config.acp_env},
+            mounts=mounts,
+            image=acp_worker_image(config),
+            # The pi template has no ACP agent installed.
+            template=config.acp_e2b_template,
+            create_env=None,
+        )
+
+    def driver(
         self,
         spec: ExecutionSpec,
         *,
-        executor: str,
+        sandbox: Sandbox,
+        launch: Launch,
         on_frame: Callable[[Mapping[str, Any]], None],
-        on_identity: Callable[[Mapping[str, str]], None],
-        client_factory: Callable[..., Any],
-        sandbox_factory: Callable[..., Any] | None,
+        client_factory: Callable[..., Any] | None,
     ) -> ExecutionAdapter:
-        return compose_adapter(
+        return AcpExecutionAdapter(
             spec,
-            harness=self.name,
-            executor=executor,
+            sandbox=sandbox,
+            launch=launch,
             client_factory=client_factory,
             on_frame=on_frame,
-            sandbox_factory=sandbox_factory,
-            on_identity=on_identity,
-            rpc_plan=_unused_pi_plan,
-            docker_plan=_unused_pi_plan,
-            docker_stop=docker_stop_argv,
-            e2b_rpc_plan=_unused_pi_plan,
-            acp_plan=self.acp_plan,
-            acp_docker_plan=self.acp_docker_plan,
-            acp_e2b_plan=lambda s: self.acp_e2b_plan(s, sandbox_factory=sandbox_factory),
-        )
-
-    def acp_plan(
-        self, spec: ExecutionSpec
-    ) -> tuple[list[str], dict[str, str], Path | None]:
-        """Launch inputs for the in-process ACP agent: argv, filtered env, cwd.
-
-        The argv comes from the frozen ``PI_GLINK_ACP_COMMAND`` and is never
-        shell-expanded; the environment is the pi face's minimal passthrough
-        list plus this run's own ``HOME`` (plan §4.5).
-        """
-        if not isinstance(spec.runtime, AcpRuntime):
-            raise ConfigError("ACP harness 的运行期配置没有按 AcpRuntime 渲染")
-        return (
-            build_acp_argv(spec.config),
-            build_acp_env(spec.config, spec.runtime),
-            spec.workspace,
-        )
-
-    def acp_docker_plan(
-        self, spec: ExecutionSpec
-    ) -> tuple[list[str], dict[str, str], str]:
-        """Launch inputs for the containerised ACP agent (M3a).
-
-        Same composition rules as the pi docker plan (reachable daemon, frozen
-        image, persisted container name, resource ceilings), but the container's
-        stdio carries ACP JSON-RPC and its ``HOME`` is the run's own agent state
-        root with the injected credentials mounted read-only inside it. The
-        command is the frozen ``PI_GLINK_ACP_COMMAND`` executed *inside* the
-        image, so it must name an image-local executable.
-        """
-        if not isinstance(spec.runtime, AcpRuntime):
-            raise ConfigError("ACP harness 的运行期配置没有按 AcpRuntime 渲染")
-        if not docker_available():
-            raise ConfigError(
-                "LOCAL_WEB_EXECUTOR=docker requires a reachable Docker daemon"
-            )
-        plan = build_acp_docker_plan(
-            spec.config,
-            spec.runtime,
-            run_id=spec.run_id,
-            workspace=spec.workspace,
-        )
-        return plan.argv, plan.env, plan.container_name
-
-    def acp_e2b_plan(
-        self, spec: ExecutionSpec, *, sandbox_factory: Callable[..., Any] | None = None
-    ) -> E2BAcpSandboxClient:
-        """The sandbox carrier for one ACP run (M3b).
-
-        The ACP family's E2B face reuses the pi face's sandbox lifecycle
-        (:class:`~pi_glink.kernel.acp_e2b_env.E2BAcpSandboxClient`: same frozen
-        credential, bounded lifetime, artifact recovery and identity), and the
-        separate ``LOCAL_WEB_E2B_ACP_TEMPLATE`` because the pi template has no
-        ACP agent installed. The sandbox id is persisted by the adapter as soon
-        as it exists.
-        """
-        if not isinstance(spec.runtime, AcpRuntime):
-            raise ConfigError("ACP harness 的运行期配置没有按 AcpRuntime 渲染")
-        return E2BAcpSandboxClient(
-            spec.config,
-            spec.runtime,
-            run_id=spec.run_id,
-            workspace=spec.workspace,
-            sandbox_factory=sandbox_factory,
         )
 
     # -- (e) 终态词汇归一化 ------------------------------------------------------

@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from pi_glink.store import RunSpec
 from pi_glink.app import PiGlinkServer, create_server
 from pi_glink.config import build_config
 from pi_glink.kernel.execution import (
@@ -95,9 +96,7 @@ def seed_history(
         workspace=server.config.workspace_root / run_id,
         tenant_id=tenant,
         creator_user_id=user,
-        harness="pi",
-        harness_pack="pi",
-        executor="inproc",
+        spec=RunSpec(family="pi", pack="pi", executor="inproc"),
     )
     for seq in range(1, frames + 1):
         store.append_event(
@@ -258,7 +257,7 @@ def adapters(monkeypatch: pytest.MonkeyPatch) -> AdapterBehavior:
         behavior.created.append(adapter)
         return adapter
 
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", build)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", build)
     return behavior
 
 
@@ -783,7 +782,7 @@ def test_unknown_and_ownerless_parents_are_unknown_runs(server: PiGlinkServer) -
     session_file = session_dir / "ownerless.jsonl"
     original = '{"ownerless": true}\n'
     session_file.write_text(original, encoding="utf-8")
-    server.store.create("旧研究", run_id="ownerlessparent", workspace=workspace, harness="pi", harness_pack="pi", executor="inproc")
+    server.store.create("旧研究", run_id="ownerlessparent", workspace=workspace, spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     server.store.update(
         "ownerlessparent",
         status="finished",
@@ -889,7 +888,7 @@ def test_ownerless_records_are_invisible_to_every_tenant(
     workspace = server.config.workspace_root / "ownerless01"
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "report.md").write_text("# 旧报告\n", encoding="utf-8")
-    server.store.create("历史研究", run_id="ownerless01", workspace=workspace, harness="pi", harness_pack="pi", executor="inproc")
+    server.store.create("历史研究", run_id="ownerless01", workspace=workspace, spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     server.store.update(
         "ownerless01",
         status="finished",

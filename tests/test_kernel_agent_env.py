@@ -13,14 +13,24 @@ from pi_glink.kernel.agent_env import (
     IMAGE_PACKAGE_NODE_MODULES,
     PROVIDER_ID,
     WEB_SEARCH_FILENAME,
-    build_pi_argv,
-    build_pi_env,
     local_package_source,
     prepare_agent_dir,
     template_manifest,
 )
 
+from harness_helpers import compose_launch, execution_spec
+from pi_glink.kernel.sandbox import SANDBOXES
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _inproc_spawn(config, runtime, tmp_path: Path, *, extra_argv: tuple[str, ...] = ()):
+    """The pi family's launch, spawned by the in-process sandbox (production path)."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    spec = execution_spec(config, runtime, workspace=workspace, extra_argv=extra_argv)
+    launch, sandbox = compose_launch("pi", "inproc", spec, store_root=tmp_path / "store")
+    return sandbox.spawn(launch)
 
 
 @pytest.fixture()
@@ -48,12 +58,17 @@ def _config(tmp_path: Path, template_dir: Path, **overrides: str):
 
 
 def _prepare(config, tmp_path: Path, name: str = "run-1"):
-    """Render a per-run runtime directory (the only supported call shape)."""
+    """Render a per-run runtime directory (the only supported call shape).
+
+    ``image_packages`` is the sandbox fact the pi family passes in production
+    (``Sandbox.isolated`` of the run's executor).
+    """
     run_dir = tmp_path / "runs" / name
     return prepare_agent_dir(
         config,
         runtime_dir=run_dir / "pi-agent",
         session_dir=run_dir / "sessions",
+        image_packages=SANDBOXES[config.executor].isolated,
     )
 
 
@@ -98,7 +113,7 @@ def test_models_json_does_not_fabricate_a_price_table(
 
 
 def test_model_credential_goes_to_auth_json_not_the_environment(
-    tmp_path: Path, template_dir: Path
+    tmp_path: Path, template_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path, template_dir)
     runtime = _prepare(config, tmp_path)
@@ -114,8 +129,10 @@ def test_model_credential_goes_to_auth_json_not_the_environment(
     assert payload == {PROVIDER_ID: {"type": "api_key", "key": "sk-secret-value"}}
     assert auth.stat().st_mode & 0o777 == 0o600
 
-    # …and the kernel process environment does not contain it at all.
-    env = build_pi_env(config, runtime, base_env={"PATH": "/usr/bin"})
+    # …and the kernel process environment does not contain it at all, even
+    # when the operator's shell exports it.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-operator-shell-value")
+    env = _inproc_spawn(config, runtime, tmp_path).env
     assert "OPENAI_API_KEY" not in env
 
 
@@ -170,17 +187,21 @@ def test_missing_endpoint_or_model_is_refused(tmp_path: Path, template_dir: Path
         _prepare(_config(tmp_path, template_dir, OPENAI_MODEL=""), tmp_path)
 
 
-def test_argv_and_env_redirect_pi_to_the_runtime_directory(tmp_path: Path, template_dir: Path) -> None:
+def test_argv_and_env_redirect_pi_to_the_runtime_directory(
+    tmp_path: Path, template_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config = _config(tmp_path, template_dir)
     runtime = _prepare(config, tmp_path)
-    argv = build_pi_argv(config, runtime, extra=["--no-session"])
+    monkeypatch.setenv("PATH", "/usr/bin")
+    spawn = _inproc_spawn(config, runtime, tmp_path, extra_argv=("--no-session",))
+    argv = spawn.argv
     assert argv[:2] == [config.pi_bin, "--mode"]
     assert argv[2] == "rpc"
     assert "--provider" in argv and PROVIDER_ID in argv
     assert "--model" in argv and "openai/gpt-5.6-sol" in argv
     assert argv[-1] == "--no-session"
 
-    env = build_pi_env(config, runtime, base_env={"PATH": "/usr/bin"})
+    env = spawn.env
     assert env["PI_CODING_AGENT_DIR"] == str(runtime.directory)
     assert env["PI_CODING_AGENT_SESSION_DIR"] == str(runtime.session_dir)
     assert str(config.session_dir) not in env["PI_CODING_AGENT_SESSION_DIR"], (

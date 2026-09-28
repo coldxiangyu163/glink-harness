@@ -18,7 +18,7 @@ from pi_glink.kernel.agent_env import RunCredentials
 from pi_glink.kernel.harness import select_family
 from pi_glink.kernel.harness_acp import AcpHarnessFamily
 from pi_glink.kernel.harness_pi import PiHarnessFamily
-from pi_glink.store import CANCELLED, FAILED, FINISHED, RunStore
+from pi_glink.store import CANCELLED, FAILED, FINISHED, RunStore, RunSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"
@@ -77,7 +77,7 @@ def test_acp_validate_credentials_is_a_noop(tmp_path: Path) -> None:
 
 def test_pi_resume_value(tmp_path: Path) -> None:
     _config, store, family = make_family(tmp_path)
-    parent = store.create("第一轮", harness="pi", executor="inproc", harness_pack="pi")
+    parent = store.create("第一轮", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     assert family.resume_value(parent) == "continued.jsonl"
     assert family.resume_value(None) is None
 
@@ -89,15 +89,14 @@ def test_pi_verifies_continuation_before_turn_per_executor(tmp_path: Path) -> No
     json`` 适配器删除。
     """
     _config, _store, family = make_family(tmp_path)
-    assert family.verifies_continuation_before_turn("inproc") is True
-    assert family.verifies_continuation_before_turn("docker") is True
-    assert family.verifies_continuation_before_turn("e2b") is True
+    # 与 sandbox 无关（S2 起无 executor 参数）。
+    assert family.verifies_continuation_before_turn() is True
 
 
 def test_continuation_workspace_defaults_to_none(tmp_path: Path) -> None:
     """pi 每 run 独立工作区（基类默认）；ACP 覆写见 test_kernel_harness_acp。"""
     _config, store, family = make_family(tmp_path)
-    parent = store.create("第一轮", harness="pi", executor="inproc", harness_pack="pi")
+    parent = store.create("第一轮", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     assert family.continuation_workspace(parent) is None
 
 

@@ -47,8 +47,9 @@ from pi_glink.kernel.acp_execution import (
 )
 from pi_glink.kernel.acp_rpc import AcpError
 from pi_glink.kernel.execution import ExecutionAdapter, ExecutionSpec, SessionInfo
+from pi_glink.kernel.sandbox import Launch, open_sandbox
 from pi_glink.runs.runner import FollowupUnavailable, RunManager
-from pi_glink.store import FAILED, FINISHED, RunStore
+from pi_glink.store import FAILED, FINISHED, RunStore, RunSpec
 from pi_glink.tenancy import TenantContext, TenantCredentialStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -193,9 +194,10 @@ def test_adapter_refuses_a_followup_the_agent_cannot_resume(tmp_path: Path) -> N
     )
     adapter = AcpExecutionAdapter(
         spec,
-        argv=list(config.acp_command),
-        env={},
-        cwd=tmp_path,
+        sandbox=open_sandbox(
+            "inproc", config=config, run_id=spec.run_id, workspace=spec.workspace
+        ),
+        launch=Launch(argv=tuple(config.acp_command)),
         on_frame=lambda _frame: None,
     )
     with pytest.raises(AcpError) as excinfo:
@@ -401,9 +403,7 @@ def test_acp_followup_refuses_a_parent_that_is_not_an_acp_run(tmp_path: Path) ->
     record = store.create(
         "pi 父 run",
         workspace_root=config.workspace_root,
-        harness="pi",
-        harness_pack="pi",
-        executor="inproc",
+        spec=RunSpec(family="pi", pack="pi", executor="inproc"),
     )
     session_file = Path(config.session_dir) / record.run_id / "pi-session.jsonl"
     session_file.parent.mkdir(parents=True, exist_ok=True)
@@ -558,7 +558,7 @@ def test_acp_followup_refuses_a_parent_owned_by_another_tenant(
     credentials = TenantCredentialStore.from_file(tenants_file, repo_root=REPO_ROOT)
     created: list[Any] = []
     monkeypatch.setattr(
-        "pi_glink.kernel.harness_acp.compose_adapter", _fake_acp_adapter_factory(created)
+        "pi_glink.kernel.harness_acp.AcpExecutionAdapter", _fake_acp_adapter_factory(created)
     )
     manager = RunManager(config, EventBus(), store, credential_store=credentials)
     alpha = TenantContext(
@@ -698,9 +698,13 @@ def craft_parent(
         "workspace": str(directory / "workspace"),
         "session_id": session_id,
         "finished_at": time.time(),
-        "harness": harness,
-        "harness_pack": harness_pack,
-        "executor": executor,
+        "spec": {
+            "family": harness,
+            "pack": harness_pack,
+            "executor": executor,
+            "blueprint": None,
+            "credential_origin": "host",
+        },
     }
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     (directory / "meta.json").write_text(
@@ -732,8 +736,8 @@ def test_agent_identity_is_written_back_at_session_ready(tmp_path: Path) -> None
     record = run_first_turn(manager, "第一轮：记住代号 REMEMBER:AGENT-1，然后写报告")
     final = store.get(record.run_id)
 
-    assert final.harness == "acp"
-    assert final.executor == "inproc"
+    assert final.spec.family == "acp"
+    assert final.spec.executor == "inproc"
     assert final.agent == "fake-acp"  # fake_acp 协商结果里的 agentInfo.name
 
 
@@ -771,8 +775,8 @@ def test_an_acp_parent_without_a_resume_channel_is_refused(
         capabilities={},  # 无续接通道的能力矩阵
     )
     with pytest.raises(FollowupUnavailable) as excinfo:
-        manager._family.check_continuation(  # noqa: SLF001
-            manager._resumable_parent(None, parent.run_id)  # noqa: SLF001
+        manager._family_for("acp").check_continuation(  # noqa: SLF001
+            manager._resumable_parent(None, parent.run_id, manager._admission_spec(None))  # noqa: SLF001
         )
     assert excinfo.value.code == "session_unavailable"
 
@@ -791,8 +795,8 @@ def test_state_home_follows_the_parent_recorded_executor(tmp_path: Path) -> None
         executor="e2b",
         state_root="recovered",
     )
-    state_home = manager._family.state_home(parent)  # noqa: SLF001
+    state_home = manager._family_for("acp").state_home(parent)  # noqa: SLF001
     assert state_home == store.run_dir(parent.run_id) / "acp-agent" / "recovered"
-    admitted = manager._resumable_parent(None, parent.run_id)  # noqa: SLF001
-    manager._family.check_continuation(admitted)  # noqa: SLF001
+    admitted = manager._resumable_parent(None, parent.run_id, manager._admission_spec(None))  # noqa: SLF001
+    manager._family_for("acp").check_continuation(admitted)  # noqa: SLF001
     assert admitted.run_id == parent.run_id

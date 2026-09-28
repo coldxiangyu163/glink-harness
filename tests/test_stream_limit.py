@@ -91,7 +91,7 @@ def stream_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     created: list[PiGlinkServer] = []
 
     def build(adapter: _Adapter, **overrides: str):
-        monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", lambda spec, **kwargs: adapter)
+        monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter)
         instance = create_server(make_config(tmp_path, **overrides))
         created.append(instance)
         thread = threading.Thread(target=instance.serve_forever, daemon=True)

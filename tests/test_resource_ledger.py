@@ -34,7 +34,7 @@ from pi_glink.kernel.execution import (
 )
 from pi_glink.runs.runner import ResourcesUnreleased, RunManager, RunQuotaExceeded
 from pi_glink.ownership import DataRootOwnership
-from pi_glink.store import FAILED, FINISHED, RUNNING, RunStore
+from pi_glink.store import FAILED, FINISHED, RUNNING, RunStore, RunSpec
 from pi_glink.tenancy import TenantContext
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -95,7 +95,7 @@ def record_hold(
     released: bool = False,
 ) -> None:
     """A terminal record whose cleanup did not confirm the release."""
-    store.create("泄漏的 run", run_id=run_id, tenant_id=tenant_id, harness="pi", harness_pack="pi", executor="inproc")
+    store.create("泄漏的 run", run_id=run_id, tenant_id=tenant_id, spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     store.update(
         run_id,
         status=FINISHED,
@@ -170,7 +170,7 @@ def test_the_ledger_survives_a_restart(tmp_path: Path) -> None:
 def test_a_corrupt_record_is_hidden_from_lists_but_holds_globally(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
-    store.create("正常", run_id="good", tenant_id="tenant-a", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("正常", run_id="good", tenant_id="tenant-a", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     store.update(
         "good",
         status=FINISHED,
@@ -544,8 +544,8 @@ def test_the_sweep_never_probes_a_run_that_is_still_in_flight(
         docker_probe=lambda name: (calls.append(name) or True, "fake docker: 不存在"),
     )
     adapter = _BlockingAdapter()
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", lambda spec, **kwargs: adapter)
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: True)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter)
+    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
 
     run_id = manager.start("进行中", context("tenant-a")).run_id
     assert store.get(run_id).holds_resources is True, "运行中的 run 也是持有"
@@ -647,9 +647,9 @@ def test_the_docker_face_persists_the_container_name_before_start(
 ) -> None:
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
     store = RunStore(config.data_root / "runs")
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: True)
+    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
     monkeypatch.setattr(
-        "pi_glink.kernel.execution.subprocess.run",
+        "pi_glink.kernel.sandbox.subprocess.run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args, 1, "", "Error: No such container"
         ),
@@ -711,7 +711,7 @@ def test_the_run_state_helper_keeps_its_meaning() -> None:
 
     record = RunRecord(
         run_id="x", prompt="p", status=RUNNING, created_at=time.time(), workspace="/tmp/x",
-        harness="pi", harness_pack="pi", executor="inproc",
+        spec=RunSpec(family="pi", pack="pi", executor="inproc"),
     )
     assert record.holds_resources is True
 
@@ -721,7 +721,7 @@ def test_reconcile_closes_leftover_children_and_summarizes_them(tmp_path: Path) 
     frame carries the same ``children`` summary as a normal verdict."""
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
-    store.create("遗留 run", run_id="leftover-kids", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("遗留 run", run_id="leftover-kids", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     store.write_child(
         "leftover-kids",
         {"n": 0, "toolCallId": "c1", "agent": "researcher", "task": "调研甲",

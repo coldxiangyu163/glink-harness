@@ -21,6 +21,7 @@ import re
 import shlex
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -30,10 +31,12 @@ from acp_pack import apply_acp_pack
 from pi_glink.events import EventBus
 from pi_glink.kernel import docker_env
 from pi_glink.kernel.acp_env import prepare_acp_runtime
-from pi_glink.kernel.execution import ExecutionSpec, build_adapter
-from pi_glink.kernel.rpc import PiRpcClient
+from harness_helpers import compose_launch, execution_spec, family
+from pi_glink.kernel.acp_execution import AcpExecutionAdapter
+from pi_glink.kernel.execution import ExecutionSpec
+from pi_glink.kernel.sandbox import DockerSandbox, E2BSandbox, open_sandbox
 from pi_glink.runs.runner import RunManager
-from pi_glink.store import FAILED, FINISHED, RunStore
+from pi_glink.store import FAILED, FINISHED, RunStore, RunSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NOTES = REPO_ROOT / "docs" / "acp-integration-notes.md"
@@ -62,16 +65,37 @@ def make_runtime(config, tmp_path: Path, name: str = "r1"):
     return prepare_acp_runtime(config, runtime_dir=tmp_path / name / "acp-agent")
 
 
-def make_plan(config, runtime, tmp_path: Path, *, run_id: str = "abc123"):
-    return docker_env.build_acp_plan(
-        config,
-        runtime,
-        run_id=run_id,
-        workspace=tmp_path / "workspace",
+def _docker_command(family_name: str, config, runtime, tmp_path: Path, *, run_id: str):
+    """``DockerSandbox.spawn(family.launch(spec))`` — the production composition.
+
+    Returns the argv/env the protocol client receives, plus the container name
+    and image the launch froze, so the checks below read one real ``docker
+    run`` command instead of a test-only builder.
+    """
+    spec = execution_spec(config, runtime, workspace=tmp_path / "workspace", run_id=run_id)
+    launch, sandbox = compose_launch(
+        family_name, "docker", spec, store_root=tmp_path / f"store-{family_name}"
+    )
+    assert isinstance(sandbox, DockerSandbox)
+    spawn = sandbox.spawn(launch)
+    assert spawn.argv == sandbox.command(launch)
+    return SimpleNamespace(
+        argv=list(spawn.argv),
+        env=spawn.env,
+        container_name=sandbox.container_name,
+        image=launch.image,
     )
 
 
-# -- plan composition ---------------------------------------------------------
+def make_plan(config, runtime, tmp_path: Path, *, run_id: str = "abc123"):
+    return _docker_command("acp", config, runtime, tmp_path, run_id=run_id)
+
+
+def make_pi_plan(config, runtime, tmp_path: Path, *, run_id: str = "abc123"):
+    return _docker_command("pi", config, runtime, tmp_path, run_id=run_id)
+
+
+# -- docker command composition ------------------------------------------------
 
 
 def test_the_plan_bridges_container_stdio_and_mounts_the_state_root(
@@ -177,14 +201,9 @@ def test_the_plan_reuses_the_pi_face_isolation_contract(tmp_path: Path) -> None:
         config,
         runtime_dir=tmp_path / "pi" / "pi-agent",
         session_dir=tmp_path / "pi" / "sessions",
+        image_packages=True,
     )
-    pi_plan = docker_env.build_plan(
-        config,
-        pi_runtime,
-        run_id="abc123",
-        workspace=tmp_path / "workspace",
-        session_dir=pi_runtime.session_dir,
-    )
+    pi_plan = make_pi_plan(config, pi_runtime, tmp_path)
 
     def isolation(argv: list[str]) -> dict[str, str]:
         return {
@@ -211,14 +230,9 @@ def test_the_pi_docker_plan_is_unchanged_by_the_acp_plan(tmp_path: Path) -> None
         config,
         runtime_dir=tmp_path / "pi" / "pi-agent",
         session_dir=tmp_path / "pi" / "sessions",
+        image_packages=True,
     )
-    plan = docker_env.build_plan(
-        config,
-        runtime,
-        run_id="abc123",
-        workspace=tmp_path / "workspace",
-        session_dir=runtime.session_dir,
-    )
+    plan = make_pi_plan(config, runtime, tmp_path)
     argv = plan.argv
     assert argv[:4] == ["docker", "run", "--rm", "-i"]
     assert argv[argv.index("--entrypoint") + 1] == agent_env.IMAGE_PACKAGE_GUARD
@@ -387,47 +401,27 @@ def test_e2b_is_no_longer_refused_for_the_acp_family(tmp_path: Path) -> None:
         timeout_seconds=5,
     )
 
-    class _FakeSandbox:
-        sandbox_id = "fake-sandbox-id"
-        argv = ["fake-acp"]
-        template = "glink-acp-worker"
+    def refuse_create(**_kwargs):  # pragma: no cover - 装配契约不创建沙箱
+        raise AssertionError("装配阶段不得创建 E2B 沙箱")
 
-        def start(self, **_kwargs) -> None:
-            pass
-
-        def spawn(self):  # pragma: no cover - 装配契约只检查可调用
-            raise AssertionError("spawn 不应在本用例中被调用")
-
-    with pytest.raises(ConfigError, match="acp_e2b_plan"):
-        # 没有沙箱 plan 的装配必须显式失败，不能静默回退到 on-prem 面。
-        build_adapter(
-            spec,
-            harness="acp",
-            executor="e2b",
-            client_factory=PiRpcClient,
-            on_frame=lambda _frame: None,
-            rpc_plan=lambda _spec: ([], {}, None),
-            docker_plan=lambda _spec: ([], {}, "container"),
-            docker_stop=lambda _name: [],
-            acp_plan=lambda _spec: ([], {}, None),
-        )
-
-    from pi_glink.kernel.acp_execution import AcpSandboxExecutionAdapter
-
-    adapter = build_adapter(
-        spec,
-        harness="acp",
-        executor="e2b",
-        client_factory=PiRpcClient,
-        on_frame=lambda _frame: None,
-        rpc_plan=lambda _spec: ([], {}, None),
-        docker_plan=lambda _spec: ([], {}, "container"),
-        docker_stop=lambda _name: [],
-        acp_plan=lambda _spec: ([], {}, None),
-        acp_e2b_plan=lambda _spec: _FakeSandbox(),
+    sandbox = open_sandbox(
+        config.executor,
+        config=config,
+        run_id=spec.run_id,
+        workspace=spec.workspace,
+        sandbox_factory=refuse_create,
     )
-    assert isinstance(adapter, AcpSandboxExecutionAdapter)
-    assert adapter.identity() == {"sandbox": "fake-sandbox-id"}
+    # 执行面由冻结的 executor 选出，不静默回退到 on-prem 面。
+    assert isinstance(sandbox, E2BSandbox) and sandbox.remote
+    adapter = family("acp", config, tmp_path / "store").build_adapter(
+        spec, sandbox, on_frame=lambda _frame: None
+    )
+    assert isinstance(adapter, AcpExecutionAdapter)
+    assert adapter.kind == "e2b" and adapter.sandbox is sandbox
+    # 沙箱身份只在 open（创建）之后存在；装配本身不产生任何资源。
+    assert adapter.identity() == {}
+    # launch 选的是 ACP 模板，不是 pi 的 worker 模板。
+    assert adapter.launch.template == "glink-acp-worker"
 
 
 def test_a_missing_daemon_fails_closed_and_keeps_the_persisted_identity(
@@ -437,7 +431,7 @@ def test_a_missing_daemon_fails_closed_and_keeps_the_persisted_identity(
     run record keeps its container name for the online ledger."""
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
     store = RunStore(config.data_root / "runs")
-    monkeypatch.setattr("pi_glink.kernel.harness_acp.docker_available", lambda: False)
+    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: False)
     manager = RunManager(config, EventBus(), store)
     record = manager.start("docker 不可用时应当失败")
     final = manager.wait(record.run_id, timeout=30)
@@ -453,7 +447,7 @@ def test_the_acp_container_identity_is_reconciled_by_its_persisted_name(
     """``confirm_absent`` semantics apply to ACP runs through the same ledger."""
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
     store = RunStore(config.data_root / "runs")
-    store.create("残留的 ACP run", run_id="acp-leak", harness="acp", harness_pack="dsh", executor="docker")
+    store.create("残留的 ACP run", run_id="acp-leak", spec=RunSpec(family="acp", pack="dsh", executor="docker"))
     store.update(
         "acp-leak",
         status=FINISHED,
@@ -477,10 +471,11 @@ def test_the_acp_container_identity_is_reconciled_by_its_persisted_name(
 def test_the_acp_docker_plan_feeds_the_adapter_through_the_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The adapter receives the container plan and the container's session cwd.
+    """The adapter receives the container command and the container's session cwd.
 
-    A fake client records what ``build_adapter`` handed the adapter; no daemon
-    is contacted and no container is started.
+    A fake client records what ``family.build_adapter`` over the runner's own
+    sandbox selection handed the adapter; no daemon is contacted and no
+    container is started.
     """
     config = make_config(
         tmp_path,
@@ -530,28 +525,23 @@ def test_the_acp_docker_plan_feeds_the_adapter_through_the_runner(
         timeout_seconds=5,
     )
     manager = RunManager(config, EventBus(), RunStore(config.data_root / "runs"))
-    monkeypatch.setattr("pi_glink.kernel.harness_acp.docker_available", lambda: True)
-    monkeypatch.setattr("pi_glink.kernel.execution.AcpRpcClient", _RecordingClient)
-    monkeypatch.setattr("pi_glink.kernel.acp_execution.subprocess.run", fake_run)
-    adapter = build_adapter(
-        spec,
-        harness="acp",
-        executor="docker",
-        client_factory=PiRpcClient,
-        on_frame=lambda _frame: None,
-        rpc_plan=lambda _spec: ([], {}, None),
-        docker_plan=lambda _spec: ([], {}, "container"),
-        docker_stop=docker_env.stop_argv,
-        acp_plan=lambda _spec: ([], {}, None),
-        acp_docker_plan=manager._family.acp_docker_plan,  # noqa: SLF001
+    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
+    monkeypatch.setattr("pi_glink.kernel.acp_execution.AcpRpcClient", _RecordingClient)
+    monkeypatch.setattr("pi_glink.kernel.sandbox.subprocess.run", fake_run)
+    sandbox = open_sandbox(
+        config.executor, config=config, run_id="abc123", workspace=tmp_path / "workspace"
     )
-    expected = docker_env.build_acp_plan(
-        config, runtime, run_id="abc123", workspace=tmp_path / "workspace"
+    adapter = manager._family_for("acp").build_adapter(  # noqa: SLF001
+        spec, sandbox, on_frame=lambda _frame: None
     )
+    expected = make_plan(config, runtime, tmp_path)
     assert adapter.identity() == {"container": expected.container_name}
 
     adapter.start()
-    assert seen["argv"] == expected.argv, "运行期 argv 来自 docker_env.build_acp_plan"
+    assert seen["argv"] == expected.argv, "运行期 argv 即 DockerSandbox.command(launch)"
+    assert seen["argv"] == docker_env.run_argv(
+        config, adapter.launch, run_id="abc123", workspace=tmp_path / "workspace"
+    )
     assert seen["argv"][seen["argv"].index("pi-glink-acp-worker:test") + 1 :] == [
         "codex-acp",
         "--flag",

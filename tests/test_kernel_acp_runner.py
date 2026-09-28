@@ -25,12 +25,11 @@ from acp_pack import apply_acp_pack
 from pi_glink.events import EventBus
 from pi_glink.kernel.acp_env import AcpRuntime
 from pi_glink.kernel.acp_execution import AcpExecutionAdapter
-from pi_glink.kernel.execution import (
-    ExecutionAdapter,
-    ExecutionSpec,
-    build_adapter,
-)
-from pi_glink.kernel.rpc import PiRpcClient
+from harness_helpers import family
+from pi_glink.kernel import docker_env
+from pi_glink.kernel.execution import ExecutionAdapter, ExecutionSpec
+from pi_glink.kernel.harness_pi import PiExecutionAdapter
+from pi_glink.kernel.sandbox import SANDBOXES, open_sandbox
 from pi_glink.redaction import REPLACEMENT
 from pi_glink.runs.runner import (
     FollowupUnavailable,
@@ -988,7 +987,7 @@ def test_acp_accepts_the_host_blueprint_command(tmp_path: Path) -> None:
     assert final is not None and final.status == FINISHED
     stored = store.get(record.run_id)
     assert stored is not None
-    assert stored.blueprint == "deepresearch" and stored.prompt == "跨境资金监管"
+    assert stored.spec.blueprint == "deepresearch" and stored.prompt == "跨境资金监管"
 
 
 def test_acp_refuses_a_bare_blueprint_command(tmp_path: Path) -> None:
@@ -1085,93 +1084,63 @@ def test_acp_adapter_is_composed_through_the_same_contract(tmp_path: Path) -> No
         workspace=tmp_path,
         timeout_seconds=5,
     )
-    adapter = build_adapter(
-        spec,
-        harness="acp",
-        executor="inproc",
-        client_factory=PiRpcClient,
-        on_frame=lambda _frame: None,
-        rpc_plan=lambda _spec: ([], {}, None),
-        docker_plan=lambda _spec: ([], {}, "container"),
-        docker_stop=lambda _name: [],
-        acp_plan=lambda _spec: ([sys.executable, "-c", "pass"], {}, _spec.workspace),
-    )
-    assert isinstance(adapter, ExecutionAdapter)
-    assert isinstance(adapter, AcpExecutionAdapter)
-    assert adapter.kind == "acp"
+    acp = family("acp", config, tmp_path / "store")
+    pi = family("pi", config, tmp_path / "store")
 
-    # The pi path is untouched by the new dispatch.
-    from pi_glink.kernel.execution import RpcExecutionAdapter
+    def sandbox_for(executor: str):
+        def refuse_create(**_kwargs):  # pragma: no cover - 装配不创建沙箱
+            raise AssertionError("装配阶段不得创建 E2B 沙箱")
 
-    pi_adapter = build_adapter(
-        spec,
-        executor="inproc",
-        client_factory=PiRpcClient,
-        on_frame=lambda _frame: None,
-        rpc_plan=lambda _spec: (["pi", "--mode", "rpc"], {}, _spec.workspace),
-        docker_plan=lambda _spec: ([], {}, "container"),
-        docker_stop=lambda _name: [],
-    )
-    assert isinstance(pi_adapter, RpcExecutionAdapter)
-
-    # M3a：docker 面由同一 ACP 适配器承载（容器 stdio 交给同一个 M1 客户端）。
-    # 原义务（M1）：harness=acp + executor=docker 在装配层即拒绝；新义务：
-    # 可装配，且容器身份/停止语义走 docker 面约定（详见
-    # tests/test_kernel_acp_docker.py 的 plan 组合回归）。
-    docker_adapter = build_adapter(
-        spec,
-        harness="acp",
-        executor="docker",
-        client_factory=PiRpcClient,
-        on_frame=lambda _frame: None,
-        rpc_plan=lambda _spec: ([], {}, None),
-        docker_plan=lambda _spec: ([], {}, "container"),
-        docker_stop=lambda _name: [],
-        acp_plan=lambda _spec: ([], {}, None),
-        acp_docker_plan=lambda _spec: (["docker", "run", "-i"], {}, "pi-glink-contract"),
-    )
-    assert isinstance(docker_adapter, AcpExecutionAdapter)
-    assert docker_adapter.identity() == {"container": "pi-glink-contract"}
-
-    # M3b：e2b 面已实现，装配层不再拒绝；沙箱客户端/桥接与终态走
-    # tests/test_kernel_acp_e2b.py（fake SDK），这里只确认接缝不再失败。
-    # 原义务（M1–M3a）：build_adapter(harness="acp", executor="e2b") 必须报
-    # ConfigError（不静默降级）；新义务：接受，但缺少 acp_e2b_plan 时显式失败。
-    from pi_glink.kernel.acp_execution import AcpSandboxExecutionAdapter
-
-    class _FakeSandboxClient:
-        sandbox_id = ""
-        argv: list[str] = []
-        template = "glink-acp-worker"
-
-        def start(self, **_kwargs) -> None:
-            pass
-
-        def spawn(self):  # pragma: no cover - 本用例不启动 agent
-            raise AssertionError("spawn 不应在本用例中被调用")
-
-    e2b_adapter = build_adapter(
-        spec,
-        harness="acp",
-        executor="e2b",
-        client_factory=PiRpcClient,
-        on_frame=lambda _frame: None,
-        rpc_plan=lambda _spec: ([], {}, None),
-        docker_plan=lambda _spec: ([], {}, "container"),
-        docker_stop=lambda _name: [],
-        acp_plan=lambda _spec: ([], {}, None),
-        acp_e2b_plan=lambda _spec: _FakeSandboxClient(),
-    )
-    assert isinstance(e2b_adapter, AcpSandboxExecutionAdapter)
-    with pytest.raises(ConfigError):
-        build_adapter(
-            spec,
-            harness="acp",
-            executor="e2b",
-            client_factory=PiRpcClient,
-            on_frame=lambda _frame: None,
-            rpc_plan=lambda _spec: ([], {}, None),
-            docker_plan=lambda _spec: ([], {}, "container"),
-            docker_stop=lambda _name: [],
-            acp_plan=lambda _spec: ([], {}, None),
+        return open_sandbox(
+            executor,
+            config=config,
+            run_id=spec.run_id,
+            workspace=spec.workspace,
+            sandbox_factory=refuse_create,
         )
+
+    # 原义务（M1–M3b）：build_adapter 的 (harness, executor) 字符串分派按面
+    # 回调取 plan，缺 plan 时显式失败。新义务：没有分派和 plan 回调——每个
+    # (族, 执行面) 组合都是 ``family.driver(sandbox.spawn(family.launch(spec)))``；
+    # 执行面由冻结的 executor 选出，驱动由族给出，两者正交。
+    assert set(SANDBOXES) == {"inproc", "docker", "e2b"}
+    for executor in SANDBOXES:
+        sandbox = sandbox_for(executor)
+        adapter = acp.build_adapter(spec, sandbox, on_frame=lambda _frame: None)
+        assert isinstance(adapter, ExecutionAdapter)
+        assert isinstance(adapter, AcpExecutionAdapter)
+        assert adapter.kind == executor and adapter.sandbox is sandbox
+        assert list(adapter.launch.argv) == list(config.acp_command)
+        expected_identity = (
+            {"container": docker_env.container_name_for("contract-run")}
+            if executor == "docker"
+            else {}
+        )
+        # 容器名在 docker run 之前就由 run id 固定；E2B 身份在创建后才存在。
+        assert adapter.identity() == expected_identity
+
+    # The pi path goes through the same composition and keeps its own driver.
+    from pi_glink.kernel import agent_env
+
+    pi_runtime = agent_env.prepare_agent_dir(
+        config,
+        runtime_dir=tmp_path / "pi" / "pi-agent",
+        session_dir=tmp_path / "pi" / "sessions",
+    )
+    pi_spec = ExecutionSpec(
+        config=config,
+        runtime=pi_runtime,
+        run_id="contract-run",
+        prompt="契约",
+        system_prompt="",
+        workspace=tmp_path,
+        timeout_seconds=5,
+    )
+    pi_adapter = pi.build_adapter(pi_spec, sandbox_for("inproc"), on_frame=lambda _frame: None)
+    assert isinstance(pi_adapter, PiExecutionAdapter)
+    assert not isinstance(pi_adapter, AcpExecutionAdapter)
+
+    # 族的 launch 只接受本族渲染的运行期：把 pi 的运行期交给 ACP 族显式失败，
+    # 不静默组出错误的 argv。
+    with pytest.raises(ConfigError, match="AcpRuntime"):
+        acp.build_adapter(pi_spec, sandbox_for("inproc"), on_frame=lambda _frame: None)

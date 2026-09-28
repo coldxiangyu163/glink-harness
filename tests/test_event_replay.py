@@ -35,7 +35,7 @@ from pi_glink.events import RUN_STARTED, EventBus
 from pi_glink.kernel.rpc import PiRpcClient
 from pi_glink.runs.runner import RunManager
 from pi_glink.static_files import WebAssets
-from pi_glink.store import FAILED, RUNNING, RunStore
+from pi_glink.store import FAILED, RUNNING, RunStore, RunSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
@@ -431,7 +431,7 @@ def test_all_readers_observe_the_same_committed_facts(tmp_path: Path) -> None:
 def test_restart_reconciles_a_run_left_running_by_a_previous_process(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
-    store.create("上一次进程遗留", run_id="abandoned", workspace=tmp_path / "ws", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("上一次进程遗留", run_id="abandoned", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     store.update(
         "abandoned",
         status=RUNNING,
@@ -811,7 +811,7 @@ def test_a_reconciled_interruption_is_invisible_until_its_fsync_returns(
     frame become visible together, after fsync — or not at all."""
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
-    store.create("上一个进程遗留", run_id="orphan", workspace=tmp_path / "ws", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("上一个进程遗留", run_id="orphan", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     store.append_event(
         "orphan",
         {"type": "run_started", "runId": "orphan", "seq": 1, "ts": time.time(), "payload": {}},

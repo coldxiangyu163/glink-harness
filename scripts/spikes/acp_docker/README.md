@@ -1,7 +1,7 @@
 # ACP docker 面的 live 探针（GLINK-ACP-05 / M4 起，M5/M6 扩展，M9 增续接冒烟）
 
 `handshake.py` 用生产装配路径（`build_config` → `prepare_acp_runtime` →
-`docker_env.build_acp_plan` → `AcpExecutionAdapter`）在本地 `pi-glink-acp-worker`
+`AcpHarnessFamily.launch` → `DockerSandbox` → `AcpExecutionAdapter`）在本地 `pi-glink-acp-worker`
 镜像里只做 `initialize` + `session/new`（不发 prompt、不消耗模型），并在结束时按
 持久化容器名 force-remove、确认无同名容器残留。不是默认检查的一部分。
 

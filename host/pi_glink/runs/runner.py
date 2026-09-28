@@ -46,7 +46,7 @@ import logging
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -61,7 +61,7 @@ from ..blueprints import (
 )
 from ..config import HostConfig
 from ..ownership import DataRootOwnership
-from ..redaction import SecretRedactor, redactor_from_config
+from ..redaction import SecretRedactor, credential_secrets_from_text, redactor_from_config
 from ..store import (
     ARTIFACTS_DIRNAME,
     CANCELLED,
@@ -71,14 +71,10 @@ from ..store import (
     RUNNING,
     SUBAGENTS_DIRNAME,
     RunRecord,
+    RunSpec,
     RunStore,
 )
-from ..kernel.acp_env import AcpRuntime, credential_secrets_from_text
-from ..kernel.agent_env import AgentRuntime, RunCredentials
-from ..kernel.docker_env import (
-    container_name_for as docker_container_name,
-    host_session_path as docker_host_session_path,
-)
+from ..kernel.agent_env import RunCredentials
 from ..kernel.execution import (
     CleanupReport,
     ExecutionAdapter,
@@ -90,11 +86,17 @@ from ..kernel.execution import (
 # ``FollowupUnavailable`` is defined in the family module (family gates raise
 # it) and re-exported here: ``web_routes`` and existing importers keep their
 # ``runs.runner`` import unchanged.
-from ..kernel.harness import FollowupUnavailable, HarnessFamily, Verdict, select_family
-from ..kernel.projection import Projector
+from ..kernel.harness import (
+    FollowupUnavailable,
+    FrameProjector,
+    HarnessFamily,
+    HarnessRuntime,
+    Verdict,
+    select_family,
+)
 # ``RunBusy`` is defined next to the ledger because both the admission gate and
 # the ledger's adjudication raise it; re-exported here for existing importers.
-from ..kernel.rpc import PiRpcClient
+from ..kernel.sandbox import Sandbox, open_sandbox
 from ..kernel.sweep import SessionSweep
 from ..tenancy import (
     TenantContext,
@@ -305,8 +307,8 @@ class _Execution:
     phase: str = _OPEN
     cancel_requested: bool = False
     adapter: ExecutionAdapter | None = None
-    runtime: AgentRuntime | AcpRuntime | None = None
-    projector: Projector | None = None
+    runtime: HarnessRuntime | None = None
+    projector: FrameProjector | None = None
     #: Set once the finalizer finished (committed or not).
     finalized: threading.Event = field(default_factory=threading.Event)
     verdict: Verdict | None = None
@@ -324,9 +326,6 @@ class _Execution:
     progress: ChildProgressObserver | None = None
 
 
-ClientFactory = Callable[..., PiRpcClient]
-
-
 class RunManager:
     """Own the lifecycle of local runs."""
 
@@ -336,7 +335,7 @@ class RunManager:
         bus: Any,
         store: RunStore,
         *,
-        client_factory: ClientFactory = PiRpcClient,
+        client_factory: Callable[..., Any] | None = None,
         sandbox_factory: Callable[..., Any] | None = None,
         ownership: DataRootOwnership | None = None,
         credential_store: TenantCredentialStore | None = None,
@@ -360,13 +359,16 @@ class RunManager:
             self.redactor.add_from_file(config.web_search_config_path)
         self._lock = threading.RLock()
         self._executions: dict[str, _Execution] = {}
-        #: The process-wide harness family, chosen here once: every "the pi
-        #: family does X, the ACP family does Y" decision of the run lifecycle
-        #: goes through it. The admission freeze (``harness=``/``executor=``
-        #: written into the record) stays below — it *is* the freeze point.
-        self._family: HarnessFamily = select_family(
-            config.harness, config=config, store=store
-        )
+        #: Harness families by name (``RunSpec.family``). Every "the pi family
+        #: does X, the ACP family does Y" decision goes through the family the
+        #: *run's own* spec names, never a process-wide one: admission resolves
+        #: the spec from the frozen config (:meth:`_admission_spec`), and from
+        #: then on the record is the only source (:meth:`_family_of`).
+        self._families: dict[str, HarnessFamily] = {}
+        self._families_lock = threading.Lock()
+        # Fail at startup (not at the first admission) on a family the frozen
+        # configuration cannot provide.
+        self._family_for(config.harness)
         #: The external-resource ledger: restart reconciliation, operator
         #: adjudication and the online identity-probe sweep. It shares this
         #: manager's admission lock and reads the in-flight table through the
@@ -485,17 +487,23 @@ class RunManager:
         blueprint_prompt = (
             render_blueprint(blueprint_template) if blueprint_template is not None else ""
         )
+        # The run's spec as far as it is known before credentials are read
+        # (family/pack/executor from the frozen config, the resolved
+        # blueprint); the credential origin completes it below.
+        target = self._admission_spec(blueprint_template)
+        family = self._family_for(target.family)
         if parent_run_id is not None:
             # 锁外追问门禁：runner 的共享门禁（owner→harness 字段→terminal→
             # stale）先行，族的追加事实（ACP 族的能力矩阵、session id、状态
             # 根；pi 族无追加）随后。fail-closed 发生在凭据解析与 run 目录
             # 创建之前；子 adapter 在任何 resume 请求前还会自查它自己协商
             # 到的能力。
-            self._family.check_continuation(
-                self._resumable_parent(context, parent_run_id)
+            family.check_continuation(
+                self._resumable_parent(context, parent_run_id, target)
             )
         credentials = self._credentials_for_context(context)
-        self._family.validate_credentials(credentials)
+        family.validate_credentials(credentials)
+        spec = replace(target, credential_origin=credentials.origin)
         # Build the run's redaction boundary before anything derived from the
         # prompt can be stored: a credential pasted into the prompt is masked
         # with the same knowledge the run's own output will be.
@@ -504,7 +512,7 @@ class RunManager:
         # session snapshot's file IO happen before admission. The refusals are
         # re-evaluated inside the lock below, where the seed is consumed, so a
         # state that changed while the file was being read is still enforced.
-        seed = self._resume_seed(context, parent_run_id, redactor)
+        seed = self._resume_seed(context, parent_run_id, redactor, spec)
 
         with self._lock:
             self._check_admission(context)
@@ -514,12 +522,12 @@ class RunManager:
                 # concurrent follow-up of the same parent): a refusal here
                 # discards the seed, nothing has been written yet. 共享门禁
                 # 与族追加门禁在同一次调用内保持原次序（先共享后族）。
-                parent = self._resumable_parent(context, parent_run_id)
-                self._family.check_continuation(parent)
+                parent = self._resumable_parent(context, parent_run_id, spec)
+                family.check_continuation(parent)
                 # The family decides whether the conversation's workspace is
                 # reused (ACP keeps it: the session's ``cwd`` is recorded in
                 # the agent's own state) or fresh (pi).
-                continuation_workspace = self._family.continuation_workspace(parent)
+                continuation_workspace = family.continuation_workspace(parent)
             # The store allocates the id and creates the run directory
             # exclusively (a generated collision is retried there): a new run can
             # never adopt or overwrite an existing record. An ACP continuation
@@ -534,20 +542,15 @@ class RunManager:
                 tenant_id=context.tenant_id if context is not None else None,
                 creator_user_id=context.user_id if context is not None else None,
                 parent_run_id=parent_run_id,
-                blueprint=(
-                    blueprint_template.name if blueprint_template is not None else None
-                ),
                 blueprint_stages=(
                     tuple(stage.as_record() for stage in blueprint_template.stages)
                     if blueprint_template is not None
                     else ()
                 ),
-                # 准入时冻结的宿主事实，与 run id/owner 同一次原子写入：
-                # 追问门禁比父记录自己的族/包与执行面，不用当前配置反推
-                # 历史 run（docs/adr/0002）。
-                harness=self._family.name,
-                harness_pack=self.config.harness_pack,
-                executor=self.config.executor,
+                # 准入时从冻结配置解析的 RunSpec，与 run id/owner 同一次原子
+                # 写入：此后族、执行面、追问门禁与状态根都读它，不用当前配置
+                # 反推历史 run（docs/adr/0002）。
+                spec=spec,
             )
             run_id = record.run_id
             workspace = Path(record.workspace)
@@ -658,7 +661,7 @@ class RunManager:
         return self.store.list_for(context.tenant_id, limit=None)
 
     def _resumable_parent(
-        self, context: TenantContext | None, parent_run_id: str
+        self, context: TenantContext | None, parent_run_id: str, spec: RunSpec
     ) -> RunRecord:
         """The parent a follow-up may resume *now*, or the refusal it has earned.
 
@@ -669,8 +672,8 @@ class RunManager:
         follow-up turn is ``stale_run``.
 
         Between the owner gate and the state checks the parent must have run
-        under the host's own family and pack: the record's ``harness`` and
-        ``harness_pack`` (frozen at admission) must equal the current ones,
+        under the child's family and pack: the record's ``spec.family`` and
+        ``spec.pack`` (frozen at admission) must equal the child's ``spec``,
         otherwise the follow-up is ``session_unavailable`` whatever the
         parent's status — a foreign parent is still ``unknown_run`` first, so
         existence is not disclosed across tenants. The family-specific facts
@@ -685,9 +688,9 @@ class RunManager:
         parent = self._authorized_parent(context, parent_run_id)
         if parent is None:
             raise FollowupUnavailable("unknown_run")
-        if parent.harness != self._family.name:
+        if parent.spec.family != spec.family:
             raise FollowupUnavailable("session_unavailable")
-        if parent.harness_pack != self.config.harness_pack:
+        if parent.spec.pack != spec.pack:
             # 同族不同包（例如 dsh → opencode）的会话不能续接：agent 自己的状态根
             # 与续接能力都是按包声明的，fail-closed 胜过猜一个映射。
             raise FollowupUnavailable("session_unavailable")
@@ -705,6 +708,7 @@ class RunManager:
         context: TenantContext | None,
         parent_run_id: str | None,
         redactor: SecretRedactor,
+        spec: RunSpec,
     ) -> bytes | None:
         """Snapshot the sanitized session of an authorized parent run.
 
@@ -724,8 +728,38 @@ class RunManager:
         """
         if parent_run_id is None:
             return None
-        parent = self._resumable_parent(context, parent_run_id)
-        return self._family.resume_seed(parent, redactor=redactor)
+        parent = self._resumable_parent(context, parent_run_id, spec)
+        return self._family_for(spec.family).resume_seed(parent, redactor=redactor)
+
+    # -- run spec and families ------------------------------------------------
+
+    def _admission_spec(self, blueprint: Blueprint | None) -> RunSpec:
+        """The :class:`RunSpec` a new run is admitted with, from the frozen config.
+
+        This is the only place the host's configured harness family, pack and
+        sandbox face turn into run facts; the credential origin is filled in
+        once the run's credentials are selected. No request field selects them
+        (yet): a per-request choice would only change this resolution.
+        """
+        return RunSpec(
+            family=self.config.harness,
+            pack=self.config.harness_pack,
+            executor=self.config.executor,
+            blueprint=blueprint.name if blueprint is not None else None,
+        )
+
+    def _family_for(self, name: str) -> HarnessFamily:
+        """The (cached) harness family object named by a ``RunSpec.family``."""
+        with self._families_lock:
+            family = self._families.get(name)
+            if family is None:
+                family = select_family(name, config=self.config, store=self.store)
+                self._families[name] = family
+            return family
+
+    def _family_of(self, execution: _Execution) -> HarnessFamily:
+        """The family of one admitted run: its record's ``spec.family``."""
+        return self._family_for(execution.record.spec.family)
 
     def _redactor_for(self, credentials: RunCredentials) -> SecretRedactor:
         """A per-run redaction boundary: host secrets + this run's credentials."""
@@ -994,16 +1028,25 @@ class RunManager:
             self._seed_report(execution)
             self._emit_open(execution, events.RUN_STARTED, {"prompt": execution.record.prompt})
 
-            runtime = self._prepare_runtime(execution)
-            adapter = self._build_adapter(execution, runtime)
+            # The sandbox face is the run's frozen ``spec.executor``, not the
+            # host's current configuration. Constructing it is side-effect
+            # free; the resource is created inside ``adapter.start()``.
+            sandbox = open_sandbox(
+                execution.record.spec.executor,
+                config=self.config,
+                run_id=run_id,
+                workspace=execution.workspace,
+                sandbox_factory=self._sandbox_factory,
+                on_identity=lambda identity: self._store_identity(execution, identity),
+            )
+            runtime = self._prepare_runtime(execution, sandbox)
+            adapter = self._build_adapter(execution, runtime, sandbox)
             execution.adapter = adapter
             adapter.start()
             self._store_external_identity(execution, adapter)
 
             session = adapter.session_info()
-            if execution.parent_run_id and self._family.verifies_continuation_before_turn(
-                self.config.executor
-            ):
+            if execution.parent_run_id and self._family_of(execution).verifies_continuation_before_turn():
                 # 两族三面同规则：RPC ``get_state`` 在 session_ready 即知
                 # 会话身份，续接身份不符在回合前、第一次模型调用前拒
                 # session_unavailable（docs/adr/0004）。
@@ -1180,7 +1223,7 @@ class RunManager:
             logger.exception("session credential sweep failed run=%s", run_id)
 
     def _commit_verdict(
-        self, execution: _Execution, projector: Projector | None
+        self, execution: _Execution, projector: FrameProjector | None
     ) -> bool:
         """Decide and durably commit the verdict, then the bookkeeping."""
         run_id = execution.record.run_id
@@ -1253,7 +1296,7 @@ class RunManager:
         # 族把 harness 自己的 stop 词汇（pi 的 error/aborted/length，ACP 的
         # StopReason 集合）译成产品终态词汇；``None`` 落入下方的交付策略
         # （报告检查）。映射逐字节不变式见契约 §4 与族实现。
-        verdict = self._family.model_stop_verdict(stop, model_error=execution.execution_facts.model_error)
+        verdict = self._family_of(execution).model_stop_verdict(stop, model_error=execution.execution_facts.model_error)
         if verdict is not None:
             return verdict
         if execution.artifact_facts.report_path is None:
@@ -1323,7 +1366,7 @@ class RunManager:
         except (ArtifactError, OSError) as exc:
             raise FollowupUnavailable("report_unavailable") from exc
 
-    def _prepare_runtime(self, execution: _Execution) -> AgentRuntime | AcpRuntime:
+    def _prepare_runtime(self, execution: _Execution, sandbox: Sandbox) -> HarnessRuntime:
         """Render the run's own per-harness configuration and session directory.
 
         The render itself is the family's (:meth:`HarnessFamily.prepare_runtime`):
@@ -1345,12 +1388,13 @@ class RunManager:
             parent = self._authorized_parent(execution.context, execution.parent_run_id)
             if parent is None:
                 raise FollowupUnavailable("session_unavailable")
-        prepared = self._family.prepare_runtime(
+        prepared = self._family_of(execution).prepare_runtime(
             run_id,
             run_dir,
             parent=parent,
             session_seed=execution.session_seed,
             credentials=execution.credentials,
+            sandbox=sandbox,
         )
         execution.runtime = prepared.runtime
         if prepared.seed_consumed:
@@ -1367,14 +1411,14 @@ class RunManager:
             execution.redactor.add(value)
         for path in prepared.secret_files:
             execution.redactor.add_from_file(path)
-        execution.projector = self._family.make_projector(execution.redactor)
+        execution.projector = self._family_of(execution).make_projector(execution.redactor)
         return prepared.runtime
 
 
     # -- adapters -------------------------------------------------------------
 
     def _build_adapter(
-        self, execution: _Execution, runtime: AgentRuntime | AcpRuntime
+        self, execution: _Execution, runtime: HarnessRuntime, sandbox: Sandbox
     ) -> ExecutionAdapter:
         run_id = execution.record.run_id
         parent = (
@@ -1386,15 +1430,13 @@ class RunManager:
             # The parent disappeared or is no longer readable by this run's
             # tenant: never start a kernel with an unverified resume target.
             raise FollowupUnavailable("session_unavailable")
-        if self.config.executor == "docker":
-            # The container name is fixed by the run id before ``docker run``
-            # executes: persist it now so a failure inside the adapter's start()
-            # cannot leave an unnamed container behind. 资源台账身份在
-            # adapter.start() 前落盘是面关切且两族同行为，故留在 runner 而
-            # 不进族方法。
-            self._store_identity(
-                execution, {"container": docker_container_name(run_id)}
-            )
+        planned = sandbox.planned_identity()
+        if planned:
+            # An identity fixed before the resource exists (the Docker
+            # container name derives from the run id): persist it now so a
+            # failure inside the adapter's start() cannot leave an unnamed
+            # resource behind. 两族同行为，是执行面事实，由 sandbox 给出。
+            self._store_identity(execution, planned)
         spec = ExecutionSpec(
             config=self.config,
             runtime=runtime,
@@ -1408,16 +1450,14 @@ class RunManager:
             # sanitized session file copied into the run's session directory,
             # while the ACP family resumes the **session id** the parent
             # recorded, against the state root inherited in _prepare_runtime.
-            resume_session=self._family.resume_value(parent),
+            resume_session=self._family_of(execution).resume_value(parent),
             expected_session_id=parent.session_id if parent else None,
         )
-        return self._family.build_adapter(
+        return self._family_of(execution).build_adapter(
             spec,
-            executor=self.config.executor,
+            sandbox,
             on_frame=lambda frame: self._on_frame(execution, frame),
-            on_identity=lambda identity: self._store_identity(execution, identity),
             client_factory=self._client_factory,
-            sandbox_factory=self._sandbox_factory,
         )
 
     def _store_external_identity(
@@ -1560,7 +1600,7 @@ class RunManager:
         the total with the latest cumulative context snapshot. The totals stay
         on the execution; the family only computes.
         """
-        return self._family.accumulate_usage(
+        return self._family_of(execution).accumulate_usage(
             frame, payload, execution.execution_facts.usage_total, execution.execution_facts.usage_keys
         )
 
@@ -1568,17 +1608,9 @@ class RunManager:
         self, execution: _Execution, session: SessionInfo
     ) -> None:
         run_id = execution.record.run_id
+        # Already a host path: the adapter maps the sandbox's view back
+        # (``Sandbox.host_path``) before reporting it.
         session_file = session.session_file
-        if isinstance(session_file, str) and session_file and self.config.executor == "docker":
-            assert execution.runtime is not None
-            mapped = self._host_session_file(session_file, execution.runtime)
-            if mapped is None:
-                logger.warning(
-                    "container session path does not map back to the host mount: %s",
-                    session_file,
-                )
-            else:
-                session_file = mapped
         if session.session_id or session_file:
             # 与 ``session_id`` 同一先例的写回点：agent 身份是内核自己报告
             # 的事实（ACP 协商结果里的 ``agentInfo.name``），启动后才知道，
@@ -1600,18 +1632,6 @@ class RunManager:
         payload: dict[str, Any] = dict(session.payload)
         payload["sessionFile"] = session_file
         self._emit_open(execution, events.SESSION_READY, payload)
-
-    def _host_session_file(self, reported: str, runtime: AgentRuntime) -> str | None:
-        """Translate a pi-reported container path into its host location.
-
-        The in-process face reports host paths directly. The Docker face
-        reports container paths (``/sessions/…``) while the file itself lives in
-        the run's mounted session directory; only the host path can be read back
-        for sanitising. Only the session mount is translated: an unmappable path
-        is refused instead of being trusted.
-        """
-        mapped = docker_host_session_path(reported, runtime.session_dir)
-        return str(mapped) if mapped is not None else None
 
     # -- artifacts ------------------------------------------------------------
 
@@ -1929,7 +1949,7 @@ class RunManager:
                     run_id=execution.record.run_id,
                     lock=execution.lock,
                     is_open=lambda: execution.phase == _OPEN,
-                    match_n=self._family.match_progress_n,
+                    match_n=self._family_of(execution).match_progress_n,
                     source_factory=lambda: self._child_progress_source(execution),
                     emit_frame=lambda event_type, payload: self._emit_frame(
                         execution, event_type, payload
@@ -2068,7 +2088,7 @@ class RunManager:
         the family's answer for the closing children-dir sweep flips the
         run's ``redacted`` fact exactly like the other sweeps.
         """
-        if self._family.enrich_children(
+        if self._family_of(execution).enrich_children(
             execution.record.run_id,
             runtime=execution.runtime,
             artifact_failures=execution.artifact_facts.artifact_failures,

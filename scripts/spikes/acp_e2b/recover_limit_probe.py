@@ -4,10 +4,10 @@
 ACP-13 的 e2b 状态根回收是有界的（4096 文件 / 8 MiB 单文件 / 64 MiB 总量 /
 深度 12），触顶即「整份拒绝、不留半份、终态帧 artifactFailures 记录」——该路径
 此前只有合成覆盖（§14.1、§14.8）。本探针用**真实 E2B 沙箱 + 真实 SDK + 生产回收
-函数**（``E2BAcpSandboxClient.recover_state()``，与 run finalize 调用的是同一份）
+函数**（``AcpSandboxTransfer.recover_state()``，与 run finalize 调用的是同一份）
 实测触顶：
 
-* 每个轴一个真实沙箱：``start()`` 后先 ``upload_home()``（本探针无凭据，只建状态
+* 每个轴一个真实沙箱：``E2BSandbox.open()`` 后先 ``upload_home()``（本探针无凭据，只建状态
   根），再用沙箱内命令写合成状态文件（**不经过宿主上传通道**，所以 8 MiB 以上的
   单文件也能落在状态根里）；
 * 调用生产的 ``recover_state()``，记录 verdict（ok/failures/文件数/字节数）；
@@ -56,9 +56,10 @@ from pi_glink.kernel.acp_env import (  # noqa: E402
 from pi_glink.kernel.acp_e2b_env import (  # noqa: E402
     ACP_STATE_MAX_DEPTH,
     SANDBOX_ACP_HOME,
-    E2BAcpSandboxClient,
+    AcpSandboxTransfer,
 )
 from pi_glink.kernel.e2b_env import confirm_sandbox_absent  # noqa: E402
+from pi_glink.kernel.sandbox import E2BSandbox, Launch  # noqa: E402
 
 #: One synthetic state tree per axis. ``seed`` commands run inside the sandbox;
 #: ``files``/``bytes`` are the state facts the recovery has to judge.
@@ -187,8 +188,8 @@ def run_axis(axis: str, args: argparse.Namespace, api_key: str, workdir: Path) -
     config = build_config(values, REPO_ROOT)
     run_dir = axis_dir / "data" / "runs" / f"limit-{axis}"
     runtime = prepare_acp_runtime(config, runtime_dir=run_dir / "acp-agent")
-    client = E2BAcpSandboxClient(
-        config, runtime, run_id=f"limit-{axis}", workspace=axis_dir / "workspace"
+    sandbox = E2BSandbox(
+        config=config, run_id=f"limit-{axis}", workspace=axis_dir / "workspace"
     )
     facts: dict = {
         "axis": axis,
@@ -197,16 +198,23 @@ def run_axis(axis: str, args: argparse.Namespace, api_key: str, workdir: Path) -
         "seeded": {"files": spec["files"], "bytes": spec["bytes"]},
     }
     try:
-        client.start()
-        facts["sandboxId"] = client.sandbox_id
-        print(f"  [step] 沙箱已创建 sandbox_id={client.sandbox_id}", flush=True)
-        client.upload_home()
-        if client.sandbox is None:
-            facts["seedError"] = "沙箱句柄缺失（start 未建立）"
+        # 只建沙箱与状态根，不启动 agent：launch 只需要 ACP 模板。
+        sandbox.open(
+            Launch(argv=(), template=config.acp_e2b_template),
+            timeout_seconds=config.task_timeout_seconds + 300,
+        )
+        facts["sandboxId"] = sandbox.sandbox_id
+        print(f"  [step] 沙箱已创建 sandbox_id={sandbox.sandbox_id}", flush=True)
+        if sandbox.handle is None:
+            facts["seedError"] = "沙箱句柄缺失（open 未建立）"
             return facts
+        transfer = AcpSandboxTransfer(
+            sandbox.handle, runtime, workspace=axis_dir / "workspace"
+        )
+        transfer.upload_home()
         for index, command in enumerate(spec["seed"], start=1):
             print(f"  [step] 种子命令 {index}/{len(spec['seed'])}", flush=True)
-            result = client.sandbox.commands.run(command, timeout=args.seed_timeout)
+            result = sandbox.handle.commands.run(command, timeout=args.seed_timeout)
             exit_code = getattr(result, "exit_code", 0)
             if exit_code not in (0, None):
                 facts["seedError"] = (
@@ -214,7 +222,7 @@ def run_axis(axis: str, args: argparse.Namespace, api_key: str, workdir: Path) -
                     f"{str(getattr(result, 'stderr', ''))[:200]}"
                 )
                 return facts
-        before_files, before_bytes, failure = sandbox_file_facts(client.sandbox)
+        before_files, before_bytes, failure = sandbox_file_facts(sandbox.handle)
         facts["sandboxStateBefore"] = {"files": before_files, "bytes": before_bytes}
         print(
             f"  [step] 沙箱内状态: files={before_files} bytes={before_bytes}", flush=True
@@ -222,12 +230,12 @@ def run_axis(axis: str, args: argparse.Namespace, api_key: str, workdir: Path) -
         if failure:
             facts["seedError"] = failure
             return facts
-        facts["listingShape"] = listing_shape(client.sandbox)
+        facts["listingShape"] = listing_shape(sandbox.handle)
         print(f"  [step] {facts['listingShape']}", flush=True)
 
         started = time.monotonic()
         print("  [step] 开始 recover_state()", flush=True)
-        state = client.recover_state()
+        state = transfer.recover_state()
         facts["recoverSeconds"] = round(time.monotonic() - started, 2)
         facts["ok"] = state.ok
         facts["recoveredFiles"] = len(state.files)
@@ -259,15 +267,15 @@ def run_axis(axis: str, args: argparse.Namespace, api_key: str, workdir: Path) -
                     "sub/state-b.txt": hashlib.sha256(b"tiny").hexdigest(),
                 }
 
-        after_files, after_bytes, failure = sandbox_file_facts(client.sandbox)
+        after_files, after_bytes, failure = sandbox_file_facts(sandbox.handle)
         facts["sandboxStateAfter"] = {"files": after_files, "bytes": after_bytes}
         if failure:
             facts["sandboxStateAfterError"] = failure
     except Exception as exc:  # noqa: BLE001 - the failure is the evidence
         facts["error"] = f"{type(exc).__name__}: {exc}"
-        facts["sandboxId"] = client.sandbox_id
+        facts["sandboxId"] = sandbox.sandbox_id
     finally:
-        close_failures = client.close()
+        close_failures = sandbox.close().failures
         facts["closeFailures"] = list(close_failures)
         sandbox_id = facts.get("sandboxId") or ""
         absent, detail = confirm_sandbox_absent(sandbox_id, api_key=api_key)
@@ -360,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"日期: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"模板: {args.template}（dev 模板，未重建）")
     print(f"e2b SDK: {sdk_version}")
-    print(f"回收函数: pi_glink.kernel.acp_e2b_env.E2BAcpSandboxClient.recover_state()（生产路径）")
+    print(f"回收函数: pi_glink.kernel.acp_e2b_env.AcpSandboxTransfer.recover_state()（生产路径）")
     print(
         f"上限: 文件数 {INHERIT_MAX_FILES} / 单文件 {INHERIT_MAX_FILE_BYTES} B / "
         f"总量 {INHERIT_MAX_TOTAL_BYTES} B / 深度 {ACP_STATE_MAX_DEPTH}"

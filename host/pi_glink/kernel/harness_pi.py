@@ -1,7 +1,8 @@
 """The pi harness family.
 
 pi 族的策略面：宿主模型凭据准入、会话文件种子、
-``AgentRuntime`` 渲染与 ``Projector``、RPC/Docker/E2B 面的 adapter 组装、
+``AgentRuntime`` 渲染与 ``Projector``、pi 进程的 :class:`Launch` 描述与
+RPC 驱动（``PiExecutionAdapter``，与 sandbox 正交）、
 pi stop 词汇归一化，以及 pi-subagents 的子代理增强与进度配对。
 """
 
@@ -21,19 +22,12 @@ from ..store import (
     RunRecord,
 )
 from .agent_env import (
+    IMAGE_PACKAGE_GUARD,
     AgentRuntime,
-    build_pi_argv,
-    build_pi_env,
     prepare_agent_dir,
 )
-from .docker_env import (
-    build_plan as build_docker_plan,
-    is_available as docker_available,
-    stop_argv as docker_stop_argv,
-)
-from .e2b_env import SANDBOX_SESSIONS
-from .execution import ExecutionAdapter, ExecutionSpec
-from .execution import build_adapter as compose_adapter
+from .docker_env import worker_image
+from .execution import ExecutionAdapter, ExecutionSpec, PiExecutionAdapter
 from .harness import (
     FollowupUnavailable,
     HarnessFamily,
@@ -41,6 +35,7 @@ from .harness import (
     Verdict,
 )
 from .projection import Projector
+from .sandbox import Launch, Mount, Sandbox
 from .subagent_artifacts import (
     associate_children,
     parse_artifact_filename,
@@ -112,11 +107,10 @@ class PiHarnessFamily(HarnessFamily):
         # session directory.
         return "continued.jsonl" if parent else None
 
-    def verifies_continuation_before_turn(self, executor: str) -> bool:
-        # 恒 True：三面同规则，都走 RPC 通道，``get_state`` 在
+    def verifies_continuation_before_turn(self) -> bool:
+        # 恒 True：每个 sandbox 同规则，都走 RPC 通道，``get_state`` 在
         # ``session_ready`` 即知会话身份（pi 以 ``--session continued.jsonl``
         # 启动，续接会话原地打开、保持原 session id；docs/adr/0004）。
-        # ``executor`` 参数保留以合 ABC 签名。
         return True
 
     # -- (c) runtime 渲染与 projector 工厂 --------------------------------------
@@ -129,12 +123,16 @@ class PiHarnessFamily(HarnessFamily):
         parent: RunRecord | None,
         session_seed: bytes | None,
         credentials: "RunCredentials | None",
+        sandbox: Sandbox,
     ) -> PreparedRuntime:
         runtime = prepare_agent_dir(
             self._config,
             runtime_dir=run_dir / RUNTIME_DIRNAME,
             session_dir=Path(self._config.session_dir) / run_id,
             credentials=credentials,
+            # An isolated sandbox runs pi from its image: settings.json names
+            # the image-local prebaked packages (the guard verifies them).
+            image_packages=sandbox.isolated,
         )
         seed_consumed = False
         if session_seed is not None:
@@ -157,83 +155,75 @@ class PiHarnessFamily(HarnessFamily):
     def make_projector(self, redactor: "SecretRedactor") -> Projector:
         return Projector(redactor)
 
-    # -- (d) adapter 组装 --------------------------------------------------------
+    # -- (d) launch 描述与协议驱动 ---------------------------------------------
 
-    def build_adapter(
-        self,
-        spec: ExecutionSpec,
-        *,
-        executor: str,
-        on_frame: Callable[[Mapping[str, Any]], None],
-        on_identity: Callable[[Mapping[str, str]], None],
-        client_factory: Callable[..., Any],
-        sandbox_factory: Callable[..., Any] | None,
-    ) -> ExecutionAdapter:
-        return compose_adapter(
-            spec,
-            harness=self.name,
-            executor=executor,
-            client_factory=client_factory,
-            on_frame=on_frame,
-            sandbox_factory=sandbox_factory,
-            on_identity=on_identity,
-            rpc_plan=self._rpc_plan,
-            docker_plan=self._docker_plan,
-            docker_stop=docker_stop_argv,
-            e2b_rpc_plan=self._e2b_rpc_plan,
-        )
+    def launch(self, spec: ExecutionSpec, sandbox: Sandbox) -> Launch:
+        """pi in RPC mode, with its config and session directories placed.
 
-    def _rpc_plan(
-        self, spec: ExecutionSpec
-    ) -> tuple[list[str], dict[str, str], Path | None]:
-        return (
-            build_pi_argv(spec.config, spec.runtime, extra=[
-                *spec.extra_argv,
-                *(["--session", str(spec.runtime.session_dir / spec.resume_session)] if spec.resume_session else []),
-            ]),
-            build_pi_env(spec.config, spec.runtime),
-            spec.workspace,
-        )
+        ``argv[0]`` is the host's ``config.pi_bin`` in-process and the image's
+        ``pi`` on an isolated sandbox (a host path means nothing there), where
+        the image's package guard runs first. ``spec.extra_argv`` already holds
+        ``--name pi-glink-<run_id>`` and the optional ``--append-system-prompt``
+        (the runner injects them identically on every sandbox). The
+        continuation is ``--session <sessions>/continued.jsonl`` in the
+        sandbox's own view — the upload/mount location of the seeded copy. The
+        prompt itself travels as an RPC frame on stdin, never in argv.
 
-    def _docker_plan(
-        self, spec: ExecutionSpec
-    ) -> tuple[list[str], dict[str, str], str]:
-        if not docker_available():
-            raise ConfigError(
-                "LOCAL_WEB_EXECUTOR=docker requires a reachable Docker daemon"
-            )
-        plan = build_docker_plan(
-            spec.config,
-            spec.runtime,
-            run_id=spec.run_id,
-            workspace=spec.workspace,
-            session_dir=spec.runtime.session_dir,
-            extra=[*spec.extra_argv, *(["--session", f"/sessions/{spec.resume_session}"] if spec.resume_session else [])],
-        )
-        return plan.argv, plan.env, plan.container_name
-
-    def _e2b_rpc_plan(self, spec: ExecutionSpec) -> list[str]:
-        """e2b 面沙箱内 pi 的 RPC argv（命令链由 ``E2BSandboxClient.spawn_rpc`` 组合）。
-
-        ``argv[0]`` 是字面量 ``"pi"``（镜像 PATH 内，docker_env.py 先例）：
-        宿主路径 ``config.pi_bin`` 在沙箱里没有意义。``spec.extra_argv`` 已含
-        ``--name pi-glink-<run_id>`` 与可选 ``--append-system-prompt <text>``
-        （runner 统一注入，三面不变），``shlex.join`` 在 spawn 时负责其引
-        用。续接形式与另两面同形（``--session <路径>``），只是路径是沙箱内
-        的 ``/home/user/sessions/continued.jsonl``——``upload_continuation``
-        的上传位置与该路径一致。prompt 本体走 stdin 的 ``prompt`` 帧，不进
-        argv。
+        The environment is credential-free: the model credential is in the
+        rendered ``auth.json`` (pi's own store), so ``env`` inside the kernel
+        cannot print it.
         """
+        runtime: AgentRuntime = spec.runtime
+        config_dir = sandbox.place("config", runtime.directory)
+        sessions_dir = sandbox.place("sessions", runtime.session_dir)
         argv = [
-            "pi",
+            "pi" if sandbox.isolated else spec.config.pi_bin,
             "--mode", "rpc",
-            "--provider", spec.runtime.provider_id,
-            "--model", spec.runtime.model_id,
+            "--provider", runtime.provider_id,
+            "--model", runtime.model_id,
             *spec.extra_argv,
         ]
         if spec.resume_session:
-            argv.extend(["--session", f"{SANDBOX_SESSIONS}/{spec.resume_session}"])
-        return argv
+            argv.extend(["--session", f"{sessions_dir}/{spec.resume_session}"])
+        env = {
+            "PI_CODING_AGENT_DIR": config_dir,
+            "PI_CODING_AGENT_SESSION_DIR": sessions_dir,
+            "PI_SKIP_VERSION_CHECK": "1",
+            "PI_TELEMETRY": "0",
+        }
+        return Launch(
+            argv=tuple(argv),
+            env=env,
+            mounts=(
+                Mount(runtime.directory, config_dir),
+                # The run's own session directory: a shared mount would let two
+                # runs write into each other's session files.
+                Mount(runtime.session_dir, sessions_dir),
+            ),
+            guard=IMAGE_PACKAGE_GUARD if sandbox.isolated else None,
+            image=worker_image(spec.config),
+            template=spec.config.e2b_template,
+            # A remote sandbox is created with the same credential-free
+            # environment its kernel command gets.
+            create_env=env,
+        )
+
+    def driver(
+        self,
+        spec: ExecutionSpec,
+        *,
+        sandbox: Sandbox,
+        launch: Launch,
+        on_frame: Callable[[Mapping[str, Any]], None],
+        client_factory: Callable[..., Any] | None,
+    ) -> ExecutionAdapter:
+        return PiExecutionAdapter(
+            spec,
+            sandbox=sandbox,
+            launch=launch,
+            client_factory=client_factory,
+            on_frame=on_frame,
+        )
 
     # -- (e) 终态词汇归一化 ------------------------------------------------------
 

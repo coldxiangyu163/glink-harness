@@ -20,11 +20,9 @@ import pytest
 
 from acp_pack import apply_acp_pack
 from pi_glink.config import ConfigError, build_config
-from pi_glink.kernel.acp_env import (
-    build_acp_env,
-    credential_secrets_from_text,
-    prepare_acp_runtime,
-)
+from harness_helpers import compose_launch, execution_spec
+from pi_glink.kernel.acp_env import prepare_acp_runtime
+from pi_glink.redaction import credential_secrets_from_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -145,10 +143,19 @@ def test_a_symlinked_destination_is_refused(tmp_path: Path) -> None:
     assert outside.read_text(encoding="utf-8") == "untouched"
 
 
-def test_env_entries_are_applied_and_home_stays_the_run_root(tmp_path: Path) -> None:
+def test_env_entries_are_applied_and_home_stays_the_run_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg = config({"PI_GLINK_ACP_ENV": "ACME_MODE=workspace;ACME_EMPTY="})
     result = prepare_acp_runtime(cfg, runtime_dir=tmp_path / "acp-agent")
-    env = build_acp_env(cfg, result, base_env={"PATH": "/usr/bin", "HOME": "/operator"})
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("HOME", "/operator")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-operator-shell-value")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    spec = execution_spec(cfg, result, workspace=workspace)
+    launch, sandbox = compose_launch("acp", "inproc", spec, store_root=tmp_path / "store")
+    env = sandbox.spawn(launch).env
     assert env["HOME"] == str(result.home)
     assert env["HOME"] != "/operator"
     assert env["ACME_MODE"] == "workspace"

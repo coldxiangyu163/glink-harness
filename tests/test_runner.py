@@ -34,7 +34,7 @@ from pi_glink.runs.runner import (
     UnsupportedCommand,
     parse_blueprint_command,
 )
-from pi_glink.store import CANCELLED, FAILED, FINISHED, RUNNING, RunStore
+from pi_glink.store import CANCELLED, FAILED, FINISHED, RUNNING, RunStore, RunSpec
 from pi_glink.tenancy import TenantContext
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -194,7 +194,7 @@ def test_docker_session_file_is_mapped_back_to_the_host_and_sanitized(
     found nothing and the closing sanitise pass returned silently, leaving a
     tool-echoed credential in the host session log.
     """
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: True)
+    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
 
     secret = "sk-test-0123456789abcdef"
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker", OPENAI_API_KEY=secret)
@@ -241,7 +241,7 @@ def test_subagent_files_in_the_session_dir_are_sanitized_too(
 ) -> None:
     """Branched sessions and subagent artifacts share the session directory on
     the host-side faces; the closing sweep covers them, not just the main file."""
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: True)
+    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
 
     secret = "sk-subagent-0123456789abcdef"
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker", OPENAI_API_KEY=secret)
@@ -478,7 +478,7 @@ def test_a_blueprint_command_equals_the_blueprint_field(tmp_path: Path) -> None:
     slash = slash_store.get(slash_run.run_id)
     assert field is not None and slash is not None
     assert slash.prompt == field.prompt == "监管新规", "斜杠命令必须被重写，不能原样进内核"
-    assert slash.blueprint == field.blueprint == "deepresearch"
+    assert slash.spec.blueprint == field.spec.blueprint == "deepresearch"
     assert slash.blueprint_stages == field.blueprint_stages
 
 
@@ -530,7 +530,7 @@ def test_the_blueprint_command_names_come_from_the_blueprint_directory(tmp_path:
 
     record = manager.start("/synthetic 题目")
     assert manager.wait(record.run_id, timeout=30).status == FINISHED
-    assert record.blueprint == "synthetic"
+    assert record.spec.blueprint == "synthetic"
 
     with pytest.raises(UnsupportedCommand):
         manager.start("/notes 还没有这个蓝图")
@@ -620,7 +620,7 @@ def test_usage_is_summed_across_requests_and_not_double_counted(tmp_path: Path) 
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
-    record = store.create("用量", run_id="usage", workspace=tmp_path / "ws", harness="pi", harness_pack="pi", executor="inproc")
+    record = store.create("用量", run_id="usage", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     execution = _Execution(record=record, workspace=tmp_path / "ws")
     execution.projector = Projector(manager.redactor)
     manager.bus.open_run(record.run_id)
@@ -823,7 +823,7 @@ def scripted_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter: S
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", lambda spec, **kwargs: adapter)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter)
     return config, store, manager
 
 
@@ -1019,7 +1019,7 @@ def test_a_tail_withheld_during_finalization_is_released_before_the_verdict(
         return original_recover(destination)
 
     adapter.recover_artifacts = recover_with_late_frame  # type: ignore[method-assign]
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", build)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", build)
     record = manager.start("收尾期间到达的帧")
     manager.wait(record.run_id, timeout=30)
     events = read_events(store, record.run_id)
@@ -1077,7 +1077,7 @@ def test_two_concurrent_followups_of_one_parent_admit_exactly_one_child(
     )
     manager = RunManager(config, EventBus(), store)
     monkeypatch.setattr(
-        "pi_glink.kernel.harness_pi.compose_adapter",
+        "pi_glink.kernel.harness_pi.PiExecutionAdapter",
         lambda spec, **kwargs: _ResumingAdapter(spec.expected_session_id),
     )
 
@@ -1098,9 +1098,7 @@ def test_two_concurrent_followups_of_one_parent_admit_exactly_one_child(
         workspace=workspace,
         tenant_id=context.tenant_id,
         creator_user_id=context.user_id,
-        harness="pi",
-        harness_pack="pi",
-        executor="inproc",
+        spec=RunSpec(family="pi", pack="pi", executor="inproc"),
     )
     store.update(
         parent_id,
@@ -1113,7 +1111,7 @@ def test_two_concurrent_followups_of_one_parent_admit_exactly_one_child(
     both_snapshotting = threading.Barrier(2, timeout=10)
     # 锁边界在 pi 族的种子读取上：runner._resume_seed 只做共享门禁与委托，
     # 快照 IO（读取 + 脱敏）在族方法里，仍在准入锁外。
-    family = manager._family  # noqa: SLF001 - the lock boundary under test
+    family = manager._family_for("pi")  # noqa: SLF001 - the lock boundary under test
     snapshot = family.resume_seed
 
     def gated_snapshot(parent, *, redactor):
@@ -1199,7 +1197,11 @@ def open_execution(manager: RunManager, store: RunStore, workspace: Path, run_id
     """An open execution without a kernel: the typed-event commit seam."""
     from pi_glink.runs.runner import _Execution  # noqa: PLC0415
 
-    record = store.create("子代理", run_id=run_id, workspace=workspace, harness="pi", harness_pack="pi", executor="inproc")
+    # The run's spec is the manager's own admission spec: the family that
+    # handles its frames is the one its record names.
+    record = store.create(
+        "子代理", run_id=run_id, workspace=workspace, spec=manager._admission_spec(None)  # noqa: SLF001
+    )
     execution = _Execution(record=record, workspace=workspace)
     manager.bus.open_run(record.run_id)
     return execution
@@ -1561,8 +1563,8 @@ def test_admission_records_the_harness_and_executor_facts(tmp_path: Path) -> Non
     final = manager.wait(record.run_id, timeout=30)
 
     assert final.status == FINISHED
-    assert final.harness == manager.config.harness == "pi"
-    assert final.executor == manager.config.executor == "inproc"
+    assert final.spec.family == manager.config.harness == "pi"
+    assert final.spec.executor == manager.config.executor == "inproc"
     assert final.agent is None
 
 
@@ -1576,7 +1578,8 @@ def _write_parent_meta(
 ) -> None:
     """手写一份父记录的 meta.json（与合法 pi 会话文件），不经过 store.create。
 
-    准入事实默认 pi/pi/inproc；``harness``、``status`` 等键可按测试需要覆盖。
+    准入事实默认 spec = pi/pi/inproc；``family`` / ``pack`` / ``executor`` 覆盖
+    ``spec`` 的对应字段，``status`` 等其余键覆盖 meta 顶层。
     """
     session_dir = config.session_dir / parent_id
     directory = store.run_dir(parent_id)
@@ -1587,9 +1590,13 @@ def _write_parent_meta(
         "created_at": time.time(),
         "workspace": str(directory / "workspace"),
         "finished_at": time.time(),
-        "harness": "pi",
-        "harness_pack": "pi",
-        "executor": "inproc",
+        "spec": {
+            "family": "pi",
+            "pack": "pi",
+            "executor": "inproc",
+            "blueprint": None,
+            "credential_origin": "host",
+        },
     }
     if with_session_file:
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -1600,6 +1607,9 @@ def _write_parent_meta(
         )
         meta["session_id"] = "same-session"
         meta["session_file"] = str(session_file)
+    for name in ("family", "pack", "executor"):
+        if name in meta_fields:
+            meta["spec"][name] = meta_fields.pop(name)
     meta.update(meta_fields)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     (directory / "meta.json").write_text(
@@ -1619,7 +1629,7 @@ def test_same_family_pi_parent_follow_up_is_admitted_unchanged(
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
     monkeypatch.setattr(
-        "pi_glink.kernel.harness_pi.compose_adapter",
+        "pi_glink.kernel.harness_pi.PiExecutionAdapter",
         lambda spec, **kwargs: _ResumingAdapter(spec.expected_session_id),
     )
     parent_id = "parentrun001"
@@ -1629,7 +1639,7 @@ def test_same_family_pi_parent_follow_up_is_admitted_unchanged(
     session_file.write_text(
         json.dumps({"id": "same-session", "text": "第一轮"}) + "\n", encoding="utf-8"
     )
-    store.create("第一轮", run_id=parent_id, harness="pi", executor="inproc", harness_pack="pi")
+    store.create("第一轮", run_id=parent_id, spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     store.update(
         parent_id,
         status=FINISHED,
@@ -1643,7 +1653,7 @@ def test_same_family_pi_parent_follow_up_is_admitted_unchanged(
     assert final.status == FINISHED
     assert final.session_id == "same-session"
     assert final.parent_run_id == parent_id
-    assert final.harness == "pi" and final.executor == "inproc"
+    assert final.spec.family == "pi" and final.spec.executor == "inproc"
     assert manager.shutdown(timeout=10) == []
 
 
@@ -1666,9 +1676,9 @@ def test_known_cross_family_parent_is_refused_before_its_session_is_read(
         admitted.append(spec.run_id)
         return _ResumingAdapter(spec.expected_session_id)
 
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", recording_adapter)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", recording_adapter)
     _write_parent_meta(
-        config, store, "parentrun001", harness="acp", executor="inproc"
+        config, store, "parentrun001", family="acp", executor="inproc"
     )
 
     with pytest.raises(FollowupUnavailable) as excinfo:
@@ -1695,7 +1705,7 @@ def test_cross_family_refusal_precedes_the_state_checks(tmp_path: Path) -> None:
         "busyparent01",
         with_session_file=False,
         status=RUNNING,
-        harness="acp",
+        family="acp",
         executor="inproc",
     )
 
@@ -1730,7 +1740,7 @@ def test_foreign_parent_stays_unknown_even_when_its_family_is_known(
         with_session_file=False,
         tenant_id="tenant-alpha",
         creator_user_id="user-a",
-        harness="acp",
+        family="acp",
         executor="docker",
     )
     stranger = TenantContext(
@@ -1761,7 +1771,7 @@ def test_finalize_drives_its_steps_in_the_contract_order(
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
-    record = store.create("顺序探针", run_id="orderprobe01", harness="pi", harness_pack="pi", executor="inproc")
+    record = store.create("顺序探针", run_id="orderprobe01", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     workspace = tmp_path / "ws"
     workspace.mkdir()
     from pi_glink.runs.runner import _Execution  # noqa: PLC0415, SLF001

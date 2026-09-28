@@ -3,8 +3,10 @@
 The runner-level ACP regressions (``test_kernel_acp_runner.py`` /
 ``test_kernel_acp_resume.py`` / ``test_kernel_acp_e2b.py``) exercise these
 adapters through ``RunManager`` with a real child process or a fake SDK. The
-tests here construct :class:`AcpExecutionAdapter` and
-:class:`AcpSandboxExecutionAdapter` directly against a scripted in-process
+tests here construct :class:`AcpExecutionAdapter` directly over a
+:class:`~pi_glink.kernel.sandbox.Sandbox` (the real in-process and Docker
+sandboxes, and a scripted remote sandbox plus a scripted
+``AcpSandboxTransfer`` for the E2B shape) against a scripted in-process
 ``AcpRpcClient`` stand-in — no subprocess, no store, no HTTP — and pin the
 adapter contract itself:
 
@@ -39,7 +41,6 @@ from pi_glink.kernel.acp_execution import (
     ACP_STDERR_TAIL_LINE_CHARS,
     ACP_STDERR_TAIL_LINES,
     AcpExecutionAdapter,
-    AcpSandboxExecutionAdapter,
     _bounded_stderr_tail,
     compose_prompt,
 )
@@ -49,8 +50,17 @@ from pi_glink.kernel.acp_rpc import (
     AcpMethodNotFound,
     AcpRequestError,
 )
+from pi_glink.kernel.docker_env import CONTAINER_WORKSPACE, container_name_for
 from pi_glink.kernel.e2b_env import SANDBOX_WORKSPACE
 from pi_glink.kernel.execution import ExecutionSpec
+from pi_glink.kernel.sandbox import (
+    CleanupReport,
+    Launch,
+    Sandbox,
+    Spawn,
+    open_sandbox,
+    passthrough_env,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -162,47 +172,92 @@ class ScriptedAcpClient:
         return list(self.script.get("stderr_tail", []))[-limit:]
 
 
-class FakeSandboxClient:
-    """An ``E2BAcpSandboxClient`` stand-in for the sandbox face's own work."""
+class ScriptedRemoteSandbox(Sandbox):
+    """A remote (E2B-shaped) :class:`Sandbox`: open, spawn, recover, kill — logged.
 
-    def __init__(self, log: list[str], *, sandbox_id: str = "sbx-1") -> None:
-        self.argv = ["agent", "--acp"]
-        self.template = "glink-acp-worker"
-        self.sandbox_id = sandbox_id
+    The resource half of the remote face; the ACP state-root half is
+    :class:`ScriptedTransfer`, installed where the adapter builds its
+    ``AcpSandboxTransfer``.
+    """
+
+    kind = "e2b"
+    isolated = True
+    remote = True
+
+    def __init__(self, log: list[str], *, sandbox_id: str = "sbx-1", **kwargs: Any) -> None:
+        super().__init__(**kwargs)
         self.log = log
-        self.start_timeouts: list[int | None] = []
+        self._id = sandbox_id
+        self.sandbox_id = ""
+        self.template = ""
+        self._handle: object | None = None
+        self.open_timeouts: list[int] = []
         self.workspace_files: list[Path] = []
         self.workspace_failures: list[str] = []
+        self.close_failures: list[str] = []
+
+    @property
+    def handle(self) -> object | None:
+        return self._handle
+
+    def place(self, role: str, host: Path) -> str:
+        return {"workspace": SANDBOX_WORKSPACE}.get(role, f"/sandbox/{role}")
+
+    def open(self, launch: Launch, *, timeout_seconds: int) -> None:
+        self.log.append("sandbox.open")
+        self.open_timeouts.append(timeout_seconds)
+        self._handle = object()
+        self.sandbox_id = self._id
+        self.template = launch.template
+        if self._on_identity is not None:
+            self._on_identity({"sandbox": self.sandbox_id})
+
+    def spawn(self, launch: Launch) -> Spawn:
+        self.log.append("sandbox.spawn")
+
+        def process(*_args: Any, **_kwargs: Any) -> object:
+            self.log.append("sandbox.process")
+            return object()
+
+        return Spawn(argv=list(launch.argv), env={}, cwd=None, process=process)
+
+    def recover_workspace(self, destination: Path) -> tuple[list[Path], list[str]]:
+        self.log.append("sandbox.recover_workspace")
+        return (list(self.workspace_files), list(self.workspace_failures))
+
+    def session_facts(self) -> dict[str, Any]:
+        return {"sandboxId": self.sandbox_id, "template": self.template}
+
+    def identity(self) -> Mapping[str, str]:
+        return {"sandbox": self.sandbox_id} if self.sandbox_id else {}
+
+    def close(self) -> CleanupReport:
+        self.log.append("sandbox.close")
+        self._handle = None
+        failures = tuple(self.close_failures)
+        return CleanupReport(
+            released=not failures, failures=failures, external=dict(self.identity())
+        )
+
+
+class ScriptedTransfer:
+    """An ``AcpSandboxTransfer`` stand-in: the state root's delivery and recovery."""
+
+    def __init__(self, log: list[str]) -> None:
+        self.log = log
         self.state = AcpStateRecovery(
             ok=True, files=("home/.agent/state.json",), secrets=("state-secret",)
         )
-        self.close_failures: list[str] = []
-
-    def start(self, *, timeout_seconds: int | None = None) -> None:
-        self.log.append("sandbox.start")
-        self.start_timeouts.append(timeout_seconds)
 
     def upload_home(self) -> None:
-        self.log.append("sandbox.upload_home")
+        self.log.append("transfer.upload_home")
 
     def upload_continuation(self) -> None:
-        self.log.append("sandbox.upload_continuation")
-
-    def spawn(self) -> object:
-        self.log.append("sandbox.spawn")
-        return object()
-
-    def recover_artifacts(self, destination: Path) -> tuple[list[Path], list[str]]:
-        self.log.append("sandbox.recover_artifacts")
-        return (list(self.workspace_files), list(self.workspace_failures))
+        self.log.append("transfer.upload_continuation")
 
     def recover_state(self) -> AcpStateRecovery:
-        self.log.append("sandbox.recover_state")
+        self.log.append("transfer.recover_state")
         return self.state
-
-    def close(self) -> list[str]:
-        self.log.append("sandbox.close")
-        return list(self.close_failures)
 
 
 # -- helpers --------------------------------------------------------------------
@@ -241,6 +296,9 @@ def make_spec(config, tmp_path: Path, **overrides: Any) -> ExecutionSpec:
     return ExecutionSpec(**values)
 
 
+LAUNCH = Launch(argv=("agent", "--acp"), env={"A": "1"}, template="glink-acp-worker")
+
+
 def make_adapter(
     tmp_path: Path,
     *,
@@ -248,9 +306,13 @@ def make_adapter(
     config_overrides: Mapping[str, str] | None = None,
     spec_overrides: Mapping[str, Any] | None = None,
     log: list[str] | None = None,
-    **adapter_kwargs: Any,
+    executor: str = "inproc",
 ):
-    """An adapter over a scripted client; returns (adapter, created, log, frames)."""
+    """An adapter over a real ``executor`` sandbox and a scripted client.
+
+    Returns (adapter, created, log, frames). The Docker sandbox needs the
+    caller to stub ``docker_available`` and the ``docker rm -f`` runner.
+    """
     config = make_config(tmp_path, **dict(config_overrides or {}))
     spec = make_spec(config, tmp_path, **dict(spec_overrides or {}))
     shared_log = log if log is not None else []
@@ -263,20 +325,22 @@ def make_adapter(
         created.append(client)
         return client
 
+    sandbox = open_sandbox(
+        executor, config=config, run_id=spec.run_id, workspace=spec.workspace
+    )
     adapter = AcpExecutionAdapter(
         spec,
-        argv=["agent", "--acp"],
-        env={"A": "1"},
-        cwd=tmp_path,
+        sandbox=sandbox,
+        launch=LAUNCH,
         client_factory=factory,
         on_frame=frames.append,
-        **adapter_kwargs,
     )
     return adapter, created, shared_log, frames
 
 
 def make_sandbox_adapter(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     script: Mapping[str, Any] | None = None,
     spec_overrides: Mapping[str, Any] | None = None,
@@ -287,7 +351,15 @@ def make_sandbox_adapter(
     frames: list[Mapping[str, Any]] = []
     created: list[ScriptedAcpClient] = []
     identities: list[Mapping[str, str]] = []
-    sandbox = FakeSandboxClient(log)
+    transfer = ScriptedTransfer(log)
+    transfers: list[tuple[object, Path]] = []
+
+    def build_transfer(handle, runtime, *, workspace):
+        # The adapter hands the transfer the opened sandbox's own handle.
+        transfers.append((handle, workspace))
+        return transfer
+
+    monkeypatch.setattr("pi_glink.kernel.acp_execution.AcpSandboxTransfer", build_transfer)
     script_dict = dict(script or {})
 
     def factory(argv, **kwargs):
@@ -299,13 +371,22 @@ def make_sandbox_adapter(
         log.append("identity")
         identities.append(dict(identity))
 
-    adapter = AcpSandboxExecutionAdapter(
-        spec,
-        sandbox=sandbox,
-        client_factory=factory,
-        on_frame=frames.append,
+    sandbox = ScriptedRemoteSandbox(
+        log,
+        config=config,
+        run_id=spec.run_id,
+        workspace=spec.workspace,
         on_identity=on_identity,
     )
+    adapter = AcpExecutionAdapter(
+        spec,
+        sandbox=sandbox,
+        launch=LAUNCH,
+        client_factory=factory,
+        on_frame=frames.append,
+    )
+    sandbox.transfer = transfer  # type: ignore[attr-defined] - test handle
+    sandbox.transfers = transfers  # type: ignore[attr-defined]
     return adapter, sandbox, created, log, frames, identities
 
 
@@ -340,10 +421,11 @@ def test_the_adapter_contract_order_and_turn_frames(tmp_path: Path) -> None:
     report = adapter.close()
 
     client = created[0]
-    # The factory received the frozen argv/env/cwd and the frame callbacks.
+    # The factory received the sandbox's spawn of the frozen launch: the argv,
+    # the launch env over the in-process passthrough, the host workspace.
     assert client.argv == ["agent", "--acp"]
-    assert client.env == {"A": "1"}
-    assert client.cwd == tmp_path
+    assert client.env == {**passthrough_env(), "A": "1"}
+    assert client.cwd == tmp_path / "ws"
     assert client.spawn is None
     # Protocol order: initialize → session/new → (driver) session/prompt.
     assert [entry for entry in log if entry.startswith("request:")] == [
@@ -383,12 +465,15 @@ def test_the_adapter_contract_order_and_turn_frames(tmp_path: Path) -> None:
     assert info is not None and info.session_id == "sess-1"
 
 
-def test_session_info_records_the_negotiated_session(tmp_path: Path) -> None:
+def test_session_info_records_the_negotiated_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     capabilities = {"loadSession": False, "sessionCapabilities": {"resume": {}}}
+    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
     adapter, _created, _log, _frames = make_adapter(
         tmp_path,
         script={"capabilities": capabilities, "session_id": "sess-9"},
-        session_cwd="/workspace",
+        executor="docker",
     )
     adapter.start()
     info = adapter.session_info()
@@ -404,9 +489,13 @@ def test_session_info_records_the_negotiated_session(tmp_path: Path) -> None:
     assert payload["authMethods"] == []
     # The ACP cwd is the agent-visible workspace (the container mount point on
     # the Docker face), never silently the host path.
-    assert payload["cwd"] == "/workspace"
+    assert payload["cwd"] == CONTAINER_WORKSPACE == "/workspace"
     # A first turn does not masquerade as a continuation.
     assert "resumed" not in payload and "resumeMethod" not in payload
+    monkeypatch.setattr(
+        "pi_glink.kernel.sandbox.subprocess.run",
+        lambda *args, **kwargs: type("R", (), {"returncode": 0, "stderr": ""})(),
+    )
     adapter.close()
 
 
@@ -722,51 +811,47 @@ def test_deliver_input_before_start_fails_closed(tmp_path: Path) -> None:
 def test_close_reports_client_and_container_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    stopped: list[str] = []
+    stopped: list[list[str]] = []
+    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
     adapter, _created, _log, _frames = make_adapter(
-        tmp_path,
-        script={"close_raises": True},
-        container_name="ctr-9",
-        container_stop=lambda name: stopped.append(name) or ["docker", "rm", "-f", name],
+        tmp_path, script={"close_raises": True}, executor="docker"
     )
+    name = container_name_for("unit-run")
     monkeypatch.setattr(
-        "pi_glink.kernel.acp_execution.subprocess.run",
-        lambda *args, **kwargs: type(
-            "R", (), {"returncode": 1, "stderr": "permission denied"}
-        )(),
+        "pi_glink.kernel.sandbox.subprocess.run",
+        lambda argv, **kwargs: stopped.append(list(argv))
+        or type("R", (), {"returncode": 1, "stderr": "permission denied"})(),
     )
     adapter.start()
     report = adapter.close()
 
-    assert stopped == ["ctr-9"], "teardown addresses the persisted name only"
+    assert stopped == [["docker", "rm", "-f", name]], "teardown addresses the persisted name only"
     assert report.released is False
     assert len(report.failures) == 2
     assert "关闭 ACP agent 进程失败" in report.failures[0]
     assert "删除容器失败" in report.failures[1]
     assert "permission denied" in report.failures[1]
     # The external identity survives a failed teardown for reconciliation.
-    assert report.external == {"container": "ctr-9"}
-    assert adapter.identity() == {"container": "ctr-9"}
+    assert report.external == {"container": name}
+    assert adapter.identity() == {"container": name}
 
 
 def test_a_container_already_gone_is_not_a_teardown_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    adapter, _created, _log, _frames = make_adapter(
-        tmp_path,
-        container_name="ctr-1",
-        container_stop=lambda name: ["docker", "rm", "-f", name],
-    )
+    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
+    adapter, _created, _log, _frames = make_adapter(tmp_path, executor="docker")
+    name = container_name_for("unit-run")
     monkeypatch.setattr(
-        "pi_glink.kernel.acp_execution.subprocess.run",
+        "pi_glink.kernel.sandbox.subprocess.run",
         lambda *args, **kwargs: type(
-            "R", (), {"returncode": 1, "stderr": "Error: No such container: ctr-1"}
+            "R", (), {"returncode": 1, "stderr": f"Error: No such container: {name}"}
         )(),
     )
     adapter.start()
     report = adapter.close()
     assert report.released is True and report.failures == ()
-    assert report.external == {"container": "ctr-1"}
+    assert report.external == {"container": name}
 
 
 # -- agent -> client requests ---------------------------------------------------------
@@ -887,29 +972,36 @@ def test_tool_kinds_are_remembered_and_never_relabelled(tmp_path: Path) -> None:
 
 
 def test_sandbox_start_orders_creation_identity_upload_and_protocol(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    adapter, sandbox, created, log, _frames, identities = make_sandbox_adapter(tmp_path)
+    adapter, sandbox, created, log, _frames, identities = make_sandbox_adapter(
+        tmp_path, monkeypatch
+    )
     adapter.start()
 
     # The sandbox exists (and is named to the host) before any step that can
     # fail; the run HOME is uploaded before the agent process starts.
-    assert log[:4] == [
-        "sandbox.start",
+    assert log[:5] == [
+        "sandbox.open",
         "identity",
-        "sandbox.upload_home",
+        "transfer.upload_home",
+        "sandbox.spawn",
         "client.start",
     ]
     assert identities == [{"sandbox": "sbx-1"}]
+    # The transfer works on the opened sandbox's own handle and workspace.
+    assert len(sandbox.transfers) == 1
+    assert sandbox.transfers[0][0] is not None
+    assert sandbox.transfers[0][1] == tmp_path / "ws"
     # The sandbox outlives the run's deadline: task timeout plus the margin.
-    assert sandbox.start_timeouts == [330]
-    assert log[4:6] == ["request:initialize", "request:session/new"]
+    assert sandbox.open_timeouts == [330]
+    assert log[5:7] == ["request:initialize", "request:session/new"]
     # The client drives the sandbox background command, never a host process.
     client = created[0]
     assert client.spawn is not None
     assert client.env == {} and client.cwd is None
     client.spawn()
-    assert log[-1] == "sandbox.spawn"
+    assert log[-1] == "sandbox.process"
     # The agent-visible workspace is the sandbox path, not a host path.
     requests = dict()
     for method, params in client.requests:
@@ -920,16 +1012,19 @@ def test_sandbox_start_orders_creation_identity_upload_and_protocol(
 
 
 def test_sandbox_continuation_uploads_the_parent_workspace_first(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter, sandbox, _created, log, frames, _identities = make_sandbox_adapter(
         tmp_path,
+        monkeypatch,
         script={"capabilities": {"sessionCapabilities": {"resume": {}}}},
         spec_overrides={"resume_session": "parent-sess"},
     )
     adapter.start()
 
-    assert log.index("sandbox.upload_continuation") < log.index("client.start")
+    assert log.index("transfer.upload_home") < log.index("transfer.upload_continuation")
+    assert log.index("transfer.upload_continuation") < log.index("sandbox.spawn")
+    assert log.index("sandbox.spawn") < log.index("client.start")
     assert "request:session/resume" in log
     resumed = [frame for frame in frames if frame["type"] == "acp_session_resumed"]
     assert resumed == [
@@ -944,10 +1039,10 @@ def test_sandbox_continuation_uploads_the_parent_workspace_first(
 
 
 def test_sandbox_recovery_merges_the_workspace_and_the_state_root(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter, sandbox, _created, _log, _frames, _identities = make_sandbox_adapter(
-        tmp_path
+        tmp_path, monkeypatch
     )
     adapter.start()
 
@@ -975,13 +1070,13 @@ def test_sandbox_recovery_merges_the_workspace_and_the_state_root(
 
 
 def test_sandbox_recovery_failures_fail_closed_and_stay_visible(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter, sandbox, _created, _log, _frames, _identities = make_sandbox_adapter(
-        tmp_path
+        tmp_path, monkeypatch
     )
     sandbox.workspace_failures.append("workspace read failed")
-    sandbox.state = AcpStateRecovery(ok=False, failures=("state read failed",))
+    sandbox.transfer.state = AcpStateRecovery(ok=False, failures=("state read failed",))
     adapter.start()
 
     recovery = adapter.recover_artifacts(tmp_path / "ws")
@@ -994,9 +1089,11 @@ def test_sandbox_recovery_failures_fail_closed_and_stay_visible(
     adapter.close()
 
 
-def test_sandbox_close_reports_client_then_sandbox_failures(tmp_path: Path) -> None:
+def test_sandbox_close_reports_client_then_sandbox_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     adapter, sandbox, _created, log, _frames, _identities = make_sandbox_adapter(
-        tmp_path
+        tmp_path, monkeypatch
     )
     sandbox.close_failures.append("sandbox kill failed: boom")
     adapter.start()

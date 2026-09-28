@@ -27,7 +27,7 @@ from pi_glink.harnesses import (
 from pi_glink.kernel.acp_env import ACP_HOME_DIRNAME, prepare_acp_runtime
 from pi_glink.kernel.harness import FollowupUnavailable
 from pi_glink.runs.runner import RunManager
-from pi_glink.store import FINISHED, RunStore
+from pi_glink.store import FINISHED, RunStore, RunSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPO_PACKS = REPO_ROOT / "harnesses"
@@ -343,29 +343,26 @@ def test_a_run_record_carries_the_pack_and_a_foreign_pack_cannot_continue(
     record = store.create(
         "题目",
         run_id="parent-run",
-        harness="acp",
-        harness_pack="demo",
-        executor="inproc",
+        spec=RunSpec(family="acp", pack="demo", executor="inproc"),
     )
     written = json.loads(
         (store.run_dir(record.run_id) / "meta.json").read_text(encoding="utf-8")
     )
-    assert written["harness"] == "acp" and written["harness_pack"] == "demo"
+    assert written["spec"]["family"] == "acp" and written["spec"]["pack"] == "demo"
+    assert not {"harness", "harness_pack", "executor"} & written.keys()
 
     # 同包但父 run 未结束：按状态的既有拒绝（run_busy），不是包名拒绝。
     with pytest.raises(FollowupUnavailable) as excinfo:
-        manager._resumable_parent(None, "parent-run")  # noqa: SLF001
+        manager._resumable_parent(None, "parent-run", manager._admission_spec(None))  # noqa: SLF001
     assert excinfo.value.code == "run_busy"
 
     # 异包（同族）：fail-closed 为 session_unavailable，不再读父会话。
     store.create(
         "题目",
         run_id="foreign-run",
-        harness="acp",
-        harness_pack="opencode",
-        executor="inproc",
+        spec=RunSpec(family="acp", pack="opencode", executor="inproc"),
     )
     store.update("foreign-run", status=FINISHED)
     with pytest.raises(FollowupUnavailable) as excinfo:
-        manager._resumable_parent(None, "foreign-run")  # noqa: SLF001
+        manager._resumable_parent(None, "foreign-run", manager._admission_spec(None))  # noqa: SLF001
     assert excinfo.value.code == "session_unavailable"

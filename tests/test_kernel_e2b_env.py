@@ -28,6 +28,7 @@ import json
 import shlex
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -38,17 +39,19 @@ from e2b_fake import BrokenHandle, FakeSandbox, IdleHandle
 from pi_glink.config import build_config
 from pi_glink.events import EventBus
 from pi_glink.kernel import agent_env, e2b_env
-from pi_glink.kernel.acp_e2b_env import SandboxCommandProcess
+from harness_helpers import compose_launch, execution_spec, family
 from pi_glink.kernel.e2b_env import (
     ARTIFACT_MAX_BYTES,
     SANDBOX_PACKAGE_GUARD,
     SANDBOX_SESSIONS,
     SANDBOX_WORKSPACE,
     SUBAGENT_RECOVER_MAX_FILE_BYTES,
-    E2BSandboxClient,
+    PiSandboxTransfer,
+    SandboxCommandProcess,
     _read_file_bounded,
 )
-from pi_glink.kernel.execution import E2BSandboxRpcExecutionAdapter, ExecutionSpec
+from pi_glink.kernel.execution import ExecutionAdapter, ExecutionSpec
+from pi_glink.kernel.sandbox import E2BSandbox, open_sandbox
 from pi_glink.kernel.rpc import PiRpcClient
 from pi_glink.runs.runner import RunManager
 from pi_glink.store import RunStore
@@ -78,7 +81,40 @@ def _prepare(config, tmp_path: Path, name: str = "run-1"):
         config,
         runtime_dir=run_dir / "pi-agent",
         session_dir=run_dir / "sessions",
+        image_packages=True,
     )
+
+
+class _Face:
+    """The pi family on one E2B sandbox, composed as ``PiExecutionAdapter.start`` does.
+
+    ``sandbox`` is the resource and transport (:class:`E2BSandbox`: create,
+    command, recover the workspace, kill); ``transfer`` is pi's own layout on
+    the opened sandbox (:class:`PiSandboxTransfer`: config/continuation upload,
+    session and subagent recovery). The launch is the family's real one.
+    """
+
+    def __init__(self, config, runtime, *, run_id: str, workspace: Path, sandbox_factory) -> None:
+        workspace = Path(workspace)
+        self.runtime = runtime
+        spec = execution_spec(config, runtime, workspace=workspace, run_id=run_id)
+        launch, sandbox = compose_launch(
+            "pi", "e2b", spec, store_root=workspace.parent / f"store-{run_id}",
+            sandbox_factory=sandbox_factory,
+        )
+        assert isinstance(sandbox, E2BSandbox)
+        self.launch = launch
+        self.sandbox = sandbox
+        self.transfer: PiSandboxTransfer | None = None
+
+    def open(self, *, timeout_seconds: int = 0) -> None:
+        self.sandbox.open(self.launch, timeout_seconds=timeout_seconds)
+        self.transfer = PiSandboxTransfer(self.sandbox.handle, self.runtime)
+
+    def spawn(self, argv: list[str]) -> SandboxCommandProcess:
+        spawn = self.sandbox.spawn(replace(self.launch, argv=tuple(argv)))
+        assert spawn.process is not None
+        return spawn.process()
 
 
 def wait_for(predicate, *, timeout: float = 10.0) -> bool:
@@ -102,26 +138,26 @@ def test_e2b_key_reaches_create_and_model_key_stays_out_of_env(tmp_path: Path) -
         captured.update(kwargs)
         return FakeSandbox()
 
-    client = E2BSandboxClient(
+    client = _Face(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=factory
     )
-    client.start()
+    client.open()
     assert captured["template"] == "pi-glink-worker"
     # The *E2B* key authenticates the sandbox API…
     assert captured["api_key"] == "e2b-secret-key"
     # …while the *model* key travels in auth.json, never as an env var.
     assert "OPENAI_API_KEY" not in captured["envs"]
-    client.close()
+    client.sandbox.close()
 
 
 def test_missing_credential_is_refused_before_any_cloud_call(tmp_path: Path) -> None:
     config = make_config(tmp_path, E2B_API_KEY="")
     runtime = _prepare(config, tmp_path)
-    client = E2BSandboxClient(
+    client = _Face(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: FakeSandbox()
     )
     with pytest.raises(Exception) as excinfo:
-        client.start()
+        client.open()
     assert "E2B_API_KEY" in str(excinfo.value)
     assert config.has_e2b_key is False
 
@@ -151,29 +187,29 @@ def test_sandbox_followup_uploads_and_recovers_a_private_session(tmp_path: Path)
     workspace = tmp_path / "ws"
     workspace.mkdir()
     (workspace / "report.md").write_text("# previous report", encoding="utf-8")
-    client = E2BSandboxClient(config, runtime, run_id="child", workspace=workspace,
+    client = _Face(config, runtime, run_id="child", workspace=workspace,
                               sandbox_factory=lambda **_: sandbox)
-    client.start()
-    client.upload_config()
-    client.upload_continuation("continued.jsonl", workspace)
+    client.open()
+    client.transfer.upload_config()
+    client.transfer.upload_continuation("continued.jsonl", workspace)
     assert sandbox.written["/home/user/sessions/continued.jsonl"] == session_bytes.decode(
         "utf-8"
     )
     assert sandbox.written["/home/user/workspace/report.md"] == "# previous report"
     # The continuation argv names the uploaded session at its sandbox path, in
     # the same ``--session <path>`` shape the in-process and Docker faces use.
-    process = client.spawn_rpc(
+    process = client.spawn(
         ["pi", "--mode", "rpc", "--session", f"{SANDBOX_SESSIONS}/continued.jsonl"]
     )
     try:
         assert "--session /home/user/sessions/continued.jsonl" in sandbox.command
     finally:
         process.kill()
-    saved, error = client.recover_session()
+    saved, error = client.transfer.recover_session()
     assert error is None
     assert saved == runtime.session_dir / "continued.jsonl"
     assert saved.read_bytes() == session_bytes
-    client.close()
+    client.sandbox.close()
 
 
 def test_sandbox_session_recovery_rejects_a_path_escape(tmp_path: Path) -> None:
@@ -181,10 +217,10 @@ def test_sandbox_session_recovery_rejects_a_path_escape(tmp_path: Path) -> None:
     runtime = _prepare(config, tmp_path)
     sandbox = FakeSandbox()
     sandbox.session_files = ("../outside.jsonl",)
-    client = E2BSandboxClient(config, runtime, run_id="root", workspace=tmp_path / "ws",
+    client = _Face(config, runtime, run_id="root", workspace=tmp_path / "ws",
                               sandbox_factory=lambda **_: sandbox)
-    client.start()
-    path, error = client.recover_session()
+    client.open()
+    path, error = client.transfer.recover_session()
     assert path is None and error
     assert not (tmp_path / "outside.jsonl").exists()
 
@@ -204,11 +240,11 @@ def _session_bytes(session_id: str, *, parent: str | None = None) -> bytes:
 
 
 def _recovery_client(config, runtime, sandbox, tmp_path):
-    client = E2BSandboxClient(
+    client = _Face(
         config, runtime, run_id="root", workspace=tmp_path / "ws",
         sandbox_factory=lambda **_: sandbox,
     )
-    client.start()
+    client.open()
     return client
 
 
@@ -226,7 +262,7 @@ def test_recover_session_selects_the_main_session_among_subagent_branches(
         _session_bytes("branch-session", parent="/home/user/sessions/research.jsonl")
     )
     client = _recovery_client(config, runtime, sandbox, tmp_path)
-    saved, error = client.recover_session()
+    saved, error = client.transfer.recover_session()
     assert error is None
     assert saved == runtime.session_dir / "research.jsonl"
     assert saved.read_bytes() == main
@@ -243,7 +279,7 @@ def test_recover_session_ignores_the_subagent_artifacts_subdirectory(
     sandbox.entry_types["/home/user/sessions/subagent-artifacts"] = "dir"
     sandbox.readable["/home/user/sessions/continued.jsonl"] = main
     client = _recovery_client(config, runtime, sandbox, tmp_path)
-    saved, error = client.recover_session()
+    saved, error = client.transfer.recover_session()
     assert error is None
     assert saved == runtime.session_dir / "continued.jsonl"
     assert saved.read_bytes() == main
@@ -258,7 +294,7 @@ def test_recover_session_refuses_two_main_candidates(tmp_path: Path) -> None:
     sandbox.readable["/home/user/sessions/a.jsonl"] = _session_bytes("one")
     sandbox.readable["/home/user/sessions/b.jsonl"] = _session_bytes("two")
     client = _recovery_client(config, runtime, sandbox, tmp_path)
-    saved, error = client.recover_session()
+    saved, error = client.transfer.recover_session()
     assert saved is None and error
 
 
@@ -271,7 +307,7 @@ def test_recover_session_refuses_when_only_branches_remain(tmp_path: Path) -> No
         "branch-session", parent="/home/user/sessions/gone.jsonl"
     )
     client = _recovery_client(config, runtime, sandbox, tmp_path)
-    saved, error = client.recover_session()
+    saved, error = client.transfer.recover_session()
     assert saved is None and error
 
 
@@ -284,7 +320,7 @@ def test_recover_session_refuses_an_unreadable_candidate(tmp_path: Path) -> None
     sandbox.readable["/home/user/sessions/research.jsonl"] = _session_bytes("main")
     # branch.jsonl is listed but not readable: no guessing past it.
     client = _recovery_client(config, runtime, sandbox, tmp_path)
-    saved, error = client.recover_session()
+    saved, error = client.transfer.recover_session()
     assert saved is None and error
     assert "branch.jsonl" in error
 
@@ -331,7 +367,7 @@ def test_recover_subagent_files_mirrors_branches_and_artifacts(tmp_path: Path) -
     client = _recovery_client(config, runtime, sandbox, tmp_path)
     destination = tmp_path / "run" / "subagents"
 
-    files, failures = client.recover_subagent_files(destination)
+    files, failures = client.transfer.recover_subagent_files(destination)
 
     assert failures == []
     assert (destination / "sessions" / "branch.jsonl").read_bytes() == branch
@@ -354,7 +390,7 @@ def test_recover_subagent_files_skips_links_and_records_failures(tmp_path: Path)
     client = _recovery_client(config, runtime, sandbox, tmp_path)
     destination = tmp_path / "run" / "subagents"
 
-    files, failures = client.recover_subagent_files(destination)
+    files, failures = client.transfer.recover_subagent_files(destination)
 
     assert files == []
     # A link is skipped (never followed, not a failure); an unreadable regular
@@ -377,7 +413,7 @@ def test_recover_subagent_files_enforces_the_single_file_cap(tmp_path: Path) -> 
     client = _recovery_client(config, runtime, sandbox, tmp_path)
     destination = tmp_path / "run" / "subagents"
 
-    files, failures = client.recover_subagent_files(destination)
+    files, failures = client.transfer.recover_subagent_files(destination)
 
     assert files == []
     assert len(failures) == 1 and "huge.md" in failures[0]
@@ -425,11 +461,11 @@ def test_upload_config_delivers_the_runtime_directory_with_a_manifest(tmp_path: 
     config = make_config(tmp_path)
     runtime = _prepare(config, tmp_path)
     sandbox = FakeSandbox()
-    client = E2BSandboxClient(
+    client = _Face(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
     )
-    client.start()
-    client.upload_config()
+    client.open()
+    client.transfer.upload_config()
 
     assert "/home/user/config/models.json" in sandbox.written
     assert "/home/user/config/settings.json" in sandbox.written
@@ -444,13 +480,13 @@ def test_upload_config_delivers_the_runtime_directory_with_a_manifest(tmp_path: 
 
     # The manifest names every delivered path with its content digest, so the
     # delivery is verifiable instead of "the directory happened to be empty".
-    manifest = dict(client.upload_manifest)
+    manifest = dict(client.transfer.upload_manifest)
     for relative in ("models.json", "settings.json", "auth.json"):
         assert relative in manifest
         digest = hashlib.sha256((runtime.directory / relative).read_bytes()).hexdigest()
         assert manifest[relative] == digest
-    assert client.uploaded, "the uploaded path list must not be empty"
-    client.close()
+    assert client.transfer.uploaded, "the uploaded path list must not be empty"
+    client.sandbox.close()
 
 
 def test_upload_manifest_covers_reviewable_template_entries(tmp_path: Path) -> None:
@@ -468,17 +504,17 @@ def test_upload_manifest_covers_reviewable_template_entries(tmp_path: Path) -> N
     config = make_config(tmp_path, PI_CODING_AGENT_DIR=str(template))
     runtime = _prepare(config, tmp_path)
     sandbox = FakeSandbox()
-    client = E2BSandboxClient(
+    client = _Face(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
     )
-    client.start()
-    client.upload_config()
+    client.open()
+    client.transfer.upload_config()
 
-    delivered = {relative for relative, _digest in client.upload_manifest}
+    delivered = {relative for relative, _digest in client.transfer.upload_manifest}
     assert {"AGENTS.md", "settings.json", "extensions/hello.js"} <= delivered
     assert "/home/user/config/extensions/hello.js" in sandbox.written
     assert not any(relative.startswith("prompts/") for relative in delivered)
-    client.close()
+    client.sandbox.close()
 
 
 # -- sandbox run (RPC channel) --------------------------------------------------
@@ -781,12 +817,12 @@ def test_spawn_rpc_composes_the_guarded_command_chain(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     runtime = _prepare(config, tmp_path)
     sandbox = FakeSandbox()
-    client = E2BSandboxClient(
+    client = _Face(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
     )
-    client.start()
+    client.open()
     argv = ["pi", "--mode", "rpc", "--provider", "fake", "--model", "fake/model"]
-    process = client.spawn_rpc(argv)
+    process = client.spawn(argv)
     try:
         command = sandbox.command
         guard = SANDBOX_PACKAGE_GUARD
@@ -797,7 +833,7 @@ def test_spawn_rpc_composes_the_guarded_command_chain(tmp_path: Path) -> None:
         kwargs = sandbox.command_kwargs
         assert kwargs["background"] is True and kwargs["stdin"] is True
         assert kwargs["cwd"] == SANDBOX_WORKSPACE
-        assert kwargs["timeout"] == client.sandbox_timeout
+        assert kwargs["timeout"] == client.sandbox.sandbox_timeout
         assert "OPENAI_API_KEY" not in sandbox.command_envs
         settings = json.loads((runtime.directory / "settings.json").read_text(encoding="utf-8"))
         assert settings["packages"] == [
@@ -806,7 +842,7 @@ def test_spawn_rpc_composes_the_guarded_command_chain(tmp_path: Path) -> None:
         ]
     finally:
         process.kill()
-        client.close()
+        client.sandbox.close()
 
 
 def test_spawn_rpc_quotes_hostile_argv_and_keeps_the_prompt_off_the_command_line(
@@ -821,13 +857,13 @@ def test_spawn_rpc_quotes_hostile_argv_and_keeps_the_prompt_off_the_command_line
     config = make_config(tmp_path)
     runtime = _prepare(config, tmp_path)
     sandbox = FakeSandbox()
-    client = E2BSandboxClient(
+    client = _Face(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
     )
-    client.start()
+    client.open()
     hostile = "系统提示 with 'quotes' and $(rm -rf /) `whoami` \\ backslash\n第二行  line"
     argv = ["pi", "--mode", "rpc", "--append-system-prompt", hostile]
-    process = client.spawn_rpc(argv)
+    process = client.spawn(argv)
     try:
         command = sandbox.command
         assert shlex.quote(hostile) in command, "the text must survive as one quoted word"
@@ -838,7 +874,7 @@ def test_spawn_rpc_quotes_hostile_argv_and_keeps_the_prompt_off_the_command_line
         assert "base64" not in command, "旧的 base64 编码机制已整体废除"
     finally:
         process.kill()
-        client.close()
+        client.sandbox.close()
 
 
 # -- artifact recovery --------------------------------------------------------
@@ -859,12 +895,12 @@ def test_sandbox_lifetime_is_bounded_by_configuration(tmp_path: Path) -> None:
         captured.update(kwargs)
         return FakeSandbox()
 
-    client = E2BSandboxClient(
+    client = _Face(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=factory
     )
-    client.start(timeout_seconds=99_999)
+    client.open(timeout_seconds=99_999)
     assert captured["timeout"] == 120
-    client.close()
+    client.sandbox.close()
 
 
 def test_sandbox_lifetime_defaults_to_the_task_timeout_plus_headroom(tmp_path: Path) -> None:
@@ -876,12 +912,12 @@ def test_sandbox_lifetime_defaults_to_the_task_timeout_plus_headroom(tmp_path: P
         captured.update(kwargs)
         return FakeSandbox()
 
-    client = E2BSandboxClient(
+    client = _Face(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=factory
     )
-    client.start()
+    client.open()
     assert captured["timeout"] == 1200
-    client.close()
+    client.sandbox.close()
 
 
 def test_the_kernel_command_is_allowed_to_run_for_the_whole_sandbox_lifetime(
@@ -898,18 +934,18 @@ def test_the_kernel_command_is_allowed_to_run_for_the_whole_sandbox_lifetime(
     config = make_config(tmp_path, LOCAL_WEB_TASK_TIMEOUT_SECONDS="900")
     runtime = _prepare(config, tmp_path)
     sandbox = FakeSandbox()
-    client = E2BSandboxClient(
+    client = _Face(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
     )
-    client.start()
-    process = client.spawn_rpc(["pi", "--mode", "rpc"])
+    client.open()
+    process = client.spawn(["pi", "--mode", "rpc"])
     try:
         assert sandbox.command_timeout is not None, "the SDK default (60 s) must not be left in place"
         # The command may run as long as the sandbox it runs in; never longer.
-        assert sandbox.command_timeout == client.sandbox_timeout == 1200
+        assert sandbox.command_timeout == client.sandbox.sandbox_timeout == 1200
     finally:
         process.kill()
-        client.close()
+        client.sandbox.close()
 
 
 def test_the_command_timeout_follows_a_tighter_configured_sandbox_ceiling(
@@ -920,16 +956,16 @@ def test_the_command_timeout_follows_a_tighter_configured_sandbox_ceiling(
     )
     runtime = _prepare(config, tmp_path)
     sandbox = FakeSandbox()
-    client = E2BSandboxClient(
+    client = _Face(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
     )
-    client.start()
-    process = client.spawn_rpc(["pi", "--mode", "rpc"])
+    client.open()
+    process = client.spawn(["pi", "--mode", "rpc"])
     try:
         assert sandbox.command_timeout == 300
     finally:
         process.kill()
-        client.close()
+        client.sandbox.close()
 
 
 def test_recovered_artifacts_are_bounded_and_path_safe(tmp_path: Path) -> None:
@@ -940,18 +976,18 @@ def test_recovered_artifacts_are_bounded_and_path_safe(tmp_path: Path) -> None:
     sandbox.readable["/home/user/workspace/notes.md"] = "记录\n"
     sandbox.readable["/home/user/workspace/../escape.md"] = "越界\n"
     sandbox.readable["/home/user/workspace/huge.bin"] = b"x" * (ARTIFACT_MAX_BYTES + 1)
-    client = E2BSandboxClient(
+    client = _Face(
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=lambda **_: sandbox
     )
-    client.start()
-    files, failures = client.recover_artifacts(tmp_path / "ws")
+    client.open()
+    files, failures = client.sandbox.recover_workspace(tmp_path / "ws")
 
     names = {path.name for path in files}
     assert {"report.md", "notes.md"} <= names
     assert not (tmp_path / "escape.md").exists(), "a traversal name must not escape"
     assert any("非法产物名" in failure for failure in failures)
     assert any("上限" in failure for failure in failures)
-    client.close()
+    client.sandbox.close()
 
 
 # -- bounded reads ---------------------------------------------------------------
@@ -964,16 +1000,16 @@ def test_artifacts_are_bounded_by_listing_metadata_before_reading(tmp_path: Path
     sandbox.readable["/home/user/workspace/huge.bin"] = b"small"
     sandbox.sizes["/home/user/workspace/huge.bin"] = ARTIFACT_MAX_BYTES + 1  # metadata lies, read must not
     sandbox.reads.clear()
-    client = E2BSandboxClient(
+    client = _Face(
         config,
         _prepare(config, tmp_path),
         run_id="abc123",
         workspace=tmp_path / "ws",
         sandbox_factory=lambda **_: sandbox,
     )
-    client.start()
-    files, failures = client.recover_artifacts(tmp_path / "ws")
-    client.close()
+    client.open()
+    files, failures = client.sandbox.recover_workspace(tmp_path / "ws")
+    client.sandbox.close()
 
     assert {path.name for path in files} == {"report.md"}
     assert any("上限" in failure for failure in failures)
@@ -982,18 +1018,18 @@ def test_artifacts_are_bounded_by_listing_metadata_before_reading(tmp_path: Path
 
 def _recover_from(sandbox: FakeSandbox, tmp_path: Path):
     config = make_config(tmp_path)
-    client = E2BSandboxClient(
+    client = _Face(
         config,
         _prepare(config, tmp_path),
         run_id="abc123",
         workspace=tmp_path / "ws",
         sandbox_factory=lambda **_: sandbox,
     )
-    client.start()
+    client.open()
     try:
-        return client.recover_artifacts(tmp_path / "ws")
+        return client.sandbox.recover_workspace(tmp_path / "ws")
     finally:
-        client.close()
+        client.sandbox.close()
 
 
 def test_directories_and_symlinks_are_skipped_without_a_false_failure(tmp_path: Path) -> None:
@@ -1036,7 +1072,7 @@ def test_the_real_sdk_file_type_enum_is_understood(tmp_path: Path) -> None:
     assert e2b is not None
 
 
-# -- adapter unit tests (E2BSandboxRpcExecutionAdapter) ---------------------------
+# -- adapter unit tests (PiExecutionAdapter over E2BSandbox) ----------------------
 
 
 def _adapter_spec(config, runtime, tmp_path: Path, **overrides: Any) -> ExecutionSpec:
@@ -1053,6 +1089,23 @@ def _adapter_spec(config, runtime, tmp_path: Path, **overrides: Any) -> Executio
     return ExecutionSpec(**values)
 
 
+def _e2b_adapter(
+    spec: ExecutionSpec, tmp_path: Path, *, client_factory, sandbox_factory, on_identity=None
+) -> ExecutionAdapter:
+    """``family.build_adapter(spec, open_sandbox("e2b"))`` — the production composition."""
+    sandbox = open_sandbox(
+        "e2b",
+        config=spec.config,
+        run_id=spec.run_id,
+        workspace=spec.workspace,
+        sandbox_factory=sandbox_factory,
+        on_identity=on_identity,
+    )
+    return family("pi", spec.config, tmp_path / "adapter-store").build_adapter(
+        spec, sandbox, on_frame=lambda frame: None, client_factory=client_factory
+    )
+
+
 def test_start_records_the_sandbox_identity_before_uploading(tmp_path: Path) -> None:
     """身份在上传之前落盘：部分失败也留下可点名的资源。"""
     config = make_config(tmp_path)
@@ -1065,13 +1118,9 @@ def test_start_records_the_sandbox_identity_before_uploading(tmp_path: Path) -> 
         identities.append(dict(identity))
         written_at_identity.append(len(sandbox.written))
 
-    adapter = E2BSandboxRpcExecutionAdapter(
-        _adapter_spec(config, runtime, tmp_path),
-        argv=["pi", "--mode", "rpc"],
-        client_factory=PiRpcClient,
-        on_frame=lambda frame: None,
-        sandbox_factory=lambda **_: sandbox,
-        on_identity=on_identity,
+    adapter = _e2b_adapter(
+        _adapter_spec(config, runtime, tmp_path), tmp_path,
+        client_factory=PiRpcClient, sandbox_factory=lambda **_: sandbox, on_identity=on_identity,
     )
     adapter.start()
     try:
@@ -1083,7 +1132,7 @@ def test_start_records_the_sandbox_identity_before_uploading(tmp_path: Path) -> 
 
 
 def test_popen_injection_reaches_the_shared_rpc_client(tmp_path: Path) -> None:
-    """spawn_rpc 的进程门面经 ``popen=`` 注入共享的 PiRpcClient。"""
+    """E2BSandbox.spawn 的进程门面经 ``popen=`` 注入共享的 PiRpcClient。"""
     config = make_config(tmp_path)
     runtime = _prepare(config, tmp_path)
     sandbox = FakeSandbox()
@@ -1093,12 +1142,9 @@ def test_popen_injection_reaches_the_shared_rpc_client(tmp_path: Path) -> None:
         captured.update(kwargs)
         return PiRpcClient(argv, **kwargs)
 
-    adapter = E2BSandboxRpcExecutionAdapter(
-        _adapter_spec(config, runtime, tmp_path),
-        argv=["pi", "--mode", "rpc"],
-        client_factory=spy_factory,
-        on_frame=lambda frame: None,
-        sandbox_factory=lambda **_: sandbox,
+    adapter = _e2b_adapter(
+        _adapter_spec(config, runtime, tmp_path), tmp_path,
+        client_factory=spy_factory, sandbox_factory=lambda **_: sandbox,
     )
     adapter.start()
     try:
@@ -1148,12 +1194,9 @@ def test_abort_settle_grace_does_not_change_the_cancelled_verdict(
         def close(self, *, timeout: float = 5.0) -> int:
             return 0
 
-    adapter = E2BSandboxRpcExecutionAdapter(
-        _adapter_spec(config, runtime, tmp_path),
-        argv=["pi", "--mode", "rpc"],
-        client_factory=_Client,
-        on_frame=lambda frame: None,
-        sandbox_factory=lambda **_: sandbox,
+    adapter = _e2b_adapter(
+        _adapter_spec(config, runtime, tmp_path), tmp_path,
+        client_factory=_Client, sandbox_factory=lambda **_: sandbox,
     )
     started_at = time.monotonic()
     adapter.start()
@@ -1177,12 +1220,9 @@ def test_stream_loss_oserror_in_close_is_a_log_not_a_cleanup_failure(tmp_path: P
     runtime = _prepare(config, tmp_path)
     # get_state 的响应帧还没收完整流就断了：pump 以「无退出码」收场。
     sandbox = FakeSandbox(tmp_path / "sandbox", stream_break_marker=b"get_state")
-    adapter = E2BSandboxRpcExecutionAdapter(
-        _adapter_spec(config, runtime, tmp_path),
-        argv=["pi", "--mode", "rpc"],
-        client_factory=PiRpcClient,
-        on_frame=lambda frame: None,
-        sandbox_factory=lambda **_: sandbox,
+    adapter = _e2b_adapter(
+        _adapter_spec(config, runtime, tmp_path), tmp_path,
+        client_factory=PiRpcClient, sandbox_factory=lambda **_: sandbox,
     )
     adapter.start()
     process = adapter._process  # noqa: SLF001 - 测试钉死断流事实

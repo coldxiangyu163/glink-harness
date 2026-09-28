@@ -2,7 +2,7 @@
 """ACP E2B dev 模板的真实沙箱握手（GLINK-ACP-04 / M3b 起，M5 扩展，不消耗模型）。
 
 用**生产装配路径**（``build_config`` → ``prepare_acp_runtime`` →
-``E2BAcpSandboxClient`` → ``build_adapter`` → ``AcpSandboxExecutionAdapter``）在真实
+``AcpHarnessFamily.launch`` → ``E2BSandbox`` → ``AcpExecutionAdapter``）在真实
 沙箱里跑 ``initialize`` + ``session/new``，不发 ``session/prompt``：
 
 * 证明 E2B 模板里的 agent 确实经 ``send_stdin`` / ``CommandHandle`` 完成 ACP 握手；
@@ -34,9 +34,10 @@ from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 
 from pi_glink.config import build_config  # noqa: E402
 from pi_glink.kernel.acp_env import prepare_acp_runtime  # noqa: E402
-from pi_glink.kernel.acp_e2b_env import E2BAcpSandboxClient  # noqa: E402
-from pi_glink.kernel.execution import ExecutionSpec, build_adapter  # noqa: E402
-from pi_glink.kernel.rpc import PiRpcClient  # noqa: E402
+from pi_glink.kernel.execution import ExecutionSpec  # noqa: E402
+from pi_glink.kernel.harness_acp import AcpHarnessFamily  # noqa: E402
+from pi_glink.kernel.sandbox import E2BSandbox  # noqa: E402
+from pi_glink.store import RunStore  # noqa: E402
 
 #: The agents and the credential location each one reads (M2/M4/M5 measurement).
 AGENTS = {
@@ -138,12 +139,12 @@ def main(argv: list[str] | None = None) -> int:
     result["credential_dests"] = list(runtime.credential_dests)
     result["secret_count"] = len(runtime.secrets)
 
-    sandbox_client = E2BAcpSandboxClient(
-        config,
-        runtime,
+    sandbox = E2BSandbox(
+        config=config,
         run_id=f"handshake-{args.agent.replace('-', '_')}",
         workspace=workdir / "workspace",
     )
+    family = AcpHarnessFamily(config=config, store=RunStore(workdir / "runs"))
     spec = ExecutionSpec(
         config=config,
         runtime=runtime,
@@ -153,26 +154,20 @@ def main(argv: list[str] | None = None) -> int:
         workspace=workdir / "workspace",
         timeout_seconds=args.timeout,
     )
-    adapter = build_adapter(
-        spec,
-        harness="acp",
-        executor="e2b",
-        client_factory=PiRpcClient,
-        on_frame=lambda frame: None,
-        rpc_plan=lambda _spec: ([], {}, None),
-        docker_plan=lambda _spec: ([], {}, "container"),
-        docker_stop=lambda _name: [],
-        acp_plan=lambda _spec: ([], {}, None),
-        acp_e2b_plan=lambda _spec: sandbox_client,
+    # 生产组合：harness.driver(sandbox.spawn(harness.launch(spec)))。
+    launch = family.launch(spec, sandbox)
+    adapter = family.driver(
+        spec, sandbox=sandbox, launch=launch, on_frame=lambda frame: None, client_factory=None
     )
     try:
         adapter.start()
-        result["sandbox_id"] = sandbox_client.sandbox_id
-        result["sandbox_command"] = sandbox_client.command()
+        transfer = adapter._transfer  # 探针读取生产上传的清单（仅计数与摘要）
+        result["sandbox_id"] = sandbox.sandbox_id
+        result["sandbox_command"] = sandbox.command(launch)
         result["harden_command"] = "chmod 0700 /home/user/acp/home …"
         result["upload_manifest"] = [
             {"path": relative, "sha256": digest}
-            for relative, digest in sandbox_client.upload_manifest
+            for relative, digest in (transfer.upload_manifest if transfer else [])
         ]
         session = adapter.session_info()
         if session is None:
@@ -200,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
             # performs, measured against the real sandbox SDK (recursive
             # listing shape, entry paths/sizes, streamed reads) without a
             # model call. Only counts/paths are recorded, never file content.
-            state = sandbox_client.recover_state()
+            state = transfer.recover_state()
             result["stateRecovery"] = {
                 "ok": state.ok,
                 "fileCount": len(state.files),
@@ -212,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 - 失败本身是证据
         result["initializeOk"] = False
         result["error"] = f"{type(exc).__name__}: {exc}"
-        result["sandbox_id"] = sandbox_client.sandbox_id
+        result["sandbox_id"] = sandbox.sandbox_id
     finally:
         cleanup = adapter.close()
         result["cleanup"] = {

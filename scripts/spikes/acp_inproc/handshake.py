@@ -41,13 +41,11 @@ from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 
 from pi_glink import __version__ as HOST_VERSION  # noqa: E402
 from pi_glink.config import build_config  # noqa: E402
-from pi_glink.kernel.acp_env import (  # noqa: E402
-    build_acp_argv,
-    build_acp_env,
-    prepare_acp_runtime,
-)
-from pi_glink.kernel.acp_execution import AcpExecutionAdapter  # noqa: E402
+from pi_glink.kernel.acp_env import prepare_acp_runtime  # noqa: E402
 from pi_glink.kernel.execution import ExecutionSpec  # noqa: E402
+from pi_glink.kernel.harness_acp import AcpHarnessFamily  # noqa: E402
+from pi_glink.kernel.sandbox import InprocSandbox  # noqa: E402
+from pi_glink.store import RunStore  # noqa: E402
 
 DEFAULT_COMMAND = "dsh --profile acp"
 
@@ -178,13 +176,10 @@ def main(argv: list[str] | None = None) -> int:
         workspace=workspace,
         timeout_seconds=args.timeout,
     )
-    adapter = AcpExecutionAdapter(
-        spec,
-        argv=build_acp_argv(config),
-        env=build_acp_env(config, runtime),
-        cwd=workspace,
-        on_frame=frames.append,
-    )
+    # 生产组合：harness.driver(sandbox.spawn(harness.launch(spec)))。
+    family = AcpHarnessFamily(config=config, store=RunStore(workdir / "runs"))
+    sandbox = InprocSandbox(config=config, run_id="handshake", workspace=workspace)
+    adapter = family.build_adapter(spec, sandbox, on_frame=frames.append)
     started = time.monotonic()
     exit_code = 0
     try:

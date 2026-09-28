@@ -4,8 +4,10 @@ The host stays outside the boundary. It starts ``docker run --rm -i`` and speaks
 the harness's own stdio protocol over the container's stdio, so the runner, the
 event projection and the browser contract are untouched by the change of face:
 
-* the **pi** face speaks its bidirectional RPC protocol (:func:`build_plan`);
-* the **ACP** face speaks ACP JSON-RPC (:func:`build_acp_plan`).
+the pi family speaks its bidirectional RPC protocol, the ACP family ACP
+JSON-RPC. :func:`run_argv` composes the command from the harness's
+:class:`~pi_glink.kernel.sandbox.Launch`; the lifecycle (availability check,
+persisted name, force-remove) is :class:`~pi_glink.kernel.sandbox.DockerSandbox`.
 
 Only data crosses the boundary:
 
@@ -39,13 +41,14 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 from ..config import DEFAULT_WORKER_IMAGE, HostConfig
-from .acp_env import AcpRuntime, build_acp_argv
-from .agent_env import IMAGE_PACKAGE_GUARD, PASSTHROUGH_ENV, AgentRuntime
+from .agent_env import PASSTHROUGH_ENV
+
+if TYPE_CHECKING:  # pragma: no cover - annotation only
+    from .sandbox import Launch
 
 #: Default image; frozen at configuration time (see ``HostConfig.worker_image``).
 WORKER_IMAGE_DEFAULT = DEFAULT_WORKER_IMAGE
@@ -67,16 +70,6 @@ _DOCKER_CLI_ENV = (
     "DOCKER_TLS_VERIFY",
     "DOCKER_CERT_PATH",
 )
-
-
-@dataclass(frozen=True, slots=True)
-class ContainerPlan:
-    """Everything the runner needs to start one containerised run."""
-
-    argv: list[str]
-    env: dict[str, str]
-    container_name: str
-    image: str
 
 
 def worker_image(config: HostConfig) -> str:
@@ -129,136 +122,63 @@ def image_present(image: str) -> bool:
     return result.returncode == 0
 
 
-def build_plan(
+def run_argv(
     config: HostConfig,
-    runtime: AgentRuntime,
+    launch: "Launch",
     *,
     run_id: str,
     workspace: Path,
-    session_dir: Path,
-    extra: Sequence[str] = (),
-) -> ContainerPlan:
-    """Compose ``docker run`` for one run.
+) -> list[str]:
+    """Compose ``docker run -i`` for one run from a harness's :class:`Launch`.
 
-    ``-i`` keeps stdin open for the RPC command stream and ``--rm`` removes the
-    container when pi exits. Credentials are forwarded by *name* so their values
-    never appear in the process list. ``session_dir`` is the run's own session
-    directory: a shared mount would let two runs write into each other's session
-    files.
-    Every run gets explicit resource ceilings and a reduced privilege profile
-    (``--cpus`` / ``--memory`` / ``--pids-limit``, all capabilities dropped,
-    ``no-new-privileges``). The image and its template are never changed here;
-    the limits apply to the container instance only. They are contract, not
-    measured facts: no live Docker run is performed by the default test suite,
-    so the host cannot claim what the daemon actually enforced.
+    The container's stdio is the harness's own transport: ``-i`` keeps stdin
+    open and ``--rm`` removes the container when the kernel exits. The name is
+    fixed by the run id (:func:`container_name_for`) and labelled, so the
+    resource ledger can address exactly this container. Resource ceilings and
+    the reduced privilege profile (:func:`_isolation_argv`) are identical for
+    every harness.
 
-    ``--entrypoint`` is the image-local prebaked-package guard
-    (:data:`agent_env.IMAGE_PACKAGE_GUARD`), not the image default: the mounted
-    ``settings.json`` points at ``/opt/pi-packages`` instead of declaring an
-    ``npm:`` install, and pi silently ignores a local package path that does not
-    exist — the guard turns that silent loss into a clear failure (exit 78).
+    The workspace is always mounted read-write at :data:`CONTAINER_WORKSPACE`
+    and is the working directory; every other mount comes from the launch (the
+    pi config and session directories, the ACP ``HOME`` with each injected
+    credential re-mounted ``:ro`` on top so the container can keep state under
+    ``HOME`` but cannot modify the credential). ``launch.guard`` becomes the
+    entrypoint: the image's package guard verifies the prebaked pi packages
+    and then ``exec``\\ s the argv, because pi silently ignores a missing local
+    package. ``launch.env`` holds non-secret literals (``-e NAME=value``);
+    ``launch.secret_env`` is passed by *name* only (``-e NAME``) with the value
+    on the docker CLI's own environment (:func:`cli_env`), so it never appears
+    in argv (the process list).
     """
-    image = worker_image(config)
-    container_name = container_name_for(run_id)
     argv: list[str] = [
         "docker", "run", "--rm", "-i",
-        "--name", container_name,
+        "--name", container_name_for(run_id),
         "--label", f"pi-glink.run={run_id}",
         *_isolation_argv(config),
-        # The container faces load pi packages from the image instead of running
-        # npm inside the run, so the entrypoint is the image's package guard:
-        # it exits 78 when a package the mounted settings point at is missing.
-        # A pre-change image has no such file and fails at container start
-        # instead of silently running without web_search.
-        "--entrypoint", IMAGE_PACKAGE_GUARD,
-        "-v", f"{workspace}:{CONTAINER_WORKSPACE}",
-        "-w", CONTAINER_WORKSPACE,
-        "-v", f"{runtime.directory}:{CONTAINER_CONFIG}",
-        "-v", f"{session_dir}:{CONTAINER_SESSIONS}",
-        "-e", f"PI_CODING_AGENT_DIR={CONTAINER_CONFIG}",
-        "-e", f"PI_CODING_AGENT_SESSION_DIR={CONTAINER_SESSIONS}",
-        "-e", "PI_SKIP_VERSION_CHECK=1",
-        "-e", "PI_TELEMETRY=0",
     ]
-    argv.extend(
-        [
-            image,
-            "pi", "--mode", "rpc",
-            "--provider", runtime.provider_id,
-            "--model", runtime.model_id,
-        ]
-    )
-    argv.extend(extra)
-    return ContainerPlan(
-        argv=argv,
-        env=build_env(config),
-        container_name=container_name,
-        image=image,
-    )
-
-
-def build_acp_plan(
-    config: HostConfig,
-    runtime: AcpRuntime,
-    *,
-    run_id: str,
-    workspace: Path,
-) -> ContainerPlan:
-    """Compose ``docker run -i`` for one ACP family run.
-
-    The container's stdio is the ACP transport: ``-i`` keeps stdin open and
-    ``--rm`` removes the container when the agent exits. The agent's argv is the
-    frozen ``PI_GLINK_ACP_COMMAND`` verbatim, so the *image-local* command (for
-    example ``dsh --profile acp``) is what runs — the in-process face's host
-    path would not exist inside the container.
-
-    The ACP family keeps its state in ``HOME``, so the run's own state root is
-    mounted at :data:`CONTAINER_HOME` and the container's ``HOME`` points at it:
-    ``~/.codex`` / ``~/.dsh`` / caches live in the run directory and are
-    destroyed with it, never in the operator's home. The mount itself stays
-    writable (an agent must be able to keep sessions), but every injected
-    credential file is mounted ``:ro`` on top of it: the container can read the
-    credential and cannot modify or delete it.
-
-    ``PI_GLINK_ACP_ENV`` entries are passed by *name* (``-e NAME``), with their
-    values set on the docker CLI's own environment: they never appear in argv
-    (the process list), unlike the file-mounted credentials they are the
-    explicit process-environment channel of this face.
-    """
-    image = acp_worker_image(config)
-    container_name = container_name_for(run_id)
-    argv: list[str] = [
-        "docker", "run", "--rm", "-i",
-        "--name", container_name,
-        "--label", f"pi-glink.run={run_id}",
-        *_isolation_argv(config),
-        "-v", f"{workspace}:{CONTAINER_WORKSPACE}",
-        "-w", CONTAINER_WORKSPACE,
-        "-v", f"{runtime.home}:{CONTAINER_HOME}",
-        "-e", f"HOME={CONTAINER_HOME}",
-    ]
-    for dest in runtime.credential_dests:
-        # A nested read-only mount: the credential file itself cannot be
-        # rewritten by the container while HOME stays writable for agent state.
-        argv.extend(
-            [
-                "-v",
-                f"{runtime.home / dest}:{CONTAINER_HOME}/{dest}:ro",
-            ]
-        )
-    for name, _value in config.acp_env:
-        # By name only: the value stays out of argv (see the docstring).
+    if launch.guard:
+        argv.extend(["--entrypoint", launch.guard])
+    argv.extend(["-v", f"{workspace}:{CONTAINER_WORKSPACE}", "-w", CONTAINER_WORKSPACE])
+    for mount in launch.mounts:
+        suffix = ":ro" if mount.read_only else ""
+        argv.extend(["-v", f"{mount.source}:{mount.target}{suffix}"])
+    for name, value in launch.env.items():
+        argv.extend(["-e", f"{name}={value}"])
+    for name in launch.secret_env:
         argv.extend(["-e", name])
-    argv.append(image)
-    argv.extend(build_acp_argv(config))
-    env = build_env(config)
-    env.update({name: value for name, value in config.acp_env})
-    return ContainerPlan(
-        argv=argv,
-        env=env,
-        container_name=container_name,
-        image=image,
-    )
+    argv.append(launch.image)
+    argv.extend(launch.argv)
+    return argv
+
+
+def cli_env(
+    launch: "Launch", *, base_env: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """The docker CLI's environment for one launch: :func:`build_env` plus the
+    values of ``launch.secret_env`` (forwarded by name in :func:`run_argv`)."""
+    env = build_env(base_env=base_env)
+    env.update(launch.secret_env)
+    return env
 
 
 def _isolation_argv(config: HostConfig) -> list[str]:
@@ -277,9 +197,7 @@ def _isolation_argv(config: HostConfig) -> list[str]:
     ]
 
 
-def build_env(
-    config: HostConfig, *, base_env: Mapping[str, str] | None = None
-) -> dict[str, str]:
+def build_env(*, base_env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Environment for the *docker CLI*, not for the container.
 
     The container's configuration — including the credential in ``auth.json`` —
@@ -372,19 +290,6 @@ def _container_present(
     if "no such" in message.lower():
         return False, "docker inspect 确认容器不存在"
     return None, f"docker inspect 无法判定: exit {result.returncode}: {message[-200:]}"
-
-
-def host_session_path(raw: str, session_dir: Path) -> Path | None:
-    """Map a session path pi reported inside the container to its host file.
-
-    pi only knows container paths (``/sessions/<file>.jsonl``); the host mounted
-    the run's own session directory at :data:`CONTAINER_SESSIONS`. Without this
-    translation the host-side sanitizer reads a path that does not exist and
-    silently skips the file — the leak the audit reproduced. Only the session
-    mount is translated on purpose: the credential lives in ``/config/auth.json``
-    and must keep its real value.
-    """
-    return translate_container_path(raw, ((CONTAINER_SESSIONS, session_dir),))
 
 
 def translate_container_path(

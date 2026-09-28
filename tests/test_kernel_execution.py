@@ -30,13 +30,14 @@ from pi_glink.events import EventBus
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
-    E2BSandboxRpcExecutionAdapter,
     ExecutionAdapter,
     ExecutionOutcome,
     ExecutionSpec,
+    PiExecutionAdapter,
     SessionInfo,
-    build_adapter,
 )
+from pi_glink.kernel.harness import select_family
+from pi_glink.kernel.sandbox import DockerSandbox, E2BSandbox, open_sandbox
 from pi_glink.kernel.rpc import PiRpcClient
 from pi_glink.runs.runner import RunManager
 from pi_glink.store import FINISHED, RunStore
@@ -114,7 +115,7 @@ def test_the_manager_drives_every_face_through_the_same_protocol(
     config, store, manager = make_manager(tmp_path)
     adapter = RecordingAdapter()
     monkeypatch.setattr(
-        "pi_glink.kernel.harness_pi.compose_adapter", lambda spec, **kwargs: adapter
+        "pi_glink.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter
     )
 
     record = manager.start("统一接口")
@@ -151,7 +152,7 @@ def test_cancellation_goes_through_the_adapter_not_a_face_branch(
 
     adapter.wait = slow_wait  # type: ignore[method-assign]
     monkeypatch.setattr(
-        "pi_glink.kernel.harness_pi.compose_adapter", lambda spec, **kwargs: adapter
+        "pi_glink.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter
     )
 
     record = manager.start("取消走适配器")
@@ -181,9 +182,9 @@ def _run_face(tmp_path: Path, executor: str, monkeypatch: pytest.MonkeyPatch) ->
         )
     else:
         sandbox_factory = None
-        monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: True)
+        monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
         monkeypatch.setattr(
-            "pi_glink.kernel.execution.subprocess.run",
+            "pi_glink.kernel.sandbox.subprocess.run",
             lambda *args, **kwargs: type("R", (), {"returncode": 0, "stderr": ""})(),
         )
     config = make_config(tmp_path, **overrides)
@@ -264,15 +265,18 @@ def test_the_three_faces_agree_frame_for_frame(
     assert inproc_types == docker_types == e2b_types
 
 
-def test_build_adapter_selects_the_face_from_the_frozen_executor(
+def test_the_adapter_is_the_family_driver_over_the_frozen_executor_sandbox(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """``family.build_adapter(spec, open_sandbox(executor))`` is the only composition.
+
+    The pi family's driver is the same :class:`PiExecutionAdapter` on every
+    sandbox; only the sandbox (chosen from the frozen executor, not the host's
+    current configuration) differs, and the adapter reports its kind and
+    identity from it.
+    """
+    # The host is configured for docker; the frozen executor decides the face.
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.docker_available", lambda: True)
-    monkeypatch.setattr(
-        "pi_glink.kernel.execution.subprocess.run",
-        lambda *args, **kwargs: type("R", (), {"returncode": 0, "stderr": ""})(),
-    )
     from pi_glink.kernel import agent_env
 
     runtime = agent_env.prepare_agent_dir(
@@ -289,31 +293,35 @@ def test_build_adapter_selects_the_face_from_the_frozen_executor(
         workspace=tmp_path / "ws",
         timeout_seconds=60,
     )
-    adapter = build_adapter(
-        spec,
-        executor="docker",
-        client_factory=PiRpcClient,
-        on_frame=lambda frame: None,
-        rpc_plan=lambda s: ([], {}, None),
-        docker_plan=lambda s: (["docker", "run"], {}, "pi-glink-abc123"),
-        docker_stop=lambda name: ["docker", "rm", "-f", name],
+    family = select_family("pi", config=config, store=RunStore(tmp_path / "store"))
+
+    def sandbox(executor: str, **kwargs: Any):
+        return open_sandbox(
+            executor, config=config, run_id="abc123", workspace=tmp_path / "ws", **kwargs
+        )
+
+    docker = sandbox("docker")
+    adapter = family.build_adapter(
+        spec, docker, client_factory=PiRpcClient, on_frame=lambda frame: None
     )
-    assert isinstance(adapter, ExecutionAdapter)
+    assert isinstance(docker, DockerSandbox)
+    assert isinstance(adapter, PiExecutionAdapter)
     assert adapter.kind == "docker"
     assert adapter.identity() == {"container": "pi-glink-abc123"}
 
-    # The e2b face composes the RPC adapter over the sandbox channel; the
-    # kernel argv comes from the face-specific plan.
-    e2b_adapter = build_adapter(
-        spec,
-        executor="e2b",
-        client_factory=PiRpcClient,
-        on_frame=lambda frame: None,
-        sandbox_factory=lambda **_: FakeSandbox(),
-        rpc_plan=lambda s: ([], {}, None),
-        docker_plan=lambda s: (["docker", "run"], {}, "pi-glink-abc123"),
-        docker_stop=lambda name: ["docker", "rm", "-f", name],
-        e2b_rpc_plan=lambda s: ["pi", "--mode", "rpc"],
+    e2b = sandbox("e2b", sandbox_factory=lambda **_: FakeSandbox())
+    e2b_adapter = family.build_adapter(
+        spec, e2b, client_factory=PiRpcClient, on_frame=lambda frame: None
     )
-    assert isinstance(e2b_adapter, E2BSandboxRpcExecutionAdapter)
+    assert isinstance(e2b, E2BSandbox)
+    assert isinstance(e2b_adapter, PiExecutionAdapter)
     assert e2b_adapter.kind == "e2b"
+    # No sandbox exists before start(): nothing to name yet.
+    assert e2b_adapter.identity() == {}
+
+    inproc_adapter = family.build_adapter(
+        spec, sandbox("inproc"), client_factory=PiRpcClient, on_frame=lambda frame: None
+    )
+    assert isinstance(inproc_adapter, PiExecutionAdapter)
+    assert inproc_adapter.kind == "inproc"
+    assert inproc_adapter.identity() == {}

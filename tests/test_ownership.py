@@ -24,7 +24,7 @@ import pytest
 from pi_glink.app import create_server
 from pi_glink.config import build_config
 from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.store import FAILED, RUNNING, RunStore
+from pi_glink.store import FAILED, RUNNING, RunStore, RunSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
@@ -153,7 +153,7 @@ def test_reconcile_without_ownership_is_refused_and_changes_nothing(tmp_path: Pa
 
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
-    store.create("别的宿主的 run", run_id="theirs", workspace=tmp_path / "ws", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("别的宿主的 run", run_id="theirs", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     meta_before = (store.run_dir("theirs") / "meta.json").read_bytes()
     manager = RunManager(config, EventBus(), store)
     with pytest.raises(OwnershipRequired):
@@ -166,7 +166,7 @@ def test_a_dead_owners_running_record_is_reconciled_by_the_next_owner(tmp_path: 
     """Once the owner is gone (lock released), recovery proceeds as before."""
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
-    store.create("上一次进程遗留", run_id="orphan", workspace=tmp_path / "ws", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("上一次进程遗留", run_id="orphan", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     server = create_server(config, client_factory=fake_factory)
     try:
         record = server.store.get("orphan")
@@ -184,7 +184,7 @@ def test_resource_adjudication_requires_the_host_to_be_stopped(
 
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
-    store.create("资源未确认", run_id="held", workspace=tmp_path / "ws", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("资源未确认", run_id="held", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     store.update(
         "held",
         status="finished",

@@ -58,7 +58,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from ..config import ConfigError, HostConfig
 from .sweep import SessionSweep
@@ -83,10 +83,6 @@ TEMPLATE_ENTRIES = ("settings.json", "AGENTS.md", "agents", "extensions", "skill
 #: Backwards-compatible private alias (the list is part of the module contract
 #: for the E2B upload manifest, so it is exported under a public name).
 _TEMPLATE_ENTRIES = TEMPLATE_ENTRIES
-#: Faces that run pi inside a self-contained image/template. They load pi
-#: packages from the image (see :data:`CONTAINER_LOCAL_PACKAGES`) instead of
-#: installing them into the mounted runtime directory on every run.
-CONTAINER_EXECUTORS = ("docker", "e2b")
 #: Image-local pi package root, installed at build time by both
 #: ``docker/Dockerfile.worker`` and ``docker/e2b/Dockerfile.e2b``. It is
 #: deliberately outside ``PI_CODING_AGENT_DIR``: the runtime directory is a
@@ -229,6 +225,7 @@ def prepare_agent_dir(
     runtime_dir: Path,
     session_dir: Path | None = None,
     credentials: RunCredentials | None = None,
+    image_packages: bool = False,
 ) -> AgentRuntime:
     """Render the per-run pi configuration directory and return its handle.
 
@@ -241,6 +238,10 @@ def prepare_agent_dir(
     contain. The default derives them from the host configuration (local mode);
     multi-tenant runs pass the run's own tenant credentials, so one tenant's
     key is never rendered into another tenant's directory.
+
+    ``image_packages`` is the run's sandbox fact (``Sandbox.isolated``): an
+    isolated kernel (container or cloud sandbox) resolves the prebaked pi
+    packages at their image-local paths, a host kernel at the template's.
     """
     if not config.openai_base_url:
         raise ConfigError("OPENAI_BASE_URL is required to launch the pi kernel")
@@ -255,7 +256,7 @@ def prepare_agent_dir(
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     sessions.mkdir(parents=True, exist_ok=True, mode=0o700)
     _sync_template(config.agent_config_dir, directory)
-    if config.executor in CONTAINER_EXECUTORS:
+    if image_packages:
         _map_prebaked_packages(directory)
     _seed_web_search_config(source, directory)
     _write_auth_json(source, directory)
@@ -394,45 +395,16 @@ def _map_package_entry(entry: Any) -> tuple[Any, bool]:
     return entry, False
 
 
-def build_pi_argv(
-    config: HostConfig, runtime: AgentRuntime, *, extra: Sequence[str] = ()
-) -> list[str]:
-    """Command line for the headless pi process."""
-    argv = [
-        config.pi_bin,
-        "--mode",
-        "rpc",
-        "--provider",
-        runtime.provider_id,
-        "--model",
-        runtime.model_id,
-    ]
-    argv.extend(extra)
-    return argv
+def passthrough_env(base_env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The minimal host environment a kernel process (or the docker CLI) inherits.
 
-
-def build_pi_env(
-    config: HostConfig,
-    runtime: AgentRuntime,
-    *,
-    base_env: Mapping[str, str] | None = None,
-) -> dict[str, str]:
-    """Child environment: minimal passthrough, and **no model credential**.
-
-    The credential is not an environment variable any more. It lives in the
-    runtime ``auth.json`` (mode 0600, outside the repository) that pi reads
-    itself, which keeps it out of the kernel process environment — a shell tool
-    running `env` cannot see it. ``base_env`` is still filtered through
-    :data:`PASSTHROUGH_ENV` so a caller handing in ``os.environ`` cannot widen
-    the child's view of host credentials.
+    ``base_env`` (default ``os.environ``) is filtered through
+    :data:`PASSTHROUGH_ENV`, so a caller handing in ``os.environ`` cannot widen
+    the child's view of host credentials. No model credential is ever an
+    environment variable: pi reads it from the rendered ``auth.json``.
     """
     source = dict(base_env) if base_env is not None else dict(os.environ)
-    env = {name: source[name] for name in PASSTHROUGH_ENV if name in source}
-    env["PI_CODING_AGENT_DIR"] = str(runtime.directory)
-    env["PI_CODING_AGENT_SESSION_DIR"] = str(runtime.session_dir)
-    env["PI_SKIP_VERSION_CHECK"] = "1"
-    env["PI_TELEMETRY"] = "0"
-    return env
+    return {name: source[name] for name in PASSTHROUGH_ENV if name in source}
 
 
 def _models_document(config: HostConfig) -> dict[str, Any]:

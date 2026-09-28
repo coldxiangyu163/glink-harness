@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from pi_glink.store import RunSpec
 from pi_glink.app import PiGlinkServer, create_server
 from pi_glink.config import build_config
 from pi_glink.kernel.rpc import PiRpcClient
@@ -591,7 +592,7 @@ def test_start_is_refused_while_a_release_is_unconfirmed(
             return CleanupReport(released=False, failures=("synthetic kill failed",))
         def cancel(self): pass
 
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", lambda spec, **kwargs: LeakingAdapter())
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: LeakingAdapter())
     instance = create_server(make_config(tmp_path), client_factory=fake_factory())
     thread = threading.Thread(target=instance.serve_forever, daemon=True)
     thread.start()
@@ -624,7 +625,7 @@ def _workspace_report_record(server: PiGlinkServer, run_id: str, *, report: str 
     if report is not None:
         target.write_text(report, encoding="utf-8")
     store.create("研究", run_id=run_id, workspace=workspace,
-                 harness="pi", harness_pack="pi", executor="inproc")
+                 spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     store.update(run_id, status="finished", report_path=str(report_path or target),
                  finished_at=time.time(), event_count=0)
     return target
@@ -670,7 +671,7 @@ def test_a_host_artifact_behind_a_directory_link_is_not_served(server: PiGlinkSe
     outside.mkdir()
     (outside / "report.md").write_text("# 外部\n", encoding="utf-8")
     store = server.store
-    store.create("产物目录被替换", run_id="swapartifact", workspace=tmp_path / "ws", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("产物目录被替换", run_id="swapartifact", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     (store.run_dir("swapartifact") / "artifacts").symlink_to(outside, target_is_directory=True)
     store.update("swapartifact", status="finished",
                  report_path=str(store.run_dir("swapartifact") / "artifacts" / "report.md"))

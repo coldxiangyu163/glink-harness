@@ -3,11 +3,15 @@
 The runner owns locks, phases, finalize ordering and commits. Everything that
 reads as "the pi family does X, the ACP family does Y" lives behind
 :class:`HarnessFamily`: admission allowlists, follow-up gates and resume
-seeds, runtime rendering and projector construction, adapter assembly,
-stop-reason normalization, and subagent enrichment. ``executor`` (the
-in-process / Docker / E2B transmission face) stays orthogonal: face concerns
-(container identity persistence, container-path mapping) remain in the runner
-or the face plans. The behavioural invariants of this interface are listed in
+seeds, runtime rendering and projector construction, the launch description
+and protocol driver, stop-reason normalization, and subagent enrichment.
+
+The execution face is the orthogonal :class:`~pi_glink.kernel.sandbox.Sandbox`
+dimension (in-process / Docker / E2B: resource, spawn, path mapping, identity,
+teardown). A run's adapter is ``harness.driver(sandbox.spawn(harness.launch(spec)))``
+(:meth:`HarnessFamily.build_adapter`); a family never branches on the
+sandbox's name — it asks the sandbox facts (``isolated``, ``remote``,
+``place``). The behavioural invariants of this interface are listed in
 docs/architecture.md §4「族接口」.
 """
 
@@ -16,17 +20,41 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, TYPE_CHECKING
+from typing import Any, Callable, Mapping, Protocol, TYPE_CHECKING
 
 from ..config import ConfigError, HostConfig
 from ..store import RunRecord, RunStore
 from .execution import ExecutionAdapter, ExecutionSpec
+from .sandbox import Launch, Sandbox
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only
     from ..redaction import SecretRedactor
-    from .agent_env import AgentRuntime, RunCredentials
-    from .acp_env import AcpRuntime
-    from .projection import Projector
+    from .agent_env import RunCredentials
+    from .sweep import SessionSweep
+
+
+class HarnessRuntime(Protocol):
+    """A family's rendered per-run runtime, as the runner consumes it.
+
+    The concrete type is the family's own (pi ``AgentRuntime``, ACP
+    ``AcpRuntime``); the runner only asks for the paths it must sweep and
+    otherwise hands the object back to the family and its driver.
+    """
+
+    def session_sweeps(self) -> "tuple[SessionSweep, ...]": ...
+
+
+class FrameProjector(Protocol):
+    """A family's per-run frame projector, as the runner consumes it.
+
+    pi ``Projector`` / ACP ``AcpProjector``: one wire frame in, the product
+    events it projects to out; ``flush`` releases the withheld stream tail
+    before the verdict. The runner never names the concrete class.
+    """
+
+    def project(self, frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]: ...
+
+    def flush(self) -> list[tuple[str, dict[str, Any]]]: ...
 
 
 class FollowupUnavailable(RuntimeError):
@@ -61,7 +89,7 @@ class Verdict:
 class PreparedRuntime:
     """What a family's runtime render produced（runner 按原序消费）。"""
 
-    runtime: "AgentRuntime | AcpRuntime"
+    runtime: HarnessRuntime
     #: 渲染中新知的凭据形值：并入本 run 的脱敏边界（ACP 的 runtime.secrets）。
     secret_values: tuple[str, ...] = ()
     #: 需 add_from_file 并入边界的文件（pi 的 web-search.json）。
@@ -71,14 +99,15 @@ class PreparedRuntime:
 
 
 class HarnessFamily(ABC):
-    """One harness family's policy surface. Selected once per process.
+    """One harness family's policy surface. One instance per family name.
 
-    实例在 ``RunManager.__init__`` 由 ``select_family`` 唯一选出，构造时
-    注入冻结的 ``config`` 与 ``store``；此后 runner 不再读
-    ``config.harness`` 做族分支（准入冻结写入与记录字段比较除外）。
+    ``RunManager`` 按 run 的 ``RunSpec.family`` 经 ``select_family`` 取得并
+    缓存实例（每个族名一份），构造时注入冻结的 ``config`` 与 ``store``；准入
+    时族名写入 run 的 ``RunSpec.family``，此后 runner 与族方法只读
+    ``RunSpec``，不再读 ``config.harness``/``config.executor`` 做分支。
     """
 
-    name: str = "unknown"  # "pi" | "acp"，与 record.harness 的取值同表
+    name: str = "unknown"  # "pi" | "acp"，与 RunSpec.family 的取值同表
 
     def __init__(self, *, config: HostConfig, store: RunStore) -> None:
         self._config = config
@@ -105,7 +134,7 @@ class HarnessFamily(ABC):
         （owner→harness 字段→terminal→stale，runner 保留）。
 
         基类空实现（pi 无额外门禁）。ACP 族覆写，追加事实：能力矩阵
-        （父 run ``session_ready`` 帧，族已由父记录 ``harness`` 字段证明）、
+        （父 run ``session_ready`` 帧，族已由父记录 ``spec.family`` 证明）、
         session_id、``acp_resume_method``、状态根目录存在性；拒绝一律
         ``FollowupUnavailable("session_unavailable")``。
         """
@@ -139,12 +168,12 @@ class HarnessFamily(ABC):
         """
 
     @abstractmethod
-    def verifies_continuation_before_turn(self, executor: str) -> bool:
+    def verifies_continuation_before_turn(self) -> bool:
         """Whether the child's session identity is proven before the turn.
 
-        pi：恒 True——三面都走 RPC 通道，``get_state`` 在 ``session_ready``
-        即知会话身份（docs/adr/0004）；ACP：恒 True（session/resume 之后即
-        知）。``executor`` 参数保留以稳定签名。
+        pi：恒 True——每个 sandbox 上都走 RPC 通道，``get_state`` 在
+        ``session_ready`` 即知会话身份（docs/adr/0004）；ACP：恒 True
+        （session/resume 之后即知）。与 sandbox 无关，故无参数。
         """
 
     # -- (c) runtime 渲染与 projector 工厂 -------------------------------------
@@ -158,8 +187,13 @@ class HarnessFamily(ABC):
         parent: RunRecord | None,
         session_seed: bytes | None,
         credentials: "RunCredentials | None",
+        sandbox: Sandbox,
     ) -> PreparedRuntime:
         """Render the run's per-harness configuration.
+
+        ``sandbox`` is asked facts only: an ``isolated`` sandbox runs the
+        kernel from its image, so pi's ``settings.json`` names the image-local
+        prebaked packages instead of host paths.
 
         调用前 runner 已做好父记录二次授权（``_authorized_parent`` 重查，
         失败即 ``session_unavailable``）。pi：prepare_agent_dir + 种子写入
@@ -170,29 +204,56 @@ class HarnessFamily(ABC):
         """
 
     @abstractmethod
-    def make_projector(self, redactor: "SecretRedactor") -> "Projector":
+    def make_projector(self, redactor: "SecretRedactor") -> FrameProjector:
         """The frame projector（pi：``Projector``；ACP：``AcpProjector``）。
         runner 在 PreparedRuntime 的 secret 全部并入边界之后调用。"""
 
-    # -- (d) adapter 组装 -------------------------------------------------------
+    # -- (d) launch 描述与协议驱动 -------------------------------------------
 
     @abstractmethod
-    def build_adapter(
+    def launch(self, spec: ExecutionSpec, sandbox: Sandbox) -> Launch:
+        """Describe the kernel process independent of the carrier.
+
+        argv、非密环境、密值环境（``secret_env``，Docker 只按名转发）、需挂载
+        的宿主路径、包守卫、镜像与模板名。族自己的路径一律经
+        ``sandbox.place(role, host)`` 得到进程视角的位置，不按 sandbox 名分支。
+        """
+
+    @abstractmethod
+    def driver(
         self,
         spec: ExecutionSpec,
         *,
-        executor: str,
+        sandbox: Sandbox,
+        launch: Launch,
         on_frame: Callable[[Mapping[str, Any]], None],
-        on_identity: Callable[[Mapping[str, str]], None],
-        client_factory: Callable[..., Any],
-        sandbox_factory: Callable[..., Any] | None,
+        client_factory: Callable[..., Any] | None,
     ) -> ExecutionAdapter:
-        """Compose the face adapter（委托 ``execution.build_adapter``，签名
-        不变）。族内私有 plan 方法：pi 族 ``_rpc_plan``/``_docker_plan``；
-        ACP 族 ``_acp_plan``/``_acp_docker_plan``/``_acp_e2b_plan``（含
-        AcpRuntime 类型守卫与 daemon 检查）。docker 容器名预持久化不在此
-        ——runner 保留（资源台账身份，面关切）。
+        """The family's protocol driver over ``sandbox`` (pi：
+        ``PiExecutionAdapter``；ACP：``AcpExecutionAdapter``)。driver 在
+        ``start()`` 里调 ``sandbox.open``/``sandbox.spawn(launch)``。"""
+
+    def build_adapter(
+        self,
+        spec: ExecutionSpec,
+        sandbox: Sandbox,
+        *,
+        on_frame: Callable[[Mapping[str, Any]], None],
+        client_factory: Callable[..., Any] | None = None,
+    ) -> ExecutionAdapter:
+        """``driver(sandbox.spawn(launch(spec)))`` — the only composition path.
+
+        没有 ``(harness, executor)`` 字符串分派：sandbox 由 runner 按
+        ``RunSpec.executor`` 选出（:func:`~pi_glink.kernel.sandbox.open_sandbox`），
+        族只提供 launch 与 driver。
         """
+        return self.driver(
+            spec,
+            sandbox=sandbox,
+            launch=self.launch(spec, sandbox),
+            on_frame=on_frame,
+            client_factory=client_factory,
+        )
 
     # -- (e) 终态词汇归一化 ------------------------------------------------------
 
@@ -210,7 +271,7 @@ class HarnessFamily(ABC):
         self,
         run_id: str,
         *,
-        runtime: "AgentRuntime | AcpRuntime | None",
+        runtime: "HarnessRuntime | None",
         artifact_failures: list[str],
         sweep: Callable[[Path], bool],
         warn: Callable[[str], None],
@@ -249,12 +310,14 @@ class HarnessFamily(ABC):
 def select_family(
     harness: str, *, config: HostConfig, store: RunStore
 ) -> HarnessFamily:
-    """The process-wide family, chosen once in ``RunManager.__init__``.
+    """The family instance for one ``RunSpec.family`` name.
 
-    ``harness`` is the selected pack's manifest ``family`` (``pi``/``acp``),
-    derived and validated by :func:`pi_glink.config.build_config`; the pack
-    itself travels on the frozen config (``harness_pack``,
-    ``pack_capabilities``, ``pack_home``, the ACP argv/options).
+    ``RunManager`` caches one instance per name and looks it up from each
+    run's frozen spec, so nothing assumes one harness per host. ``harness`` is
+    a pack manifest ``family`` (``pi``/``acp``), derived and validated by
+    :func:`pi_glink.config.build_config`; the pack itself travels on the
+    frozen config (``harness_pack``, ``pack_capabilities``, ``pack_home``,
+    the ACP argv/options).
     """
     from .harness_acp import AcpHarnessFamily
     from .harness_pi import PiHarnessFamily

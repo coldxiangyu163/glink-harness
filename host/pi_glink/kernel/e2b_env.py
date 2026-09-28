@@ -1,11 +1,17 @@
-"""E2B execution face: pi runs inside a cloud sandbox.
+"""E2B sandbox plumbing and pi's file transfer for the E2B face.
+
+This module holds what the E2B face needs below the
+:class:`~pi_glink.kernel.sandbox.E2BSandbox` resource (sandbox creation,
+workspace recovery, the ``subprocess.Popen``-shaped
+:class:`SandboxCommandProcess` over a background command) plus the pi
+harness's own transfer (:class:`PiSandboxTransfer`: configuration upload,
+continuation upload, session and subagent-artifact recovery).
 
 **RPC 通道（GLINK-ARCH-3 收敛）。** 本面与其余两面说同一个协议：pi 以
-``pi --mode rpc`` 作为沙箱 *background* 命令启动（``stdin=True``），宿主把
-``CommandHandle`` 包装成 ``subprocess.Popen`` 形状的
-:class:`~pi_glink.kernel.acp_e2b_env.SandboxCommandProcess` 交给共享的
-``PiRpcClient``——只有载体变化，帧分发、投影与终态判定复用同一套代码
-（ACP 面同构先例：``E2BAcpSandboxClient.spawn()``）。双向通道的可行性（
+``pi --mode rpc`` 作为沙箱 *background* 命令启动（``stdin=True``），
+``E2BSandbox.spawn()`` 把 ``CommandHandle`` 包装成 :class:`SandboxCommandProcess`
+交给共享的 ``PiRpcClient``——只有载体变化，帧分发、投影与终态判定复用同一套
+代码（ACP 族走同一个 ``E2BSandbox.spawn()``）。双向通道的可行性（
 含运行中 abort 被受理、close_stdin 语义）由 spike 实测钉死，证据在
 ``docs/evidence/pi-e2b-rpc-stdin-spike.txt``。
 
@@ -51,10 +57,12 @@ import hashlib
 import json
 import logging
 import re
-import shlex
+import queue
 import shutil
+import subprocess
+import threading
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from ..artifacts import ArtifactError, ArtifactTree
 from ..config import ConfigError, HostConfig
@@ -84,50 +92,22 @@ class SandboxError(RuntimeError):
     """Raised when the sandbox cannot be created or the run cannot start."""
 
 
-class E2BSandboxClient:
-    """Own one sandbox for one run.
+class PiSandboxTransfer:
+    """pi 族在一个**已打开**沙箱上的文件交付与回收（harness 侧，不拥有沙箱）。
 
-    ``sandbox_factory`` is injectable so the runner can be exercised without a
-    cloud dependency.
+    沙箱的创建、命令、身份与销毁属于
+    :class:`~pi_glink.kernel.sandbox.E2BSandbox`（资源与传输）；本类只知道
+    pi 的布局：渲染好的配置目录交到 :data:`SANDBOX_CONFIG`、续接会话快照交到
+    :data:`SANDBOX_SESSIONS`、主会话与子代理产物在沙箱销毁前拉回宿主。
+    ``handle`` 是 E2B SDK 的沙箱对象（``files``/``commands``）。
     """
 
-    def __init__(
-        self,
-        config: HostConfig,
-        runtime: AgentRuntime,
-        *,
-        run_id: str,
-        workspace: Path,
-        sandbox_factory: Callable[..., Any] | None = None,
-    ) -> None:
-        self.config = config
+    def __init__(self, handle: Any, runtime: AgentRuntime) -> None:
+        self.handle = handle
         self.runtime = runtime
-        self.run_id = run_id
-        self.workspace = workspace
-        self._sandbox_factory = sandbox_factory
-        self.sandbox: Any | None = None
         self.uploaded: list[str] = []
         #: ``(relative path, sha256)`` for everything delivered to the sandbox.
         self.upload_manifest: list[tuple[str, str]] = []
-        self.sandbox_id: str = ""
-        #: Lifetime the sandbox was created with; the kernel command must be
-        #: allowed to run at least that long (see ``_command_timeout``).
-        self.sandbox_timeout: int = 0
-
-    # -- lifecycle ------------------------------------------------------------
-
-    def start(self, *, timeout_seconds: int | None = None) -> None:
-        if self.sandbox is not None:
-            raise SandboxError("sandbox already started")
-        sandbox, self.sandbox_timeout = _create_sandbox(
-            self.config,
-            template=self.config.e2b_template,
-            timeout_seconds=timeout_seconds,
-            sandbox_factory=self._sandbox_factory,
-            envs=self._model_envs(),
-        )
-        self.sandbox = sandbox
-        self.sandbox_id = str(getattr(sandbox, "sandbox_id", ""))
 
     def upload_config(self) -> None:
         """Upload the run's rendered configuration directory (see module docstring).
@@ -137,7 +117,7 @@ class E2BSandboxClient:
         faces read. The manifest lets a test (or an operator) verify what was
         actually delivered.
         """
-        sandbox = self._require_sandbox()
+        sandbox = self.handle
         sandbox.files.make_dir(SANDBOX_CONFIG)
         sandbox.files.make_dir(SANDBOX_WORKSPACE)
         sandbox.files.make_dir(SANDBOX_SESSIONS)
@@ -166,7 +146,7 @@ class E2BSandboxClient:
         """Transfer only the host-owned session snapshot and prior report."""
         if session_name != "continued.jsonl":
             raise SandboxError("invalid continuation session")
-        sandbox = self._require_sandbox()
+        sandbox = self.handle
         with ArtifactTree(self.runtime.session_dir) as tree:
             data = tree.read(session_name, max_bytes=ARTIFACT_MAX_BYTES)
         sandbox.files.write(f"{SANDBOX_SESSIONS}/{session_name}", data)
@@ -189,7 +169,7 @@ class E2BSandboxClient:
         session must be *uniquely* determined; anything ambiguous refuses the
         follow-up instead of guessing.
         """
-        sandbox = self._require_sandbox()
+        sandbox = self.handle
         try:
             main, _others, failure = _session_candidates(sandbox)
             if failure is not None or main is None:
@@ -217,107 +197,186 @@ class E2BSandboxClient:
         as failures (they are not load-bearing for the run's continuation), and
         every write lands through the destination's directory handles.
         """
-        sandbox = self._require_sandbox()
         destination.mkdir(parents=True, exist_ok=True)
         try:
             tree = ArtifactTree(destination)
         except ArtifactError as exc:
             return [], [f"子代理产物落点不可用: {exc}"]
         with tree:
-            return _mirror_subagent_data(sandbox, tree, destination)
+            return _mirror_subagent_data(self.handle, tree, destination)
 
-    def spawn_rpc(self, argv: list[str]) -> "SandboxCommandProcess":
-        """以 RPC 模式在沙箱内启动 pi，返回 ``subprocess.Popen`` 形状的进程门面。
 
-        命令链（ACP 面 ``command()`` 先例）：先验包守卫——模板早于宿主时以
-        exit 78 失败（``kernel_exit``），否则守卫验包后 ``exec`` pi——再
-        ``cd`` 到工作区并 ``exec`` 整条 argv。``shlex.join`` 负责
-        ``--append-system-prompt`` 文本的引用；prompt 本体走 stdin 的
-        ``prompt`` 帧，从不出现在命令行（旧的 base64 prompt/system 编码机制
-        已随 ``--mode json`` 路径整体废除）。
+class SandboxCommandProcess:
+    """A ``subprocess.Popen``-shaped facade over one sandbox background command.
 
-        ``background=True, stdin=True`` 是双向 stdio 通道（spike 证据
-        ``docs/evidence/pi-e2b-rpc-stdin-spike.txt``）。``timeout`` 必须与
-        沙箱寿命同长：SDK 默认 60 秒的命令活动时限会在沙箱仍存活时杀掉每个
-        研究 run。
-        """
-        sandbox = self._require_sandbox()
-        command = (
-            # 模板早于宿主时没有守卫脚本：带明确原因失败，而不是让 pi 在
-            # 没有 web_search 的情况下起跑。
-            f"test -x {SANDBOX_PACKAGE_GUARD} || {{ "
-            f"echo 'pi-glink: 沙箱模板缺少预装包守卫 {SANDBOX_PACKAGE_GUARD}，"
-            "请用 scripts/build-e2b-template.py 重建模板' >&2; exit 78; }"
-            f" && cd {SANDBOX_WORKSPACE}"
-            f" && exec {shlex.join([SANDBOX_PACKAGE_GUARD, *argv])}"
-        )
-        handle = sandbox.commands.run(
-            command,
-            background=True,
-            stdin=True,
-            envs=self._model_envs(),
-            cwd=SANDBOX_WORKSPACE,
-            timeout=self._command_timeout(),
-        )
-        # 延迟 import：acp_e2b_env 自本模块导入常量与助手，模块级互领会成环。
-        from .acp_e2b_env import SandboxCommandProcess
+    The ACP client is written against ``subprocess``: a stdin it writes frames
+    to, a stdout it reads bytes from, a stderr it iterates, and
+    ``poll``/``wait``/``terminate``/``kill``. On this face the agent is an E2B
+    background command started with ``stdin=True``, so this adapter maps those
+    calls onto ``send_stdin`` / ``close_stdin`` / the ``CommandHandle`` stream /
+    ``kill``. Only the carrier changes: the protocol, projection and lifecycle
+    code is the same one the in-process and Docker faces use.
 
-        return SandboxCommandProcess(handle, sandbox_id=self.sandbox_id)
+    The facts this adapter relies on were measured in a real sandbox *before* it
+    was written (``docs/evidence/acp-m3-e2b-framing.txt``): ``send_stdin``
+    writes arrive in call order and byte-exact; stdout chunks are **not**
+    frame-aligned, so the client keeps using the shared LF-only framer;
+    ``close_stdin`` signals EOF and the command then exits with a real code.
+    """
 
-    def _command_timeout(self) -> int:
-        """How long the sandboxed kernel command may run, in seconds.
+    def __init__(self, handle: Any, *, sandbox_id: str = "") -> None:
+        self._handle = handle
+        self._stdout: queue.Queue[bytes | None] = queue.Queue()
+        self._stderr: queue.Queue[bytes | None] = queue.Queue()
+        self._exited = threading.Event()
+        self._exit_code: int | None = None
+        self._stream_error: str | None = None
+        self.sandbox_id = sandbox_id
+        self.pid = int(getattr(handle, "pid", 0) or 0)
+        self.stdin = _HandleStdin(handle)
+        self.stdout = _QueueReader(self._stdout)
+        self.stderr = _QueueLines(self._stderr)
+        self._reader = threading.Thread(target=self._pump, name="e2b-stdout", daemon=True)
+        self._reader.start()
 
-        Matched to the sandbox's own lifetime: a shorter bound would kill the
-        kernel (and discard its work) while the sandbox is still usable, and a
-        longer one is meaningless because the sandbox dies first. The value is
-        frozen from the same calculation that created the sandbox, so the two
-        cannot drift apart.
-        """
-        if self.sandbox_timeout > 0:
-            return self.sandbox_timeout
-        return int(self.config.task_timeout_seconds) + 300
+    @property
+    def stream_error(self) -> str | None:
+        return self._stream_error
 
-    def recover_artifacts(self, destination: Path) -> tuple[list[Path], list[str]]:
-        """Pull the sandbox workspace back into the host run workspace.
-
-        Only direct children with simple names are recovered, each one bounded;
-        anything unreadable (a directory), oversized, or named with a path
-        separator is recorded as a failure instead of being guessed at.
-        """
-        return _recover_workspace(self._require_sandbox(), destination)
-
-    def close(self) -> list[str]:
-        """Destroy the sandbox. Returns the failures instead of hiding them."""
-        sandbox = self.sandbox
-        self.sandbox = None
-        if sandbox is None:
-            return []
+    def _pump(self) -> None:
         try:
-            sandbox.kill()
-        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-            return [f"sandbox kill failed: {type(exc).__name__}: {exc}"]
-        return []
+            for stdout, stderr, _pty in self._handle:
+                if stdout:
+                    self._stdout.put(str(stdout).encode("utf-8"))
+                if stderr:
+                    self._stderr.put(str(stderr).encode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 - reported through the exit code
+            self._stream_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            self._exit_code = self._resolve_exit_code()
+            self._stdout.put(None)
+            self._stderr.put(None)
+            self._exited.set()
 
-    # -- internals ------------------------------------------------------------
+    def _resolve_exit_code(self) -> int | None:
+        """The command's own exit code, or ``None`` when the stream was lost.
 
-    def _require_sandbox(self) -> Any:
-        if self.sandbox is None:
-            raise SandboxError("sandbox 未启动")
-        return self.sandbox
-
-    def _model_envs(self) -> dict[str, str]:
-        """Environment for the sandboxed kernel — deliberately credential-free.
-
-        The model credential travels in the uploaded ``auth.json`` (pi's own
-        store), exactly like the in-process face, so ``env`` inside the sandbox
-        cannot print it.
+        The SDK's ``wait()`` answers from the end event the iterator already
+        consumed; a non-zero exit arrives as ``CommandExitException``, whose
+        ``exit_code`` is the command's result rather than a stream failure.
         """
-        return {
-            "PI_CODING_AGENT_DIR": SANDBOX_CONFIG,
-            "PI_CODING_AGENT_SESSION_DIR": SANDBOX_SESSIONS,
-            "PI_SKIP_VERSION_CHECK": "1",
-            "PI_TELEMETRY": "0",
-        }
+        try:
+            result = self._handle.wait()
+        except Exception as exc:  # noqa: BLE001 - an exit code is still a result
+            code = getattr(exc, "exit_code", None)
+            if isinstance(code, int) and not isinstance(code, bool):
+                return code
+            if self._stream_error is None:
+                self._stream_error = f"{type(exc).__name__}: {exc}"
+            return None
+        code = getattr(result, "exit_code", None)
+        if isinstance(code, int) and not isinstance(code, bool):
+            return code
+        return None
+
+    # -- the subprocess.Popen surface the ACP client uses ---------------------
+
+    def poll(self) -> int | None:
+        if not self._exited.is_set():
+            return None
+        # A command that ended without a usable exit code is no longer running;
+        # ``-1`` keeps ``poll() is not None`` meaning "gone" — the only thing the
+        # client reads it for — without inventing a real status.
+        return self._exit_code if self._exit_code is not None else -1
+
+    @property
+    def returncode(self) -> int | None:
+        """``subprocess.Popen`` 形状：退出后是状态（无码为 -1，同 poll()），否则 None。
+
+        pi 的 RPC 客户端在 ``exit_code`` 与 ``_write`` 两处读这个属性（ACP
+        客户端不读它）。
+        """
+        return self.poll() if self._exited.is_set() else None
+
+    def wait(self, timeout: float | None = None) -> int:
+        if not self._exited.wait(timeout):
+            raise subprocess.TimeoutExpired("e2b sandbox command", timeout)
+        if self._exit_code is None:
+            raise OSError(
+                "sandbox command ended without an exit code"
+                + (f": {self._stream_error}" if self._stream_error else "")
+            )
+        return self._exit_code
+
+    def terminate(self) -> None:
+        self.kill()
+
+    def kill(self) -> None:
+        try:
+            self._handle.kill()
+        except Exception:  # noqa: BLE001 - the sandbox is torn down anyway
+            logger.debug("sandbox command kill failed", exc_info=True)
+
+
+class _HandleStdin:
+    """``process.stdin``: one ACP frame per acknowledged ``send_stdin`` RPC."""
+
+    def __init__(self, handle: Any) -> None:
+        self._handle = handle
+        self._closed = False
+
+    def write(self, data: bytes) -> int:
+        payload = bytes(data)
+        if self._closed:
+            raise BrokenPipeError("sandbox stdin is closed")
+        if payload:
+            try:
+                self._handle.send_stdin(payload)
+            except Exception as exc:  # noqa: BLE001 - mapped to the pipe's failure mode
+                raise BrokenPipeError(
+                    f"sandbox stdin write failed: {type(exc).__name__}: {exc}"
+                ) from exc
+        return len(payload)
+
+    def flush(self) -> None:
+        """Nothing is buffered: every ``send_stdin`` call is an acknowledged RPC."""
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._handle.close_stdin(request_timeout=30)
+        except Exception:  # noqa: BLE001 - an older envd; kill() still ends it
+            logger.debug("sandbox close_stdin unsupported or failed", exc_info=True)
+
+
+class _QueueReader:
+    """A blocking byte reader over the stdout chunks the pump thread receives."""
+
+    def __init__(self, chunks: "queue.Queue[bytes | None]") -> None:
+        self._chunks = chunks
+
+    def read(self, _size: int = -1) -> bytes:
+        chunk = self._chunks.get()
+        if chunk is None:
+            self._chunks.put(None)  # keep EOF sticky for a later read
+            return b""
+        return chunk
+
+
+class _QueueLines:
+    """``process.stderr``: iterate byte lines until the stream ends."""
+
+    def __init__(self, chunks: "queue.Queue[bytes | None]") -> None:
+        self._chunks = chunks
+
+    def __iter__(self) -> Iterator[bytes]:
+        while True:
+            chunk = self._chunks.get()
+            if chunk is None:
+                return
+            yield from chunk.splitlines(keepends=True)
 
 
 def _create_sandbox(

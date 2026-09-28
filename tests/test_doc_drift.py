@@ -7,8 +7,8 @@ JSONL、断流按文件补齐、``LFLineFramer``/``EventCatchUpFailed`` 与
 含「旧」「删除」「废除」「历史」之一；README 或现行文档段落里命中即视为漂移。
 
 守卫自带反例：``drift_violations``/``mode_json_argv_violations`` 直接在合成文本上
-验证“现行叙述变红、历史叙述放行、相似的现行名字（``E2BSandboxRpcExecutionAdapter``）
-不误伤”。
+验证“现行叙述变红、历史叙述放行、形近的名字（``E2BSandboxRpcExecutionAdapter``，
+词边界反例）不误伤”。
 """
 
 from __future__ import annotations
@@ -116,7 +116,7 @@ def test_drift_guard_allows_historical_narration() -> None:
 
 
 def test_drift_guard_does_not_confuse_the_rpc_adapter_name() -> None:
-    """``E2BSandboxRpcExecutionAdapter`` 是现行名字，不得被误伤。"""
+    """形近的 ``E2BSandboxRpcExecutionAdapter`` 不是被删除的 ``E2BSandboxExecutionAdapter``，不得被误伤。"""
     text = "沙箱面沿用 E2BSandboxRpcExecutionAdapter；三面均 `--mode rpc`。"
     assert drift_violations(text) == []
 

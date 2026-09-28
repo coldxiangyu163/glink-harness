@@ -398,7 +398,7 @@ def test_pi_blueprint_run_delivers_the_render_and_records_the_metadata(tmp_path:
     # The record carries the template's identity and its stage metadata, in order.
     stored = store.get(record.run_id)
     assert stored is not None
-    assert stored.blueprint == "synthetic"
+    assert stored.spec.blueprint == "synthetic"
     assert [dict(stage) for stage in stored.blueprint_stages] == [
         stage.as_record() for stage in load_blueprint(config.blueprints_dir, "synthetic").stages
     ]
@@ -434,7 +434,7 @@ def test_pi_run_without_a_blueprint_is_unchanged(tmp_path: Path) -> None:
     assert appended_system_prompt(captured["argv"]) == pi_system_prompt()
     assert "<blueprint" not in captured["argv"][captured["argv"].index("--append-system-prompt") + 1]
     stored = store.get(record.run_id)
-    assert stored is not None and stored.blueprint is None and stored.blueprint_stages == ()
+    assert stored is not None and stored.spec.blueprint is None and stored.blueprint_stages == ()
 
 
 def test_a_blueprint_event_stream_adds_no_product_event(tmp_path: Path) -> None:
@@ -548,7 +548,7 @@ def test_acp_blueprint_run_delivers_the_render_in_the_leading_block(tmp_path: Pa
     assert expected in prompt["text"]
     assert prompt["text"].endswith("--- 用户请求 ---\n\n合成 ACP 题目")
     stored = store.get(record.run_id)
-    assert stored is not None and stored.blueprint == "synthetic"
+    assert stored is not None and stored.spec.blueprint == "synthetic"
     assert len(stored.blueprint_stages) == 2
 
 
@@ -841,7 +841,7 @@ def test_blueprint_metadata_stays_inside_its_tenant(tmp_path: Path, monkeypatch:
         def close(self):
             return CleanupReport(released=True)
 
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", lambda spec, **kw: FakeAdapter(spec, on_frame=kw["on_frame"]))
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kw: FakeAdapter(spec, on_frame=kw["on_frame"]))
 
     secret_file = tmp_path / "gateway.key"
     secret_file.write_bytes(b"0123456789abcdef0123456789abcdef")
@@ -888,7 +888,7 @@ def test_blueprint_metadata_stays_inside_its_tenant(tmp_path: Path, monkeypatch:
 
     record = manager.start("alpha 的蓝图题目", alpha, blueprint="synthetic")
     assert manager.wait(record.run_id, timeout=30) is not None
-    assert record.tenant_id == "tenant-alpha" and record.blueprint == "synthetic"
+    assert record.tenant_id == "tenant-alpha" and record.spec.blueprint == "synthetic"
     assert store.get_for(record.run_id, "tenant-alpha") is not None
     assert store.get_for(record.run_id, "tenant-beta") is None
     assert [item.run_id for item in store.list_for("tenant-beta")] == []

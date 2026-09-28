@@ -1,12 +1,15 @@
 """One run driven over the ACP client.
 
-The ACP family shares this adapter across transmission faces: ``inproc`` (the
-agent process shares the host machine), ``docker`` (the agent runs in a
-container, ``AcpRpcClient`` speaking to ``docker run -i``'s stdio) and ``e2b``
-(the agent runs as a sandbox background command driven by ``send_stdin``, wired
-through :class:`AcpSandboxExecutionAdapter` below). Only the process launch, the
-agent-visible workspace and the teardown differ; the protocol work — and
-therefore this module — is the same.
+This is the ACP family's driver in ``harness.driver(sandbox.spawn(harness.launch(spec)))``
+(docs/architecture.md §4): one adapter class for every
+:class:`~pi_glink.kernel.sandbox.Sandbox` — in-process (the agent shares the
+host machine), Docker (``AcpRpcClient`` speaking to ``docker run -i``'s stdio)
+and E2B (a sandbox background command driven by ``send_stdin``). The sandbox
+owns the resource, the process spawn, the agent-visible workspace path and the
+teardown; this module owns the protocol work, the same code on every sandbox.
+On a remote sandbox the driver additionally delivers the rendered ``HOME``
+before the agent starts and recovers the workspace and state root before the
+sandbox dies (:class:`~pi_glink.kernel.acp_e2b_env.AcpSandboxTransfer`).
 
 ``start()``
     Spawn the agent, ``initialize`` (protocol version + capability negotiation)
@@ -33,11 +36,13 @@ therefore this module — is the same.
 ``cancel()``
     ``session/cancel`` notification. Idempotent, safe from another thread.
 ``recover_artifacts()``
-    No-op: the workspace already is the host directory (mounted into the
-    container on the Docker face).
+    No-op where the workspace already is the host directory (in-process, the
+    Docker mount); on a remote sandbox, pull the workspace and the agent state
+    root back before teardown.
 ``close()``
-    Stop the agent process, force-remove the container by its persisted name
-    when there is one, and report whether that succeeded.
+    Stop the agent process, then close the sandbox (force-remove the container
+    by its persisted name, kill the E2B sandbox), and report whether that
+    succeeded.
 
 ``session/request_permission`` is answered fail-closed (no human is watching):
 the first ``reject_once``/``reject_always`` option is selected, or — when the
@@ -59,7 +64,6 @@ channel, and the baseline text block is the one channel every agent accepts.
 from __future__ import annotations
 
 import logging
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -72,7 +76,7 @@ from ..config import (
 )
 from .acp_child_progress import AcpChildProgressSource
 from .acp_child_progress import available as acp_progress_available
-from .acp_e2b_env import E2BAcpSandboxClient
+from .acp_e2b_env import AcpSandboxTransfer
 from .acp_rpc import (
     REQUEST_TIMEOUT_SECONDS,
     AcpClosed,
@@ -82,7 +86,6 @@ from .acp_rpc import (
     AcpRequestError,
     AcpRpcClient,
 )
-from .e2b_env import SANDBOX_WORKSPACE
 from .execution import (
     ArtifactRecovery,
     CleanupReport,
@@ -93,6 +96,7 @@ from .execution import (
     publishable_recovered_session,
 )
 from .outcome import POLL_SECONDS, ExecutionOutcome, SealedOutcome
+from .sandbox import Launch, Sandbox
 
 logger = logging.getLogger("pi_glink.kernel.acp_execution")
 
@@ -206,42 +210,36 @@ def acp_resume_method(capabilities: Mapping[str, Any]) -> str | None:
 
 
 class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
-    """The ACP face: one agent process, one session, one prompt turn."""
-
-    kind = "acp"
+    """The ACP driver: one agent process, one session, one prompt turn."""
 
     def __init__(
         self,
         spec: ExecutionSpec,
         *,
-        argv: list[str],
-        env: Mapping[str, str],
-        cwd: Path | None,
-        client_factory: Callable[..., AcpRpcClient] = AcpRpcClient,
+        sandbox: Sandbox,
+        launch: Launch,
+        client_factory: Callable[..., AcpRpcClient] | None = None,
         on_frame: FrameCallback,
-        session_cwd: str | None = None,
-        container_name: str | None = None,
-        container_stop: Callable[[str], list[str]] | None = None,
-        spawn_factory: Callable[[], Any] | None = None,
     ) -> None:
         super().__init__(spec, on_frame=on_frame)
-        self._argv = list(argv)
-        self._env = dict(env)
-        self._cwd = cwd
-        self._client_factory = client_factory
-        #: How the client starts the agent: ``None`` spawns the argv on this
-        #: host; the sandbox face injects a factory for a sandbox background
-        #: command. Only the carrier differs — the protocol work below is the
-        #: same code for every face.
-        self._spawn_factory = spawn_factory
+        self.kind = sandbox.kind
+        self.sandbox = sandbox
+        self.launch = launch
+        self._client_factory = client_factory or AcpRpcClient
         #: The ``cwd`` handed to ``session/new``: the workspace as the *agent*
-        #: sees it. In-process that is the host workspace; in a container it is
-        #: the mount point (:data:`~pi_glink.kernel.docker_env.CONTAINER_WORKSPACE`),
-        #: because the host path does not exist inside the container.
-        self._session_cwd = session_cwd or str(spec.workspace)
-        #: Durable container identity, for the run record and reconciliation.
-        self._container_name = container_name
-        self._container_stop = container_stop
+        #: sees it — the host workspace in-process, the mount point in a
+        #: container, the sandbox path on E2B. A host path the carrier cannot
+        #: see is never sent.
+        self._session_cwd = sandbox.place("workspace", spec.workspace)
+        #: Remote-sandbox delivery/recovery of the rendered ``HOME``.
+        self._transfer: AcpSandboxTransfer | None = None
+        #: The sandbox state-root recovery verdict (``None`` until a remote
+        #: sandbox's ``recover_artifacts`` ran). It is published in the
+        #: post-recovery ``session_ready`` frame so a reader can see whether
+        #: this run's state root is available on the host for a follow-up; the
+        #: admission gate reads the recovered directory itself, never this
+        #: frame alone.
+        self._state_recovered: bool | None = None
         self._client: AcpRpcClient | None = None
         self._driver: threading.Thread | None = None
         self._done = threading.Event()
@@ -291,15 +289,33 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
     # -- lifecycle ------------------------------------------------------------
 
     def start(self) -> None:
+        sandbox = self.sandbox
+        sandbox.open(self.launch, timeout_seconds=self.spec.timeout_seconds + 300)
+        # From here on the sandbox has persisted any identity it created, so a
+        # partial start still leaves a named leftover; ``close()`` releases it.
+        if sandbox.remote:
+            transfer = AcpSandboxTransfer(
+                sandbox.handle, self.spec.runtime, workspace=self.spec.workspace
+            )
+            self._transfer = transfer
+            transfer.upload_home()
+            if self.spec.resume_session:
+                # The continuation's workspace half: the resumed agent works in
+                # the conversation's workspace (M7), so the deliverable it
+                # produced there travels into the new sandbox first.
+                transfer.upload_continuation()
+        spawn = sandbox.spawn(self.launch)
         client_kwargs: dict[str, Any] = {
-            "cwd": self._cwd,
-            "env": self._env,
+            "cwd": spawn.cwd,
+            "env": spawn.env,
             "on_notification": self._on_notification,
             "on_request": self._on_request,
         }
-        if self._spawn_factory is not None:
-            client_kwargs["spawn"] = self._spawn_factory
-        client = self._client_factory(self._argv, **client_kwargs)
+        if spawn.process is not None:
+            # How the client starts the agent: a remote sandbox hands over an
+            # already-started background command; only the carrier differs.
+            client_kwargs["spawn"] = spawn.process
+        client = self._client_factory(spawn.argv, **client_kwargs)
         self._client = client
         try:
             client.start()
@@ -516,9 +532,17 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
             "configOptions": [dict(option) for option in self._config_options],
             # The ACP session's cwd (the agent-visible workspace): the host
             # workspace in-process, the container mount point on the Docker
-            # face. This is the ACP fact, not a host path.
+            # face, the sandbox path on E2B. This is the ACP fact, not a host
+            # path.
             "cwd": self._session_cwd,
         }
+        # Which carrier ran the agent (E2B: sandbox id and template).
+        payload.update(self.sandbox.session_facts())
+        if self._state_recovered is not None:
+            # Set once the state root has been recovered to the host (or the
+            # recovery failed): the durable ``acp-agent/recovered`` mirror is
+            # what a follow-up inherits.
+            payload["stateRootRecovered"] = self._state_recovered
         if self._resume_method_used is not None:
             # A continuation's session id is the parent's own id, so the run
             # record can prove the agent reattached to exactly that session
@@ -777,20 +801,45 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
             logger.debug("session/cancel could not be sent: %s", exc)
 
     def recover_artifacts(self, destination: Path) -> ArtifactRecovery:
-        # The workspace already is the host directory for this face.
-        return ArtifactRecovery()
+        transfer = self._transfer
+        if transfer is None or self.sandbox.handle is None:
+            # The workspace already is the host directory (in-process, the
+            # Docker mount), or the remote sandbox never came up.
+            return ArtifactRecovery()
+        files, failures = self.sandbox.recover_workspace(destination)
+        # The sandbox destroys the agent state with it, so the state root is
+        # recovered in the same pre-teardown window as the workspace. A failed
+        # recovery publishes no recovered root, which is exactly the
+        # fail-closed refusal a follow-up then earns.
+        state = transfer.recover_state()
+        self._state_recovered = state.ok
+        return ArtifactRecovery(
+            files=tuple(files),
+            failures=tuple(failures) + state.failures,
+            state_recovered=state.ok,
+            secrets=state.secrets,
+        )
+
+    def recovered_session(self) -> SessionInfo | None:
+        # The state-root recovery verdict exists only once a remote sandbox's
+        # ``recover_artifacts`` ran, so a publishable answer exists from then
+        # on (``session_file`` stays None on this family).
+        if not self.sandbox.remote:
+            return None
+        return publishable_recovered_session(self.session_info())
 
     def child_progress_source(self) -> AcpChildProgressSource | None:
         """Poll the state root's dsh session files for child progress (R3a).
 
-        The in-process and Docker faces share the host state root (the
-        container mounts this run's ``HOME``), so one source serves both. The
+        A mounting sandbox shares the host state root (the container mounts
+        this run's ``HOME``), so one source serves in-process and Docker. The
         sessions are dsh's private zstd format, so the source exists only
         while ``zstandard`` is installed (``pi-glink[acp-progress]``); without
-        it this face honestly has no progress. The sandbox face overrides this
-        with ``None`` — its sessions die with the sandbox (coarse capability).
+        it this face honestly has no progress. A remote sandbox stays
+        **coarse** (``None``): its sessions die with it and no live mirror of
+        them is implemented.
         """
-        if not acp_progress_available():
+        if self.sandbox.remote or not acp_progress_available():
             return None
         home = getattr(self.spec.runtime, "home", None)
         if home is None:
@@ -798,10 +847,9 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         return AcpChildProgressSource(Path(home) / ".dsh" / "sessions")
 
     def identity(self) -> Mapping[str, str]:
-        # An in-process agent has no durable external identity (no container, no
-        # sandbox), exactly like the pi inproc face. A containerised ACP agent
-        # has one: the frozen container name.
-        return {"container": self._container_name} if self._container_name else {}
+        # The carrier's durable identity (container name, sandbox id); none
+        # in-process, exactly like the pi family on the same sandbox.
+        return dict(self.sandbox.identity())
 
     def close(self) -> CleanupReport:
         failures: list[str] = []
@@ -821,25 +869,11 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
                 # The client has reaped the child: a pending stream-loss report
                 # gets its exit status here, where that status really exists.
                 self._complete_kernel_exit(client, exit_code)
-        if self._container_name and self._container_stop is not None:
-            # Closing stdin ends the agent; with ``--rm`` the container is then
-            # removed by the daemon. The force-remove is the belt-and-braces
-            # confirmation that nothing keeps running, addressed by the one
-            # identity this run persisted — never a name pattern.
-            try:
-                result = subprocess.run(
-                    self._container_stop(self._container_name),
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                stderr = (result.stderr or "").strip()
-                if result.returncode != 0 and "No such container" not in stderr:
-                    failures.append(
-                        f"删除容器失败: exit {result.returncode}: {stderr[-200:]}"
-                    )
-            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-                failures.append(f"删除容器失败: {type(exc).__name__}: {exc}")
+        # Client first (stop the agent), then the carrier: the sandbox
+        # force-removes the container by its persisted name or kills the E2B
+        # sandbox. Either failure is reported, never swallowed.
+        self._transfer = None
+        failures.extend(self.sandbox.close().failures)
         return CleanupReport(
             released=not failures, failures=tuple(failures), external=dict(self.identity())
         )
@@ -995,138 +1029,6 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
                 ):
                     return option
         return None
-
-
-class AcpSandboxExecutionAdapter(AcpExecutionAdapter):
-    """The ACP family inside an E2B sandbox (M3b).
-
-    Composition, not a second protocol implementation: the sandbox's background
-    command is wrapped as a ``subprocess``-shaped process
-    (:class:`~pi_glink.kernel.acp_e2b_env.SandboxCommandProcess`) and handed to the
-    *same* :class:`AcpRpcClient` the in-process and Docker faces use, so
-    ``initialize``/``session/new``/``session/prompt`` handling, permission
-    answers, turn boundaries and the verdict inputs are the same code.
-
-    Face-specific work only:
-
-    * the sandbox is created first — its identity is persisted immediately, like
-      the pi face — and the run's rendered ACP ``HOME`` (credentials, 0600
-      inside the sandbox) is uploaded before the agent starts;
-    * the agent-visible workspace is the sandbox path, so ``session/new``'s
-      ``cwd`` is that path and never a host path the sandbox cannot see;
-    * the workspace is recovered from the sandbox before it is destroyed (the pi
-      face's rule), and ``close()`` kills the sandbox after the client stopped
-      the agent.
-    """
-
-    kind = "acp-e2b"
-
-    def __init__(
-        self,
-        spec: ExecutionSpec,
-        *,
-        sandbox: E2BAcpSandboxClient,
-        client_factory: Callable[..., AcpRpcClient] = AcpRpcClient,
-        on_frame: FrameCallback,
-        on_identity: Callable[[Mapping[str, str]], None] | None = None,
-    ) -> None:
-        super().__init__(
-            spec,
-            argv=sandbox.argv,
-            # The agent's environment is per command (per-run HOME plus the
-            # configured entries); the client's ``env`` is only used when it
-            # spawns a host process, which this face never does.
-            env={},
-            cwd=None,
-            client_factory=client_factory,
-            on_frame=on_frame,
-            session_cwd=SANDBOX_WORKSPACE,
-            spawn_factory=sandbox.spawn,
-        )
-        self._sandbox = sandbox
-        self._on_identity = on_identity
-        #: The sandbox state-root recovery verdict (``None`` until the face's
-        #: ``recover_artifacts`` ran). It is published in the post-recovery
-        #: ``session_ready`` frame so a reader can see whether this run's state
-        #: root is available on the host for a follow-up; the admission gate
-        #: reads the recovered directory itself, never this frame alone.
-        self._state_recovered: bool | None = None
-
-    def start(self) -> None:
-        self._sandbox.start(timeout_seconds=self.spec.timeout_seconds + 300)
-        # The sandbox exists from here on: hand its identity to the host before
-        # any step that can fail, so a partial start still leaves a named
-        # leftover the operator and the online sweep can act on.
-        if self._sandbox.sandbox_id and self._on_identity is not None:
-            self._on_identity({"sandbox": self._sandbox.sandbox_id})
-        self._sandbox.upload_home()
-        if self.spec.resume_session:
-            # The continuation's workspace half: the resumed agent works in the
-            # conversation's workspace (M7), so the deliverable it produced
-            # there travels into the new sandbox before the agent starts.
-            self._sandbox.upload_continuation()
-        super().start()
-
-    def session_info(self) -> SessionInfo | None:
-        session = super().session_info()
-        if session is None:
-            return None
-        payload = dict(session.payload)
-        # Same facts the pi E2B face records: which sandbox carried the run and
-        # which template it came from.
-        payload["sandboxId"] = self._sandbox.sandbox_id
-        payload["template"] = self._sandbox.template
-        if self._state_recovered is not None:
-            # Set once the state root has been recovered to the host (or the
-            # recovery failed): the durable
-            # ``acp-agent/recovered`` mirror is what a follow-up inherits.
-            payload["stateRootRecovered"] = self._state_recovered
-        return SessionInfo(
-            payload=payload, session_id=session.session_id, session_file=None
-        )
-
-    def recovered_session(self) -> SessionInfo | None:
-        # The state-root recovery verdict exists only once ``recover_artifacts``
-        # ran, so a publishable answer exists from then on (``session_file``
-        # stays None on this face).
-        return publishable_recovered_session(self.session_info())
-
-    def child_progress_source(self) -> None:
-        # R3a: the sandbox face stays **coarse** — the dsh session files only
-        # exist inside the sandbox, and this face implements no live mirror of
-        # them, so there is honestly no running progress to poll.
-        return None
-
-    def recover_artifacts(self, destination: Path) -> ArtifactRecovery:
-        files, failures = self._sandbox.recover_artifacts(destination)
-        # The sandbox destroys the agent state with it, so the state root is
-        # recovered in the same pre-teardown window as the workspace. A failed
-        # recovery publishes no recovered root, which is exactly the
-        # fail-closed refusal a follow-up then earns.
-        state = self._sandbox.recover_state()
-        self._state_recovered = state.ok
-        return ArtifactRecovery(
-            files=tuple(files),
-            failures=tuple(failures) + state.failures,
-            state_recovered=state.ok,
-            secrets=state.secrets,
-        )
-
-    def close(self) -> CleanupReport:
-        # Client first (stop the agent), then the sandbox. The base report
-        # carries the client/container failures; this face adds the sandbox
-        # destruction. Either failure is reported, never swallowed.
-        report = super().close()
-        failures = list(report.failures)
-        failures.extend(self._sandbox.close())
-        return CleanupReport(
-            released=not failures,
-            failures=tuple(failures),
-            external=dict(self.identity()),
-        )
-
-    def identity(self) -> Mapping[str, str]:
-        return {"sandbox": self._sandbox.sandbox_id} if self._sandbox.sandbox_id else {}
 
 
 def _clip(text: str, limit: int) -> str:

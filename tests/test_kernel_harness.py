@@ -65,13 +65,22 @@ def test_select_family_refuses_an_unknown_harness(tmp_path: Path) -> None:
         select_family("bogus", config=config, store=RunStore(tmp_path / "runs"))
 
 
-def test_run_manager_selects_the_family_once_at_init(tmp_path: Path) -> None:
-    """``RunManager.__init__`` 是唯一选择点：族实例的 name 等于冻结配置。"""
+def test_run_manager_resolves_the_configured_family_at_init(tmp_path: Path) -> None:
+    """``RunManager.__init__`` 按冻结配置解析一次族（启动即 fail-closed）。
+
+    原义务：进程级唯一族实例 ``manager._family``。新义务（S2）：族按 run 自己
+    的 ``RunSpec.family`` 取（``_family_for``，按名缓存），准入 spec 来自冻结
+    配置；初始化时已解析配置族并缓存同一实例。
+    """
     from pi_glink.events import EventBus  # noqa: PLC0415
     from pi_glink.runs.runner import RunManager  # noqa: PLC0415
 
     for harness, family_type in (("pi", PiHarnessFamily), ("acp", AcpHarnessFamily)):
         config = make_config(tmp_path / harness, harness)
         manager = RunManager(config, EventBus(), RunStore(config.data_root / "runs"))
-        assert type(manager._family) is family_type  # noqa: SLF001
-        assert manager._family.name == config.harness  # noqa: SLF001
+        family = manager._family_for(config.harness)  # noqa: SLF001
+        assert type(family) is family_type
+        assert family.name == config.harness
+        assert manager._families == {config.harness: family}  # noqa: SLF001
+        assert manager._family_for(config.harness) is family  # noqa: SLF001
+        assert manager._admission_spec(None).family == config.harness  # noqa: SLF001

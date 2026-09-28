@@ -573,10 +573,10 @@ def main() -> int:
 
     config = build_config(config_values(args.mode, state_dir, tenants_file, gateway_secret), REPO_ROOT)
     # Replace only the execution face, exactly like the Python regressions do
-    # (``monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", …)``):
+    # (``monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", …)``):
     # the real Runner, store, event bus, HTTP/SSE and front-end all stay in the
     # loop, but no pi binary, Docker daemon or sandbox is contacted.
-    pi_family.compose_adapter = build_fake
+    pi_family.PiExecutionAdapter = build_fake
     server = create_server(config)
     bootstrap = bootstrap_accounts(server.accounts) if args.mode == "accounts" else {"password": None, "users": {}}
     state = {

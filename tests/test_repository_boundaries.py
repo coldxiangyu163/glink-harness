@@ -176,6 +176,60 @@ def kernel_import_violations(root: Path) -> list[str]:
     return violations
 
 
+#: 编排层（``runs/runner.py``）对接入层的依赖只经抽象（docs/architecture.md §4）：
+#: 族与 sandbox 的选择入口、执行契约与运行期协议。模块 -> 允许导入的名字；
+#: ``None`` 表示整个模块都是抽象。具体族（``harness_pi`` / ``harness_acp``、
+#: ``acp_*``）、具体 sandbox（``docker_env`` / ``e2b_env``、``InprocSandbox`` 等）
+#: 与具体运行期（``AgentRuntime`` / ``AcpRuntime``）都不在内：runner 不按类型分派，
+#: 也就写不出两族运行期的联合类型。
+_RUNNER_KERNEL_ALLOWLIST: dict[str, frozenset[str] | None] = {
+    "pi_glink.kernel.harness": None,
+    "pi_glink.kernel.execution": None,
+    "pi_glink.kernel.sweep": None,
+    "pi_glink.kernel.sandbox": frozenset(
+        {"Sandbox", "SANDBOXES", "open_sandbox", "Launch", "Spawn", "CleanupReport"}
+    ),
+    "pi_glink.kernel.agent_env": frozenset({"RunCredentials"}),
+}
+_RUNNER = Path("host/pi_glink/runs/runner.py")
+
+
+def runner_kernel_imports(relative: Path, text: str) -> list[str]:
+    """Kernel imports of the orchestration module outside the abstraction allowlist."""
+    package = list(relative.with_suffix("").parts)[1:-1]
+    violations: list[str] = []
+    for node in ast.walk(ast.parse(text, filename=str(relative))):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("pi_glink.kernel"):
+                    # ``import pi_glink.kernel.x`` exposes every name: not an abstraction edge.
+                    violations.append(f"{relative}: forbidden import {alias.name}")
+            continue
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.level:
+            base = package[: len(package) - node.level + 1]
+            module = ".".join([*base, node.module] if node.module else base)
+        else:
+            module = node.module or ""
+        if module == "pi_glink.kernel":
+            names = [alias.name for alias in node.names]
+            violations.extend(f"{relative}: forbidden import pi_glink.kernel.{name}" for name in names)
+            continue
+        if not module.startswith("pi_glink.kernel."):
+            continue
+        if module not in _RUNNER_KERNEL_ALLOWLIST:
+            violations.append(f"{relative}: forbidden import {module}")
+            continue
+        allowed = _RUNNER_KERNEL_ALLOWLIST[module]
+        if allowed is None:
+            continue
+        for alias in node.names:
+            if alias.name not in allowed:
+                violations.append(f"{relative}: forbidden import {module}.{alias.name}")
+    return violations
+
+
 def worker_versions(text: str) -> tuple[str, str]:
     node = re.search(r"^FROM\s+(node:\d+\.\d+\.\d+-[\w.-]+)(?:@sha256:[a-f0-9]{64})?\s*$", text, re.MULTILINE)
     pi = re.search(r"^ARG\s+PI_VERSION=(\d+\.\d+\.\d+(?:-[\w.-]+)?)\s*$", text, re.MULTILINE)
@@ -273,6 +327,43 @@ def test_kernel_import_direction_covers_new_modules(tmp_path: Path) -> None:
     ]
     source.write_text("from ..kernel.harness import HarnessFamily\n")
     assert kernel_import_violations(tmp_path) == []
+
+
+def test_runner_depends_on_kernel_abstractions_only() -> None:
+    assert runner_kernel_imports(_RUNNER, (ROOT / _RUNNER).read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "from ..kernel.acp_env import AcpRuntime",
+        "from ..kernel.acp_execution import AcpExecutionAdapter",
+        "from ..kernel.harness_pi import PiHarnessFamily",
+        "from ..kernel.docker_env import container_name_for",
+        "from ..kernel.e2b_env import SANDBOX_WORKSPACE",
+        "from ..kernel.sandbox import DockerSandbox",
+        "from ..kernel.agent_env import AgentRuntime",
+        "from ..kernel.projection import Projector",
+        "from ..kernel import acp_env",
+        "import pi_glink.kernel.acp_env",
+        "from pi_glink.kernel.acp_env import AcpRuntime",
+    ],
+)
+def test_runner_rule_rejects_concrete_families_sandboxes_and_runtimes(text: str) -> None:
+    """反例：runner 导入具体族/sandbox/运行期（任一写法）都必须变红。"""
+    assert runner_kernel_imports(_RUNNER, text) != []
+
+
+def test_runner_rule_allows_the_abstractions() -> None:
+    text = (
+        "from ..kernel.harness import HarnessFamily, FrameProjector, select_family\n"
+        "from ..kernel.execution import ExecutionAdapter\n"
+        "from ..kernel.sandbox import Sandbox, open_sandbox\n"
+        "from ..kernel.agent_env import RunCredentials\n"
+        "from ..kernel.sweep import SessionSweep\n"
+        "from ..redaction import credential_secrets_from_text\n"
+    )
+    assert runner_kernel_imports(_RUNNER, text) == []
 
 
 def test_worker_version_declarations_are_exact_and_equal() -> None:

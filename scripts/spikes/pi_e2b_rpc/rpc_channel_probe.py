@@ -3,13 +3,13 @@
 
 回答架构评审第 3 组的问题：pi-integration-notes.md 的旧前提「SDK 不提供持久
 stdin」已被 ACP 面实测推翻（docs/evidence/acp-m3-e2b-framing.txt），pi 的 E2B
-面能否因此收敛到 RPC 通道（``RpcExecutionAdapter`` + ``SandboxCommandProcess``），
+面能否因此收敛到 RPC 通道（今 ``PiExecutionAdapter`` + ``E2BSandbox`` 的 ``SandboxCommandProcess``），
 从而删掉 ``--mode json`` 单向流、tee 补读与「运行中不能 abort」的旧路径。
 
 方法（尽量走生产路径）：
 
 * ``build_config``（--env-file）→ ``prepare_agent_dir`` 渲染真实 runtime；
-* ``E2BSandboxEnvironment`` 起 ``pi-glink-worker`` 模板沙箱并上传配置（生产
+* ``E2BSandbox`` 起 ``pi-glink-worker`` 模板沙箱并上传配置（生产
   上传路径原样）；
 * 沙箱内以 ``background=True, stdin=True`` 启动 ``pi --mode rpc``，用仓库自己的
   ``PiRpcClient`` 驱动——``subprocess.Popen`` 在注入点替换为
@@ -37,12 +37,16 @@ sys.path.insert(0, str(REPO_ROOT / "host"))
 
 from pi_glink.config import build_config  # noqa: E402
 from pi_glink.kernel import rpc as rpc_module  # noqa: E402
-from pi_glink.kernel.acp_e2b_env import SandboxCommandProcess  # noqa: E402
 from pi_glink.kernel.agent_env import prepare_agent_dir  # noqa: E402
 from pi_glink.kernel.e2b_env import (  # noqa: E402
     SANDBOX_WORKSPACE,
-    E2BSandboxClient,
+    PiSandboxTransfer,
+    SandboxCommandProcess,
 )
+from pi_glink.kernel.execution import ExecutionSpec  # noqa: E402
+from pi_glink.kernel.harness_pi import PiHarnessFamily  # noqa: E402
+from pi_glink.kernel.sandbox import E2BSandbox  # noqa: E402
+from pi_glink.store import RunStore  # noqa: E402
 from pi_glink.kernel.rpc import PiRpcClient, wait_for_idle  # noqa: E402
 
 RESULTS: list[tuple[str, bool, str]] = []
@@ -127,22 +131,33 @@ def main() -> int:
             pass
 
         runtime = prepare_agent_dir(config, runtime_dir=tmp_path / "agent")
-        env = E2BSandboxClient(
-            config, runtime, run_id=f"spike-{int(time.time())}", workspace=tmp_path / "workspace"
+        run_id = f"spike-{int(time.time())}"
+        sandbox = E2BSandbox(config=config, run_id=run_id, workspace=tmp_path / "workspace")
+        spec = ExecutionSpec(
+            config=config,
+            runtime=runtime,
+            run_id=run_id,
+            prompt="",
+            system_prompt="",
+            workspace=tmp_path / "workspace",
+            timeout_seconds=args.timeout,
         )
+        family = PiHarnessFamily(config=config, store=RunStore(tmp_path / "runs"))
+        launch = family.launch(spec, sandbox)
         try:
-            env.start(timeout_seconds=args.timeout)
-            sandbox_id = env.sandbox_id
+            sandbox.open(launch, timeout_seconds=args.timeout)
+            sandbox_id = sandbox.sandbox_id
             info(f"sandbox_id: {sandbox_id}")
 
             # 1) 模板携带 pi，且版本符合钉住值。
-            probe = env.sandbox.commands.run("pi --version", timeout=60)
+            probe = sandbox.handle.commands.run("pi --version", timeout=60)
             version = str(probe.stdout).strip()
             check("模板内 pi 可用", bool(version), f"pi --version = {version!r}")
 
             # 2) 生产上传路径交付配置（auth.json/models.json 在 manifest 里）。
-            env.upload_config()
-            names = [rel for rel, _ in env.upload_manifest]
+            transfer = PiSandboxTransfer(sandbox.handle, runtime)
+            transfer.upload_config()
+            names = [rel for rel, _ in transfer.upload_manifest]
             check(
                 "配置上传（生产路径）",
                 "auth.json" in names and "models.json" in names,
@@ -154,11 +169,11 @@ def main() -> int:
                 f"cd {SANDBOX_WORKSPACE} && "
                 f"pi --mode rpc --provider {runtime.provider_id} --model {runtime.model_id}"
             )
-            handle = env.sandbox.commands.run(
+            handle = sandbox.handle.commands.run(
                 command,
                 background=True,
                 stdin=True,
-                envs=env._model_envs(),  # noqa: SLF001 - 与生产命令同一组 envs
+                envs=dict(launch.env),  # 与生产命令同一组 envs
                 timeout=args.timeout,
             )
             proc = RpcSandboxProcess(handle, sandbox_id=sandbox_id)
@@ -265,7 +280,7 @@ def main() -> int:
                     proc.kill()
         finally:
             if sandbox_id:
-                failures = env.close()
+                failures = sandbox.close().failures
                 info(f"按 sandbox_id={sandbox_id} 终止: {not failures}")
 
     lines = ["", "结果汇总"]

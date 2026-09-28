@@ -28,6 +28,7 @@ import shlex
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -38,15 +39,12 @@ from pi_glink.config import ConfigError, build_config
 from acp_pack import apply_acp_pack
 from pi_glink.events import EventBus
 from pi_glink.kernel.acp_env import prepare_acp_runtime
-from pi_glink.kernel.acp_execution import RESUME_METHOD, AcpSandboxExecutionAdapter
-from pi_glink.kernel.acp_e2b_env import (
-    SANDBOX_ACP_HOME,
-    E2BAcpSandboxClient,
-    SandboxCommandProcess,
-)
-from pi_glink.kernel.e2b_env import SANDBOX_WORKSPACE
-from pi_glink.kernel.execution import ExecutionSpec, build_adapter
-from pi_glink.kernel.rpc import PiRpcClient
+from harness_helpers import compose_launch, family
+from pi_glink.kernel.acp_e2b_env import SANDBOX_ACP_HOME, AcpSandboxTransfer
+from pi_glink.kernel.acp_execution import RESUME_METHOD, AcpExecutionAdapter
+from pi_glink.kernel.e2b_env import SANDBOX_WORKSPACE, SandboxCommandProcess
+from pi_glink.kernel.execution import ExecutionSpec
+from pi_glink.kernel.sandbox import E2BSandbox, open_sandbox
 from pi_glink.runs.runner import FollowupUnavailable, RunManager
 from pi_glink.store import FAILED, FINISHED, RunStore
 from pi_glink.tenancy import TenantContext, TenantCredentialStore
@@ -352,23 +350,52 @@ def event_kinds(store: RunStore, run_id: str) -> list[str]:
     ]
 
 
+class _AcpFace:
+    """The ACP family on one E2B sandbox, composed as ``AcpExecutionAdapter.start`` does.
+
+    ``sandbox`` is the resource and transport (:class:`E2BSandbox`: create,
+    command, kill); ``transfer`` is the ACP state root on the opened sandbox
+    (:class:`AcpSandboxTransfer`: ``HOME`` upload and recovery). The launch is
+    the family's real one, so the command checked here is the command run.
+    """
+
+    def __init__(self, config, runtime, tmp_path: Path, *, sandbox_factory, workspace: Path | None = None):
+        self.runtime = runtime
+        self.workspace = workspace or (tmp_path / "ws")
+        spec = make_spec(config, runtime, tmp_path)
+        spec = replace(spec, workspace=self.workspace)
+        launch, sandbox = compose_launch(
+            "acp", "e2b", spec, store_root=tmp_path / "face-store", sandbox_factory=sandbox_factory
+        )
+        assert isinstance(sandbox, E2BSandbox)
+        self.launch = launch
+        self.sandbox = sandbox
+        self.transfer: AcpSandboxTransfer | None = None
+
+    def open(self, *, timeout_seconds: int = 0) -> None:
+        self.sandbox.open(self.launch, timeout_seconds=timeout_seconds)
+        self.transfer = AcpSandboxTransfer(
+            self.sandbox.handle, self.runtime, workspace=self.workspace
+        )
+
+    def command_env(self) -> dict[str, str]:
+        """What ``E2BSandbox.spawn`` passes as the command's ``envs``."""
+        return {**self.launch.env, **self.launch.secret_env}
+
+    def spawn(self) -> SandboxCommandProcess:
+        spawn = self.sandbox.spawn(self.launch)
+        assert spawn.process is not None
+        return spawn.process()
+
+
 def make_sandbox_client(
     config, runtime, tmp_path: Path, sandbox: FakeSandbox, *, workspace: Path | None = None
-) -> E2BAcpSandboxClient:
-    captured: dict[str, Any] = {}
-
+) -> _AcpFace:
     def factory(**kwargs: Any) -> FakeSandbox:
-        captured.update(kwargs)
         sandbox.create_kwargs = dict(kwargs)
         return sandbox
 
-    return E2BAcpSandboxClient(
-        config,
-        runtime,
-        run_id="abc123",
-        workspace=workspace or (tmp_path / "ws"),
-        sandbox_factory=factory,
-    )
+    return _AcpFace(config, runtime, tmp_path, sandbox_factory=factory, workspace=workspace)
 
 
 def make_spec(config, runtime, tmp_path: Path, *, prompt: str = "写一份报告") -> ExecutionSpec:
@@ -396,7 +423,7 @@ def test_the_sandbox_uses_the_frozen_acp_template_and_credential(tmp_path: Path)
     sandbox = FakeSandbox(tmp_path)
     client = make_sandbox_client(config, runtime, tmp_path, sandbox)
 
-    client.start(timeout_seconds=120)
+    client.open(timeout_seconds=120)
     created = sandbox.create_kwargs
     assert created["template"] == "glink-acp-worker"
     assert created["template"] != config.e2b_template, "ACP 模板与 pi 模板是两个旋钮"
@@ -405,20 +432,19 @@ def test_the_sandbox_uses_the_frozen_acp_template_and_credential(tmp_path: Path)
     # The ACP sandbox has no pi runtime directory to deliver; the model key is
     # not part of any create-time environment.
     assert created["envs"] == {}
-    assert client.sandbox_id == "fake-sandbox-id"
-    client.close()
+    assert client.sandbox.sandbox_id == "fake-sandbox-id"
+    client.sandbox.close()
     assert sandbox.killed is True
 
 
 def test_missing_credential_is_refused_before_any_cloud_call(tmp_path: Path) -> None:
     config = make_config(tmp_path, E2B_API_KEY="")
     runtime = make_runtime(config, tmp_path)
-    client = E2BAcpSandboxClient(
-        config, runtime, run_id="abc123", workspace=tmp_path / "ws",
-        sandbox_factory=lambda **_: FakeSandbox(tmp_path),
+    client = _AcpFace(
+        config, runtime, tmp_path, sandbox_factory=lambda **_: FakeSandbox(tmp_path)
     )
     with pytest.raises(ConfigError) as excinfo:
-        client.start()
+        client.open()
     assert "E2B_API_KEY" in str(excinfo.value)
 
 
@@ -433,12 +459,12 @@ def test_credentials_are_uploaded_into_the_run_home_and_hardened(tmp_path: Path)
     runtime = make_runtime(config, tmp_path)
     sandbox = FakeSandbox(tmp_path)
     client = make_sandbox_client(config, runtime, tmp_path, sandbox)
-    client.start()
-    client.upload_home()
+    client.open()
+    client.transfer.upload_home()
 
     target = f"{SANDBOX_ACP_HOME}/.dsh/.credentials.yaml"
     assert sandbox.written[target] == source.read_bytes()
-    assert (f".dsh/.credentials.yaml",) == tuple(rel for rel, _digest in client.upload_manifest)
+    assert (f".dsh/.credentials.yaml",) == tuple(rel for rel, _digest in client.transfer.upload_manifest)
     # The boundary is re-applied inside the sandbox: the state root is 0700
     # *before* the upload (nothing lands in a traversable directory), then the
     # directories 0700 and the files 0600 — and only this run's paths appear.
@@ -452,8 +478,8 @@ def test_credentials_are_uploaded_into_the_run_home_and_hardened(tmp_path: Path)
     ]
     assert "sk-opaque-credential-1234567890" not in " ".join(sandbox.harden_commands)
     # The value stays in the file; the manifest makes delivery verifiable.
-    assert client.upload_manifest[0][1]
-    client.close()
+    assert client.transfer.upload_manifest[0][1]
+    client.sandbox.close()
 
 
 def test_the_agent_command_is_the_frozen_argv_in_the_sandbox_workspace(tmp_path: Path) -> None:
@@ -467,16 +493,17 @@ def test_the_agent_command_is_the_frozen_argv_in_the_sandbox_workspace(tmp_path:
     runtime = make_runtime(config, tmp_path)
     sandbox = FakeSandbox(tmp_path)
     client = make_sandbox_client(config, runtime, tmp_path, sandbox)
-    client.start()
-    assert client.argv == list(config.acp_command)
-    assert client.command() == f"cd {SANDBOX_WORKSPACE} && exec {shlex.join(client.argv)}"
+    client.open()
+    argv = list(client.launch.argv)
+    assert argv == list(config.acp_command)
+    assert client.sandbox.command(client.launch) == f"cd {SANDBOX_WORKSPACE} && exec {shlex.join(argv)}"
     # HOME is the run's sandbox state root; extra entries are the explicit
     # process-environment channel (values never enter the command line).
     assert client.command_env() == {"HOME": SANDBOX_ACP_HOME, "ACME_MODE": "sandbox-mode-value"}
-    assert "sandbox-mode-value" not in client.command()
+    assert "sandbox-mode-value" not in client.sandbox.command(client.launch)
 
     client.spawn()
-    assert sandbox.command == client.command()
+    assert sandbox.command == client.sandbox.command(client.launch)
     assert sandbox.command_kwargs["background"] is True
     assert sandbox.command_kwargs["stdin"] is True
     assert sandbox.command_kwargs["cwd"] == SANDBOX_WORKSPACE
@@ -484,38 +511,45 @@ def test_the_agent_command_is_the_frozen_argv_in_the_sandbox_workspace(tmp_path:
     assert sandbox.command_kwargs["timeout"] == sandbox.create_kwargs["timeout"]
     # The fake executed exactly what the client asked for (the fake parses the
     # command line back into an argv), so quoting cannot silently change it.
-    assert sandbox.agent_argv == client.argv
-    client.close()
+    assert sandbox.agent_argv == argv
+    client.sandbox.close()
 
 
 def test_an_argv_argument_with_spaces_stays_one_argument(tmp_path: Path) -> None:
     config = make_config(tmp_path, PI_GLINK_ACP_COMMAND="agent --config '/tmp/a b/c.json'")
     runtime = make_runtime(config, tmp_path)
     client = make_sandbox_client(config, runtime, tmp_path, FakeSandbox(tmp_path))
-    assert client.command() == f"cd {SANDBOX_WORKSPACE} && exec agent --config '/tmp/a b/c.json'"
+    assert (
+        client.sandbox.command(client.launch)
+        == f"cd {SANDBOX_WORKSPACE} && exec agent --config '/tmp/a b/c.json'"
+    )
 
 
 # -- bridging (real fake ACP agent behind a stand-in handle) ------------------
 
 
 def build_acp_e2b_adapter(config, runtime, tmp_path: Path, sandbox: FakeSandbox):
-    client = make_sandbox_client(config, runtime, tmp_path, sandbox)
+    """``family.build_adapter(spec, open_sandbox("e2b"))`` — the production composition."""
     frames: list[dict[str, Any]] = []
     identities: list[dict[str, str]] = []
-    adapter = build_adapter(
-        make_spec(config, runtime, tmp_path),
-        harness="acp",
-        executor="e2b",
-        client_factory=PiRpcClient,
-        on_frame=frames.append,
+
+    def factory(**kwargs: Any) -> FakeSandbox:
+        sandbox.create_kwargs = dict(kwargs)
+        return sandbox
+
+    spec = make_spec(config, runtime, tmp_path)
+    e2b = open_sandbox(
+        "e2b",
+        config=config,
+        run_id=spec.run_id,
+        workspace=spec.workspace,
+        sandbox_factory=factory,
         on_identity=identities.append,
-        rpc_plan=lambda _spec: ([], {}, None),
-        docker_plan=lambda _spec: ([], {}, "container"),
-        docker_stop=lambda _name: [],
-        acp_plan=lambda _spec: ([], {}, None),
-        acp_e2b_plan=lambda _spec: client,
     )
-    return adapter, frames, identities, client
+    adapter = family("acp", config, tmp_path / "adapter-store").build_adapter(
+        spec, e2b, on_frame=frames.append
+    )
+    return adapter, frames, identities, e2b
 
 
 def test_the_agent_is_bridged_over_the_sandbox_handle(tmp_path: Path) -> None:
@@ -527,7 +561,7 @@ def test_the_agent_is_bridged_over_the_sandbox_handle(tmp_path: Path) -> None:
     runtime = make_runtime(config, tmp_path)
     sandbox = FakeSandbox(tmp_path)
     adapter, frames, identities, client = build_acp_e2b_adapter(config, runtime, tmp_path, sandbox)
-    assert isinstance(adapter, AcpSandboxExecutionAdapter)
+    assert isinstance(adapter, AcpExecutionAdapter) and adapter.kind == "e2b"
 
     adapter.start()
     # The sandbox identity is handed over as soon as the sandbox exists.
@@ -586,7 +620,7 @@ def test_the_bridge_wraps_the_handle_as_a_subprocess(tmp_path: Path) -> None:
     runtime = make_runtime(config, tmp_path)
     sandbox = FakeSandbox(tmp_path, report=None)
     client = make_sandbox_client(config, runtime, tmp_path, sandbox)
-    client.start()
+    client.open()
     process = client.spawn()
     assert isinstance(process, SandboxCommandProcess)
     try:
@@ -600,7 +634,7 @@ def test_the_bridge_wraps_the_handle_as_a_subprocess(tmp_path: Path) -> None:
         assert process.poll() == 0
         assert process.stdout.read() == b""
     finally:
-        client.close()
+        client.sandbox.close()
     assert sandbox.killed is True
 
 
@@ -1297,14 +1331,26 @@ def test_the_runner_wires_the_acp_e2b_plan_from_the_frozen_configuration(tmp_pat
 
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store=store, sandbox_factory=factory)
-    client = manager._family.acp_e2b_plan(  # noqa: SLF001
-        make_spec(config, runtime, tmp_path), sandbox_factory=factory
+    spec = make_spec(config, runtime, tmp_path)
+    # The runner's own selection: the sandbox from the frozen executor, the
+    # launch from the run's family (no per-face plan callback).
+    e2b = open_sandbox(
+        config.executor,
+        config=config,
+        run_id=spec.run_id,
+        workspace=spec.workspace,
+        sandbox_factory=factory,
     )
-    assert isinstance(client, E2BAcpSandboxClient)
-    client.start()
+    assert isinstance(e2b, E2BSandbox)
+    adapter = manager._family_for("acp").build_adapter(  # noqa: SLF001
+        spec, e2b, on_frame=lambda _frame: None
+    )
+    assert isinstance(adapter, AcpExecutionAdapter)
+    e2b.open(adapter.launch, timeout_seconds=0)
     assert created["template"] == "glink-acp-worker:pinned"
     assert created["api_key"] == "e2b-secret-key"
-    assert client.argv == ["dsh", "--profile", "acp"]
+    assert list(adapter.launch.argv) == ["dsh", "--profile", "acp"]
+    e2b.close()
 
 
 # -- image pin boundary -------------------------------------------------------

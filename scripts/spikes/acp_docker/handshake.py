@@ -2,7 +2,7 @@
 """ACP docker 面容器内握手探针（GLINK-ACP-05 / M4 起，GLINK-ACP-06 / M5 扩展，不消耗模型调用）。
 
 用**生产装配路径**（``build_config`` → ``prepare_acp_runtime`` →
-``docker_env.build_acp_plan`` → ``AcpExecutionAdapter``）在本地 ACP worker
+``AcpHarnessFamily.launch`` → ``DockerSandbox`` → ``AcpExecutionAdapter``）在本地 ACP worker
 镜像里跑 ``initialize`` + ``session/new``，不发 ``session/prompt``：
 
 * 证明镜像里的 ACP agent 经 ``docker run -i`` 的容器 stdio 完成 ACP 握手；
@@ -33,14 +33,11 @@ from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 
 from pi_glink.config import build_config  # noqa: E402
 from pi_glink.kernel.acp_env import prepare_acp_runtime  # noqa: E402
-from pi_glink.kernel.acp_execution import AcpExecutionAdapter  # noqa: E402
-from pi_glink.kernel.docker_env import (  # noqa: E402
-    CONTAINER_WORKSPACE,
-    build_acp_plan,
-    confirm_absent,
-    stop_argv,
-)
+from pi_glink.kernel.docker_env import acp_worker_image, confirm_absent  # noqa: E402
 from pi_glink.kernel.execution import ExecutionSpec  # noqa: E402
+from pi_glink.kernel.harness_acp import AcpHarnessFamily  # noqa: E402
+from pi_glink.kernel.sandbox import DockerSandbox  # noqa: E402
+from pi_glink.store import RunStore  # noqa: E402
 
 DEFAULT_COMMAND = "dsh --profile acp"
 
@@ -87,13 +84,16 @@ def main(argv: list[str] | None = None) -> int:
     runtime = prepare_acp_runtime(
         config, runtime_dir=workdir / "data" / "acp-agent"
     )
-    plan = build_acp_plan(config, runtime, run_id=run_id, workspace=workspace)
+    # 生产组合：harness.driver(sandbox.spawn(harness.launch(spec)))。
+    family = AcpHarnessFamily(config=config, store=RunStore(workdir / "runs"))
+    sandbox = DockerSandbox(config=config, run_id=run_id, workspace=workspace)
+    container_name = sandbox.container_name
 
     print("ACP docker 容器内握手实测（不消耗模型调用）")
     print("=" * 44)
     print(f"日期: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"镜像: {plan.image}")
-    print(f"容器名: {plan.container_name}")
+    print(f"镜像: {acp_worker_image(config)}")
+    print(f"容器名: {container_name}")
     print(f"容器内命令: {args.command}")
     print(f"命令级 env 名: {', '.join(name for name, _ in config.acp_env) or '（无）'}")
     credential_dests = ", ".join(dest for _source, dest in config.acp_credential_files) or "（无）"
@@ -115,16 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         workspace=workspace,
         timeout_seconds=args.timeout,
     )
-    adapter = AcpExecutionAdapter(
-        spec,
-        argv=plan.argv,
-        env=plan.env,
-        cwd=None,
-        session_cwd=CONTAINER_WORKSPACE,
-        container_name=plan.container_name,
-        container_stop=stop_argv,
-        on_frame=frames.append,
-    )
+    adapter = family.build_adapter(spec, sandbox, on_frame=frames.append)
     started = time.monotonic()
     exit_code = 0
     try:
@@ -148,9 +139,9 @@ def main(argv: list[str] | None = None) -> int:
         close = adapter.close()
         print(f"\nclient.close(): released={close.released} failures={list(close.failures)}")
 
-    absent, detail = confirm_absent(plan.container_name)
+    absent, detail = confirm_absent(container_name)
     listing = subprocess.run(
-        ["docker", "ps", "-a", "--filter", f"name={plan.container_name}", "--format", "{{.Names}}"],
+        ["docker", "ps", "-a", "--filter", f"name={container_name}", "--format", "{{.Names}}"],
         capture_output=True,
         text=True,
     ).stdout.strip()

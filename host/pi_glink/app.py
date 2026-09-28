@@ -22,14 +22,13 @@ from __future__ import annotations
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Callable
+from typing import Any, Callable
 
 from .accounts import AccountsStore
 from .auth import AccountsAuth
 from .config import ConfigError, HostConfig, load_config
 from .events import EventBus
-from .runs import ClientFactory, RunManager
-from .kernel.rpc import PiRpcClient
+from .runs import RunManager
 from .ownership import DataRootOwnership
 from .static_files import WebAssets
 from .store import RunStore
@@ -134,7 +133,7 @@ class HostRequestHandler(
 def create_server(
     config: HostConfig,
     *,
-    client_factory: ClientFactory | None = None,
+    client_factory: Callable[..., Any] | None = None,
     docker_probe: Callable[[str], tuple[bool, str]] | None = None,
     sandbox_probe: Callable[[str], tuple[bool, str]] | None = None,
 ) -> PiGlinkServer:
@@ -177,7 +176,7 @@ def create_server(
             config,
             bus,
             store,
-            client_factory=client_factory or PiRpcClient,
+            client_factory=client_factory,
             ownership=ownership,
             credential_store=tenancy.credentials if tenancy is not None else None,
             docker_probe=docker_probe,

@@ -26,21 +26,18 @@ from acp_pack import apply_acp_pack
 from pi_glink.events import EventBus
 from pi_glink.kernel.acp_child_progress import AcpChildProgressSource
 from pi_glink.kernel.acp_child_progress import ProgressFact as AcpProgressFact
-from pi_glink.kernel.acp_execution import (
-    AcpExecutionAdapter,
-    AcpSandboxExecutionAdapter,
-)
+from pi_glink.kernel.acp_execution import AcpExecutionAdapter
 from pi_glink.kernel.child_progress import PiChildProgressSource
 from pi_glink.kernel.child_progress import ProgressFact as PiProgressFact
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
-    E2BSandboxRpcExecutionAdapter,
     ExecutionAdapter,
     ExecutionOutcome,
     ExecutionSpec,
-    RpcExecutionAdapter,
+    PiExecutionAdapter,
 )
+from pi_glink.kernel.sandbox import Launch, Sandbox, open_sandbox
 from pi_glink.kernel.child_progress import E2bChildProgressSource
 from pi_glink.runs import child_progress_observer as observer_module
 from pi_glink.runs.child_progress_observer import ChildProgressObserver
@@ -174,7 +171,10 @@ def open_execution(
     adapter: Any = None,
 ) -> _Execution:
     """An open execution without a kernel: the typed-event commit seam."""
-    record = store.create("子代理进度", run_id=run_id, workspace=workspace, harness="pi", harness_pack="pi", executor="inproc")
+    # The run is admitted with the manager's own RunSpec, so an ACP-configured
+    # host records an ACP run and the family-specific progress mapping applies.
+    spec = manager._admission_spec(None)  # noqa: SLF001
+    record = store.create("子代理进度", run_id=run_id, workspace=workspace, spec=spec)
     execution = _Execution(record=record, workspace=workspace)
     execution.adapter = adapter
     manager.bus.open_run(record.run_id)
@@ -216,61 +216,68 @@ def _spec(tmp_path: Path, runtime: Any) -> ExecutionSpec:
     )
 
 
-def test_rpc_adapter_sources_the_host_session_dir(tmp_path: Path) -> None:
-    """pi inproc/docker: the transcripts live in session_dir/subagent-artifacts."""
-    session_dir = tmp_path / "sessions" / "seam000"
-    adapter = RpcExecutionAdapter(
-        _spec(tmp_path, SimpleNamespace(session_dir=session_dir)),
-        argv=[],
-        env={},
-        cwd=None,
+def _sandbox(spec: ExecutionSpec, executor: str) -> Sandbox:
+    return open_sandbox(
+        executor, config=spec.config, run_id=spec.run_id, workspace=spec.workspace
+    )
+
+
+def _pi_adapter(spec: ExecutionSpec, executor: str) -> PiExecutionAdapter:
+    return PiExecutionAdapter(
+        spec,
+        sandbox=_sandbox(spec, executor),
+        launch=Launch(argv=()),
         client_factory=lambda *a, **k: None,
         on_frame=lambda frame: None,
     )
 
-    source = adapter.child_progress_source()
 
-    assert isinstance(source, PiChildProgressSource)
-    assert source._directory == session_dir / "subagent-artifacts"  # noqa: SLF001
-    source.close()
+def _acp_adapter(spec: ExecutionSpec, executor: str) -> AcpExecutionAdapter:
+    return AcpExecutionAdapter(
+        spec,
+        sandbox=_sandbox(spec, executor),
+        launch=Launch(argv=()),
+        on_frame=lambda frame: None,
+    )
+
+
+def test_rpc_adapter_sources_the_host_session_dir(tmp_path: Path) -> None:
+    """pi inproc/docker: the transcripts live in session_dir/subagent-artifacts."""
+    session_dir = tmp_path / "sessions" / "seam000"
+    spec = _spec(tmp_path, SimpleNamespace(session_dir=session_dir))
+    for executor in ("inproc", "docker"):
+        source = _pi_adapter(spec, executor).child_progress_source()
+
+        assert isinstance(source, PiChildProgressSource)
+        assert source._directory == session_dir / "subagent-artifacts"  # noqa: SLF001
+        source.close()
 
 
 def test_e2b_adapter_sources_only_while_the_sandbox_lives(tmp_path: Path) -> None:
     """pi e2b: no client (or a closed sandbox) honestly means no source."""
-    adapter = E2BSandboxRpcExecutionAdapter(
-        _spec(tmp_path, SimpleNamespace(session_dir=tmp_path / "s")),
-        argv=[],
-        client_factory=lambda *a, **k: None,
-        on_frame=lambda frame: None,
-    )
+    adapter = _pi_adapter(_spec(tmp_path, SimpleNamespace(session_dir=tmp_path / "s")), "e2b")
     assert adapter.child_progress_source() is None, "start 前没有沙箱可观察"
 
-    sandbox = SimpleNamespace(files=SimpleNamespace())
-    adapter._sandbox = SimpleNamespace(sandbox=sandbox)  # noqa: SLF001
+    handle = SimpleNamespace(files=SimpleNamespace())
+    adapter.sandbox._handle = handle  # noqa: SLF001 - 沙箱已创建
     source = adapter.child_progress_source()
     assert isinstance(source, E2bChildProgressSource)
     assert source._root.endswith("/subagent-artifacts")  # noqa: SLF001
 
-    adapter._sandbox = SimpleNamespace(sandbox=None)  # noqa: SLF001 - sandbox 已销毁
+    adapter.sandbox._handle = None  # noqa: SLF001 - sandbox 已销毁
     assert adapter.child_progress_source() is None
 
 
 def test_acp_adapter_sources_the_state_root_sessions(tmp_path: Path) -> None:
     """ACP inproc/docker: dsh sessions below the run's state root (zstd 可用时)。"""
     home = tmp_path / "acp-home"
-    adapter = AcpExecutionAdapter(
-        _spec(tmp_path, SimpleNamespace(home=home)),
-        argv=[],
-        env={},
-        cwd=None,
-        on_frame=lambda frame: None,
-    )
+    spec = _spec(tmp_path, SimpleNamespace(home=home))
+    for executor in ("inproc", "docker"):
+        source = _acp_adapter(spec, executor).child_progress_source()
 
-    source = adapter.child_progress_source()
-
-    assert isinstance(source, AcpChildProgressSource)
-    assert source._root == home / ".dsh" / "sessions"  # noqa: SLF001
-    source.close()
+        assert isinstance(source, AcpChildProgressSource)
+        assert source._root == home / ".dsh" / "sessions"  # noqa: SLF001
+        source.close()
 
 
 def test_acp_adapter_has_no_source_without_zstandard(
@@ -280,20 +287,17 @@ def test_acp_adapter_has_no_source_without_zstandard(
     monkeypatch.setattr(
         "pi_glink.kernel.acp_execution.acp_progress_available", lambda: False
     )
-    adapter = AcpExecutionAdapter(
-        _spec(tmp_path, SimpleNamespace(home=tmp_path / "acp-home")),
-        argv=[],
-        env={},
-        cwd=None,
-        on_frame=lambda frame: None,
-    )
+    adapter = _acp_adapter(_spec(tmp_path, SimpleNamespace(home=tmp_path / "acp-home")), "inproc")
 
     assert adapter.child_progress_source() is None
 
 
-def test_acp_sandbox_face_stays_coarse() -> None:
-    """ACP e2b 面不实现进度源（能力如实停留 coarse）。"""
-    assert AcpSandboxExecutionAdapter.child_progress_source(object()) is None
+def test_acp_sandbox_face_stays_coarse(tmp_path: Path) -> None:
+    """ACP e2b 面不实现进度源（能力如实停留 coarse），沙箱活着也一样。"""
+    adapter = _acp_adapter(_spec(tmp_path, SimpleNamespace(home=tmp_path / "acp-home")), "e2b")
+    assert adapter.child_progress_source() is None
+    adapter.sandbox._handle = SimpleNamespace(files=SimpleNamespace())  # noqa: SLF001
+    assert adapter.child_progress_source() is None
 
 
 # -- runner wiring: lazy start, mapping, throttle, lifecycle --------------------

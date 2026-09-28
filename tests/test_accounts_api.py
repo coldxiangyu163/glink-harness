@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from pi_glink.store import RunSpec
 from pi_glink.accounts import AccountsStore
 from pi_glink.app import HostRequestHandler, PiGlinkServer, create_server, main as app_main
 from pi_glink.config import ConfigError, build_config
@@ -137,7 +138,7 @@ def adapters(monkeypatch: pytest.MonkeyPatch) -> AdapterBehavior:
         behavior.created.append(adapter)
         return adapter
 
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", build)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", build)
     return behavior
 
 
@@ -369,9 +370,7 @@ def seed_history(server, run_id: str, *, frames: int = 20, tenant: str = "tenant
     store.create(
         "历史回放", run_id=run_id, workspace=server.config.workspace_root / run_id,
         tenant_id=tenant, creator_user_id=user,
-        harness="pi",
-        harness_pack="pi",
-        executor="inproc",
+        spec=RunSpec(family="pi", pack="pi", executor="inproc"),
     )
     for seq in range(1, frames + 1):
         store.append_event(
@@ -1441,7 +1440,7 @@ def test_foreign_and_ownerless_records_stay_invisible_in_accounts_mode(server: P
     # Two invisible shapes: an ownerless record (single-user surface), and one
     # whose owner is another tenant.
     store = server.store
-    store.create("无 owner 记录", run_id="ownerless-run", workspace=server.config.workspace_root / "ownerless-run", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("无 owner 记录", run_id="ownerless-run", workspace=server.config.workspace_root / "ownerless-run", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     seed_history(server, "other-tenant-run", frames=3, tenant="tenant-beta", user="u9")
     bootstrap_user(server, email="member@example.test")
     client = logged_in_client(server, "member@example.test")

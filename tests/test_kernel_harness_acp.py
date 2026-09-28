@@ -84,9 +84,13 @@ def write_parent(
         "workspace": str(directory / "workspace"),
         "session_id": session_id,
         "finished_at": time.time(),
-        "harness": harness,
-        "harness_pack": harness_pack,
-        "executor": executor,
+        "spec": {
+            "family": harness,
+            "pack": harness_pack,
+            "executor": executor,
+            "blueprint": None,
+            "credential_origin": "host",
+        },
     }
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     (directory / "meta.json").write_text(
@@ -295,5 +299,5 @@ def test_resume_value_is_the_parent_session_id(tmp_path: Path) -> None:
 def test_acp_always_verifies_continuation_before_turn(tmp_path: Path) -> None:
     """ACP 各面在 session/resume 之后即知 session id，回合前即可校验。"""
     _config, _store, family = make_family(tmp_path)
-    for executor in ("inproc", "docker", "e2b"):
-        assert family.verifies_continuation_before_turn(executor) is True
+    # 与 sandbox 无关（S2 起无 executor 参数）。
+    assert family.verifies_continuation_before_turn() is True

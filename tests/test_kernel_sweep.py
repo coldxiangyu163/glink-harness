@@ -28,7 +28,7 @@ from pi_glink.kernel.acp_env import ACP_HOME_DIRNAME, ACP_RECOVERED_DIRNAME, Acp
 from pi_glink.kernel.agent_env import AgentRuntime
 from pi_glink.redaction import REPLACEMENT, SecretRedactor
 from pi_glink.runs.runner import RunManager, _Execution
-from pi_glink.store import RunRecord, RunStore
+from pi_glink.store import RunRecord, RunStore, RunSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -56,7 +56,7 @@ def build_context(tmp_path: Path, run_id: str) -> tuple[RunManager, RunStore, Ru
     manager = RunManager(config, EventBus(), store)
     workspace = tmp_path / "ws"
     workspace.mkdir(exist_ok=True)
-    record = store.create("收尾扫描", run_id=run_id, workspace=workspace, harness="pi", harness_pack="pi", executor="inproc")
+    record = store.create("收尾扫描", run_id=run_id, workspace=workspace, spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     return manager, store, record, workspace
 
 

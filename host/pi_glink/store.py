@@ -99,13 +99,63 @@ _CHILD_VISIT_LIMIT = 4 * CHILD_READ_LIMIT
 #: Bounded retries when a generated run id collides with an existing directory.
 _RUN_ID_ATTEMPTS = 5
 #: ``meta.json`` fields a record must carry as non-empty strings to be read.
-_REQUIRED_TEXT_FIELDS = ("run_id", "prompt", "status", "workspace", "harness", "harness_pack", "executor")
+_REQUIRED_TEXT_FIELDS = ("run_id", "prompt", "status", "workspace")
+#: ``RunSpec`` fields a record's ``spec`` object must carry as non-empty strings.
+_REQUIRED_SPEC_FIELDS = ("family", "pack", "executor", "credential_origin")
 _TAIL_CHUNK = 64 * 1024
 _STATUS_BY_EVENT = {
     "run_finished": FINISHED,
     "run_failed": FAILED,
     "run_cancelled": CANCELLED,
 }
+
+
+@dataclass(frozen=True, slots=True)
+class RunSpec:
+    """What one run executes with, resolved once at admission (docs/architecture.md §2).
+
+    The runner resolves it from the frozen host configuration when it admits
+    the run and writes it inside the same atomic ``meta.json`` write as the run
+    id and owner; everything after admission — the harness family, the
+    sandbox face, the follow-up gate, the ACP state root a continuation
+    inherits — reads it from the record, never from the host's current
+    configuration (docs/adr/0002).
+
+    * ``family`` — harness family (``pi`` | ``acp``);
+    * ``pack`` — harness pack (``harnesses/<pack>/``);
+    * ``executor`` — sandbox face (``inproc`` | ``docker`` | ``e2b``);
+    * ``blueprint`` — session blueprint stem, ``None`` without one;
+    * ``credential_origin`` — where the run's credentials came from
+      (``host`` | ``tenant`` | ``shared``, :class:`~pi_glink.kernel.agent_env.RunCredentials`).
+      The values themselves are never part of the spec.
+    """
+
+    family: str
+    pack: str
+    executor: str
+    blueprint: str | None = None
+    credential_origin: str = "host"
+
+    @classmethod
+    def from_mapping(cls, data: Any) -> "RunSpec | None":
+        """Parse ``meta.json``'s ``spec`` object; ``None`` when it is unusable."""
+        if not isinstance(data, Mapping):
+            return None
+        if any(
+            not isinstance(data.get(name), str) or not data[name]
+            for name in _REQUIRED_SPEC_FIELDS
+        ):
+            return None
+        blueprint = data.get("blueprint")
+        if blueprint is not None and (not isinstance(blueprint, str) or not blueprint):
+            return None
+        return cls(
+            family=data["family"],
+            pack=data["pack"],
+            executor=data["executor"],
+            blueprint=blueprint,
+            credential_origin=data["credential_origin"],
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,18 +167,10 @@ class RunRecord:
     status: str
     created_at: float
     workspace: str
-    #: Harness family this run executed under (``pi`` | ``acp``), recorded at
-    #: admission from the frozen config. Required: the follow-up gate compares
-    #: it with the host's family and never derives it from the current config.
-    harness: str
-    #: Harness pack this run executed under (``harnesses/<pack>/``, e.g. ``dsh``),
-    #: recorded in the same atomic admission write; a follow-up requires the
-    #: same pack.
-    harness_pack: str
-    #: Execution face this run used (``inproc`` | ``docker`` | ``e2b``),
-    #: recorded at admission; the ACP state root a follow-up inherits is
-    #: derived from it.
-    executor: str
+    #: The admission-time :class:`RunSpec` (family, pack, sandbox face,
+    #: blueprint, credential origin). Required: every later decision reads it
+    #: instead of the host's current configuration.
+    spec: RunSpec
     #: Previous execution in the same research conversation; None for its first turn.
     parent_run_id: str | None = None
     finished_at: float | None = None
@@ -163,13 +205,9 @@ class RunRecord:
     #: rewritten.
     tenant_id: str | None = None
     creator_user_id: str | None = None
-    #: Session blueprint this run was admitted with (the stem of
-    #: ``blueprints/<name>.md``), or ``None`` for a run admitted without one.
-    #: Recorded facts only: the host never advances a stage.
-    blueprint: str | None = None
-    #: The blueprint's stages as parsed at admission
-    #: (``id``/``title``/``goal``/``deliverable``/``checkpoint``). Empty for a run
-    #: for a run without a blueprint.
+    #: The stages of the blueprint named in ``spec.blueprint``, as parsed at
+    #: admission (``id``/``title``/``goal``/``deliverable``/``checkpoint``).
+    #: Empty for a run without a blueprint.
     blueprint_stages: tuple[Mapping[str, Any], ...] = ()
     #: Agent identity the kernel itself reported (ACP ``agentInfo.name`` from the
     #: negotiated initialize result), written back at the session_ready commit
@@ -391,13 +429,10 @@ class RunStore:
         run_id: str | None = None,
         workspace: Path | None = None,
         workspace_root: Path | None = None,
-        harness: str,
-        harness_pack: str,
-        executor: str,
+        spec: RunSpec,
         tenant_id: str | None = None,
         creator_user_id: str | None = None,
         parent_run_id: str | None = None,
-        blueprint: str | None = None,
         blueprint_stages: Sequence[Mapping[str, Any]] = (),
     ) -> RunRecord:
         """Admit a run and write its assignment facts in one atomic meta write.
@@ -413,11 +448,10 @@ class RunStore:
         same replacement as the run id and created-at stamp, so no reader can
         observe an ownerless run that an authenticated request must hide. The
         optional ``parent_run_id`` records the follow-up chain in the same write.
-        ``blueprint`` / ``blueprint_stages`` record the session template the run
-        was admitted with: facts decided before admission, never progression
-        state. ``harness`` / ``harness_pack`` / ``executor`` are frozen-config
-        facts of the same kind, required and written in this same atomic
-        admission write; ``agent`` is not a create parameter because it is only known after the run starts (the
+        ``spec`` (:class:`RunSpec`: family, pack, sandbox face, blueprint,
+        credential origin) and ``blueprint_stages`` are facts decided before
+        admission, never progression state, required and written in this same
+        atomic admission write; ``agent`` is not a create parameter because it is only known after the run starts (the
         ``session_id`` precedent: written back at the session_ready commit).
         """
         identifier, directory = self._create_run_directory(run_id)
@@ -436,11 +470,8 @@ class RunStore:
             tenant_id=tenant_id,
             creator_user_id=creator_user_id,
             parent_run_id=parent_run_id,
-            blueprint=blueprint,
             blueprint_stages=tuple(blueprint_stages),
-            harness=harness,
-            harness_pack=harness_pack,
-            executor=executor,
+            spec=spec,
         )
         return self._write(record)
 
@@ -957,9 +988,17 @@ class RunStore:
             # otherwise have to guess them. It counts as unreadable (a global
             # hold until adjudicated), like any other unusable meta.json.
             return None, True
+        spec = RunSpec.from_mapping(data.get("spec"))
+        if spec is None:
+            # Same rule for the run spec: a record without a usable ``spec``
+            # object (including every record written before RunSpec existed —
+            # no migration is performed) is unreadable, never guessed.
+            return None, True
         known = {field.name for field in fields(RunRecord)}
         try:
-            record = RunRecord(**{key: value for key, value in data.items() if key in known})
+            values = {key: value for key, value in data.items() if key in known}
+            values["spec"] = spec
+            record = RunRecord(**values)
         except TypeError:
             return None, True
         return record, False

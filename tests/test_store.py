@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from pi_glink.store import (
+    RunSpec,
     CANCELLED,
     CHILD_READ_LIMIT,
     FINISHED,
@@ -22,7 +23,7 @@ def store(tmp_path: Path) -> RunStore:
 
 
 def test_create_writes_meta_and_returns_running_record(store: RunStore, tmp_path: Path) -> None:
-    record = store.create("研究一个问题", run_id="abc123", workspace=tmp_path / "ws", harness="pi", harness_pack="pi", executor="inproc")
+    record = store.create("研究一个问题", run_id="abc123", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     assert record.status == RUNNING
     assert record.run_id == "abc123"
     assert record.event_count == 0
@@ -31,7 +32,7 @@ def test_create_writes_meta_and_returns_running_record(store: RunStore, tmp_path
 
 
 def test_update_is_atomic_and_validates_fields(store: RunStore) -> None:
-    store.create("q", run_id="r1", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("q", run_id="r1", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     updated = store.update("r1", status=FINISHED, report_path="/tmp/report.md")
     assert updated.status == FINISHED
     assert updated.is_terminal is True
@@ -43,14 +44,14 @@ def test_update_is_atomic_and_validates_fields(store: RunStore) -> None:
 
 
 def test_list_is_newest_first(store: RunStore) -> None:
-    first = store.create("first", run_id="a", harness="pi", harness_pack="pi", executor="inproc")
-    second = store.create("second", run_id="b", harness="pi", harness_pack="pi", executor="inproc")
+    first = store.create("first", run_id="a", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
+    second = store.create("second", run_id="b", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     listed = store.list()
     assert [record.run_id for record in listed] == [second.run_id, first.run_id]
 
 
 def test_events_append_one_json_object_per_line(store: RunStore) -> None:
-    store.create("q", run_id="r1", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("q", run_id="r1", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     store.append_event("r1", {"type": "run_started", "seq": 1})
     store.append_event("r1", {"type": "assistant_delta", "seq": 2, "payload": {"text": "你好"}})
     lines = store.events_path("r1").read_text(encoding="utf-8").strip().splitlines()
@@ -64,7 +65,7 @@ def test_unknown_run_reads_as_none(store: RunStore) -> None:
 
 
 def test_terminal_status_helper_covers_all_ends(store: RunStore) -> None:
-    store.create("q", run_id="r1", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("q", run_id="r1", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     assert store.update("r1", status=CANCELLED).is_terminal is True
     assert store.update("r1", status=RUNNING).is_terminal is False
 
@@ -85,13 +86,13 @@ def test_a_generated_id_collision_is_regenerated_not_overwritten(
     import pi_glink.store as store_module  # noqa: PLC0415
 
     store = RunStore(tmp_path / "runs")
-    original = store.create("原有研究", run_id="dup", harness="pi", harness_pack="pi", executor="inproc")
+    original = store.create("原有研究", run_id="dup", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     meta_before = (store.run_dir("dup") / "meta.json").read_bytes()
 
     ids = iter(["dup", "freshid00001"])
     monkeypatch.setattr(store_module.uuid, "uuid4", lambda: _Uuid(next(ids)))
 
-    created = store.create("新研究", harness="pi", harness_pack="pi", executor="inproc")
+    created = store.create("新研究", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     assert created.run_id == "freshid00001", "碰撞后必须重新生成 id"
     assert original.prompt == "原有研究"
     assert (store.run_dir("dup") / "meta.json").read_bytes() == meta_before, (
@@ -100,7 +101,7 @@ def test_a_generated_id_collision_is_regenerated_not_overwritten(
     assert store.get("dup").prompt == "原有研究"
 
     with pytest.raises(FileExistsError):
-        store.create("覆盖尝试", run_id="dup", harness="pi", harness_pack="pi", executor="inproc")
+        store.create("覆盖尝试", run_id="dup", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     assert (store.run_dir("dup") / "meta.json").read_bytes() == meta_before
 
 
@@ -110,15 +111,15 @@ def test_generated_ids_are_exhausted_after_bounded_retries(
     import pi_glink.store as store_module  # noqa: PLC0415
 
     store = RunStore(tmp_path / "runs")
-    store.create("占用 id", run_id="collide00001", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("占用 id", run_id="collide00001", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     monkeypatch.setattr(store_module.uuid, "uuid4", lambda: _Uuid("collide00001"))
     with pytest.raises(RuntimeError, match="唯一"):
-        store.create("无法分配 id", harness="pi", harness_pack="pi", executor="inproc")
+        store.create("无法分配 id", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
 
 
 def test_the_workspace_can_be_derived_from_the_generated_id(tmp_path: Path) -> None:
     store = RunStore(tmp_path / "runs")
-    record = store.create("问题", workspace_root=tmp_path / "workspaces", harness="pi", harness_pack="pi", executor="inproc")
+    record = store.create("问题", workspace_root=tmp_path / "workspaces", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     assert record.workspace == str(tmp_path / "workspaces" / record.run_id)
     assert store.get(record.run_id) == record
 
@@ -127,7 +128,7 @@ def test_run_directories_are_created_private(tmp_path: Path) -> None:
     import stat  # noqa: PLC0415
 
     store = RunStore(tmp_path / "runs")
-    record = store.create("问题", harness="pi", harness_pack="pi", executor="inproc")
+    record = store.create("问题", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     store.append_event(record.run_id, {"type": "run_started", "seq": 1})
     assert stat.S_IMODE(store.root.stat().st_mode) == 0o700
     assert stat.S_IMODE(store.run_dir(record.run_id).stat().st_mode) == 0o700
@@ -151,7 +152,7 @@ def _child(n: int, **overrides: object) -> dict:
 
 
 def test_child_document_roundtrip_through_the_directory_handle(store: RunStore) -> None:
-    store.create("q", run_id="r1", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("q", run_id="r1", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     store.write_child("r1", _child(1))
     store.write_child("r1", _child(0))
 
@@ -169,7 +170,7 @@ def test_child_document_roundtrip_through_the_directory_handle(store: RunStore) 
 
 
 def test_read_children_skips_and_counts_unusable_documents(store: RunStore, tmp_path: Path) -> None:
-    store.create("q", run_id="r1", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("q", run_id="r1", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     store.write_child("r1", _child(0))
     corrupt = store.run_dir("r1") / "children" / "1"
     corrupt.mkdir(parents=True)
@@ -190,7 +191,7 @@ def test_read_children_skips_and_counts_unusable_documents(store: RunStore, tmp_
 
 
 def test_read_children_is_bounded(store: RunStore) -> None:
-    store.create("q", run_id="r1", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("q", run_id="r1", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     for n in range(CHILD_READ_LIMIT + 6):
         store.write_child("r1", _child(n))
     page = store.read_children("r1")
@@ -200,7 +201,7 @@ def test_read_children_is_bounded(store: RunStore) -> None:
 
 
 def test_read_children_reports_an_unopenable_tree(store: RunStore) -> None:
-    store.create("q", run_id="r1", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("q", run_id="r1", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     # The children root exists but is not a directory: one unreadable unit,
     # reported instead of silently equated with absence.
     (store.run_dir("r1") / "children").write_text("not a directory", encoding="utf-8")
@@ -210,7 +211,7 @@ def test_read_children_reports_an_unopenable_tree(store: RunStore) -> None:
 
 
 def test_write_child_validates_the_sequence_number(store: RunStore) -> None:
-    store.create("q", run_id="r1", harness="pi", harness_pack="pi", executor="inproc")
+    store.create("q", run_id="r1", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     for bad in (-1, True, "0", None, 1.5):
         with pytest.raises(ValueError, match="n"):
             store.write_child("r1", {"n": bad})
@@ -220,38 +221,48 @@ def test_write_child_validates_the_sequence_number(store: RunStore) -> None:
 # -- harness / executor / agent facts on the record -----------------------------
 
 
-def test_create_records_harness_and_executor_with_the_atomic_admission_write(
+def test_create_records_the_run_spec_with_the_atomic_admission_write(
     store: RunStore,
 ) -> None:
-    """harness/executor 与 run id 同一次准入写落盘，读回与 meta.json 原文一致。"""
-    record = store.create("问题", run_id="facts1", harness="acp", executor="docker", harness_pack="dsh")
-    assert record.harness == "acp"
-    assert record.executor == "docker"
+    """RunSpec 与 run id 同一次准入写落盘，读回与 meta.json 原文一致。"""
+    spec = RunSpec(
+        family="acp", pack="dsh", executor="docker", blueprint="synthetic",
+        credential_origin="tenant",
+    )
+    record = store.create("问题", run_id="facts1", spec=spec)
+    assert record.spec == spec
     # agent 不进 create：它是 run 启动后才知道的事实（session_id 先例）。
     assert record.agent is None
 
     loaded = store.get("facts1")
-    assert loaded is not None
-    assert loaded.harness == "acp" and loaded.executor == "docker"
+    assert loaded is not None and loaded.spec == spec
     listed = {item.run_id: item for item in store.list(limit=None)}
-    assert listed["facts1"].harness == "acp"
-    assert listed["facts1"].executor == "docker"
+    assert listed["facts1"].spec == spec
 
     meta = json.loads(
         (store.run_dir("facts1") / "meta.json").read_text(encoding="utf-8")
     )
-    assert meta["harness"] == "acp"
-    assert meta["executor"] == "docker"
+    assert meta["spec"] == {
+        "family": "acp",
+        "pack": "dsh",
+        "executor": "docker",
+        "blueprint": "synthetic",
+        "credential_origin": "tenant",
+    }
+    # 旧的平铺字段不再写出：RunSpec 是唯一来源。
+    for legacy in ("harness", "harness_pack", "executor", "blueprint"):
+        assert legacy not in meta
 
 
-def test_meta_missing_an_admission_fact_is_unreadable(
+def test_meta_without_a_usable_run_spec_is_unreadable(
     store: RunStore, tmp_path: Path
 ) -> None:
-    """缺准入事实（harness/harness_pack/executor）的 meta.json 按不可读处理。
+    """缺 ``spec`` 或 ``spec`` 不完整的 meta.json 按不可读处理，不做迁移。
 
-    不猜默认值：记录不出现在 get/list 中，并作为不可读目录计入全局持有，
-    直到人工裁决（见 docs/adr/0001）。相邻合法输入（含未知键的完整 meta）
-    仍被已知键过滤正常读回。
+    RunSpec 之前写出的记录（平铺的 harness/harness_pack/executor/blueprint）
+    同样不可读：不猜默认值，记录不出现在 get/list 中，并作为不可读目录计入
+    全局持有，直到人工裁决（见 docs/adr/0001、docs/architecture.md §2）。相邻
+    合法输入（含未知键的完整 meta）仍被已知键过滤正常读回。
     """
     base = {
         "prompt": "记录",
@@ -261,12 +272,23 @@ def test_meta_missing_an_admission_fact_is_unreadable(
         "session_id": "old-session",
         "unknown_future_key": {"anything": 1},
     }
-    facts = {"harness": "pi", "harness_pack": "pi", "executor": "inproc"}
+    spec = {
+        "family": "pi",
+        "pack": "pi",
+        "executor": "inproc",
+        "blueprint": None,
+        "credential_origin": "host",
+    }
+    legacy = {"harness": "pi", "harness_pack": "pi", "executor": "inproc", "blueprint": None}
     for run_id, meta in (
-        ("complete1", {**base, **facts}),
-        ("nofacts1", dict(base)),
-        ("nopack1", {**base, "harness": "pi", "executor": "inproc"}),
-        ("emptyexec1", {**base, **facts, "executor": ""}),
+        ("complete1", {**base, "spec": spec}),
+        ("nospec1", dict(base)),
+        ("legacy1", {**base, **legacy}),
+        ("nopack1", {**base, "spec": {k: v for k, v in spec.items() if k != "pack"}}),
+        ("emptyexec1", {**base, "spec": {**spec, "executor": ""}}),
+        ("noorigin1", {**base, "spec": {k: v for k, v in spec.items() if k != "credential_origin"}}),
+        ("badblueprint1", {**base, "spec": {**spec, "blueprint": ""}}),
+        ("notamap1", {**base, "spec": "pi/pi/inproc"}),
     ):
         directory = store.run_dir(run_id)
         directory.mkdir(parents=True, mode=0o700)
@@ -277,9 +299,12 @@ def test_meta_missing_an_admission_fact_is_unreadable(
 
     record = store.get("complete1")
     assert record is not None
-    assert (record.harness, record.harness_pack, record.executor) == ("pi", "pi", "inproc")
+    assert record.spec == RunSpec(family="pi", pack="pi", executor="inproc")
     assert record.session_id == "old-session"
-    for run_id in ("nofacts1", "nopack1", "emptyexec1"):
+    unreadable = [
+        "badblueprint1", "emptyexec1", "legacy1", "noorigin1", "nopack1", "nospec1", "notamap1",
+    ]
+    for run_id in unreadable:
         assert store.get(run_id) is None
     assert [item.run_id for item in store.list(limit=None)] == ["complete1"]
-    assert store.unreadable_holds() == ["emptyexec1", "nofacts1", "nopack1"]
+    assert store.unreadable_holds() == unreadable

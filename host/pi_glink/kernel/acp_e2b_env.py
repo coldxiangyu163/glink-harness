@@ -1,13 +1,15 @@
-"""E2B execution face for the ACP harness family: the agent runs in a cloud sandbox.
+"""The ACP harness's file transfer for the E2B face (:class:`AcpSandboxTransfer`).
 
-**The ACP face shares the sandbox (M3b).** The same ``Sandbox.create``
-lifecycle, credential upload and artifact recovery as the pi face
-(:mod:`pi_glink.kernel.e2b_env`) carry the ACP family: the agent runs as a
-*background* command with ``stdin=True`` and the host frames the
+**The ACP face shares the sandbox (M3b).** The same
+:class:`~pi_glink.kernel.sandbox.E2BSandbox` resource (creation, lifetime,
+workspace recovery, identity, ``kill()``) carries both families: the agent runs
+as a *background* command with ``stdin=True`` and the host frames the
 CommandHandle's stdout with the shared LF-only splitter, so the ACP client,
 projection and verdict table are the same code as the in-process and Docker
-faces. ``SandboxCommandProcess`` adapts that handle to the ``subprocess.Popen``
-shape ``AcpRpcClient`` is written against; the measured framing facts
+faces. :class:`~pi_glink.kernel.e2b_env.SandboxCommandProcess` adapts that
+handle to the ``subprocess.Popen`` shape ``AcpRpcClient`` is written against;
+this module only adds what is ACP-specific — uploading the run's state root,
+the continuation's workspace half, and recovering the state root; the measured framing facts
 (ordering, byte fidelity, ≥64 KiB frames, ``close_stdin``) are in
 ``docs/evidence/acp-m3-e2b-framing.txt``.
 
@@ -25,36 +27,29 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import queue
 import shlex
 import shutil
-import subprocess
-import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Mapping
 
 from ..artifacts import ArtifactError, ArtifactTree
-from ..config import HostConfig
 from .acp_env import (
     ACP_RECOVERED_DIRNAME,
     INHERIT_MAX_FILE_BYTES,
     INHERIT_MAX_FILES,
     INHERIT_MAX_TOTAL_BYTES,
     AcpRuntime,
-    build_acp_argv,
-    credential_secrets_from_text,
 )
+from ..redaction import credential_secrets_from_text
 from .e2b_env import (
     REPORT_FILENAME,
     SANDBOX_HOME,
     SANDBOX_WORKSPACE,
     UPLOAD_MAX_BYTES,
     SandboxError,
-    _create_sandbox,
     _entry_kind,
     _read_file_bounded,
-    _recover_workspace,
     _runtime_manifest,
 )
 
@@ -95,250 +90,28 @@ class AcpStateRecovery:
     failures: tuple[str, ...] = ()
 
 
-class SandboxCommandProcess:
-    """A ``subprocess.Popen``-shaped facade over one sandbox background command.
+class AcpSandboxTransfer:
+    """ACP 族在一个**已打开**沙箱上的状态交付与回收（harness 侧，不拥有沙箱）。
 
-    The ACP client is written against ``subprocess``: a stdin it writes frames
-    to, a stdout it reads bytes from, a stderr it iterates, and
-    ``poll``/``wait``/``terminate``/``kill``. On this face the agent is an E2B
-    background command started with ``stdin=True``, so this adapter maps those
-    calls onto ``send_stdin`` / ``close_stdin`` / the ``CommandHandle`` stream /
-    ``kill``. Only the carrier changes: the protocol, projection and lifecycle
-    code is the same one the in-process and Docker faces use.
-
-    The facts this adapter relies on were measured in a real sandbox *before* it
-    was written (``docs/evidence/acp-m3-e2b-framing.txt``): ``send_stdin``
-    writes arrive in call order and byte-exact; stdout chunks are **not**
-    frame-aligned, so the client keeps using the shared LF-only framer;
-    ``close_stdin`` signals EOF and the command then exits with a real code.
+    沙箱的创建、命令、身份与销毁属于
+    :class:`~pi_glink.kernel.sandbox.E2BSandbox`；本类只知道 ACP 的布局：
+    ``runtime`` 是 run 的宿主渲染 ACP 状态根
+    (:func:`~pi_glink.kernel.acp_env.prepare_acp_runtime`)，其中的凭据文件交到
+    :data:`SANDBOX_ACP_HOME` 并在沙箱内收紧为 0600，使 M2/M3a 边界（per-run
+    HOME、文件形凭据、值不进 argv 或环境）在本面同样成立。追问 run 的 HOME
+    已含 runner 继承的父 run 状态，同一次上传就是把会话灌回新沙箱；
+    :meth:`recover_state` 在沙箱销毁前把状态根拉回宿主，这正是继承之所以
+    可能的前提。
     """
 
-    def __init__(self, handle: Any, *, sandbox_id: str = "") -> None:
-        self._handle = handle
-        self._stdout: queue.Queue[bytes | None] = queue.Queue()
-        self._stderr: queue.Queue[bytes | None] = queue.Queue()
-        self._exited = threading.Event()
-        self._exit_code: int | None = None
-        self._stream_error: str | None = None
-        self.sandbox_id = sandbox_id
-        self.pid = int(getattr(handle, "pid", 0) or 0)
-        self.stdin = _HandleStdin(handle)
-        self.stdout = _QueueReader(self._stdout)
-        self.stderr = _QueueLines(self._stderr)
-        self._reader = threading.Thread(target=self._pump, name="e2b-stdout", daemon=True)
-        self._reader.start()
-
-    @property
-    def stream_error(self) -> str | None:
-        return self._stream_error
-
-    def _pump(self) -> None:
-        try:
-            for stdout, stderr, _pty in self._handle:
-                if stdout:
-                    self._stdout.put(str(stdout).encode("utf-8"))
-                if stderr:
-                    self._stderr.put(str(stderr).encode("utf-8"))
-        except Exception as exc:  # noqa: BLE001 - reported through the exit code
-            self._stream_error = f"{type(exc).__name__}: {exc}"
-        finally:
-            self._exit_code = self._resolve_exit_code()
-            self._stdout.put(None)
-            self._stderr.put(None)
-            self._exited.set()
-
-    def _resolve_exit_code(self) -> int | None:
-        """The command's own exit code, or ``None`` when the stream was lost.
-
-        The SDK's ``wait()`` answers from the end event the iterator already
-        consumed; a non-zero exit arrives as ``CommandExitException``, whose
-        ``exit_code`` is the command's result rather than a stream failure.
-        """
-        try:
-            result = self._handle.wait()
-        except Exception as exc:  # noqa: BLE001 - an exit code is still a result
-            code = getattr(exc, "exit_code", None)
-            if isinstance(code, int) and not isinstance(code, bool):
-                return code
-            if self._stream_error is None:
-                self._stream_error = f"{type(exc).__name__}: {exc}"
-            return None
-        code = getattr(result, "exit_code", None)
-        if isinstance(code, int) and not isinstance(code, bool):
-            return code
-        return None
-
-    # -- the subprocess.Popen surface the ACP client uses ---------------------
-
-    def poll(self) -> int | None:
-        if not self._exited.is_set():
-            return None
-        # A command that ended without a usable exit code is no longer running;
-        # ``-1`` keeps ``poll() is not None`` meaning "gone" — the only thing the
-        # client reads it for — without inventing a real status.
-        return self._exit_code if self._exit_code is not None else -1
-
-    @property
-    def returncode(self) -> int | None:
-        """``subprocess.Popen`` 形状：退出后是状态（无码为 -1，同 poll()），否则 None。
-
-        pi 的 RPC 客户端在 ``exit_code`` 与 ``_write`` 两处读这个属性（ACP
-        客户端不读它）。
-        """
-        return self.poll() if self._exited.is_set() else None
-
-    def wait(self, timeout: float | None = None) -> int:
-        if not self._exited.wait(timeout):
-            raise subprocess.TimeoutExpired("e2b sandbox command", timeout)
-        if self._exit_code is None:
-            raise OSError(
-                "sandbox command ended without an exit code"
-                + (f": {self._stream_error}" if self._stream_error else "")
-            )
-        return self._exit_code
-
-    def terminate(self) -> None:
-        self.kill()
-
-    def kill(self) -> None:
-        try:
-            self._handle.kill()
-        except Exception:  # noqa: BLE001 - the sandbox is torn down anyway
-            logger.debug("sandbox command kill failed", exc_info=True)
-
-
-class _HandleStdin:
-    """``process.stdin``: one ACP frame per acknowledged ``send_stdin`` RPC."""
-
-    def __init__(self, handle: Any) -> None:
-        self._handle = handle
-        self._closed = False
-
-    def write(self, data: bytes) -> int:
-        payload = bytes(data)
-        if self._closed:
-            raise BrokenPipeError("sandbox stdin is closed")
-        if payload:
-            try:
-                self._handle.send_stdin(payload)
-            except Exception as exc:  # noqa: BLE001 - mapped to the pipe's failure mode
-                raise BrokenPipeError(
-                    f"sandbox stdin write failed: {type(exc).__name__}: {exc}"
-                ) from exc
-        return len(payload)
-
-    def flush(self) -> None:
-        """Nothing is buffered: every ``send_stdin`` call is an acknowledged RPC."""
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self._handle.close_stdin(request_timeout=30)
-        except Exception:  # noqa: BLE001 - an older envd; kill() still ends it
-            logger.debug("sandbox close_stdin unsupported or failed", exc_info=True)
-
-
-class _QueueReader:
-    """A blocking byte reader over the stdout chunks the pump thread receives."""
-
-    def __init__(self, chunks: "queue.Queue[bytes | None]") -> None:
-        self._chunks = chunks
-
-    def read(self, _size: int = -1) -> bytes:
-        chunk = self._chunks.get()
-        if chunk is None:
-            self._chunks.put(None)  # keep EOF sticky for a later read
-            return b""
-        return chunk
-
-
-class _QueueLines:
-    """``process.stderr``: iterate byte lines until the stream ends."""
-
-    def __init__(self, chunks: "queue.Queue[bytes | None]") -> None:
-        self._chunks = chunks
-
-    def __iter__(self) -> Iterator[bytes]:
-        while True:
-            chunk = self._chunks.get()
-            if chunk is None:
-                return
-            yield from chunk.splitlines(keepends=True)
-
-
-class E2BAcpSandboxClient:
-    """Own one E2B sandbox for one ACP run.
-
-    The lifecycle is the pi face's (create with the frozen credential and a
-    bounded lifetime, destroy by ``kill()``, recover the workspace before the
-    sandbox dies) and the artifact/identity contract is the same. The difference
-    is the transport: the ACP agent runs as a background command with
-    ``stdin=True`` and :meth:`spawn` wraps its handle for the shared ACP client
-    (:class:`SandboxCommandProcess`), exactly like the Docker face hands
-    ``docker run -i``'s stdio to the same client.
-
-    ``runtime`` is the run's host-rendered ACP state root
-    (:func:`~pi_glink.kernel.acp_env.prepare_acp_runtime`): the credential files
-    it holds are uploaded into the sandbox state root with 0600 applied there,
-    so the M2/M3a boundary (per-run HOME, file-shaped credentials, no value in
-    argv or environment) holds on this face too. A follow-up's ``runtime`` HOME
-    additionally holds the parent run's state, inherited by the runner before
-    this client exists, so the same upload is what restores the session into
-    the new sandbox; and :meth:`recover_state` brings the sandbox's own state
-    root back to the host before :meth:`close` destroys it, which is what makes
-    that inheritance possible in the first place.
-    """
-
-    def __init__(
-        self,
-        config: HostConfig,
-        runtime: AcpRuntime,
-        *,
-        run_id: str,
-        workspace: Path,
-        sandbox_factory: Callable[..., Any] | None = None,
-        template: str = "",
-    ) -> None:
-        self.config = config
+    def __init__(self, handle: Any, runtime: AcpRuntime, *, workspace: Path) -> None:
+        self.handle = handle
         self.runtime = runtime
-        self.run_id = run_id
         self.workspace = Path(workspace)
-        self._sandbox_factory = sandbox_factory
-        self._template = template or config.acp_e2b_template
-        self.sandbox: Any | None = None
-        self.sandbox_id: str = ""
-        #: Lifetime the sandbox was created with; the agent command must be
-        #: allowed to run at least that long (see ``_command_timeout``).
-        self.sandbox_timeout: int = 0
         #: Sandbox paths the credential upload wrote.
         self.uploaded: list[str] = []
         #: ``(relative path, sha256)`` for everything delivered to the sandbox.
         self.upload_manifest: list[tuple[str, str]] = []
-
-    @property
-    def argv(self) -> list[str]:
-        return build_acp_argv(self.config)
-
-    @property
-    def template(self) -> str:
-        """The frozen E2B template this run's sandbox is created from."""
-        return self._template
-
-    # -- lifecycle ------------------------------------------------------------
-
-    def start(self, *, timeout_seconds: int | None = None) -> None:
-        if self.sandbox is not None:
-            raise SandboxError("sandbox already started")
-        sandbox, self.sandbox_timeout = _create_sandbox(
-            self.config,
-            template=self._template,
-            timeout_seconds=timeout_seconds,
-            sandbox_factory=self._sandbox_factory,
-        )
-        self.sandbox = sandbox
-        self.sandbox_id = str(getattr(sandbox, "sandbox_id", ""))
 
     def upload_home(self) -> None:
         """Deliver the run's rendered ACP HOME (credential files) to the sandbox.
@@ -359,7 +132,7 @@ class E2BAcpSandboxClient:
         same hardened order as the first turn. A failed upload fails the run
         (the caller never starts the agent against a partial state root).
         """
-        sandbox = self._require_sandbox()
+        sandbox = self.handle
         sandbox.files.make_dir(SANDBOX_ACP_HOME)
         self._chmod(0o700, [SANDBOX_ACP_HOME], "先收紧状态根权限")
         manifest = _runtime_manifest(self.runtime.home)
@@ -401,7 +174,7 @@ class E2BAcpSandboxClient:
         """Run one ``chmod`` inside the sandbox over exactly ``paths``."""
         if not paths:
             return
-        sandbox = self._require_sandbox()
+        sandbox = self.handle
         command = shlex.join(["chmod", f"{mode:04o}", *paths])
         try:
             sandbox.commands.run(command, timeout=60)
@@ -412,7 +185,7 @@ class E2BAcpSandboxClient:
         """Deliver the conversation's prior deliverable into the new sandbox.
 
         The pi face transfers the sanitized session snapshot plus the prior
-        ``report.md`` (:meth:`E2BSandboxClient.upload_continuation`); the ACP
+        ``report.md`` (:meth:`~pi_glink.kernel.e2b_env.PiSandboxTransfer.upload_continuation`); the ACP
         session itself travels through the inherited run HOME, and this is the
         workspace half: a resumed agent remembers the conversation's workspace
         (M7), so the deliverable it produced there is restored rather than left
@@ -421,54 +194,13 @@ class E2BAcpSandboxClient:
         through :class:`~pi_glink.artifacts.ArtifactTree` and bounded; a run
         with no prior report (or an unreadable one) simply uploads nothing.
         """
-        sandbox = self._require_sandbox()
+        sandbox = self.handle
         try:
             with ArtifactTree(self.workspace) as tree:
                 report = tree.read(REPORT_FILENAME, max_bytes=UPLOAD_MAX_BYTES)
         except ArtifactError:
             return
         sandbox.files.write(f"{SANDBOX_WORKSPACE}/{REPORT_FILENAME}", report)
-
-    def command(self) -> str:
-        """The sandbox command line: the frozen agent argv in the workspace.
-
-        ``exec`` replaces the login shell so the agent owns stdin directly, and
-        :func:`shlex.join` quotes every argument (the argv is frozen
-        configuration, but a path with a space must not become two words).
-        """
-        return f"cd {shlex.quote(SANDBOX_WORKSPACE)} && exec {shlex.join(self.argv)}"
-
-    def command_env(self) -> dict[str, str]:
-        """The agent command's environment: per-run HOME plus ``PI_GLINK_ACP_ENV``.
-
-        ``HOME`` is the sandbox state root :meth:`upload_home` filled (the
-        counterpart of the Docker face's ``HOME=/home/acp``); the configured
-        entries are this face's explicit process-environment channel, and the
-        credential material itself stays in files. ``HOME`` can never be
-        overridden by ``PI_GLINK_ACP_ENV``: the configuration refuses that name,
-        and this dict is built with it first.
-        """
-        env = {"HOME": SANDBOX_ACP_HOME}
-        for name, value in self.config.acp_env:
-            env[name] = value
-        return env
-
-    def spawn(self) -> SandboxCommandProcess:
-        """Start the agent as a background command and wrap it for the client."""
-        sandbox = self._require_sandbox()
-        handle = sandbox.commands.run(
-            self.command(),
-            background=True,
-            stdin=True,
-            envs=self.command_env(),
-            cwd=SANDBOX_WORKSPACE,
-            timeout=self._command_timeout(),
-        )
-        return SandboxCommandProcess(handle, sandbox_id=self.sandbox_id)
-
-    def recover_artifacts(self, destination: Path) -> tuple[list[Path], list[str]]:
-        """Pull the sandbox workspace back before the sandbox is destroyed."""
-        return _recover_workspace(self._require_sandbox(), destination)
 
     def recover_state(self) -> AcpStateRecovery:
         """Mirror the sandbox's ACP state root onto the host (bounded).
@@ -495,7 +227,7 @@ class E2BAcpSandboxClient:
         recovered text is scanned for credential-shaped values, which are
         returned for the run's redaction boundary; the files are not rewritten.
         """
-        sandbox = self._require_sandbox()
+        sandbox = self.handle
         max_files = INHERIT_MAX_FILES
         try:
             entries = sandbox.files.list(SANDBOX_ACP_HOME, depth=ACP_STATE_MAX_DEPTH)
@@ -600,29 +332,6 @@ class E2BAcpSandboxClient:
         return AcpStateRecovery(
             ok=True, files=tuple(sorted(collected)), bytes=total, secrets=secrets
         )
-
-    def close(self) -> list[str]:
-        """Destroy the sandbox. Returns the failures instead of hiding them."""
-        sandbox = self.sandbox
-        self.sandbox = None
-        if sandbox is None:
-            return []
-        try:
-            sandbox.kill()
-        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-            return [f"sandbox kill failed: {type(exc).__name__}: {exc}"]
-        return []
-
-    def _command_timeout(self) -> int:
-        """How long the agent command may run, in seconds (same rule as pi)."""
-        if self.sandbox_timeout > 0:
-            return self.sandbox_timeout
-        return int(self.config.task_timeout_seconds) + 300
-
-    def _require_sandbox(self) -> Any:
-        if self.sandbox is None:
-            raise SandboxError("sandbox 未启动")
-        return self.sandbox
 
 
 def _state_relative(path: str) -> str | None:

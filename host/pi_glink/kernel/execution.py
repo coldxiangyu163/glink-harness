@@ -1,20 +1,23 @@
-"""Execution adapters: the per-face mechanics behind one run lifecycle.
+"""Execution adapters: one harness driver over one sandbox, per run.
 
 The runner owns the product lifecycle (run states, event persistence, artifact
-policy, resource bookkeeping). Each execution face — in-process pi, a disposable
-Docker container, an E2B sandbox — differs in how a kernel is launched, spoken
-to, cancelled, recovered and released. Those differences live behind
-:class:`ExecutionAdapter` so the runner never grows a second copy of "wait for
-settle", "kill on cancel" or "pull the report back".
+policy, resource bookkeeping). What differs per run is composed from two
+orthogonal dimensions (docs/architecture.md §4, ``docs/multi-harness-plan.md``):
+the **harness** (pi, ACP — launch, protocol driver, stop vocabulary,
+continuation, subagents, usage) and the **sandbox**
+(:mod:`pi_glink.kernel.sandbox`: in-process, Docker, E2B — resource and
+transport). The adapter is ``harness.driver(sandbox.spawn(harness.launch(spec)))``:
+one driver class per harness family (:class:`PiExecutionAdapter` here,
+:class:`~pi_glink.kernel.acp_execution.AcpExecutionAdapter` for ACP), each
+running unchanged on every sandbox, so the runner never grows a second copy of
+"wait for settle", "kill on cancel" or "pull the report back", and no code
+branches on a ``(harness, executor)`` string pair.
 
 The frozen input is :class:`ExecutionSpec`: the run id, the kernel prompt, the
 system prompt, the per-run workspace, the per-run rendered configuration and
-the run's timeout. ``harness`` (the pi kernel or an ACP agent) and ``executor``
-(the in-process, Docker or E2B transmission face) are orthogonal: the adapter
-count is "harness families × transmission faces", not one adapter per pair (see
-``docs/multi-harness-plan.md``). An adapter never re-reads global environment
-for data the spec already carries (image, template, credentials, paths), and
-never writes to another run's workspace.
+the run's timeout. An adapter never re-reads global environment for data the
+spec already carries (image, template, credentials, paths), and never writes
+to another run's workspace.
 
 The contract is:
 
@@ -64,30 +67,34 @@ The contract is:
 from __future__ import annotations
 
 import logging
-import subprocess
 import threading
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, TYPE_CHECKING
+from typing import Any, Callable, Mapping
 
-from ..config import ConfigError, HostConfig
-from .acp_e2b_env import E2BAcpSandboxClient
-from .acp_rpc import AcpRpcClient
-from .agent_env import AgentRuntime
+from ..config import HostConfig
 from .child_progress import E2bChildProgressSource, PiChildProgressSource
-from .docker_env import CONTAINER_WORKSPACE
 from .e2b_env import (
     SANDBOX_SESSIONS,
     SUBAGENT_ARTIFACTS_DIRNAME,
-    E2BSandboxClient,
+    PiSandboxTransfer,
 )
 from .outcome import POLL_SECONDS, ExecutionOutcome
 from .rpc import PiRpcClient, PiRpcError
+from .sandbox import CleanupReport, Launch, Sandbox
 
-if TYPE_CHECKING:  # pragma: no cover - annotation only, avoids an import cycle
-    from .acp_env import AcpRuntime
+__all__ = [
+    "ABORT_SETTLE_GRACE_SECONDS",
+    "ArtifactRecovery",
+    "CleanupReport",
+    "ExecutionAdapter",
+    "ExecutionSpec",
+    "PiExecutionAdapter",
+    "SessionInfo",
+    "publishable_recovered_session",
+]
 
 logger = logging.getLogger("pi_glink.kernel.execution")
 
@@ -101,9 +108,9 @@ class ExecutionSpec:
 
     config: HostConfig
     #: The per-run rendered configuration for this run's harness: pi's
-    #: :class:`AgentRuntime` for the pi family, the ACP state root for the ACP
-    #: family. A harness-specific plan reads its own shape.
-    runtime: AgentRuntime | AcpRuntime
+    #: ``AgentRuntime`` for the pi family, the ACP state root (``AcpRuntime``)
+    #: for the ACP family. Only the owning family's launch/driver reads it.
+    runtime: Any
     run_id: str
     prompt: str
     system_prompt: str
@@ -112,15 +119,6 @@ class ExecutionSpec:
     extra_argv: tuple[str, ...] = ()
     resume_session: str | None = None
     expected_session_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class CleanupReport:
-    """Whether the face's resources are actually released."""
-
-    released: bool
-    failures: tuple[str, ...] = ()
-    external: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,59 +239,87 @@ class ExecutionAdapter(ABC):
         return {}
 
 
-class RpcExecutionAdapter(ExecutionAdapter):
-    """pi behind the bidirectional RPC protocol (in-process or in a container).
+class PiExecutionAdapter(ExecutionAdapter):
+    """pi behind its bidirectional RPC protocol, on any :class:`Sandbox`.
 
-    Both faces speak the same protocol over stdio; the difference is only the
-    command line, the environment and how the process is torn down. ``argv``,
-    ``env`` and ``cwd`` are prepared by the runner's face-specific plan and are
-    frozen in the adapter.
+    The pi family's driver (``harness.driver(sandbox.spawn(harness.launch(spec)))``,
+    docs/architecture.md §4): one protocol implementation — ``get_state`` /
+    ``prompt`` / ``abort``, frame dispatch, the wait loop — whatever carries the
+    process. The sandbox owns the resource (create/spawn/identity/destroy); this
+    adapter owns what is pi-specific about it:
+
+    * ``start()`` 的顺序钉死：``sandbox.open`` → （远端面）身份已由沙箱在
+      上传前落盘 → ``upload_config`` → ``upload_continuation`` →
+      ``sandbox.spawn`` → 客户端启动；任一步失败即释放沙箱（身份不擦除）；
+    * ``session_info`` 追加沙箱事实（E2B：``sandboxId``/``template``），会话
+      文件经 ``sandbox.host_path`` 映回宿主（Docker 报容器路径），远端面在
+      ``recover_session`` 落宿主路径前为 ``None``，回收后由
+      ``recovered_session`` 补发；
+    * 断流即失败（远端面）：沙箱流断开时 RPC 通道没有第二份事件副本，
+      ``wait`` 把带 ``stream_error`` 的 ``kernel_exit`` 改写为
+      ``execution_error``——不补发、不做 ``get_state`` 对账；
+    * 取消是协议级 abort；远端面在 abort 后等收尾宽限，使被取消的 run 也能
+      回收 ``report.md`` 与主会话（docs/adr/0004）。
     """
 
     def __init__(
         self,
         spec: ExecutionSpec,
         *,
-        argv: list[str],
-        env: Mapping[str, str],
-        cwd: Path | None,
-        client_factory: Callable[..., PiRpcClient],
+        sandbox: Sandbox,
+        launch: Launch,
+        client_factory: Callable[..., PiRpcClient] | None = None,
         on_frame: FrameCallback,
-        kind: str = "inproc",
-        container_name: str | None = None,
-        container_stop: Callable[[str], list[str]] | None = None,
-        popen: Callable[..., Any] | None = None,
     ) -> None:
         super().__init__(spec, on_frame=on_frame)
-        self.kind = kind
-        self._argv = list(argv)
-        self._env = dict(env)
-        self._cwd = cwd
-        self._client_factory = client_factory
+        self.kind = sandbox.kind
+        self.sandbox = sandbox
+        self.launch = launch
+        self._client_factory = client_factory or PiRpcClient
         self._client: PiRpcClient | None = None
-        self._container_name = container_name
-        self._container_stop = container_stop
-        #: 进程工厂注入点（E2B 面）：非 None 时透传给 ``PiRpcClient``，后者
-        #: 用它替代 ``subprocess.Popen`` 取得一个已启动的进程门面。
-        self._popen = popen
+        self._transfer: PiSandboxTransfer | None = None
+        self._process: Any | None = None
+        self._release_failures: list[str] = []
+        self._recovered_session_file: Path | None = None
         self._settled = threading.Event()
         self._outcome = ExecutionOutcome()
 
     # -- lifecycle ------------------------------------------------------------
 
     def start(self) -> None:
-        extra: dict[str, Any] = {}
-        if self._popen is not None:
-            extra["popen"] = self._popen
-        client = self._client_factory(
-            self._argv,
-            cwd=self._cwd,
-            env=self._env,
-            on_event=self._handle_frame,
-            **extra,
-        )
-        self._client = client
-        client.start()
+        sandbox = self.sandbox
+        try:
+            sandbox.open(self.launch, timeout_seconds=self.spec.timeout_seconds + 300)
+            if sandbox.remote:
+                transfer = PiSandboxTransfer(sandbox.handle, self.spec.runtime)
+                self._transfer = transfer
+                transfer.upload_config()
+                if self.spec.resume_session:
+                    transfer.upload_continuation(self.spec.resume_session, self.spec.workspace)
+            spawn = sandbox.spawn(self.launch)
+            extra: dict[str, Any] = {}
+            if spawn.process is not None:
+                # 进程工厂注入点（远端面）：客户端用它替代 ``subprocess.Popen``
+                # 取得一个已启动的进程门面。
+                extra["popen"] = spawn.process
+            client = self._client_factory(
+                spawn.argv,
+                cwd=spawn.cwd,
+                env=spawn.env,
+                on_event=self._handle_frame,
+                **extra,
+            )
+            self._client = client
+            client.start()
+            # The carrier's process facade (remote faces): ``stream_error``
+            # is read from it after the wait.
+            self._process = spawn.process() if spawn.process is not None else None
+        except Exception:
+            # A partially created resource must still be released; the
+            # identity the sandbox already persisted is not erased.
+            self._release_failures.extend(sandbox.close().failures)
+            self._transfer = None
+            raise
 
     def _handle_frame(self, frame: Mapping[str, Any]) -> None:
         if frame.get("type") == "agent_settled":
@@ -313,17 +339,47 @@ class RpcExecutionAdapter(ExecutionAdapter):
         data = state.data
         model = data.get("model")
         session_id = data.get("sessionId")
-        session_file = data.get("sessionFile")
+        payload: dict[str, Any] = {
+            "sessionId": session_id,
+            "sessionFile": data.get("sessionFile"),
+            "model": model.get("id") if isinstance(model, Mapping) else None,
+            "thinkingLevel": data.get("thinkingLevel"),
+        }
+        payload.update(self.sandbox.session_facts())
         return SessionInfo(
-            payload={
-                "sessionId": session_id,
-                "sessionFile": session_file,
-                "model": model.get("id") if isinstance(model, Mapping) else None,
-                "thinkingLevel": data.get("thinkingLevel"),
-            },
+            payload=payload,
             session_id=str(session_id) if session_id else None,
-            session_file=str(session_file) if session_file else None,
+            session_file=self._session_file(data.get("sessionFile")),
         )
+
+    def _session_file(self, reported: Any) -> str | None:
+        """The host location of the session file pi reported.
+
+        A remote sandbox's file only exists on the host after
+        ``recover_artifacts``; a mounting sandbox reports its own path, mapped
+        back through the session mount only (an unmappable path is kept as
+        reported and never read back as a host file).
+        """
+        if self.sandbox.remote:
+            return str(self._recovered_session_file) if self._recovered_session_file else None
+        if not isinstance(reported, str) or not reported:
+            return None
+        mapped = self.sandbox.host_path(
+            reported, role="sessions", host_root=self.spec.runtime.session_dir
+        )
+        if mapped is None:
+            logger.warning(
+                "container session path does not map back to the host mount: %s", reported
+            )
+            return reported
+        return mapped
+
+    def recovered_session(self) -> SessionInfo | None:
+        if not self.sandbox.remote:
+            return None
+        # The remote face's session file travels back with
+        # ``recover_artifacts``; a publishable answer exists from then on.
+        return publishable_recovered_session(self.session_info())
 
     def deliver_input(self) -> None:
         client = self._require_client()
@@ -373,32 +429,92 @@ class RpcExecutionAdapter(ExecutionAdapter):
                     )
                 )
                 break
+        if self.sandbox.remote:
+            if outcome.cancelled or outcome.timed_out:
+                self._await_abort_settle()
+            self._rewrite_stream_loss(outcome)
         return outcome
+
+    def _await_abort_settle(self) -> None:
+        """等 abort 后的收尾（``agent_settled`` 或进程退出），宽限到期照常返回。
+
+        宽限只保护回收完整性：``recover_artifacts`` 不与仍在收尾落盘的 pi
+        竞争。终态判定（cancelled/timeout）在此之前已作出，不受宽限影响。
+        本地面的工作区即宿主目录，没有竞争可言，不等。
+        """
+        grace_deadline = time.monotonic() + ABORT_SETTLE_GRACE_SECONDS
+        client = self._client
+        while time.monotonic() < grace_deadline:
+            if self._settled.is_set():
+                return
+            if client is None or not client.running:
+                return
+            time.sleep(min(POLL_SECONDS, max(grace_deadline - time.monotonic(), 0.0)))
+
+    def _rewrite_stream_loss(self, outcome: ExecutionOutcome) -> None:
+        """断流即失败：带 ``stream_error`` 的 ``kernel_exit`` 改写为 ``execution_error``。
+
+        已交付的帧保留在事件日志（它们真实到达过），缺失的尾巴不存在于任何
+        权威副本，run 只能是 failed——不补发、不伪造完整性。
+        """
+        if outcome.stop_reason != "kernel_exit":
+            return
+        stream_error = getattr(self._process, "stream_error", None)
+        if not stream_error:
+            return
+        outcome.stop_reason = "execution_error"
+        outcome.exit_code = None
+        outcome.error = f"沙箱流断开（{stream_error}）；不补发、不伪造完整性"
 
     def cancel(self) -> None:
         self._abort()
 
     def recover_artifacts(self, destination: Path) -> ArtifactRecovery:
-        # The workspace already is the host directory for this face.
-        return ArtifactRecovery()
+        transfer = self._transfer
+        if transfer is None or self.sandbox.handle is None:
+            # 本地面：工作区即宿主目录；远端面未启动（start 失败即毁）：没有
+            # 可回收之物，也不伪造失败。
+            return ArtifactRecovery()
+        files, failures = self.sandbox.recover_workspace(destination)
+        session_file, session_failure = transfer.recover_session()
+        self._recovered_session_file = session_file
+        if session_failure:
+            failures.append(session_failure)
+        return ArtifactRecovery(files=tuple(files), failures=tuple(failures))
 
-    def child_progress_source(self) -> PiChildProgressSource | None:
+    def recover_subagents(self, destination: Path) -> ArtifactRecovery:
+        """Mirror subagent sessions/artifacts while the remote sandbox exists."""
+        transfer = self._transfer
+        if transfer is None or self.sandbox.handle is None:
+            return ArtifactRecovery()
+        files, failures = transfer.recover_subagent_files(destination)
+        return ArtifactRecovery(files=tuple(files), failures=tuple(failures))
+
+    def child_progress_source(self) -> Any | None:
         """Poll the session directory's ``subagent-artifacts`` (R3a).
 
-        Both host-side pi faces keep the session directory on the host (the
-        Docker face mounts it), so the transcript layout is directly pollable
-        for the in-process and the container face alike.
+        A mounting sandbox keeps the session directory on the host, so the
+        transcript layout is directly pollable; a remote sandbox's transcripts
+        live inside it, so a source can only be built while it is still alive.
         """
+        if self.sandbox.remote:
+            handle = self.sandbox.handle
+            if handle is None:
+                return None
+            return E2bChildProgressSource(
+                handle, f"{SANDBOX_SESSIONS}/{SUBAGENT_ARTIFACTS_DIRNAME}"
+            )
         session_dir = getattr(self.spec.runtime, "session_dir", None)
         if session_dir is None:
             return None
         return PiChildProgressSource(Path(session_dir) / SUBAGENT_ARTIFACTS_DIRNAME)
 
     def identity(self) -> Mapping[str, str]:
-        return {"container": self._container_name} if self._container_name else {}
+        return dict(self.sandbox.identity())
 
     def close(self) -> CleanupReport:
-        failures: list[str] = []
+        failures: list[str] = list(self._release_failures)
+        self._release_failures = []
         client = self._client
         self._client = None
         if client is not None:
@@ -406,23 +522,23 @@ class RpcExecutionAdapter(ExecutionAdapter):
                 exit_code = client.close()
                 if exit_code is not None:
                     self._outcome.exit_code = exit_code
-            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-                failures.append(f"关闭 pi 进程失败: {type(exc).__name__}: {exc}")
-        if self._container_name and self._container_stop is not None:
-            try:
-                result = subprocess.run(
-                    self._container_stop(self._container_name),
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                stderr = (result.stderr or "").strip()
-                if result.returncode != 0 and "No such container" not in stderr:
-                    failures.append(
-                        f"删除容器失败: exit {result.returncode}: {stderr[-200:]}"
+            except OSError as exc:
+                if not self.sandbox.remote:
+                    failures.append(f"关闭 pi 进程失败: {type(exc).__name__}: {exc}")
+                else:
+                    # 断流后 ``SandboxCommandProcess.wait()`` 拿不到退出码：沙箱
+                    # ``kill()`` 才是释放权威，一次已判定 execution_error 的断流
+                    # 不再被谎报为资源未释放——降级为日志，不进 failures。
+                    logger.info(
+                        "断流后的 RPC 进程关闭无退出码 run=%s: %s（沙箱销毁兜底）",
+                        self.spec.run_id,
+                        exc,
                     )
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-                failures.append(f"删除容器失败: {type(exc).__name__}: {exc}")
+                failures.append(f"关闭 pi 进程失败: {type(exc).__name__}: {exc}")
+        self._process = None
+        self._transfer = None
+        failures.extend(self.sandbox.close().failures)
         return CleanupReport(
             released=not failures, failures=tuple(failures), external=dict(self.identity())
         )
@@ -451,348 +567,8 @@ class RpcExecutionAdapter(ExecutionAdapter):
             )
 
 
-#: abort 被受理后等 pi 收尾落盘的宽限（秒）。宽限只保护回收完整性——
+#: abort 被受理后等 pi 收尾落盘的宽限（秒，远端面）。宽限只保护回收完整性——
 #: ``recover_artifacts`` 不与仍在写会话/报告的 pi 竞争；pi 不理会 abort 时
 #: 宽限到期照常返回，``close()`` 的 terminate/kill 与沙箱销毁兜底。终态判定
 #: （cancelled/timeout）在此之前已作出，不受宽限影响。
 ABORT_SETTLE_GRACE_SECONDS = 10.0
-
-
-class E2BSandboxRpcExecutionAdapter(RpcExecutionAdapter):
-    """pi inside an E2B sandbox, over the same bidirectional RPC channel.
-
-    与 inproc/docker 面只有载体之差（ACP 面
-    :class:`~pi_glink.kernel.acp_execution.AcpSandboxExecutionAdapter` 的同构
-    先例）：沙箱的 background 命令（``background=True, stdin=True``）经
-    :class:`~pi_glink.kernel.acp_e2b_env.SandboxCommandProcess` 包装后以
-    ``popen=`` 注入共享的 ``PiRpcClient``，协议驱动（``get_state``/
-    ``prompt``/``abort``、帧分发、wait 循环）全部继承，不复制。本类只持有
-    沙箱生命周期与本面事实：
-
-    * ``start()`` 的顺序钉死：沙箱 → 身份落盘（上传之前，部分失败也留可
-      点名资源）→ ``upload_config`` → ``upload_continuation`` →
-      ``spawn_rpc`` → ``super().start()``；
-    * ``session_info`` 在继承的 ``get_state`` 载荷上追加 ``sandboxId`` 与
-      ``template``；会话身份在回合前即可知（``session_file`` 在
-      ``recover_session`` 成功落宿主路径前为 ``None``，回收后由
-      ``recovered_session`` 补发一帧）；
-    * 断流即失败：沙箱流断开时 RPC 通道没有第二份事件副本，``wait`` 把带 ``stream_error`` 的
-      ``kernel_exit`` 改写为 ``execution_error``——不补发、不做
-      ``get_state`` 对账（其响应帧走同一条已断的 stdout；SDK 重连是否重放
-      已消费输出未规定，重复投递比失败更糟）；
-    * 取消是协议级 abort：abort 由运行中的 pi 受理，沙箱存活到收尾，因此
-      被取消的 run 也能回收 ``report.md`` 与主会话（docs/adr/0004）。
-    """
-
-    kind = "e2b"
-
-    def __init__(
-        self,
-        spec: ExecutionSpec,
-        *,
-        argv: list[str],
-        client_factory: Callable[..., PiRpcClient],
-        on_frame: FrameCallback,
-        sandbox_factory: Callable[..., Any] | None = None,
-        on_identity: Callable[[Mapping[str, str]], None] | None = None,
-    ) -> None:
-        super().__init__(
-            spec,
-            argv=argv,
-            # 沙箱命令的环境与工作目录在 ``spawn_rpc`` 时给定；客户端的
-            # env/cwd 只在它自己 spawn 宿主进程时使用，本面从不如此。
-            env={},
-            cwd=None,
-            client_factory=client_factory,
-            on_frame=on_frame,
-            kind="e2b",
-            popen=lambda *a, **k: self._process,
-        )
-        self._sandbox_factory = sandbox_factory
-        self._on_identity = on_identity
-        self._sandbox: E2BSandboxClient | None = None
-        self._process: Any | None = None
-        self._release_failures: list[str] = []
-        self._session_file: Path | None = None
-        #: The sandbox id as soon as it exists, kept even after ``close()``: a
-        #: failure later in ``start()`` must not erase the durable identity.
-        self._sandbox_id: str = ""
-
-    # -- lifecycle ------------------------------------------------------------
-
-    def start(self) -> None:
-        client = E2BSandboxClient(
-            self.spec.config,
-            self.spec.runtime,
-            run_id=self.spec.run_id,
-            workspace=self.spec.workspace,
-            sandbox_factory=self._sandbox_factory,
-        )
-        self._sandbox = client
-        try:
-            client.start(timeout_seconds=self.spec.timeout_seconds + 300)
-            # The sandbox exists from here on. Hand its identity to the host
-            # before any step that can fail, so a partial creation still leaves
-            # a named leftover the operator and the online sweep can act on.
-            self._record_identity(client.sandbox_id)
-            client.upload_config()
-            if self.spec.resume_session:
-                client.upload_continuation(self.spec.resume_session, self.spec.workspace)
-            self._process = client.spawn_rpc(self._argv)
-            super().start()
-        except Exception:
-            # A partially created sandbox must still be destroyed; the sandbox
-            # identity already persisted above is not erased.
-            self._release_failures.extend(client.close())
-            self._sandbox = None
-            raise
-
-    def _record_identity(self, sandbox_id: str) -> None:
-        if not sandbox_id:
-            return
-        self._sandbox_id = sandbox_id
-        if self._on_identity is not None:
-            self._on_identity({"sandbox": sandbox_id})
-
-    def session_info(self) -> SessionInfo | None:
-        session = super().session_info()
-        if session is None:
-            return None
-        payload = dict(session.payload)
-        # Same facts the ACP sandbox face records: which sandbox carried the
-        # run and which template it came from.
-        payload["sandboxId"] = self._sandbox_id
-        payload["template"] = self.spec.config.e2b_template
-        return SessionInfo(
-            payload=payload,
-            session_id=session.session_id,
-            session_file=str(self._session_file) if self._session_file else None,
-        )
-
-    def recovered_session(self) -> SessionInfo | None:
-        # This face's session file travels back with ``recover_artifacts``; a
-        # publishable answer exists from then on.
-        return publishable_recovered_session(self.session_info())
-
-    def wait(self, *, cancel: Callable[[], bool], deadline: float) -> ExecutionOutcome:
-        outcome = super().wait(cancel=cancel, deadline=deadline)
-        if outcome.cancelled or outcome.timed_out:
-            self._await_abort_settle()
-        self._rewrite_stream_loss(outcome)
-        return outcome
-
-    def _await_abort_settle(self) -> None:
-        """等 abort 后的收尾（``agent_settled`` 或进程退出），宽限到期照常返回。
-
-        宽限只保护回收完整性：``recover_artifacts`` 不与仍在收尾落盘的 pi
-        竞争。终态判定（cancelled/timeout）在此之前已作出，不受宽限影响。
-        """
-        grace_deadline = time.monotonic() + ABORT_SETTLE_GRACE_SECONDS
-        client = self._client
-        while time.monotonic() < grace_deadline:
-            if self._settled.is_set():
-                return
-            if client is None or not client.running:
-                return
-            time.sleep(min(POLL_SECONDS, max(grace_deadline - time.monotonic(), 0.0)))
-
-    def _rewrite_stream_loss(self, outcome: ExecutionOutcome) -> None:
-        """断流即失败：带 ``stream_error`` 的 ``kernel_exit`` 改写为 ``execution_error``。
-
-        已交付的帧保留在事件日志（它们真实到达过），缺失的尾巴不存在于任何
-        权威副本，run 只能是 failed——不补发、不伪造完整性。
-        """
-        if outcome.stop_reason != "kernel_exit":
-            return
-        stream_error = getattr(self._process, "stream_error", None)
-        if not stream_error:
-            return
-        outcome.stop_reason = "execution_error"
-        outcome.exit_code = None
-        outcome.error = f"沙箱流断开（{stream_error}）；不补发、不伪造完整性"
-
-    def recover_artifacts(self, destination: Path) -> ArtifactRecovery:
-        client = self._sandbox
-        if client is None:
-            # 沙箱未启动（start 失败即毁）：没有可回收之物，也不伪造失败。
-            return ArtifactRecovery()
-        files, failures = client.recover_artifacts(destination)
-        session_file, session_failure = client.recover_session()
-        self._session_file = session_file
-        if session_failure:
-            failures.append(session_failure)
-        return ArtifactRecovery(files=tuple(files), failures=tuple(failures))
-
-    def recover_subagents(self, destination: Path) -> ArtifactRecovery:
-        """Mirror subagent sessions/artifacts while the sandbox still exists."""
-        client = self._sandbox
-        if client is None:
-            return ArtifactRecovery()
-        files, failures = client.recover_subagent_files(destination)
-        return ArtifactRecovery(files=tuple(files), failures=tuple(failures))
-
-    def child_progress_source(self) -> E2bChildProgressSource | None:
-        """Poll the sandbox's ``subagent-artifacts`` listing (R3a).
-
-        The transcripts live inside the sandbox, so a source can only be built
-        while the client — and its sandbox — is still alive; after ``close()``
-        there is honestly nothing to poll and the answer is ``None``.
-        """
-        client = self._sandbox
-        if client is None:
-            return None
-        sandbox = client.sandbox
-        if sandbox is None:
-            return None
-        return E2bChildProgressSource(
-            sandbox, f"{SANDBOX_SESSIONS}/{SUBAGENT_ARTIFACTS_DIRNAME}"
-        )
-
-    def close(self) -> CleanupReport:
-        failures: list[str] = list(self._release_failures)
-        client = self._client
-        self._client = None
-        if client is not None:
-            try:
-                exit_code = client.close()
-                if exit_code is not None:
-                    self._outcome.exit_code = exit_code
-            except OSError as exc:
-                # 断流后 ``SandboxCommandProcess.wait()`` 拿不到退出码：沙箱
-                # ``kill()`` 才是释放权威，一次已判定 execution_error 的断流
-                # 不再被谎报为资源未释放——降级为日志，不进 failures。
-                logger.info(
-                    "断流后的 RPC 进程关闭无退出码 run=%s: %s（沙箱销毁兜底）",
-                    self.spec.run_id,
-                    exc,
-                )
-            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-                failures.append(f"关闭 pi 进程失败: {type(exc).__name__}: {exc}")
-        self._process = None
-        sandbox = self._sandbox
-        self._sandbox = None
-        if sandbox is not None:
-            failures.extend(sandbox.close())
-        return CleanupReport(
-            released=not failures, failures=tuple(failures), external=dict(self.identity())
-        )
-
-    def identity(self) -> Mapping[str, str]:
-        return {"sandbox": self._sandbox_id} if self._sandbox_id else {}
-
-
-def build_adapter(
-    spec: ExecutionSpec,
-    *,
-    harness: str = "pi",
-    executor: str,
-    client_factory: Callable[..., PiRpcClient],
-    on_frame: FrameCallback,
-    sandbox_factory: Callable[..., Any] | None = None,
-    on_identity: Callable[[Mapping[str, str]], None] | None = None,
-    rpc_plan: Callable[[ExecutionSpec], tuple[list[str], Mapping[str, str], Path | None]],
-    docker_plan: Callable[[ExecutionSpec], tuple[list[str], Mapping[str, str], str]],
-    docker_stop: Callable[[str], list[str]],
-    e2b_rpc_plan: Callable[[ExecutionSpec], list[str]] | None = None,
-    acp_plan: Callable[[ExecutionSpec], tuple[list[str], Mapping[str, str], Path | None]]
-    | None = None,
-    acp_docker_plan: Callable[[ExecutionSpec], tuple[list[str], Mapping[str, str], str]]
-    | None = None,
-    acp_e2b_plan: Callable[[ExecutionSpec], "E2BAcpSandboxClient"] | None = None,
-    acp_client_factory: Callable[..., AcpRpcClient] | None = None,
-) -> ExecutionAdapter:
-    """Compose the adapter for one run's frozen harness and execution face.
-
-    ``harness`` selects the adapter family (``pi`` or ``acp``), ``executor`` the
-    transmission face within it. ``rpc_plan``/``docker_plan``/``e2b_rpc_plan``/
-    ``acp_plan`` are the harness-and-face-specific input builders kept in the
-    runner (they touch the run's rendered configuration); the adapter owns
-    everything after that. ``on_identity`` is called as soon as a face knows the
-    durable identity of the resource it created, before any later step can fail.
-
-    Every face speaks its family's protocol over one client class: for pi,
-    ``inproc``/``docker`` spawn the process locally or in a container, and
-    ``e2b`` hands a sandbox background command's handle
-    (:class:`~pi_glink.kernel.acp_e2b_env.SandboxCommandProcess`) to the same
-    :class:`PiRpcClient` through :class:`E2BSandboxRpcExecutionAdapter`; the ACP
-    family does the same with :class:`AcpRpcClient`. There is no second protocol
-    implementation on any face.
-    """
-    if harness == "acp":
-        # Imported here, not at module import: the ACP adapter depends on the
-        # contract defined in this module.
-        from .acp_execution import AcpExecutionAdapter, AcpSandboxExecutionAdapter
-
-        if executor == "e2b":
-            if acp_e2b_plan is None:
-                raise ConfigError("ACP e2b 适配器需要 acp_e2b_plan")
-            sandbox = acp_e2b_plan(spec)
-            return AcpSandboxExecutionAdapter(
-                spec,
-                sandbox=sandbox,
-                client_factory=acp_client_factory or AcpRpcClient,
-                on_frame=on_frame,
-                on_identity=on_identity,
-            )
-        if executor == "docker":
-            if acp_docker_plan is None:
-                raise ConfigError("ACP docker 适配器需要 acp_docker_plan")
-            argv, env, container_name = acp_docker_plan(spec)
-            return AcpExecutionAdapter(
-                spec,
-                argv=argv,
-                env=env,
-                cwd=None,
-                # The agent-visible workspace is the container mount point; the
-                # host workspace path does not exist inside the container.
-                session_cwd=CONTAINER_WORKSPACE,
-                client_factory=acp_client_factory or AcpRpcClient,
-                on_frame=on_frame,
-                container_name=container_name,
-                container_stop=docker_stop,
-            )
-        if acp_plan is None:
-            raise ConfigError("ACP adapter requires an acp_plan")
-        argv, env, cwd = acp_plan(spec)
-        return AcpExecutionAdapter(
-            spec,
-            argv=argv,
-            env=env,
-            cwd=cwd,
-            client_factory=acp_client_factory or AcpRpcClient,
-            on_frame=on_frame,
-        )
-    if executor == "e2b":
-        if e2b_rpc_plan is None:
-            raise ConfigError("pi e2b 适配器需要 e2b_rpc_plan")
-        return E2BSandboxRpcExecutionAdapter(
-            spec,
-            argv=e2b_rpc_plan(spec),
-            client_factory=client_factory,
-            on_frame=on_frame,
-            sandbox_factory=sandbox_factory,
-            on_identity=on_identity,
-        )
-    if executor == "docker":
-        argv, env, container_name = docker_plan(spec)
-        return RpcExecutionAdapter(
-            spec,
-            argv=argv,
-            env=env,
-            cwd=None,
-            client_factory=client_factory,
-            on_frame=on_frame,
-            kind="docker",
-            container_name=container_name,
-            container_stop=docker_stop,
-        )
-    argv, env, cwd = rpc_plan(spec)
-    return RpcExecutionAdapter(
-        spec,
-        argv=argv,
-        env=env,
-        cwd=cwd,
-        client_factory=client_factory,
-        on_frame=on_frame,
-        kind="inproc",
-    )

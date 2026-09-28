@@ -39,18 +39,19 @@ shell expansion from the configuration.
 
 from __future__ import annotations
 
-import json
 import os
-import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
 
 from ..config import ConfigError, HostConfig
-from ..redaction import MIN_SECRET_LENGTH, find_credential_shapes, is_placeholder_value
+from ..redaction import (
+    CREDENTIAL_NAME_RE,
+    MIN_SECRET_LENGTH,
+    credential_secrets_from_text,
+    is_placeholder_value,
+)
 from ..artifacts import ArtifactError, ArtifactTree
-from .agent_env import PASSTHROUGH_ENV
 from .sweep import SessionSweep
 
 #: Per-run ACP agent directory inside the run directory.
@@ -60,7 +61,7 @@ ACP_HOME_DIRNAME = "home"
 #: A state root recovered from an E2B sandbox, below
 #: :data:`ACP_RUNTIME_DIRNAME`. Only the E2B face writes it, and only after the
 #: whole bounded recovery succeeded (see
-#: :meth:`~pi_glink.kernel.acp_e2b_env.E2BAcpSandboxClient.recover_state`): the
+#: :meth:`~pi_glink.kernel.acp_e2b_env.AcpSandboxTransfer.recover_state`): the
 #: sandbox destroys the agent's own state with it, so the host needs its own
 #: copy before that happens — and the directory's existence is the durable
 #: "父状态根回收成功" fact the ACP admission gate reads. It is a separate root
@@ -103,17 +104,6 @@ class AcpStateInheritError(RuntimeError):
     agent does not actually have.
     """
 
-#: Key-name hints for values that must join the redaction boundary even when a
-#: scanner cannot recognise their shape (an opaque token, a short shared secret).
-_SECRET_NAME_RE = re.compile(r"(?i)(key|token|secret|password|credential|auth)")
-#: OAuth credential stores (opencode's ``auth.json``) name their fields exactly
-#: ``access``/``refresh``, without a ``token`` suffix the generic rule could see.
-#: Matching the whole field name (never a substring) keeps ordinary keys such as
-#: ``accessMode`` out of the redaction boundary.
-_OAUTH_SECRET_FIELDS = frozenset({"access", "refresh"})
-#: ``key: value`` / ``key = value`` scalar lines inside the credential file
-#: (dsh's ``.credentials.yaml`` is YAML; the JSON branch handles the rest).
-_SCALAR_LINE_RE = re.compile(r"^\s*(?P<name>[A-Za-z0-9_.\-]+)\s*:\s*(?P<value>.+?)\s*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,65 +326,6 @@ def build_acp_argv(config: HostConfig) -> list[str]:
     return argv
 
 
-def build_acp_env(
-    config: HostConfig,
-    runtime: AcpRuntime,
-    *,
-    base_env: Mapping[str, str] | None = None,
-) -> dict[str, str]:
-    """Child environment: minimal passthrough, per-run ``HOME``, explicit extras.
-
-    ``base_env`` is filtered through :data:`PASSTHROUGH_ENV` (the same list the
-    pi face uses) so a caller handing in ``os.environ`` cannot widen the child's
-    view of host secrets; the only value this module overrides is ``HOME``, and
-    the configuration entries applied afterwards were validated not to contain
-    it.
-    """
-    source = dict(base_env) if base_env is not None else dict(os.environ)
-    env = {name: source[name] for name in PASSTHROUGH_ENV if name in source}
-    env["HOME"] = str(runtime.home)
-    for name, value in config.acp_env:
-        env[name] = value
-    return env
-
-
-def credential_secrets_from_text(text: str) -> tuple[str, ...]:
-    """Credential values inside one credential file's text, in stable order.
-
-    Three detectors run over the copied material:
-
-    * **JSON** (codex/opencode ``auth.json``): values under a key whose name looks
-      like a credential (``*_token``, ``*ApiKey``, ``*secret``, …) or is exactly
-      ``access``/``refresh`` (opencode's OAuth store);
-    * **scalar lines** (dsh ``.credentials.yaml``): ``key: value`` pairs with the
-      same key-name rule;
-    * **shape detection**: :func:`~pi_glink.redaction.find_credential_shapes`
-      over the raw text, which finds provider-shaped values a key name alone
-      would miss.
-
-    Documentation placeholders (``your-key-here``) are skipped — they are not
-    secrets, and masking them would only corrupt output. The result keeps the
-    redactor's own minimum length rule.
-    """
-    found: list[str] = []
-    _collect_json_values(_parsed_json(text), found)
-    for line in text.splitlines():
-        match = _SCALAR_LINE_RE.match(line)
-        if match and _is_secret_field(match.group("name")):
-            found.append(_unquote(match.group("value")))
-    found.extend(find_credential_shapes(text))
-    stable: list[str] = []
-    for value in found:
-        if not isinstance(value, str):
-            continue
-        text_value = value.strip()
-        if len(text_value) < MIN_SECRET_LENGTH or is_placeholder_value(text_value):
-            continue
-        if text_value not in stable:
-            stable.append(text_value)
-    return tuple(stable)
-
-
 def _env_credential_values(config: HostConfig) -> tuple[str, ...]:
     """Credential-shaped values of the explicit ``PI_GLINK_ACP_ENV`` entries.
 
@@ -406,7 +337,7 @@ def _env_credential_values(config: HostConfig) -> tuple[str, ...]:
     """
     values: list[str] = []
     for name, value in config.acp_env:
-        if not _SECRET_NAME_RE.search(name):
+        if not CREDENTIAL_NAME_RE.search(name):
             continue
         text_value = value.strip()
         if len(text_value) < MIN_SECRET_LENGTH or is_placeholder_value(text_value):
@@ -521,44 +452,6 @@ def _inject_credential_files(
             os.close(descriptor)
         secrets.extend(credential_secrets_from_text(data.decode("utf-8", errors="replace")))
     return _dedupe(secrets)
-
-
-def _is_secret_field(key_hint: str) -> bool:
-    """Does a (dotted) key path name a credential field?
-
-    The generic rule matches credential-ish substrings anywhere in the path
-    (``openai.access_token``). The OAuth rule matches only the last path element
-    exactly, so ``openai.access`` is a credential while ``openai.accessMode``
-    is not.
-    """
-    if _SECRET_NAME_RE.search(key_hint):
-        return True
-    return key_hint.rsplit(".", 1)[-1].strip().lower() in _OAUTH_SECRET_FIELDS
-
-
-def _collect_json_values(document: object, found: list[str], key_hint: str = "") -> None:
-    if isinstance(document, Mapping):
-        for key, value in document.items():
-            _collect_json_values(value, found, f"{key_hint}.{key}" if key_hint else str(key))
-    elif isinstance(document, list):
-        for item in document:
-            _collect_json_values(item, found, key_hint)
-    elif isinstance(document, str) and _is_secret_field(key_hint):
-        found.append(document)
-
-
-def _parsed_json(text: str) -> object:
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, ValueError):
-        return None
-
-
-def _unquote(value: str) -> str:
-    text_value = value.strip()
-    if len(text_value) >= 2 and text_value[0] == text_value[-1] and text_value[0] in "\"'":
-        return text_value[1:-1]
-    return text_value
 
 
 def _dedupe(values: list[str]) -> tuple[str, ...]:

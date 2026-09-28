@@ -42,8 +42,8 @@ from pi_glink.events import EventBus
 
 from e2b_fake import FakeSandbox
 from pi_glink.kernel.agent_env import RunCredentials, prepare_agent_dir
-from pi_glink.kernel.docker_env import build_plan as build_docker_plan
-from pi_glink.kernel.e2b_env import SANDBOX_CONFIG, E2BSandboxClient
+from harness_helpers import compose_launch, execution_spec
+from pi_glink.kernel.e2b_env import SANDBOX_CONFIG, PiSandboxTransfer
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
@@ -276,13 +276,9 @@ def test_shared_credentials_render_only_into_the_per_run_auth_file(tmp_path: Pat
 
     # Docker delivers the credential only through the mounted config directory;
     # neither the container argv nor the CLI environment carries it.
-    plan = build_docker_plan(
-        config,
-        runtime,
-        run_id="run-1",
-        workspace=tmp_path / "ws",
-        session_dir=runtime.session_dir,
-    )
+    spec = execution_spec(config, runtime, workspace=tmp_path / "ws", run_id="run-1")
+    launch, docker = compose_launch("pi", "docker", spec, store_root=tmp_path / "store")
+    plan = docker.spawn(launch)
     assert plan.argv.count(f"{runtime.directory}:/config") == 1
     for element in plan.argv:
         assert SHARED_KEY not in element
@@ -328,14 +324,18 @@ def test_shared_model_key_stays_out_of_the_e2b_environment_and_command(tmp_path:
         captured.update(kwargs)
         return sandbox
 
-    client = E2BSandboxClient(
-        config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=factory
+    spec = execution_spec(config, runtime, workspace=tmp_path / "ws", run_id="abc123")
+    launch, e2b = compose_launch(
+        "pi", "e2b", spec, store_root=tmp_path / "store", sandbox_factory=factory
     )
-    client.start()
-    client.upload_config()
+    e2b.open(launch, timeout_seconds=60)
+    transfer = PiSandboxTransfer(e2b.handle, runtime)
+    transfer.upload_config()
     # The kernel runs over the RPC channel; the prompt travels as a stdin
     # frame, so the command line is guard + argv only.
-    process = client.spawn_rpc(["pi", "--mode", "rpc", "--provider", "shared", "--model", "test/model"])
+    spawn = e2b.spawn(launch)
+    assert spawn.process is not None
+    process = spawn.process()
     try:
         assert SHARED_KEY in sandbox.written[f"{SANDBOX_CONFIG}/auth.json"]
         assert SHARED_KEY not in sandbox.command
@@ -344,10 +344,11 @@ def test_shared_model_key_stays_out_of_the_e2b_environment_and_command(tmp_path:
         assert "OPENAI_API_KEY" not in captured["envs"]
         assert SHARED_KEY not in json.dumps(captured)
         assert captured["api_key"] == "e2b-secret"
-        assert any(path.endswith("/config/auth.json") for path in client.uploaded)
+        assert any(path.endswith("/config/auth.json") for path in transfer.uploaded)
     finally:
         process.kill()
-        client.close()
+        report = e2b.close()
+    assert report.released is True
     assert sandbox.killed is True, "the sandbox (and its auth.json) must be destroyed"
 
 
@@ -515,7 +516,7 @@ def behavior(monkeypatch: pytest.MonkeyPatch) -> AdapterBehavior:
     def build(spec, **kwargs):
         return FakeAdapter(spec, on_frame=kwargs["on_frame"], behavior=state)
 
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.compose_adapter", build)
+    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", build)
     return state
 
 

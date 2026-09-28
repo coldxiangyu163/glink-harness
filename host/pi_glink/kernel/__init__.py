@@ -9,10 +9,13 @@ Each harness family owns exactly two jobs:
   (:mod:`pi_glink.kernel.projection`, :mod:`pi_glink.kernel.acp_projection`).
 
 The per-harness *policy* of one run lifecycle (admission allowlists, follow-up
-gates, runtime rendering, adapter assembly, stop-reason normalization and
-subagent enrichment) lives behind the family interface in
-:mod:`pi_glink.kernel.harness`, with the two implementations in
-:mod:`pi_glink.kernel.harness_pi` and :mod:`pi_glink.kernel.harness_acp`.
+gates, runtime rendering, launch description and protocol driver,
+stop-reason normalization and subagent enrichment) lives behind the family
+interface in :mod:`pi_glink.kernel.harness`, with the two implementations in
+:mod:`pi_glink.kernel.harness_pi` and :mod:`pi_glink.kernel.harness_acp`. The
+execution face (in-process / Docker / E2B) is the orthogonal
+:mod:`pi_glink.kernel.sandbox` dimension; a run's adapter is
+``harness.driver(sandbox.spawn(harness.launch(spec)))``.
 
 It deliberately owns no research logic, no prompts, no file layout policy and
 no run orchestration: run admission, the execution skeleton, the finalize
@@ -26,9 +29,9 @@ orchestration modules (store/tenancy/ownership/blueprints/web_*/app/cli;
 
 from __future__ import annotations
 
-from .acp_e2b_env import E2BAcpSandboxClient, SANDBOX_ACP_HOME
+from .acp_e2b_env import SANDBOX_ACP_HOME
 from .acp_env import AcpRuntime, prepare_acp_runtime
-from .acp_execution import AcpExecutionAdapter, AcpSandboxExecutionAdapter
+from .acp_execution import AcpExecutionAdapter
 from .acp_projection import ACP_STOP_REASONS, AcpProjector
 from .acp_rpc import (
     AcpClosed,
@@ -40,8 +43,6 @@ from .acp_rpc import (
 )
 from .agent_env import (
     AgentRuntime,
-    build_pi_argv,
-    build_pi_env,
     prepare_agent_dir,
     template_manifest,
 )
@@ -51,12 +52,22 @@ from .execution import (
     ExecutionAdapter,
     ExecutionOutcome,
     ExecutionSpec,
+    PiExecutionAdapter,
     SessionInfo,
-    build_adapter,
 )
 from .harness import HarnessFamily, PreparedRuntime, Verdict, select_family
 from .harness_acp import AcpHarnessFamily
 from .harness_pi import PiHarnessFamily
+from .sandbox import (
+    DockerSandbox,
+    E2BSandbox,
+    InprocSandbox,
+    Launch,
+    Mount,
+    Sandbox,
+    Spawn,
+    open_sandbox,
+)
 from .projection import extract_text, project_event, project_frames
 from .rpc import (
     PiRpcClient,
@@ -78,16 +89,20 @@ __all__ = [
     "AcpRequestError",
     "AcpRpcClient",
     "AcpRuntime",
-    "AcpSandboxExecutionAdapter",
     "AcpTimeout",
     "AgentRuntime",
     "ArtifactRecovery",
     "CleanupReport",
-    "E2BAcpSandboxClient",
+    "DockerSandbox",
+    "E2BSandbox",
     "ExecutionAdapter",
     "ExecutionOutcome",
     "ExecutionSpec",
     "HarnessFamily",
+    "InprocSandbox",
+    "Launch",
+    "Mount",
+    "PiExecutionAdapter",
     "PiHarnessFamily",
     "PiRpcClient",
     "PiRpcClosed",
@@ -96,15 +111,15 @@ __all__ = [
     "PreparedRuntime",
     "RpcResponse",
     "SANDBOX_ACP_HOME",
+    "Sandbox",
     "SessionInfo",
+    "Spawn",
     "Verdict",
-    "build_adapter",
-    "build_pi_argv",
-    "build_pi_env",
     "extract_text",
     "prepare_acp_runtime",
     "prepare_agent_dir",
     "project_event",
+    "open_sandbox",
     "project_frames",
     "select_family",
     "template_manifest",

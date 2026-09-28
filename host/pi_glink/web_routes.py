@@ -92,7 +92,7 @@ def run_view(
         # Session-template facts, recorded at admission. The host never advances
         # a stage, so these are labels of what the run was admitted with, not a
         # progression state.
-        "blueprint": record.blueprint,
+        "blueprint": record.spec.blueprint,
         "blueprintStages": [dict(stage) for stage in record.blueprint_stages],
     }
 
