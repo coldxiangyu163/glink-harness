@@ -253,6 +253,7 @@ function startTool(model, payload) {
     toolCallId: id,
     name: payload.toolName || 'tool',
     args: payload.args ?? {},
+    ...(typeof payload.presentation === 'string' ? { presentation: payload.presentation } : {}),
     output: '',
     result: '',
     isError: false,

@@ -67,6 +67,15 @@ COMMAND_NAME_LIMIT = 120
 COMMAND_DESCRIPTION_LIMIT = 200
 DETAIL_LIMIT = 500
 
+# ACP's protocol categories describe *its* actions. Do not infer pi tool-name
+# semantics from ACP titles (dsh reports kind=other even for named tools).
+_ACP_KIND_PRESENTATION = {
+    "read": "read", "edit": "edit_file", "delete": "delete",
+    "move": "move", "search": "find", "execute": "execute",
+    "think": "think", "fetch": "fetch_page",
+    "switch_mode": "switch_mode", "other": "generic",
+}
+
 
 class AcpProjector:
     """Stateful projection of one ACP run's frames into product events.
@@ -313,6 +322,8 @@ def _agent_tool_call(
         "toolCallId": tool_call_id,
         "toolName": name,
         "args": project_args(update.get("rawInput")),
+        "presentation": _ACP_KIND_PRESENTATION.get(update.get("kind"), "generic")
+        if isinstance(update.get("kind"), str) else "generic",
     }
     kind = update.get("kind")
     if isinstance(kind, str) and kind:

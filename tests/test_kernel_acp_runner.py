@@ -173,6 +173,7 @@ def test_acp_run_projects_the_whole_lifecycle_and_the_report(tmp_path: Path) -> 
         "toolName": "bash",
         "args": {"command": "ls -la"},
         "kind": "execute",
+        "presentation": "execute",
     }
     updated = payloads(events, "tool_updated")
     assert updated[0]["toolCallId"] == "call_1"

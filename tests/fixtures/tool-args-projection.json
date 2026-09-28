@@ -48,7 +48,8 @@
           ],
           "count": 2,
           "limit": 5
-        }
+        },
+        "presentation": "search_web"
       }
     },
     {
@@ -62,7 +63,8 @@
             "https://example.com/b"
           ],
           "format": "markdown"
-        }
+        },
+        "presentation": "fetch_page"
       }
     },
     {
@@ -72,7 +74,8 @@
         "toolName": "bash",
         "args": {
           "command": "ls -la"
-        }
+        },
+        "presentation": "execute"
       }
     }
   ],

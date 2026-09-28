@@ -118,6 +118,7 @@
  * @property {string} toolName
  * @property {Record<string, unknown>} args
  * @property {string} [kind]
+ * @property {string} [presentation] 族投影的工具呈现提示；缺失时旧帧由读侧回退
  */
 /**
  * tool_updated（v1）：output 是累计快照，替换而非拼接
@@ -819,6 +820,14 @@ export const EVENT_SCHEMA = Object.freeze({
           "string"
         ],
         "required": false
+      },
+      {
+        "name": "presentation",
+        "types": [
+          "string"
+        ],
+        "required": false,
+        "doc": "族投影的工具呈现提示；缺失时旧帧由读侧回退"
       }
     ]
   },

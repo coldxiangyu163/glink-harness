@@ -419,6 +419,7 @@ def test_a_tool_call_arriving_terminal_emits_started_and_finished() -> None:
         "toolCallId": "call_1",
         "toolName": "bash",
         "args": {},
+        "presentation": "generic",
     }
     assert produced[1][1] == {
         "toolCallId": "call_1",

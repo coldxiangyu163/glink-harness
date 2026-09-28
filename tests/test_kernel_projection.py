@@ -230,9 +230,31 @@ def test_tool_finished_flattens_result_blocks_and_coerces_fields() -> None:
     assert payload["isError"] is True
 
 
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("web_search", "search_web"),
+        ("get_search_content", "read_search"),
+        ("fetch_content", "fetch_page"),
+        ("bash", "execute"),
+        ("read", "read_file"),
+        ("write", "write_file"),
+        ("edit", "edit_file"),
+        ("ls", "find"),
+        ("todo", "plan"),
+        ("mystery_tool", "generic"),
+    ],
+)
+def test_pi_tool_name_projects_its_own_presentation(name: str, expected: str) -> None:
+    (_kind, payload), = project_event(
+        {"type": "tool_execution_start", "toolCallId": "c1", "toolName": name, "args": {}}
+    )
+    assert payload["presentation"] == expected
+
+
 def test_tool_frames_coerce_missing_ids_and_names_to_empty_strings() -> None:
     (_kind, payload), = project_event({"type": "tool_execution_start"})
-    assert payload == {"toolCallId": "", "toolName": "", "args": {}}
+    assert payload == {"toolCallId": "", "toolName": "", "args": {}, "presentation": "generic"}
     (_kind, payload), = project_event({"type": "tool_execution_update"})
     assert payload == {"toolCallId": "", "toolName": "", "output": ""}
 
@@ -896,7 +918,7 @@ def test_non_subagent_calls_are_untouched_by_a_dispatch_in_the_same_run() -> Non
         }
     )
     assert kind == events.TOOL_STARTED
-    assert payload == {"toolCallId": "c1", "toolName": "bash", "args": {"command": "ls"}}
+    assert payload == {"toolCallId": "c1", "toolName": "bash", "args": {"command": "ls"}, "presentation": "execute"}
     updated = projector.project(
         {
             "type": "tool_execution_update",
