@@ -1,0 +1,90 @@
+{
+  "baseUrl": "http://127.0.0.1:61500",
+  "mode": "gateway",
+  "startedAt": "2026-09-28T12:50:18.014Z",
+  "finishedAt": "2026-09-28T12:50:19.948Z",
+  "dimensions": [
+    "gateway-identity",
+    "assets"
+  ],
+  "summary": {
+    "total": 7,
+    "passed": 7,
+    "skipped": 0,
+    "failed": 0
+  },
+  "checks": [
+    {
+      "dimension": "gateway-identity",
+      "name": "网关模式未认证入口：只有「从统一入口访问」的说明，没有站内表单",
+      "ok": true,
+      "detail": {
+        "authVisible": true,
+        "shellHidden": true,
+        "title": "研究工作台",
+        "loginHidden": true,
+        "registerHidden": true,
+        "gatewayNote": "本站通过组织的认证网关访问。请从统一入口登录后重试；站内不提供登录表单。",
+        "unavailableHidden": true,
+        "retryHidden": true,
+        "historyLeak": false
+      }
+    },
+    {
+      "dimension": "gateway-identity",
+      "name": "/api/me：401 + mode=gateway（前端据 mode 选择网关说明）",
+      "ok": true,
+      "detail": {
+        "status": 401,
+        "body": {
+          "error": "unauthenticated",
+          "mode": "gateway"
+        }
+      }
+    },
+    {
+      "dimension": "gateway-identity",
+      "name": "网关模式：匿名创建 / 列表读取都被拒绝（401）",
+      "ok": true,
+      "detail": {
+        "run": 401,
+        "list": 401
+      }
+    },
+    {
+      "dimension": "gateway-identity",
+      "name": "网关模式：跨站来源的 POST 被拒绝（401 未认证或 403 来源）",
+      "ok": true,
+      "detail": 401
+    },
+    {
+      "dimension": "gateway-identity",
+      "name": "网关入口文字不暴露内核/执行面/会话事实",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "dimension": "assets",
+      "name": "静态资产：前端资源全部 200（CSS/模块/图标/字体）",
+      "ok": true,
+      "detail": {
+        "failed": [],
+        "loadedCount": 18
+      }
+    },
+    {
+      "dimension": "assets",
+      "name": "网关入口控制台无错误（401 探测除外）",
+      "ok": true,
+      "detail": []
+    }
+  ],
+  "consoleErrors": [
+    "console: Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "console: Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "console: Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "console: Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "console: Failed to load resource: the server responded with a status of 401 (Unauthorized)",
+    "console: Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+  ]
+}

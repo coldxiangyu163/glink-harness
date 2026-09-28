@@ -1,5 +1,57 @@
 # 浏览器全量验收报告
 
+## 2026-09-28：重构线 `afa9b26` 全套复验
+
+- 任务：`GLINK-ARCH-UIALIGN-20260928`
+- 被测基线：`afa9b26`（与当时 `main` 相同）
+- 对照点：任务口径中的上一轮全套浏览器验收点 `421ab15`；当前 `web/modules/` 相比该点为 7 个文件、+1923/−678，新增事件 schema、reducer 与 run-list view，`web/styles.css` / `web/index.html` 未变。
+- 环境：Node 24.16.0；acceptance 使用 project-local Playwright 1.58.2；ui-parity / ui-features 使用历史脚本解析到的本机 Playwright；真实宿主为主 checkout 的 `inproc` / `local` 面。
+- 证据：`docs/evidence/browser-acceptance-2026-09-28/`。
+
+### 结论
+
+四层均已执行，但**本次不通过全绿验收**：
+
+| 层 | 结果 | 退出码 |
+|---|---:|---:|
+| token | 173 / 173 逐值一致 | 0 |
+| acceptance accounts | 99 通过 / 3 失败（102） | 1 |
+| acceptance local | 76 通过 / 2 失败 / 3 跳过（81） | 1 |
+| acceptance gateway | 7 / 7 通过 | 0 |
+| ui-parity | 30 个角色中 28 OK / 1 mismatch / 1 SKIPPED；2 个逐值差异 | 1 |
+| ui-features | 52 / 54 通过 | 1 |
+
+三种身份面仍为 190 项，合计 182 通过、5 失败、3 跳过。失败实例中，一项是 09-27 已知问题，一项是套件未跟随存储路径迁移形成的无效前置条件；其余结果暴露新的对齐/集成偏差。本任务只记录证据，没有修改 `host/`、`web/` 或 `tests/`。
+
+### 失败与偏差
+
+1. **已知 F-1 仍在**：accounts 邀请对话框按 `Esc` 后已关闭，但焦点落到 `BODY`，没有回到可见入口。复现仍是“管理员登录 → 账号菜单 → 邀请成员 → Esc”。
+2. **acceptance 会话缺失检查与新布局未同步**（accounts/local 各一项）：检查得到 201 而非预期 409。套件删除的是旧路径 `state/data/sessions/<runId>/session.jsonl`，当前实现使用 `state/data/runs/<runId>/sessions/session.jsonl`，因此本次并未实际删除父会话文件；该项不能作为产品门禁回退的证据。
+3. **acceptance 进度面板缺用量**（accounts/local 各一项）：340px 宽度、开关、步骤、状态、用时和模型均存在，但文本没有“用量”。复现为完成 fixture 的 subagent 场景后打开“进度与上下文”。
+4. **ui-parity 首页卡高度偏离**：`homeCard` 参考值 380px、当前值 124px，分别在 `height` 和 `box.height` 形成 2 个差异。其余 28 个屏幕角色通过；`conversation/#progress` 没有参考 `userBubble`，按脚本规则记 SKIPPED。复现命令及逐属性值见 `ui-parity.txt/json`。
+5. **真实宿主回答区不再画文件卡**：真实完成 run 有报告入口，报告右槽和下载均可用，但历史重放时 `.pi-output` 不可见，导致“待核验草稿 + 文件卡 + 动作条”检查失败。复现为完成一条写出 `report.md` 的真实研究，再从侧栏打开历史。
+6. **历史流 404 恢复卡未出现**：ui-features 对已完成 run 的事件流注入 404 后重新打开该历史，未显示“过程记录暂时读不到”及“重试”动作。该检查在 09-27 通过，需要结合重构后的订阅时机判断是行为回退还是历史脚本注入点失效。
+
+SSE 首次断流后的有界重连、finished 终帧收口、侧栏/首页列表选择、报告槽与分割线、过程折叠、焦点、键盘、断点、租户拒绝和 gateway 未认证入口的其余自动检查通过。真实模型面板显示 `gpt-6-sol`；一条预置 run 完整结束，ui-features 的测试 run 按设计约 6 秒后停止。这里不评价模型答案质量。
+
+### 执行与资源边界
+
+默认交付检查首次因 worktree/PATH 缺少 `pytest` 在前置检查退出 2；使用任务指定主 checkout 的 `.venv` 作为依赖环境重跑后退出 0（Python 1252 通过 / 1 deselected，Node 151 + 42 通过），见 `default-check.txt`。
+
+acceptance 直接把 `--out` 指到仓库时会把 fixture state 一并放进仓库；新的配置边界拒绝仓库内 accounts DB，首次启动因此在 READY 前失败。正式三面运行改用仓库外独占临时输出目录，完成后只归档证据并排除 `state/`。accounts/local/gateway 的 fixture PID 分别为 91152 / 93952 / 96158，`host-exit.json` 均为 code 0。
+
+主 `.env` 的 data root 当时被另一个宿主持有，本任务没有停止或复用它。最终参考站 PID 6386、真实宿主 PID 6390，使用随机 loopback 端口；均按记录 PID 停止。连同启动诊断阶段在内的 9 个记录 PID 最终全部停止，8 个曾用端口全部无监听，临时 data root 已删除；详见 `service-lifecycle.txt`。未使用 `pkill` 或宽匹配清理。
+
+提交前移除了会暴露 fixture 合成密码的 `fixture.log`，并用主 `.env` 的真实凭据值、fixture 合成凭据值及通用模式扫描全部保留证据（含 PNG 字节）；`credential-scan.txt` 结果为 PASS。
+
+### 未覆盖
+
+未执行 Docker/E2B、真实网关已认证路径、HTTPS/反向代理、Safari/Firefox/移动真机、多宿主并发、生产数据迁移或模型质量评估。此次真实面只证明本地 `inproc` 浏览器链路；隔离 acceptance 仍使用脚本化执行替身。
+
+---
+
+以下保留 2026-09-27 的基线记录，便于逐项对照。
+
 - 日期：2026-09-27（CST）
 - 被测基线：`52e622d`（浏览器验收套件本批提交；宿主与前端代码为 `67274a7` + 本批新增文件）
 - 测试对象：`web/`（生产前端，无构建链静态 ESM）+ `host/pi_glink/`（真实宿主 HTTP/SSE/存储）+ 三种身份面

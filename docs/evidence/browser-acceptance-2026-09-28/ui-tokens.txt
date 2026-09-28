@@ -1,0 +1,6 @@
+command: python scripts/check-ui-tokens.py
+cwd: /Users/coldxiangyu/AI/git/pi-glink-uialign
+started_utc: 2026-09-28T12:46:30Z
+[ok] 173 项 token 与标准库逐值一致（/Users/coldxiangyu/work/BR/glink-ui-library/src/styles/globals.css）
+finished_utc: 2026-09-28T12:46:30Z
+exit_code: 0

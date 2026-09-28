@@ -1,0 +1,6 @@
+command: cd tests/browser && npm install --no-audit --no-fund
+started_utc: 2026-09-28T12:46:39Z
+
+added 3 packages in 385ms
+finished_utc: 2026-09-28T12:46:40Z
+exit_code: 0

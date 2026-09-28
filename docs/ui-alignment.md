@@ -22,6 +22,8 @@
 | 交互层 | 状态、开合、焦点、键盘、断点与标准库合同一致 | `node tests/browser/ui-features.mjs`（54 项） |
 | 用词层 | 界面文字不暴露内核、执行面、会话与内部工具名 | `node --test tests/web/present.test.mjs` + `ui-features` 的暴露面断言 |
 
+**当前复验状态（2026-09-28，`afa9b26`）**：token 173 项通过；组件层不是全绿——`homeCard` 高度为 124px，参考页为 380px（2 个逐值差异），另有 1 个参考屏缺角色的 SKIPPED；交互层为 52/54，通过项外的两项是完成 run 的回答区未显示文件卡，以及事件流注入 404 后未出现“过程记录暂时读不到”恢复卡。这些是待裁决偏差，不是新增的“刻意偏离”。完整证据与复现见 [`browser-acceptance-report.md`](browser-acceptance-report.md) 的 2026-09-28 小节及 `docs/evidence/browser-acceptance-2026-09-28/`。
+
 ## 2. token 层
 
 `web/styles.css` 的 `:root` 复制标准库 `:root` 与 `@theme inline` 的取值（L0.1 调色板 / L0.2 语义层两层结构照搬）。

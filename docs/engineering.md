@@ -111,6 +111,8 @@ assets 十一个维度；结果写 `--out`（默认系统临时目录），宿�
 （accounts 102 项 / local 81 项 / gateway 7 项）见 [浏览器验收报告](browser-acceptance-report.md) 与
 `docs/evidence/browser-acceptance-2026-09-27/`。用法见 `tests/browser/README.md`。
 
+2026-09-28 在重构基线 `afa9b26` 上复验仍为 190 项，但结果变为 accounts 99/102、local 76 通过 + 2 失败 + 3 跳过、gateway 7/7；另有 ui-parity 2 个逐值差异和 ui-features 52/54。该轮还确认了一个执行约束：`acceptance.mjs` 会把 fixture state 放进 `--out`，而当前配置拒绝仓库内 accounts DB，所以归档到 `docs/evidence/` 时必须先用仓库外临时 `--out`，再只复制验收产物并排除 `state/` 和含合成密码的 `fixture.log`。结果、失败分类、真实宿主 PID 清理与凭据扫描见报告的 2026-09-28 小节和 `docs/evidence/browser-acceptance-2026-09-28/`；这不是对失败门槛的放宽。
+
 **它不接入 `scripts/check.sh`，也不声明为自动门禁**：进入默认检查需要先决定 CI 是否安装浏览器依赖
 与缓存、以及失败是否阻塞合并。在此之前，浏览器层的自动覆盖是“可重复执行、证据可归档”的定向验收，
 不是默认入口的一部分。

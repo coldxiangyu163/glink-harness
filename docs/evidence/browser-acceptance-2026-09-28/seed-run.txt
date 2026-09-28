@@ -1,0 +1,11 @@
+purpose: create an isolated real-model run with tool rows and report so ui-parity can measure conversation roles
+command: POST /api/runs on the recorded real inproc host (prompt is recorded below)
+prompt: 浏览器对齐验收预置：先使用 bash 执行 python3 --version，再读取工作区 README.md 的前 20 行，然后用中文总结观察并把完整结果写入 report.md。
+started_utc: 2026-09-28T12:56:14Z
+finished_utc: 2026-09-28T12:56:47Z
+run_id: 0738fb316189
+status: finished
+has_report: True
+event_count: 153
+stop_reason: None
+error_present: False

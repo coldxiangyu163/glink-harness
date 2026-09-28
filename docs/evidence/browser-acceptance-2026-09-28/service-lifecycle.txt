@@ -1,0 +1,103 @@
+task_id: GLINK-ARCH-UIALIGN-20260928
+started_utc: 2026-09-28T12:51:41Z
+reference_port: 61851
+host_port: 61852
+pre_start_port_check:
+reference port free
+host port free
+reference_command: cd /Users/coldxiangyu/work/BR/glink-ui-library/dist && python3 -m http.server 61851 --bind 127.0.0.1
+reference_pid: 98842
+host_command: cd /Users/coldxiangyu/AI/git/pi-glink && LOCAL_WEB_PORT=61852 scripts/run-local-web.sh
+host_pid: 98846
+post_start_port_check:
+COMMAND   PID        USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+Python  98842 coldxiangyu    3u  IPv4 0x3f622c10275a2f66      0t0  TCP 127.0.0.1:61851 (LISTEN)
+startup_attempt_1_result: failed (host configuration selected e2b; inproc override required)
+startup_attempt_1_cleanup_utc: 2026-09-28T12:52:33Z
+host_cleanup: pid 98846 already exited
+reference_cleanup: SIGTERM pid 98842
+startup_attempt_1_post_cleanup:
+host pid 98846 stopped
+reference pid 98842 stopped
+host port 61852 free
+reference port 61851 free
+startup_attempt_2_utc: 2026-09-28T12:53:01Z
+reference_port: 62192
+host_port: 62194
+pre_start_port_check:
+reference port free
+host port free
+reference_command: cd /Users/coldxiangyu/work/BR/glink-ui-library/dist && python3 -m http.server 62192 --bind 127.0.0.1
+reference_pid: 1477
+host_command: cd /Users/coldxiangyu/AI/git/pi-glink && LOCAL_WEB_EXECUTOR=inproc LOCAL_WEB_PORT=62194 scripts/run-local-web.sh
+host_pid: 1481
+post_start_port_check:
+COMMAND  PID        USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+Python  1477 coldxiangyu    3u  IPv4 0xcd9fb757e2d79184      0t0  TCP 127.0.0.1:62192 (LISTEN)
+reference_ready: 1
+host_ready: 0
+startup_attempt_2_result: failed
+host_cleanup: pid 1481 already exited
+reference_cleanup: SIGTERM pid 1477
+startup_attempt_2_post_cleanup:
+host pid 1481 stopped
+reference pid 1477 stopped
+host port 62194 free
+reference port 62192 free
+startup_attempt_3_utc: 2026-09-28T12:54:18Z
+reference_port: 62587
+host_port: 62588
+pre_start_port_check:
+reference port free
+host port free
+reference_command: cd /Users/coldxiangyu/work/BR/glink-ui-library/dist && python3 -m http.server 62587 --bind 127.0.0.1
+reference_pid: 3757
+host_command: cd /Users/coldxiangyu/AI/git/pi-glink && LOCAL_WEB_EXECUTOR=inproc PI_GLINK_TENANCY=local PI_GLINK_AUTH_MODE=gateway PI_GLINK_MODEL_CREDENTIALS=tenant LOCAL_WEB_PORT=62588 scripts/run-local-web.sh
+host_pid: 3762
+post_start_port_check:
+reference_ready: 1
+host_ready: 0
+startup_attempt_3_result: failed
+host_cleanup: pid 3762 already exited
+reference_cleanup: SIGTERM pid 3757
+startup_attempt_3_post_cleanup:
+host pid 3762 stopped
+reference shell pid 3757 stopped
+reference_listener_discovered_after_shell_exit: pid 3758 on port 62587
+reference_cleanup: SIGTERM exact listener pid 3758
+host port 62588 free
+reference port 62587 free
+startup_attempt_4_utc: 2026-09-28T12:55:42Z
+strategy: isolated temporary data root because configured real data root is owned by existing pid 99887; existing service left untouched
+reference_port: 62909
+host_port: 62910
+data_root: /tmp/pi-glink-uialign-live-data.br1aa5
+pre_start_port_check:
+reference port free
+host port free
+reference_command: cd /Users/coldxiangyu/work/BR/glink-ui-library/dist && python3 -m http.server 62909 --bind 127.0.0.1
+reference_pid: 6386
+host_command: cd /Users/coldxiangyu/AI/git/pi-glink && LOCAL_WEB_EXECUTOR=inproc PI_GLINK_TENANCY=local PI_GLINK_AUTH_MODE=gateway PI_GLINK_MODEL_CREDENTIALS=tenant LOCAL_WEB_DATA_ROOT=<temporary> LOCAL_WEB_PORT=62910 scripts/run-local-web.sh
+host_pid: 6390
+post_start_port_check:
+COMMAND  PID        USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+Python  6386 coldxiangyu    3u  IPv4 0x2722168eeedb4848      0t0  TCP 127.0.0.1:62909 (LISTEN)
+COMMAND    PID        USER   FD   TYPE            DEVICE SIZE/OFF NODE NAME
+python3.1 6390 coldxiangyu    7u  IPv4 0x78616a2452e738a      0t0  TCP 127.0.0.1:62910 (LISTEN)
+reference_ready: 1
+host_ready: 1
+startup_attempt_4_result: ready
+host_health: {"status": "ok", "executor": "inproc", "pi": {"bin": "pi", "available": true}, "configured": {"model": true, "e2b": false}, "activeRunId": null}
+api_me_http_status: 200
+cleanup_attempt_4_utc: 2026-09-28T12:58:31Z
+host_cleanup: SIGTERM exact pid 6390
+reference_cleanup: SIGTERM exact pid 6386
+post_cleanup_port_check:
+host pid 6390 stopped
+reference pid 6386 stopped
+host port 62910 free
+reference port 62909 free
+temporary_data_root_removed: /tmp/pi-glink-uialign-live-data.br1aa5
+final_cleanup_verification_utc: 2026-09-28T12:58:54Z
+known_pids_stopped: 98842,98846,1477,1481,3757,3758,3762,6386,6390
+known_ports_free: 61851,61852,62192,62194,62587,62588,62909,62910

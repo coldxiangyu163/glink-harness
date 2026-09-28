@@ -1,0 +1,15 @@
+Traceback (most recent call last):
+  File "/Users/coldxiangyu/AI/git/pi-glink-uialign/tests/fixtures/accounts_server.py", line 611, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "/Users/coldxiangyu/AI/git/pi-glink-uialign/tests/fixtures/accounts_server.py", line 573, in main
+    config = build_config(config_values(args.mode, state_dir, tenants_file, gateway_secret), REPO_ROOT)
+  File "/Users/coldxiangyu/AI/git/pi-glink-uialign/host/pi_glink/config.py", line 417, in build_config
+    _require_accounts_db(accounts_db, data_root, repo_root)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/coldxiangyu/AI/git/pi-glink-uialign/host/pi_glink/config.py", line 886, in _require_accounts_db
+    _require_outside_repository(accounts_db, repo_root, "PI_GLINK_ACCOUNTS_DB")
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/coldxiangyu/AI/git/pi-glink-uialign/host/pi_glink/config.py", line 874, in _require_outside_repository
+    raise ConfigError(f"{key} 必须放在仓库之外: {path}")
+pi_glink.config.ConfigError: PI_GLINK_ACCOUNTS_DB 必须放在仓库之外: /Users/coldxiangyu/AI/git/pi-glink-uialign/docs/evidence/browser-acceptance-2026-09-28/accounts/state/data/accounts/accounts.db
