@@ -19,10 +19,10 @@ from urllib.parse import unquote, urlsplit
 from .artifacts import ArtifactError, ArtifactTree
 from .blueprints import Blueprint, list_blueprints
 from .config import ConfigError
+from .contracts import FollowupUnavailable
 from .runs import (
     REPORT_MAX_BYTES,
     BlueprintUnavailable,
-    FollowupUnavailable,
     ResourcesUnreleased,
     RunBusy,
     RunQuotaExceeded,

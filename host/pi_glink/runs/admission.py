@@ -35,8 +35,9 @@ from ..blueprints import (
     render_blueprint,
 )
 from ..config import HostConfig
+from ..contracts import FollowupUnavailable
 from ..kernel.agent_env import RunCredentials
-from ..kernel.harness import FollowupUnavailable, HarnessFamily, select_family
+from ..kernel.harness import HarnessFamily, select_family
 from ..redaction import SecretRedactor
 from ..store import AdmissionCheck, RunRecord, RunSpec, RunStore
 from ..tenancy import TenantContext, TenantCredentialStore, TenantNotConfigured

@@ -32,8 +32,8 @@ from pi_glink.kernel.harness_pi import PiExecutionAdapter
 from pi_glink.kernel.sandbox import SANDBOXES, open_sandbox
 from pi_glink.redaction import REPLACEMENT
 from pi_glink.runs.stages import DecideStage
+from pi_glink.contracts import FollowupUnavailable
 from pi_glink.runs.runner import (
-    FollowupUnavailable,
     RunManager,
     UnsupportedCommand,
 )

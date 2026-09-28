@@ -41,11 +41,12 @@ from pi_glink.events import EventBus
 from pi_glink.kernel.acp_env import prepare_acp_runtime
 from harness_helpers import compose_launch, family
 from pi_glink.kernel.acp_e2b_env import SANDBOX_ACP_HOME, AcpSandboxTransfer
+from pi_glink.contracts import FollowupUnavailable
 from pi_glink.kernel.acp_execution import RESUME_METHOD, AcpExecutionAdapter
 from pi_glink.kernel.e2b_env import SANDBOX_WORKSPACE, SandboxCommandProcess
 from pi_glink.kernel.execution import ExecutionSpec
 from pi_glink.kernel.sandbox import E2BSandbox, open_sandbox
-from pi_glink.runs.runner import FollowupUnavailable, RunManager
+from pi_glink.runs.runner import RunManager
 from pi_glink.store import FAILED, FINISHED, RunStore
 from pi_glink.tenancy import TenantContext, TenantCredentialStore
 from store_helpers import events_text, stored_record

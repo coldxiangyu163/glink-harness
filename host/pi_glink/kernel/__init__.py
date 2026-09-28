@@ -55,7 +55,7 @@ from .execution import (
     PiExecutionAdapter,
     SessionInfo,
 )
-from .harness import HarnessFamily, PreparedRuntime, Verdict, select_family
+from .harness import HarnessFamily, PreparedRuntime, select_family
 from .harness_acp import AcpHarnessFamily
 from .harness_pi import PiHarnessFamily
 from .sandbox import (
@@ -114,7 +114,6 @@ __all__ = [
     "Sandbox",
     "SessionInfo",
     "Spawn",
-    "Verdict",
     "extract_text",
     "prepare_acp_runtime",
     "prepare_agent_dir",

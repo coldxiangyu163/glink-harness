@@ -318,6 +318,7 @@ def test_kernel_import_direction_allows_lower_layers_and_the_store_whitelist() -
     assert kernel_forbidden_imports(kernel_module, "from ..config import HostConfig") == []
     assert kernel_forbidden_imports(kernel_module, "from ..redaction import SecretRedactor") == []
     assert kernel_forbidden_imports(kernel_module, "from .harness import HarnessFamily") == []
+    assert kernel_forbidden_imports(kernel_module, "from ..contracts import Verdict") == []
     for relative in sorted(_KERNEL_STORE_WHITELIST):
         assert kernel_forbidden_imports(Path(relative), "from ..store import RunRecord") == [], relative
 
@@ -332,6 +333,49 @@ def test_kernel_import_direction_covers_new_modules(tmp_path: Path) -> None:
     ]
     source.write_text("from ..kernel.harness import HarnessFamily\n")
     assert kernel_import_violations(tmp_path) == []
+
+
+def host_module_imports(relative: Path, text: str) -> list[str]:
+    """Absolute module names imported by one host module (relative resolved)."""
+    package = list(relative.with_suffix("").parts)[1:-1]
+    modules: list[str] = []
+    for node in ast.walk(ast.parse(text, filename=str(relative))):
+        if isinstance(node, ast.Import):
+            modules.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = package[: len(package) - node.level + 1]
+                modules.append(".".join([*base, node.module] if node.module else base))
+            elif node.module:
+                modules.append(node.module)
+    return modules
+
+
+def test_contract_vocabulary_module_stays_a_leaf() -> None:
+    """契约词汇模块是两层共享的叶子，不得反向导入 kernel 或编排层。
+
+    它被 kernel 与编排层同时导入；若它自己反向导入任一层，方向规则就会被
+    绕成环/通道，这里如实卡住。
+    """
+    relative = Path("host/pi_glink/contracts.py")
+    imported = host_module_imports(relative, (ROOT / relative).read_text(encoding="utf-8"))
+    assert [name for name in imported if name.split(".")[0] == "pi_glink"] == []
+
+
+def test_contract_vocabulary_lives_in_the_neutral_module() -> None:
+    """M16：公开拒绝码与终态词汇的定义点是中性契约模块，不是 kernel 转发。
+
+    对基线红：``pi_glink.contracts`` 不存在，两个类型只能从
+    ``kernel.harness``（或经 ``runs.runner`` 转发）导入；修复后定义点、
+    HTTP 消费方都直指契约模块。
+    """
+    from pi_glink.contracts import FollowupUnavailable, Verdict  # noqa: PLC0415
+
+    assert FollowupUnavailable.__module__ == "pi_glink.contracts"
+    assert Verdict.__module__ == "pi_glink.contracts"
+    import pi_glink.web_routes as web_routes  # noqa: PLC0415
+
+    assert web_routes.FollowupUnavailable is FollowupUnavailable
 
 
 def test_runner_depends_on_kernel_abstractions_only() -> None:
@@ -361,6 +405,7 @@ def test_runner_rule_rejects_concrete_families_sandboxes_and_runtimes(text: str)
 
 def test_runner_rule_allows_the_abstractions() -> None:
     text = (
+        "from ..contracts import FollowupUnavailable, Verdict\n"
         "from ..kernel.harness import HarnessFamily, FrameProjector, select_family\n"
         "from ..kernel.execution import ExecutionAdapter\n"
         "from ..kernel.sandbox import Sandbox, open_sandbox\n"

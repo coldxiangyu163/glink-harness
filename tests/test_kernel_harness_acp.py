@@ -18,7 +18,8 @@ import pytest
 from pi_glink.config import HostConfig, build_config
 
 from acp_pack import apply_acp_pack
-from pi_glink.kernel.harness import FollowupUnavailable, select_family
+from pi_glink.contracts import FollowupUnavailable
+from pi_glink.kernel.harness import select_family
 from pi_glink.kernel.harness_acp import AcpHarnessFamily
 from pi_glink.redaction import SecretRedactor
 from pi_glink.store import FINISHED, RunSpec, RunStore

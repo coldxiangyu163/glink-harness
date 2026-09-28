@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, TYPE_CHECKING
 
 from ..config import ConfigError, HostConfig
+from ..contracts import Verdict
 from ..store import RunRecord, RunStore
 from .agent_env import EgressEndpoint
 from .execution import ExecutionAdapter, ExecutionSpec
@@ -56,34 +57,6 @@ class FrameProjector(Protocol):
     def project(self, frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]: ...
 
     def flush(self) -> list[tuple[str, dict[str, Any]]]: ...
-
-
-class FollowupUnavailable(RuntimeError):
-    """A parent run cannot safely supply a resumable session.
-
-    ``code`` is the refusal an HTTP caller sees (``unknown_run``, ``stale_run``,
-    ``run_busy``, ``session_unavailable``, ``report_unavailable``).
-    """
-
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
-        self.code = code
-
-
-@dataclass(frozen=True, slots=True)
-class Verdict:
-    """The run's terminal verdict.
-
-    产品终态词汇的定义点在 runner ``_decide``：status 取 store 的
-    FINISHED/FAILED/CANCELLED，stop_reason 取 abort/event_log_failed/
-    execution_error/timeout/model_error/aborted/length/max_turn_requests/
-    report_rejected/no_report。族方法只把 harness 自己的 stop 词汇译成这
-    张表，不新增词汇。
-    """
-
-    status: str
-    stop_reason: str | None
-    error: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +113,7 @@ class HarnessFamily(ABC):
         基类空实现（pi 无额外门禁）。ACP 族覆写，追加事实：能力矩阵
         （父 run ``session_ready`` 帧，族已由父记录 ``spec.family`` 证明）、
         session_id、``acp_resume_method``、状态根目录存在性；拒绝一律
-        ``FollowupUnavailable("session_unavailable")``。
+        ``pi_glink.contracts.FollowupUnavailable("session_unavailable")``。
         """
 
     def continuation_workspace(self, parent: RunRecord) -> Path | None:

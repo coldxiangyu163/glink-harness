@@ -26,7 +26,8 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from .. import events
 from ..artifacts import ArtifactError
-from ..kernel.harness import HarnessFamily, Verdict
+from ..contracts import Verdict
+from ..kernel.harness import HarnessFamily
 from ..store import CANCELLED, FAILED, FINISHED, RunStore
 from .child_progress_observer import ChildProgressObserver
 from .state import LOGGER_NAME, OPEN, RunExecution

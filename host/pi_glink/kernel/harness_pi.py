@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping, TYPE_CHECKING
 
 from ..artifacts import ArtifactError, ArtifactTree
 from ..config import ConfigError, is_loopback_hostname
+from ..contracts import FollowupUnavailable, Verdict
 from ..store import (
     CHILDREN_DIRNAME,
     FAILED,
@@ -30,12 +31,7 @@ from .agent_env import (
 )
 from .docker_env import worker_image
 from .execution import ExecutionAdapter, ExecutionSpec, PiExecutionAdapter
-from .harness import (
-    FollowupUnavailable,
-    HarnessFamily,
-    PreparedRuntime,
-    Verdict,
-)
+from .harness import HarnessFamily, PreparedRuntime
 from .projection import Projector
 from .sandbox import Launch, Mount, Sandbox
 from .subagent_artifacts import (

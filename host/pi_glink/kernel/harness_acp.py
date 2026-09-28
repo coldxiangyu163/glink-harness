@@ -16,6 +16,7 @@ from typing import Any, Callable, Mapping, TYPE_CHECKING
 
 from .. import events
 from ..config import ConfigError
+from ..contracts import FollowupUnavailable, Verdict
 from ..store import CANCELLED, FAILED, FINISHED, RunRecord
 from .acp_env import (
     ACP_HOME_DIRNAME,
@@ -30,12 +31,7 @@ from .acp_execution import AcpExecutionAdapter, acp_resume_method
 from .acp_projection import ACP_STOP_REASONS, AcpProjector
 from .docker_env import acp_worker_image
 from .execution import ExecutionAdapter, ExecutionSpec
-from .harness import (
-    FollowupUnavailable,
-    HarnessFamily,
-    PreparedRuntime,
-    Verdict,
-)
+from .harness import HarnessFamily, PreparedRuntime
 from .sandbox import Launch, Mount, Sandbox
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only

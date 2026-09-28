@@ -43,10 +43,6 @@ from typing import Any, Callable, Sequence
 from ..config import HostConfig
 from ..egress import EgressProxy
 from ..kernel.execution import ExecutionAdapter
-
-# ``FollowupUnavailable`` is defined in the family module (family gates raise
-# it) and re-exported here for ``web_routes`` and other importers.
-from ..kernel.harness import FollowupUnavailable
 from ..ownership import DataRootOwnership
 from ..redaction import SecretRedactor, redactor_from_config
 from ..store import REPORT_FILENAME, RUNNING, RunRecord, RunStore
@@ -72,7 +68,6 @@ __all__ = [
     "REPORT_MAX_BYTES",
     "BlueprintUnavailable",
     "EventLogError",
-    "FollowupUnavailable",
     "ResourcesUnreleased",
     "RunBusy",
     "RunManager",

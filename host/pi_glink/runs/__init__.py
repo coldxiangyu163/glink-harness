@@ -20,7 +20,6 @@ from .runner import (
     REPORT_MAX_BYTES,
     BlueprintUnavailable,
     EventLogError,
-    FollowupUnavailable,
     ResourcesUnreleased,
     RunBusy,
     RunManager,
@@ -33,7 +32,6 @@ from .runner import (
 __all__ = [
     "BlueprintUnavailable",
     "EventLogError",
-    "FollowupUnavailable",
     "REPORT_FILENAME",
     "REPORT_MAX_BYTES",
     "ResourcesUnreleased",

@@ -37,15 +37,14 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping
 from .. import events
 from ..artifacts import ArtifactError, ArtifactMissing, ArtifactTree
 from ..config import ConfigError, HostConfig
+from ..contracts import FollowupUnavailable, Verdict
 from ..egress import MODEL_ROUTE, SEARCH_ROUTE, EgressProxy
 from ..kernel.agent_env import RunCredentials
 from ..kernel.execution import CleanupReport, ExecutionAdapter, ExecutionSpec
 from ..kernel.harness import (
     EgressEndpoint,
-    FollowupUnavailable,
     HarnessFamily,
     HarnessRuntime,
-    Verdict,
 )
 from ..kernel.sandbox import Sandbox, open_sandbox
 from ..store import (

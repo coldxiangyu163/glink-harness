@@ -19,6 +19,7 @@ from pi_glink.events import EventBus
 from pi_glink.kernel.rpc import PiRpcClient
 
 from e2b_fake import FakeSandbox
+from pi_glink.contracts import FollowupUnavailable, Verdict
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
@@ -26,9 +27,7 @@ from pi_glink.kernel.execution import (
     ExecutionOutcome,
     SessionInfo,
 )
-from pi_glink.kernel.harness import Verdict
 from pi_glink.runs.runner import (
-    FollowupUnavailable,
     RunBusy,
     RunManager,
     UnsupportedCommand,

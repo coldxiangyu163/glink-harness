@@ -27,7 +27,7 @@ from pi_glink.harnesses import (
     pack_names,
 )
 from pi_glink.kernel.acp_env import ACP_HOME_DIRNAME, prepare_acp_runtime
-from pi_glink.kernel.harness import FollowupUnavailable
+from pi_glink.contracts import FollowupUnavailable
 from pi_glink.runs.runner import RunManager
 from pi_glink.store import FINISHED, RunStore, RunSpec
 from store_helpers import finish, stored_record

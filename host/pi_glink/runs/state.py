@@ -15,7 +15,7 @@ stay open while the kernel runs:
 
 Everything else — :class:`RecoveryFacts` (Recover), :class:`ArtifactFacts`
 (Seal), :class:`ResourceFacts` (Recover's teardown) and the
-:class:`~pi_glink.kernel.harness.Verdict` (Decide) — is immutable once built.
+:class:`~pi_glink.contracts.Verdict` (Decide) — is immutable once built.
 """
 
 from __future__ import annotations
@@ -26,9 +26,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
 from ..blueprints import Blueprint
+from ..contracts import Verdict
 from ..kernel.agent_env import RunCredentials
 from ..kernel.execution import CleanupReport, ExecutionAdapter, ExecutionOutcome
-from ..kernel.harness import FrameProjector, HarnessRuntime, Verdict
+from ..kernel.harness import FrameProjector, HarnessRuntime
 from ..store import RunRecord
 from ..tenancy import TenantContext
 

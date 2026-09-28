@@ -48,7 +48,8 @@ from pi_glink.kernel.acp_execution import (
 from pi_glink.kernel.acp_rpc import AcpError
 from pi_glink.kernel.execution import ExecutionAdapter, ExecutionSpec, SessionInfo
 from pi_glink.kernel.sandbox import Launch, open_sandbox
-from pi_glink.runs.runner import FollowupUnavailable, RunManager
+from pi_glink.contracts import FollowupUnavailable
+from pi_glink.runs.runner import RunManager
 from pi_glink.store import FAILED, FINISHED, RunStore, RunSpec
 from pi_glink.tenancy import TenantContext, TenantCredentialStore
 from store_helpers import events_text, finish
