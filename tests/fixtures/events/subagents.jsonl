@@ -1,0 +1,9 @@
+{"type": "run_started", "v": 1, "runId": "fx-sub", "seq": 1, "ts": 1790000000.5, "payload": {"prompt": "派发两个子代理"}}
+{"type": "turn_started", "v": 1, "runId": "fx-sub", "seq": 2, "ts": 1790000001.0, "payload": {}}
+{"type": "subagent_started", "v": 1, "runId": "fx-sub", "seq": 3, "ts": 1790000001.5, "payload": {"n": 0, "toolCallId": "call_a", "agent": "researcher", "task": "调研甲"}}
+{"type": "subagent_started", "v": 1, "runId": "fx-sub", "seq": 4, "ts": 1790000002.0, "payload": {"n": 1, "toolCallId": "call_b", "agent": "researcher", "task": "调研乙"}}
+{"type": "subagent_updated", "v": 1, "runId": "fx-sub", "seq": 5, "ts": 1790000002.5, "payload": {"n": 0, "steps": 2, "lastToolName": "web_search", "lastToolTarget": "甲", "bytes": 120}}
+{"type": "subagent_updated", "v": 1, "runId": "fx-sub", "seq": 6, "ts": 1790000003.0, "payload": {"n": 0, "steps": 5, "lastToolName": "fetch_content", "lastToolTarget": "https://example.test/a", "bytes": 900}}
+{"type": "subagent_finished", "v": 1, "runId": "fx-sub", "seq": 7, "ts": 1790000003.5, "payload": {"toolCallId": "call_a", "ns": [0], "status": "finished", "isError": false, "resultPreview": "甲的结论"}}
+{"type": "turn_finished", "v": 1, "runId": "fx-sub", "seq": 8, "ts": 1790000004.0, "payload": {}}
+{"type": "run_finished", "v": 1, "runId": "fx-sub", "seq": 9, "ts": 1790000004.5, "payload": {"status": "finished", "stopReason": null, "error": null, "reportPath": null, "reportStatus": "none", "cleanup": {"released": true, "failures": [], "external": {}}, "children": [{"n": 0, "agent": "researcher", "task": "调研甲", "status": "finished", "durationMs": 4200, "toolCount": 5}, {"n": 1, "agent": "researcher", "task": "调研乙", "status": "failed"}]}}

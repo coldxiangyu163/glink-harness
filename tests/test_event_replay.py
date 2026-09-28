@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from pi_glink import event_schema
 from pi_glink import events as events_module
 from pi_glink import store as store_module
 from pi_glink.app import PiGlinkServer, create_server
@@ -411,6 +412,10 @@ def test_all_readers_observe_the_same_committed_facts(tmp_path: Path) -> None:
         assert [(f["seq"], f["type"]) for f in frames] == [
             (e["seq"], e["type"]) for e in persisted
         ]
+        # Both surfaces carry the versioned, schema-valid envelope.
+        assert frames == persisted
+        for event in persisted:
+            assert event_schema.envelope_problems(event) == [], event
     finally:
         server.shutdown()
         server.server_close()
@@ -476,7 +481,7 @@ def test_a_slow_subscriber_is_disconnected_instead_of_growing_without_bound(
     bus.open_run("run-1")
     subscriber = bus.subscribe("run-1")
     for index in range(10):
-        bus.commit("run-1", RUN_STARTED, {"index": index})
+        bus.commit("run-1", RUN_STARTED, {"prompt": f"p{index}"})
 
     received: list[object] = []
     started = time.monotonic()

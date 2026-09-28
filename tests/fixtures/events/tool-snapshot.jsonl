@@ -1,0 +1,16 @@
+{"type": "run_started", "v": 1, "runId": "fx-tool", "seq": 1, "ts": 1790000000.5, "payload": {"prompt": "列出工作目录"}}
+{"type": "session_ready", "v": 1, "runId": "fx-tool", "seq": 2, "ts": 1790000001.0, "payload": {"sessionId": "s-1", "sessionFile": null, "model": "fake/model", "thinkingLevel": "low"}}
+{"type": "turn_started", "v": 1, "runId": "fx-tool", "seq": 3, "ts": 1790000001.5, "payload": {}}
+{"type": "thinking_delta", "v": 1, "runId": "fx-tool", "seq": 4, "ts": 1790000002.0, "payload": {"text": "先看看"}}
+{"type": "thinking_delta", "v": 1, "runId": "fx-tool", "seq": 5, "ts": 1790000002.5, "payload": {"text": "目录。"}}
+{"type": "tool_started", "v": 1, "runId": "fx-tool", "seq": 6, "ts": 1790000003.0, "payload": {"toolCallId": "call_1", "toolName": "bash", "args": {"command": "ls"}}}
+{"type": "tool_updated", "v": 1, "runId": "fx-tool", "seq": 7, "ts": 1790000003.5, "payload": {"toolCallId": "call_1", "toolName": "bash", "output": ""}}
+{"type": "tool_updated", "v": 1, "runId": "fx-tool", "seq": 8, "ts": 1790000004.0, "payload": {"toolCallId": "call_1", "toolName": "bash", "output": "line1\n"}}
+{"type": "tool_updated", "v": 1, "runId": "fx-tool", "seq": 9, "ts": 1790000004.5, "payload": {"toolCallId": "call_1", "toolName": "bash", "output": "line1\nline2\n"}}
+{"type": "tool_finished", "v": 1, "runId": "fx-tool", "seq": 10, "ts": 1790000005.0, "payload": {"toolCallId": "call_1", "toolName": "bash", "isError": false, "result": "line1\nline2\n"}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-tool", "seq": 11, "ts": 1790000005.5, "payload": {"text": "目录里有"}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-tool", "seq": 12, "ts": 1790000006.0, "payload": {"text": "两行。"}}
+{"type": "assistant_message", "v": 1, "runId": "fx-tool", "seq": 13, "ts": 1790000006.5, "payload": {"text": "目录里有两行输出。"}}
+{"type": "usage_reported", "v": 1, "runId": "fx-tool", "seq": 14, "ts": 1790000007.0, "payload": {"usage": {"input": 10, "output": 5, "totalTokens": 15}}}
+{"type": "turn_finished", "v": 1, "runId": "fx-tool", "seq": 15, "ts": 1790000007.5, "payload": {}}
+{"type": "run_finished", "v": 1, "runId": "fx-tool", "seq": 16, "ts": 1790000008.0, "payload": {"status": "finished", "stopReason": null, "error": null, "reportPath": "report.md", "reportStatus": "ok", "cleanup": {"released": true, "failures": [], "external": {}}, "children": [], "durationSeconds": 3.5, "usage": {"input": 10, "output": 5, "totalTokens": 15}}}

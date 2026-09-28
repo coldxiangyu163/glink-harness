@@ -213,7 +213,7 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
 * 宿主实现：`cancel()` 幂等，只发一次通知；run 的结论由宿主的取消标志决定（adapter 的
   cancel 只缩短等待）。**超时触发的收尾取消不算用户取消**：结论保持 `failed/timeout`，
   不会因为 agent 回了 `cancelled` 而被改写成 `cancelled`。产品侧在终态为 `cancelled` 时
-  把未完成的工具卡片标为已取消（前端 `run-stream.mjs` 的既有行为），适配器不为凑规范
+  把未完成的工具卡片标为已取消（前端 reducer `run-reducer.mjs` 的既有行为），适配器不为凑规范
   伪造额外的 `tool_call_update`。（`合成实测`）
 
 ## 2. 产品事件映射（实现口径）

@@ -38,7 +38,7 @@ import {
   stageText,
   toolStateLabel,
 } from './present.mjs';
-import { childrenPanel } from './run-stream.mjs';
+import { childrenPanel } from './run-reducer.mjs';
 
 let viewCounter = 0;
 

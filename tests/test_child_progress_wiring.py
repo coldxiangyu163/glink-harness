@@ -317,7 +317,7 @@ def test_no_subagent_means_no_observer(tmp_path: Path) -> None:
     manager, store = build_manager(tmp_path)
     source = FakeSource()
     execution = open_execution(manager, store, tmp_path / "ws", "prog00", adapter=FakeAdapter(source))
-    emit(manager, execution, events.KERNEL_STATUS, {"level": "info", "message": "ordinary"})
+    emit(manager, execution, events.KERNEL_STATUS, {"level": "info", "message": "ordinary", "detail": ""})
 
     finalize_ok(manager, execution)
 

@@ -1281,11 +1281,17 @@ def test_subagent_finished_without_a_started_document_records_only_what_it_prove
         manager,
         execution,
         "subagent_finished",
-        {"toolCallId": "call_9", "ns": [4], "isError": True, "resultPreview": "失败输出"},
+        {
+            "toolCallId": "call_9",
+            "ns": [4],
+            "status": "failed",
+            "isError": True,
+            "resultPreview": "失败输出",
+        },
     )
 
     document = store.read_child("subdoc3", 4)
-    assert document["status"] == "failed", "没有 status 时按 isError 推导"
+    assert document["status"] == "failed"
     assert document["agent"] == "" and document["task"] == ""
     assert document["toolCallId"] == "call_9"
 

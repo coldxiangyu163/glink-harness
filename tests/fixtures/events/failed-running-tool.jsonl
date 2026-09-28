@@ -1,0 +1,7 @@
+{"type": "run_started", "v": 1, "runId": "fx-fail", "seq": 1, "ts": 1790000000.5, "payload": {"prompt": "会失败"}}
+{"type": "turn_started", "v": 1, "runId": "fx-fail", "seq": 2, "ts": 1790000001.0, "payload": {}}
+{"type": "run_stage", "v": 1, "runId": "fx-fail", "seq": 3, "ts": 1790000001.5, "payload": {"stage": "auto_retry_start", "attempt": 1, "errorMessage": "overloaded"}}
+{"type": "tool_started", "v": 1, "runId": "fx-fail", "seq": 4, "ts": 1790000002.0, "payload": {"toolCallId": "call_x", "toolName": "bash", "args": {"command": "sleep 100"}}}
+{"type": "tool_updated", "v": 1, "runId": "fx-fail", "seq": 5, "ts": 1790000002.5, "payload": {"toolCallId": "call_x", "toolName": "bash", "output": "partial"}}
+{"type": "kernel_status", "v": 1, "runId": "fx-fail", "seq": 6, "ts": 1790000003.0, "payload": {"level": "warning", "message": "内核退出", "detail": "exit 1"}}
+{"type": "run_failed", "v": 1, "runId": "fx-fail", "seq": 7, "ts": 1790000003.5, "payload": {"status": "failed", "stopReason": "kernel_exit", "error": "pi exited with code 1", "reportPath": null, "reportStatus": "none", "cleanup": {"released": true, "failures": [], "external": {}}, "children": []}}

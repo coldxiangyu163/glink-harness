@@ -34,7 +34,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from .. import events
+from .. import event_schema, events
 from ..config import HostConfig
 from ..ownership import DataRootOwnership, OwnershipRequired
 from ..redaction import SecretRedactor
@@ -157,11 +157,15 @@ class ResourceLedger:
             },
         }
         seq = self.store.last_seq(run_id) + 1
+        # This envelope bypasses the bus (the run has no live stream any
+        # more), so it is validated and versioned here like a bus frame.
+        event_schema.check(events.RUN_FAILED, payload, source=f"resource ledger run={run_id}")
         try:
             self.store.commit_terminal(
                 run_id,
                 {
                     "type": events.RUN_FAILED,
+                    "v": event_schema.EVENT_VERSIONS[events.RUN_FAILED],
                     "runId": run_id,
                     "seq": seq,
                     "ts": time.time(),

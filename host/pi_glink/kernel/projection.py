@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable, Mapping
 
-from .. import events
+from .. import event_schema, events
 from ..redaction import SecretRedactor, StreamRedactor
 
 #: Fail-closed default. Shape-based masking runs even when a caller forgets to
@@ -88,9 +88,24 @@ def project_event(
     if not produced:
         return produced
     active = redactor if redactor is not None else _FALLBACK_REDACTOR
-    return [
-        (kind, active.redact_payload(payload) or payload) for kind, payload in produced
-    ]
+    return checked(
+        [(kind, active.redact_payload(payload) or payload) for kind, payload in produced],
+        "pi projection",
+    )
+
+
+def checked(
+    produced: list[tuple[str, dict[str, Any]]], source: str
+) -> list[tuple[str, dict[str, Any]]]:
+    """Validate a projection's output against the product event schema.
+
+    Shared by both harness projections: a drift is reported where it is made
+    (strict mode raises, see :func:`pi_glink.event_schema.check`), before the
+    bus validates the same frame again on commit.
+    """
+    for kind, payload in produced:
+        event_schema.check(kind, payload, source=source)
+    return produced
 
 
 #: Delta events whose split-credential protection needs stream state.
@@ -130,6 +145,9 @@ class Projector:
         self._next_child_n = 0
 
     def project(self, frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+        return checked(self._project(frame), "pi projection")
+
+    def _project(self, frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         produced: list[tuple[str, dict[str, Any]]] = []
         if frame.get("type") in STREAM_BOUNDARY_FRAMES:
             produced.extend(self.flush())
@@ -398,11 +416,16 @@ def _auto_retry_start(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any
             events.RUN_STAGE,
             {
                 "stage": "auto_retry_start",
-                "attempt": frame.get("attempt"),
+                "attempt": _count_or_none(frame.get("attempt")),
                 "errorMessage": str(frame.get("errorMessage") or "")[:500],
             },
         )
     ]
+
+
+def _count_or_none(value: Any) -> int | None:
+    """pi's retry ``attempt`` as the schema's ``integer | null``."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _auto_retry_end(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:

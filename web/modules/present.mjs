@@ -1,7 +1,7 @@
 /**
  * Product vocabulary: how runtime facts are *said* to the reader.
  *
- * The event model (`run-stream.mjs`) keeps the engine's own words — tool names,
+ * The event model (`run-reducer.mjs`) keeps the engine's own words — tool names,
  * stage codes, raw paths, token counts. None of those are product language: a
  * professional reading the workbench wants "检索 · 跨境资金监管", not
  * `web_search  query: · queries: …`, and never the host's filesystem layout.
