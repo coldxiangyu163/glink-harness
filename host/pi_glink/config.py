@@ -544,10 +544,9 @@ def validate_host_config(config: HostConfig) -> None:
     to skip the loopback or range checks by arriving after construction.
     """
     if config.host not in _LOOPBACK_HOSTS:
-        # One behaviour migration: an unauthenticated host may no longer be
-        # exposed beyond loopback. Remote access goes through the local
-        # authentication gateway (PI_GLINK_TENANCY=multitenant); the legacy
-        # ``LOCAL_WEB_ALLOW_REMOTE`` switch no longer opens one.
+        # An unauthenticated host is never exposed beyond loopback. Remote
+        # access goes through the local authentication gateway
+        # (PI_GLINK_TENANCY=multitenant); no switch opens a remote bind.
         raise ConfigError(
             f"LOCAL_WEB_HOST={config.host} 不是 loopback；宿主只允许本机监听，"
             "远端访问必须由本机认证网关反代（PI_GLINK_TENANCY=multitenant）"

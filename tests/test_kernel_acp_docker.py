@@ -453,7 +453,7 @@ def test_the_acp_container_identity_is_reconciled_by_its_persisted_name(
     """``confirm_absent`` semantics apply to ACP runs through the same ledger."""
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
     store = RunStore(config.data_root / "runs")
-    store.create("残留的 ACP run", run_id="acp-leak")
+    store.create("残留的 ACP run", run_id="acp-leak", harness="acp", harness_pack="dsh", executor="docker")
     store.update(
         "acp-leak",
         status=FINISHED,

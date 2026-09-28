@@ -194,13 +194,11 @@ class ChildProgressObserver:
         """Poll the source until finalize stops the thread.
 
         Latest-value-wins: a dropped intermediate frame changes nothing, so a
-        poll cycle is cheap to repeat. A failing ``poll()`` backs off with a
-        bound and the loop keeps retrying: 原义务是连续失败达到预算后整个
-        run 不再有进度，但真实 E2B run 里一次沙箱请求超时（默认
-        request_timeout 60s）就能把那笔预算花完，临时故障变成 run 生命周期内
-        的永久失明（GLINK-OBS-01 第 4 项）。新义务：失败只降频（退避上限
-        ``_PROGRESS_MAX_BACKOFF_SECONDS``），观察线程只在 finalize 时停止；
-        失败仍只用一条 ``kernel_status`` 警告，永不参与 verdict。
+        poll cycle is cheap to repeat. A failing ``poll()`` only backs off
+        (bounded by ``_PROGRESS_MAX_BACKOFF_SECONDS``) and the loop keeps
+        retrying: a transient sandbox timeout must not blind the rest of the
+        run (docs/adr/0006). The thread stops only at finalize; a failure is a
+        ``kernel_status`` warning and never takes part in the verdict.
         """
         failures = 0
         try:

@@ -9,12 +9,10 @@
 含运行中 abort 被受理、close_stdin 语义）由 spike 实测钉死，证据在
 ``docs/evidence/pi-e2b-rpc-stdin-spike.txt``。
 
-**断流即失败（与旧 tee 路径的取舍）。** RPC 通道没有第二份事件副本：流即
-权威，沙箱流断开（拿不到退出码）时 run 判 ``execution_error``——不补发、
-不做 ``get_state`` 对账（响应帧走同一条已断的 stdout，且 SDK 重连是否重放
-未规定）。旧路径把 stdout ``tee`` 进 ``events.jsonl`` 作完整性权威、断流可
-补齐，那套机制（tee/marker/补读）已整体删除；换来的是双向通道：运行中
-abort、``session_ready`` 前即知会话身份。架构文档 §5.2 记录这一取舍。
+**断流即失败。** RPC 通道没有第二份事件副本：流即权威，沙箱流断开（拿不到
+退出码）时 run 判 ``execution_error``——不补发、不做 ``get_state`` 对账
+（响应帧走同一条已断的 stdout，且 SDK 重连是否重放未规定）。换来的是双向
+通道：运行中 abort、``session_ready`` 前即知会话身份（docs/adr/0004）。
 
 **Credential flow (recorded per the task contract).**
 

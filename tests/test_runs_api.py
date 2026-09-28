@@ -614,28 +614,19 @@ def test_start_is_refused_while_a_release_is_unconfirmed(
 # -- R6: reports written before host copies existed stay readable ----------------
 
 
-def _legacy_record(server: PiGlinkServer, run_id: str, *, report: str | None = None,
-                   report_path: Path | None = None, workspace: Path | None = None) -> Path:
-    """An old-schema record: report_path points into workspaces/<id>/report.md.
-
-    The meta.json fields introduced later are removed, as an upgraded host
-    finds them on disk.
-    """
+def _workspace_report_record(server: PiGlinkServer, run_id: str, *, report: str | None = None,
+                             report_path: Path | None = None) -> Path:
+    """A finished record whose report_path points outside the host artifact copy."""
     store = server.store
-    workspace = workspace or (server.config.workspace_root / run_id)
+    workspace = server.config.workspace_root / run_id
     workspace.mkdir(parents=True, exist_ok=True)
     target = workspace / "report.md"
     if report is not None:
         target.write_text(report, encoding="utf-8")
-    store.create("历史研究", run_id=run_id, workspace=workspace)
+    store.create("研究", run_id=run_id, workspace=workspace,
+                 harness="pi", harness_pack="pi", executor="inproc")
     store.update(run_id, status="finished", report_path=str(report_path or target),
                  finished_at=time.time(), event_count=0)
-    meta_path = store.run_dir(run_id) / "meta.json"
-    fields = json.loads(meta_path.read_text(encoding="utf-8"))
-    for key in ("model_stop_reason", "report_status", "cleanup", "container_name",
-                "sandbox_id", "resource_adjudication"):
-        fields.pop(key, None)
-    meta_path.write_text(json.dumps(fields), encoding="utf-8")
     return target
 
 
@@ -646,55 +637,28 @@ def _view(server: PiGlinkServer, run_id: str) -> dict:
     return detail
 
 
-def test_a_legacy_workspace_report_is_downloadable_read_only(server: PiGlinkServer) -> None:
-    """R6: the upgrade kept the file but the endpoint answered 404."""
-    secret_line = "OPENAI_API_KEY=sk-legacy0123456789abcdef"
-    original = f"# 历史报告\n\n{secret_line}\n"
-    target = _legacy_record(server, "legacyrun01", report=original)
-    before = target.stat()
-
-    assert _view(server, "legacyrun01")["hasReport"] is True
-    status, headers, body = request(server, "/api/runs/legacyrun01/report")
-    assert status == 200
-    assert body.decode("utf-8").startswith("# 历史报告")
-    assert "sk-legacy0123456789abcdef" not in body.decode("utf-8")
-    assert headers.get("X-Redacted") == "true"
-    after = target.stat()
-    assert target.read_text(encoding="utf-8") == original, "history is never rewritten"
-    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
-
-
-def test_legacy_layout_does_not_reopen_arbitrary_report_paths(
+def test_only_the_host_artifact_copy_is_served_as_the_report(
     server: PiGlinkServer, tmp_path: Path
 ) -> None:
+    """report_path outside runs/<id>/artifacts/report.md never reopens a file.
+
+    The workspace report, an external path and a workspace link all answer
+    hasReport=false and 404 (docs/adr/0007).
+    """
     outside = tmp_path / "outside"
     outside.mkdir()
     external = outside / "report.md"
     external.write_text("# 外部文件\n", encoding="utf-8")
-    workspace_root = server.config.workspace_root
 
-    # A path outside the run's workspace.
-    _legacy_record(server, "legacyout01", report="# 本体\n", report_path=external)
-    # A path deeper inside the workspace than the legacy layout allows.
-    nested = workspace_root / "legacynest1" / "sub"
-    nested.mkdir(parents=True)
-    (nested / "report.md").write_text("# 嵌套\n", encoding="utf-8")
-    _legacy_record(server, "legacynest1", report="# 本体\n", report_path=nested / "report.md")
-    # A workspace that is not the run's own (another run's directory).
-    _legacy_record(server, "legacyother", report_path=workspace_root / "legacyrun99" / "report.md",
-                   workspace=workspace_root / "legacyrun99")
-    (workspace_root / "legacyrun99" / "report.md").write_text("# 别人的\n", encoding="utf-8")
-    # A legacy report.md that is a link to an external file.
-    linked = _legacy_record(server, "legacylink1")
+    # The agent's own workspace report.md.
+    _workspace_report_record(server, "wsreport01", report="# 本体\n")
+    # A path outside every run directory.
+    _workspace_report_record(server, "external01", report="# 本体\n", report_path=external)
+    # A workspace report.md that is a link to an external file.
+    linked = _workspace_report_record(server, "wslink0001")
     linked.symlink_to(external)
-    # A legacy workspace directory replaced by a link to an external directory.
-    swapped = workspace_root / "legacyswap1"
-    _legacy_record(server, "legacyswap1", report="# 本体\n")
-    (swapped / "report.md").unlink()
-    swapped.rmdir()
-    swapped.symlink_to(outside, target_is_directory=True)
 
-    for run_id in ("legacyout01", "legacynest1", "legacyother", "legacylink1", "legacyswap1"):
+    for run_id in ("wsreport01", "external01", "wslink0001"):
         assert _view(server, run_id)["hasReport"] is False, run_id
         assert request(server, f"/api/runs/{run_id}/report")[0] == 404, run_id
     assert external.read_text(encoding="utf-8") == "# 外部文件\n"
@@ -706,7 +670,7 @@ def test_a_host_artifact_behind_a_directory_link_is_not_served(server: PiGlinkSe
     outside.mkdir()
     (outside / "report.md").write_text("# 外部\n", encoding="utf-8")
     store = server.store
-    store.create("产物目录被替换", run_id="swapartifact", workspace=tmp_path / "ws")
+    store.create("产物目录被替换", run_id="swapartifact", workspace=tmp_path / "ws", harness="pi", harness_pack="pi", executor="inproc")
     (store.run_dir("swapartifact") / "artifacts").symlink_to(outside, target_is_directory=True)
     store.update("swapartifact", status="finished",
                  report_path=str(store.run_dir("swapartifact") / "artifacts" / "report.md"))

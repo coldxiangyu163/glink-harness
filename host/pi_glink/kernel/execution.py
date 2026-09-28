@@ -476,14 +476,12 @@ class E2BSandboxRpcExecutionAdapter(RpcExecutionAdapter):
       ``template``；会话身份在回合前即可知（``session_file`` 在
       ``recover_session`` 成功落宿主路径前为 ``None``，回收后由
       ``recovered_session`` 补发一帧）；
-    * 断流即失败：沙箱流断开时 RPC 通道没有第二份事件副本（旧 tee 路径的
-      ``events.jsonl`` 权威已删），``wait`` 把带 ``stream_error`` 的
+    * 断流即失败：沙箱流断开时 RPC 通道没有第二份事件副本，``wait`` 把带 ``stream_error`` 的
       ``kernel_exit`` 改写为 ``execution_error``——不补发、不做
       ``get_state`` 对账（其响应帧走同一条已断的 stdout；SDK 重连是否重放
       已消费输出未规定，重复投递比失败更糟）；
-    * 取消是协议级 abort（原义务：旧 e2b 路径运行中不能 abort，cancel 只能
-      直接销毁沙箱；新义务：abort 由运行中的 pi 受理，沙箱存活到收尾），
-      因此被取消的 run 现在也能回收 ``report.md`` 与主会话。
+    * 取消是协议级 abort：abort 由运行中的 pi 受理，沙箱存活到收尾，因此
+      被取消的 run 也能回收 ``report.md`` 与主会话（docs/adr/0004）。
     """
 
     kind = "e2b"

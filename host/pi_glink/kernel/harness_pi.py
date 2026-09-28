@@ -1,4 +1,4 @@
-"""The pi harness family（实现体自 runner.py 对应段落逐字搬迁）。
+"""The pi harness family.
 
 pi 族的策略面：宿主模型凭据准入、会话文件种子、
 ``AgentRuntime`` 渲染与 ``Projector``、RPC/Docker/E2B 面的 adapter 组装、
@@ -53,7 +53,6 @@ if TYPE_CHECKING:  # pragma: no cover - annotation only
 
 logger = logging.getLogger("pi_glink.kernel.harness_pi")
 
-#: 与 runner 的同义常量同值搬迁（runner 重接线前两处并存，语义逐字一致）：
 #: per-run pi 配置目录名，以及宿主读回产物（含会话种子）的统一上限。
 RUNTIME_DIRNAME = "pi-agent"
 REPORT_MAX_BYTES = 32 * 1024 * 1024
@@ -114,12 +113,10 @@ class PiHarnessFamily(HarnessFamily):
         return "continued.jsonl" if parent else None
 
     def verifies_continuation_before_turn(self, executor: str) -> bool:
-        # 恒 True：三面同规则。e2b 面自 GLINK-ARCH-3 收敛起走 RPC 通道，
-        # ``get_state`` 在 ``session_ready`` 即知会话身份（pi 以
-        # ``--session continued.jsonl`` 启动，续接会话原地打开、保持原
-        # session id）——原义务（沙箱面流中才发现 session id，只能回合后由
-        # 驱动线程比对 ``expected_session_id``）随旧 ``--mode json`` 适配器
-        # 整体删除。``executor`` 参数保留以合 ABC 签名。
+        # 恒 True：三面同规则，都走 RPC 通道，``get_state`` 在
+        # ``session_ready`` 即知会话身份（pi 以 ``--session continued.jsonl``
+        # 启动，续接会话原地打开、保持原 session id；docs/adr/0004）。
+        # ``executor`` 参数保留以合 ABC 签名。
         return True
 
     # -- (c) runtime 渲染与 projector 工厂 --------------------------------------

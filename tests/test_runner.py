@@ -620,7 +620,7 @@ def test_usage_is_summed_across_requests_and_not_double_counted(tmp_path: Path) 
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
-    record = store.create("用量", run_id="usage", workspace=tmp_path / "ws")
+    record = store.create("用量", run_id="usage", workspace=tmp_path / "ws", harness="pi", harness_pack="pi", executor="inproc")
     execution = _Execution(record=record, workspace=tmp_path / "ws")
     execution.projector = Projector(manager.redactor)
     manager.bus.open_run(record.run_id)
@@ -1098,6 +1098,9 @@ def test_two_concurrent_followups_of_one_parent_admit_exactly_one_child(
         workspace=workspace,
         tenant_id=context.tenant_id,
         creator_user_id=context.user_id,
+        harness="pi",
+        harness_pack="pi",
+        executor="inproc",
     )
     store.update(
         parent_id,
@@ -1196,7 +1199,7 @@ def open_execution(manager: RunManager, store: RunStore, workspace: Path, run_id
     """An open execution without a kernel: the typed-event commit seam."""
     from pi_glink.runs.runner import _Execution  # noqa: PLC0415
 
-    record = store.create("子代理", run_id=run_id, workspace=workspace)
+    record = store.create("子代理", run_id=run_id, workspace=workspace, harness="pi", harness_pack="pi", executor="inproc")
     execution = _Execution(record=record, workspace=workspace)
     manager.bus.open_run(record.run_id)
     return execution
@@ -1573,10 +1576,7 @@ def _write_parent_meta(
 ) -> None:
     """手写一份父记录的 meta.json（与合法 pi 会话文件），不经过 store.create。
 
-    手写而不用 create 是为了让红→绿机制落在行为上而不是签名上：旧代码读
-    回时把 harness/executor 当未知键过滤、门禁也不含族检查，于是跨族追问
-    被放行到会话读取（红）；新代码在读取之前比字段拒绝（绿）。``status``
-    等既有键可按测试需要覆盖。
+    准入事实默认 pi/pi/inproc；``harness``、``status`` 等键可按测试需要覆盖。
     """
     session_dir = config.session_dir / parent_id
     directory = store.run_dir(parent_id)
@@ -1587,6 +1587,9 @@ def _write_parent_meta(
         "created_at": time.time(),
         "workspace": str(directory / "workspace"),
         "finished_at": time.time(),
+        "harness": "pi",
+        "harness_pack": "pi",
+        "executor": "inproc",
     }
     if with_session_file:
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -1626,7 +1629,7 @@ def test_same_family_pi_parent_follow_up_is_admitted_unchanged(
     session_file.write_text(
         json.dumps({"id": "same-session", "text": "第一轮"}) + "\n", encoding="utf-8"
     )
-    store.create("第一轮", run_id=parent_id, harness="pi", executor="inproc")
+    store.create("第一轮", run_id=parent_id, harness="pi", executor="inproc", harness_pack="pi")
     store.update(
         parent_id,
         status=FINISHED,
@@ -1743,32 +1746,6 @@ def test_foreign_parent_stays_unknown_even_when_its_family_is_known(
     assert excinfo.value.code == "unknown_run"
 
 
-def test_legacy_pi_parent_follow_up_adds_no_new_refusal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """legacy 规则 2：无 harness 字段的父记录 + pi 宿主 → 不新增任何拒绝。
-
-    pi→pi 的 legacy 追问（读脱敏会话文件、--session 续接）行为与旧代码逐
-    断言一致；harness 未知即无法证明跨族，fail-closed 只适用于「已知不等」。
-    """
-    config = make_config(tmp_path)
-    store = RunStore(config.data_root / "runs")
-    manager = RunManager(config, EventBus(), store)
-    monkeypatch.setattr(
-        "pi_glink.kernel.harness_pi.compose_adapter",
-        lambda spec, **kwargs: _ResumingAdapter(spec.expected_session_id),
-    )
-    _write_parent_meta(config, store, "parentrun001")  # 无 harness/executor 键
-    assert store.get("parentrun001").harness is None
-
-    child = manager.start("追问", parent_run_id="parentrun001")
-    final = manager.wait(child.run_id, timeout=30)
-    assert final.status == FINISHED
-    assert final.session_id == "same-session"
-    assert final.parent_run_id == "parentrun001"
-    assert manager.shutdown(timeout=10) == []
-
-
 # -- finalize 编排：拆出的步骤按契约顺序被驱动 ------------------------------------
 
 
@@ -1784,7 +1761,7 @@ def test_finalize_drives_its_steps_in_the_contract_order(
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
-    record = store.create("顺序探针", run_id="orderprobe01")
+    record = store.create("顺序探针", run_id="orderprobe01", harness="pi", harness_pack="pi", executor="inproc")
     workspace = tmp_path / "ws"
     workspace.mkdir()
     from pi_glink.runs.runner import _Execution  # noqa: PLC0415, SLF001

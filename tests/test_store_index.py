@@ -138,12 +138,14 @@ def _fd_path(fd: int) -> str:
 def test_the_index_agrees_with_a_full_scan_across_every_write_path(tmp_path: Path) -> None:
     store = RunStore(tmp_path / "runs")
     store.create(
-        "甲的问题", run_id="alpha1", tenant_id="tenant-a", creator_user_id="u1"
+        "甲的问题", run_id="alpha1", tenant_id="tenant-a", creator_user_id="u1",
+        harness="pi", harness_pack="pi", executor="inproc",
     )
     store.create(
-        "乙的问题", run_id="beta1", tenant_id="tenant-b", creator_user_id="u2"
+        "乙的问题", run_id="beta1", tenant_id="tenant-b", creator_user_id="u2",
+        harness="pi", harness_pack="pi", executor="inproc",
     )
-    store.create("历史记录", run_id="legacy1")
+    store.create("无 owner 的记录", run_id="ownerless1", harness="pi", harness_pack="pi", executor="inproc")
     store.append_event("alpha1", {"type": "run_started", "runId": "alpha1", "seq": 1})
     assert_index_matches_disk(store)
 
@@ -167,28 +169,28 @@ def test_the_index_agrees_with_a_full_scan_across_every_write_path(tmp_path: Pat
         cleanup={"released": True, "failures": [], "external": {}},
     )
     store.update(
-        "legacy1",
+        "ownerless1",
         status=FINISHED,
         finished_at=time.time(),
         cleanup={"released": False, "failures": ["synthetic"], "external": {}},
     )
-    assert {record.run_id for record in store.holding_records()} == {"alpha1", "legacy1"}
+    assert {record.run_id for record in store.holding_records()} == {"alpha1", "ownerless1"}
     assert_index_matches_disk(store)
 
     store.update(
         "alpha1",
         resource_adjudication={"decision": "released", "note": "已核对", "at": time.time()},
     )
-    assert {record.run_id for record in store.holding_records()} == {"legacy1"}
+    assert {record.run_id for record in store.holding_records()} == {"ownerless1"}
     assert_index_matches_disk(store)
 
 
 def test_the_index_survives_a_restart_rebuild(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A new process starts with an empty registry and rebuilds from disk."""
     store = RunStore(tmp_path / "runs")
-    store.create("终帧未落定", run_id="r1", tenant_id="tenant-a")
+    store.create("终帧未落定", run_id="r1", tenant_id="tenant-a", harness="pi", harness_pack="pi", executor="inproc")
     store.commit_terminal("r1", terminal_frame("r1", released=False, seq=1))
-    store.create("进行中", run_id="r2", tenant_id="tenant-a")
+    store.create("进行中", run_id="r2", tenant_id="tenant-a", harness="pi", harness_pack="pi", executor="inproc")
 
     monkeypatch.setattr(store_module, "_INDEXES", {})
     restarted = RunStore(tmp_path / "runs")
@@ -202,7 +204,7 @@ def test_the_index_survives_a_restart_rebuild(tmp_path: Path, monkeypatch: pytes
 
 def test_a_reconciled_interruption_reaches_the_index(tmp_path: Path) -> None:
     store = RunStore(tmp_path / "runs")
-    store.create("上一进程遗留", run_id="orphan", tenant_id="tenant-a")
+    store.create("上一进程遗留", run_id="orphan", tenant_id="tenant-a", harness="pi", harness_pack="pi", executor="inproc")
     manager = RunManager(make_config(tmp_path), EventBus(), store)
 
     manager._commit_interrupted("orphan")  # noqa: SLF001 - the restart path
@@ -225,6 +227,9 @@ def test_listing_and_holding_queries_read_no_meta_after_warmup(
             f"问题 {index}",
             run_id=f"r{index:02d}",
             tenant_id="tenant-a" if index % 2 else "tenant-b",
+            harness="pi",
+            harness_pack="pi",
+            executor="inproc",
         )
     store.list(limit=None)  # warm the index
 
@@ -242,7 +247,7 @@ def test_a_committed_terminal_reaches_the_index_without_rereading_meta(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = RunStore(tmp_path / "runs")
-    store.create("终帧", run_id="r1", tenant_id="tenant-a")
+    store.create("终帧", run_id="r1", tenant_id="tenant-a", harness="pi", harness_pack="pi", executor="inproc")
     store.list(limit=None)  # warm the index
 
     reads = counting_reads(monkeypatch)
@@ -258,7 +263,7 @@ def test_a_terminal_commit_whose_fsync_fails_never_reaches_the_index(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = RunStore(tmp_path / "runs")
-    store.create("终帧落盘失败", run_id="r1", tenant_id="tenant-a")
+    store.create("终帧落盘失败", run_id="r1", tenant_id="tenant-a", harness="pi", harness_pack="pi", executor="inproc")
     store.list(limit=None)  # warm the index
     original_fsync = os.fsync
 
@@ -290,7 +295,7 @@ def test_concurrent_create_and_commit_lose_no_entries(tmp_path: Path) -> None:
         try:
             barrier.wait(10)
             run_id = f"c{index:02d}"
-            store.create(f"并发 {index}", run_id=run_id, tenant_id="tenant-a")
+            store.create(f"并发 {index}", run_id=run_id, tenant_id="tenant-a", harness="pi", harness_pack="pi", executor="inproc")
             store.commit_terminal(run_id, terminal_frame(run_id, released=True, seq=1))
         except BaseException as exc:  # noqa: BLE001 - reported through the assertion
             errors.append(exc)
@@ -317,7 +322,7 @@ def test_admission_reads_no_run_directory_under_the_lock(
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
     for index in range(4):
-        store.create(f"旧 run {index}", run_id=f"old{index}", tenant_id="tenant-a")
+        store.create(f"旧 run {index}", run_id=f"old{index}", tenant_id="tenant-a", harness="pi", harness_pack="pi", executor="inproc")
     for index in (1, 2, 3):
         store.update(
             f"old{index}",

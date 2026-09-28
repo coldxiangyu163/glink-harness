@@ -369,6 +369,9 @@ def seed_history(server, run_id: str, *, frames: int = 20, tenant: str = "tenant
     store.create(
         "历史回放", run_id=run_id, workspace=server.config.workspace_root / run_id,
         tenant_id=tenant, creator_user_id=user,
+        harness="pi",
+        harness_pack="pi",
+        executor="inproc",
     )
     for seq in range(1, frames + 1):
         store.append_event(
@@ -1434,11 +1437,11 @@ def test_cross_tenant_matrix_for_two_logged_in_tenants(
     assert status == 200
 
 
-def test_legacy_records_stay_invisible_in_accounts_mode(server: PiGlinkServer) -> None:
-    # Two legacy shapes: a record that predates owner tracking entirely, and one
+def test_foreign_and_ownerless_records_stay_invisible_in_accounts_mode(server: PiGlinkServer) -> None:
+    # Two invisible shapes: an ownerless record (single-user surface), and one
     # whose owner is another tenant.
     store = server.store
-    store.create("旧记录", run_id="ownerless-run", workspace=server.config.workspace_root / "ownerless-run")
+    store.create("无 owner 记录", run_id="ownerless-run", workspace=server.config.workspace_root / "ownerless-run", harness="pi", harness_pack="pi", executor="inproc")
     seed_history(server, "other-tenant-run", frames=3, tenant="tenant-beta", user="u9")
     bootstrap_user(server, email="member@example.test")
     client = logged_in_client(server, "member@example.test")

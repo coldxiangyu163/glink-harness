@@ -1,4 +1,4 @@
-"""The ACP harness family（实现体自 runner.py 对应段落逐字搬迁）。
+"""The ACP harness family.
 
 ACP 族的策略面：空命令白名单、凭据准入空实现、追问追加门禁（能力矩阵、
 session id、续接通道、状态根）、状态根继承与 ``AcpProjector``、
@@ -84,30 +84,25 @@ class AcpHarnessFamily(HarnessFamily):
         An ACP continuation needs three more facts, all of which are read
         from the host's own record of the parent rather than from the caller:
 
-        * the parent ran the **same harness** — the parent record's own
-          ``harness`` field is the proof when it carries one (written at
-          admission from the frozen config); for a legacy record without the
-          field, the ``harness: "acp"`` marker of its ``session_ready`` frame
-          remains the proof, exactly as before. Neither source trusts the
-          current configuration alone (a host switched from ``pi`` to ``acp``
-          must not present a pi run as resumable);
+        * the parent ran the **same harness** — proven by the runner's shared
+          gate from the parent record's own ``harness`` field (written at
+          admission from the frozen config), never from the current
+          configuration alone (a host switched from ``pi`` to ``acp`` must not
+          present a pi run as resumable);
         * the parent recorded a **session id** (an ACP run without one has
           nothing to resume);
         * the capability matrix recorded in that same frame declares a
           continuation channel (:func:`~pi_glink.kernel.acp_execution.
           acp_resume_method`). The matrix is a negotiated snapshot and stays
           in the event stream (it is not a RunRecord field), so the frame
-          scan remains its only source even when the record field already
-          proved the family. No capability means the follow-up is refused
+          scan is its only source. No capability means the follow-up is refused
           here, before a child run exists — it is never downgraded to a new
           session.
 
         The E2B face needs one more fact and is admitted by it:
 
-        * **原义务（M7）**：e2b 面一律拒绝（``session_unavailable``）。ACP 沙箱的
-          agent 状态随沙箱销毁，宿主没有可继承的状态根，起沙箱也必然无法 resume。
-        * **新义务（M8）**：沙箱销毁前把该 run 的状态根有界回收到宿主；追问在
-          「父状态根回收成功」时与 inproc/docker 面同样受理。回收到
+        * 沙箱销毁前把该 run 的状态根有界回收到宿主；追问在「父状态根回收
+          成功」时与 inproc/docker 面同样受理（docs/adr/0005）。回收到
           ``acp-agent/recovered`` 是整份成功的才发布，所以下面这个目录检查就是
           “回收成功”这个事实本身：失败（或未尝试）的回收什么都不留下，追问维持
           拒绝，而不是先花一个注定 resume 失败的云端沙箱。
@@ -126,10 +121,8 @@ class AcpHarnessFamily(HarnessFamily):
         admission lock in :meth:`prepare_runtime` and fails the run closed if
         it cannot complete.
         """
-        # 族证明：记录字段优先（``harness == "acp"`` 直接成立），帧扫描只
-        # 为无字段的 legacy 记录兼作族证明；能力矩阵（协商快照，不进
-        # RunRecord）两路都仍从这同一扫描取得。已知字段的父 run 扫不到
-        # 能力帧时按无续接通道拒绝，语义与现状一致。
+        # 族已由 runner 共享门禁按父记录 ``harness`` 字段证明；能力矩阵（协商
+        # 快照，不进 RunRecord）从 session_ready 帧取得，扫不到即无续接通道。
         capabilities = self.recorded_capabilities(parent)
         if capabilities is None:
             raise FollowupUnavailable("session_unavailable")
@@ -150,24 +143,17 @@ class AcpHarnessFamily(HarnessFamily):
     ) -> Mapping[str, Any] | None:
         """The capability matrix a parent ACP run recorded, or ``None``.
 
-        原义务：扫描同时承担两个角色——能力矩阵的唯一来源，以及「父 run
-        是 ACP 族」的证明（要求帧带 ``harness: "acp"`` 标记）。新义务：角色
-        收缩——族证明优先由父记录自己的 ``harness`` 字段承担（准入时原子
-        写入的事实），本扫描仅为无字段的 legacy 记录兼作族证明；能力矩阵
-        （协商快照，不进 RunRecord）两路都仍只能从 ``session_ready`` 帧取得。
-
-        The parent's ``session_ready`` frame is the only capability source that
-        exists before the child's agent process starts; ``session_ready`` is
-        committed right after the run opens, so the scan is bounded and does not
-        grow with the parent's transcript. A legacy parent with no such marked
-        frame is not proven to be an ACP run (or predates it), which is exactly
-        the ``session_unavailable`` refusal the ACP gate owes it; a parent whose
-        record already proves the family but carries no capability frame is
-        refused the same way, as a run without a continuation channel.
+        The family is a record fact (``parent.harness``): a parent that is not
+        an ACP run has no capability matrix to offer and answers ``None``
+        without a scan. The parent's ``session_ready`` frame is the only
+        capability source that exists before the child's agent process starts;
+        ``session_ready`` is committed right after the run opens, so the scan is
+        bounded and does not grow with the parent's transcript. A parent
+        without such a frame is refused as a run without a continuation
+        channel.
         """
-        # 记录字段已证明族时，任何 session_ready 帧都是合法的能力来源；
-        # 未证明时（legacy）仍要求帧自带 ``harness: "acp"`` 标记。
-        family_proven = parent.harness == "acp"
+        if parent.harness != "acp":
+            return None
         for index, event in enumerate(self._store.iter_events(parent.run_id)):
             if index >= _ACP_CAPABILITY_SCAN_EVENTS:
                 break
@@ -175,8 +161,6 @@ class AcpHarnessFamily(HarnessFamily):
                 continue
             payload = event.get("payload")
             if not isinstance(payload, Mapping):
-                continue
-            if not family_proven and payload.get("harness") != "acp":
                 continue
             capabilities = payload.get("agentCapabilities")
             return dict(capabilities) if isinstance(capabilities, Mapping) else {}
@@ -192,16 +176,12 @@ class AcpHarnessFamily(HarnessFamily):
         derived from the run record like the other one — never from caller
         input — and its existence is the recovered-state fact itself.
 
-        原义务：按当前 ``config.executor`` 推导——宿主从 e2b 切到
-        inproc/docker 后，追问 e2b 父 run 会推导出 ``acp-agent/home``
-        （不存在）→ 合法追问被误拒。新义务：按父 run 自己记录的
-        ``executor`` 推导（准入时随冻结配置原子写入），宿主切换执行面不影响
-        历史 run 的追问；无字段的旧记录回退为按当前配置推导（原行为，
-        legacy e2b 父 run 的误拒是已知局限，只对新记录修复，不回填）。
+        Which of the two applies follows the run's own recorded ``executor``
+        (frozen at admission), never the host's current face: a host that
+        switched faces still resumes its earlier runs (docs/adr/0002).
         """
-        executor = run.executor if run.executor is not None else self._config.executor
         base = self._store.run_dir(run.run_id) / ACP_RUNTIME_DIRNAME
-        if executor == "e2b":
+        if run.executor == "e2b":
             return base / ACP_RECOVERED_DIRNAME
         return base / ACP_HOME_DIRNAME
 

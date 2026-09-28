@@ -1,10 +1,10 @@
 """ACP 族策略面的单元测试。
 
-钉住自 runner 搬迁的 ACP 族行为：stopReason 到产品终态词汇的逐格映射
-（oracle 即 runner ``_decide`` 现分支字面量）、追问追加门禁的五个拒绝点
-（全部 ``session_unavailable``）、能力矩阵的记录字段/legacy 帧双路语义
-（含 50 帧扫描上限）、状态根按父记录 executor 推导与 legacy 回退、父工作
-区复用与恒为 None 的续接种子。
+钉住 ACP 族行为：stopReason 到产品终态词汇的逐格映射（oracle 即 runner
+``_decide`` 的 ACP 分支字面量）、追问追加门禁的拒绝点（全部
+``session_unavailable``）、能力矩阵只来自族已由记录证明的父 run（含 50 帧
+扫描上限）、状态根按父记录 executor 推导（不看宿主当前执行面）、父工作区
+复用与恒为 None 的续接种子。
 """
 
 from __future__ import annotations
@@ -58,9 +58,9 @@ def write_parent(
     store: RunStore,
     run_id: str,
     *,
-    harness: str | None = None,
-    executor: str | None = None,
-    frame_marker: bool = True,
+    harness: str = "acp",
+    harness_pack: str = "dsh",
+    executor: str = "inproc",
     state_root: str | None = "home",
     session_id: str | None = SESSION_ID,
     capabilities: Mapping[str, Any] | None = None,
@@ -68,8 +68,7 @@ def write_parent(
 ) -> None:
     """手写一份 ACP 追问门禁能消费的父记录（同 test_kernel_acp_resume 的先例）。
 
-    手写 meta.json 是为了能构造无 harness/executor 字段的 legacy 记录；
-    ``frame_marker=False`` 模拟能力帧缺 ``harness: "acp"`` 标记；
+    手写 meta.json 以便直接给出终态与 session id；
     ``state_root=None`` 模拟状态根缺失（或未回收）的父 run；
     ``leading_events`` 在 session_ready 帧之前垫事件，用于扫描上限断言。
 
@@ -85,11 +84,10 @@ def write_parent(
         "workspace": str(directory / "workspace"),
         "session_id": session_id,
         "finished_at": time.time(),
+        "harness": harness,
+        "harness_pack": harness_pack,
+        "executor": executor,
     }
-    if harness is not None:
-        meta["harness"] = harness
-    if executor is not None:
-        meta["executor"] = executor
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     (directory / "meta.json").write_text(
         json.dumps(meta, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -105,9 +103,8 @@ def write_parent(
             if capabilities is not None
             else {"sessionCapabilities": {"resume": {}}}
         ),
+        "harness": harness,
     }
-    if frame_marker:
-        payload["harness"] = "acp"
     store.append_event(
         run_id, {"type": "session_ready", "seq": leading_events + 1, "payload": payload}
     )
@@ -160,17 +157,17 @@ def test_acp_model_stop_verdict_table(
 
 def test_check_continuation_admits_a_continuable_parent(tmp_path: Path) -> None:
     _config, store, family = make_family(tmp_path)
-    parent = craft_parent(store, "parent000001", harness="acp", executor="inproc")
+    parent = craft_parent(store, "parent000001", executor="inproc")
     family.check_continuation(parent)  # 不抛即受理
 
 
-def test_check_continuation_refuses_a_parent_without_capability_proof(
+def test_check_continuation_refuses_a_parent_recorded_under_another_family(
     tmp_path: Path,
 ) -> None:
-    """拒绝点 1：legacy 记录（无 harness 字段）且帧无标记 → 无法证明族。"""
+    """拒绝点 1：父记录的族不是 acp → 没有能力矩阵可用，即使事件流里有帧。"""
     _config, store, family = make_family(tmp_path)
-    parent = craft_parent(store, "parent000002", frame_marker=False)
-    assert parent.harness is None
+    parent = craft_parent(store, "parent000002", harness="pi", harness_pack="pi")
+    assert family.recorded_capabilities(parent) is None
     with pytest.raises(FollowupUnavailable) as excinfo:
         family.check_continuation(parent)
     assert excinfo.value.code == "session_unavailable"
@@ -181,7 +178,7 @@ def test_check_continuation_refuses_a_parent_without_session_id(
 ) -> None:
     """拒绝点 2：有能力矩阵但没有记录的 session id → 没有可 resume 之物。"""
     _config, store, family = make_family(tmp_path)
-    parent = craft_parent(store, "parent000003", harness="acp", session_id=None)
+    parent = craft_parent(store, "parent000003", session_id=None)
     with pytest.raises(FollowupUnavailable) as excinfo:
         family.check_continuation(parent)
     assert excinfo.value.code == "session_unavailable"
@@ -192,7 +189,7 @@ def test_check_continuation_refuses_a_parent_without_a_resume_channel(
 ) -> None:
     """拒绝点 3：能力矩阵为空（无续接通道）→ 拒绝，不降格为新会话。"""
     _config, store, family = make_family(tmp_path)
-    parent = craft_parent(store, "parent000004", harness="acp", capabilities={})
+    parent = craft_parent(store, "parent000004", capabilities={})
     with pytest.raises(FollowupUnavailable) as excinfo:
         family.check_continuation(parent)
     assert excinfo.value.code == "session_unavailable"
@@ -204,7 +201,7 @@ def test_check_continuation_refuses_a_parent_with_a_missing_state_root(
     """拒绝点 4：状态根不存在（e2b 回收失败/未尝试即如此）→ 拒绝。"""
     _config, store, family = make_family(tmp_path)
     parent = craft_parent(
-        store, "parent000005", harness="acp", executor="inproc", state_root=None
+        store, "parent000005", executor="inproc", state_root=None
     )
     with pytest.raises(FollowupUnavailable) as excinfo:
         family.check_continuation(parent)
@@ -217,7 +214,7 @@ def test_check_continuation_refuses_a_state_root_that_is_not_a_directory(
     """拒绝点 5：状态根路径存在但不是目录 → 拒绝。"""
     _config, store, family = make_family(tmp_path)
     parent = craft_parent(
-        store, "parent000006", harness="acp", executor="inproc", state_root=None
+        store, "parent000006", executor="inproc", state_root=None
     )
     fake = store.run_dir(parent.run_id) / "acp-agent"
     fake.mkdir(parents=True, exist_ok=True)
@@ -227,39 +224,14 @@ def test_check_continuation_refuses_a_state_root_that_is_not_a_directory(
     assert excinfo.value.code == "session_unavailable"
 
 
-# -- 能力矩阵双路语义与扫描上限 ----------------------------------------------------
-
-
-def test_recorded_capabilities_prefers_the_record_field(tmp_path: Path) -> None:
-    """记录字段证明族时，帧无需自带标记也是合法的能力来源。"""
-    _config, store, family = make_family(tmp_path)
-    parent = craft_parent(
-        store, "parent000007", harness="acp", executor="inproc", frame_marker=False
-    )
-    capabilities = family.recorded_capabilities(parent)
-    assert capabilities == {"sessionCapabilities": {"resume": {}}}
-
-
-def test_recorded_capabilities_legacy_path_needs_the_frame_marker(
-    tmp_path: Path,
-) -> None:
-    """legacy 记录：帧带标记则矩阵成立；无标记则族未证明，返回 None。"""
-    _config, store, family = make_family(tmp_path)
-    write_parent(store, "parent000008", frame_marker=True)
-    write_parent(store, "parent000009", frame_marker=False)
-    marked = store.get("parent000008")
-    unmarked = store.get("parent000009")
-    assert family.recorded_capabilities(marked) == {
-        "sessionCapabilities": {"resume": {}}
-    }
-    assert family.recorded_capabilities(unmarked) is None
+# -- 能力矩阵与扫描上限 ------------------------------------------------------------
 
 
 def test_recorded_capabilities_scan_is_bounded_at_fifty_frames(tmp_path: Path) -> None:
     """session_ready 紧随 run 打开即提交；扫描上限 50 帧，超出即不证明。"""
     _config, store, family = make_family(tmp_path)
-    write_parent(store, "parent000010", harness="acp", frame_marker=False, leading_events=50)
-    write_parent(store, "parent000011", harness="acp", frame_marker=False, leading_events=49)
+    write_parent(store, "parent000010", leading_events=50)
+    write_parent(store, "parent000011", leading_events=49)
     beyond = store.get("parent000010")
     within = store.get("parent000011")
     assert family.recorded_capabilities(beyond) is None
@@ -274,8 +246,8 @@ def test_recorded_capabilities_scan_is_bounded_at_fifty_frames(tmp_path: Path) -
 def test_state_home_follows_the_parent_recorded_executor(tmp_path: Path) -> None:
     config, store, family = make_family(tmp_path)
     assert config.executor == "inproc"
-    write_parent(store, "parent000012", harness="acp", executor="e2b", state_root="recovered")
-    write_parent(store, "parent000013", harness="acp", executor="inproc")
+    write_parent(store, "parent000012", executor="e2b", state_root="recovered")
+    write_parent(store, "parent000013", executor="inproc")
     e2b_parent = store.get("parent000012")
     inproc_parent = store.get("parent000013")
     assert family.state_home(e2b_parent) == (
@@ -286,15 +258,13 @@ def test_state_home_follows_the_parent_recorded_executor(tmp_path: Path) -> None
     )
 
 
-def test_state_home_legacy_parent_falls_back_to_the_current_executor(
-    tmp_path: Path,
-) -> None:
-    """无 executor 字段的旧记录回退为按当前配置推导（原行为，不回填）。"""
-    _config, store, family = make_family(tmp_path, LOCAL_WEB_EXECUTOR="e2b")
-    parent = craft_parent(store, "parent000014", state_root="recovered")
-    assert parent.executor is None
+def test_state_home_ignores_the_host_current_executor(tmp_path: Path) -> None:
+    """宿主当前是 e2b 面时，inproc 父 run 的状态根仍是 ``acp-agent/home``。"""
+    config, store, family = make_family(tmp_path, LOCAL_WEB_EXECUTOR="e2b")
+    assert config.executor == "e2b"
+    parent = craft_parent(store, "parent000014", executor="inproc")
     assert family.state_home(parent) == (
-        store.run_dir(parent.run_id) / "acp-agent" / "recovered"
+        store.run_dir(parent.run_id) / "acp-agent" / "home"
     )
 
 
@@ -304,20 +274,20 @@ def test_state_home_legacy_parent_falls_back_to_the_current_executor(
 def test_continuation_workspace_reuses_the_parent_workspace(tmp_path: Path) -> None:
     """ACP 追问复用父 run 的工作区（会话 cwd 记在 agent 自己的状态里）。"""
     _config, store, family = make_family(tmp_path)
-    parent = craft_parent(store, "parent000015", harness="acp", executor="inproc")
+    parent = craft_parent(store, "parent000015", executor="inproc")
     assert family.continuation_workspace(parent) == Path(parent.workspace)
 
 
 def test_resume_seed_is_always_none(tmp_path: Path) -> None:
     """ACP 续接住在父状态根，宿主没有会话文件种子可读。"""
     _config, store, family = make_family(tmp_path)
-    parent = craft_parent(store, "parent000016", harness="acp", executor="inproc")
+    parent = craft_parent(store, "parent000016", executor="inproc")
     assert family.resume_seed(parent, redactor=SecretRedactor()) is None
 
 
 def test_resume_value_is_the_parent_session_id(tmp_path: Path) -> None:
     _config, store, family = make_family(tmp_path)
-    parent = craft_parent(store, "parent000017", harness="acp", executor="inproc")
+    parent = craft_parent(store, "parent000017", executor="inproc")
     assert family.resume_value(parent) == SESSION_ID
     assert family.resume_value(None) is None
 

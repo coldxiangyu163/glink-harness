@@ -136,7 +136,7 @@ class SseMixin:
         self, run_id: str, query: str, context: TenantContext | None, bus: Any, store: Any
     ) -> None:
         # Authorization happens before a single response header is written. An
-        # unknown run, another tenant's run and an ownerless legacy record all
+        # unknown run, another tenant's run and an ownerless (single-user) record all
         # answer the same 404, so the stream cannot be used to probe existence.
         if context is not None and store.get_for(run_id, context.tenant_id) is None:
             self._send_json(

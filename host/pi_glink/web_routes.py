@@ -579,7 +579,7 @@ class RoutesMixin:
         """The run's authoritative child-run documents (§3.5), read-only.
 
         Owner rules are exactly the run detail's: an unknown run, another
-        tenant's run and a legacy ownerless record all answer the same 404, and
+        tenant's run and an ownerless (single-user) record all answer the same 404, and
         local mode reads directly. The documents hold only redacted,
         protocol-visible facts (they are built from committed event payloads),
         so they are served as stored. ``skipped`` reports corruption honestly
@@ -671,10 +671,9 @@ class RoutesMixin:
             else self.server.store.get(run_id)
         )
         # ``report_path`` is not a download capability: only the run's own
-        # host artifact, or the report inside the run's own workspace written
-        # by earlier versions, may be served — read-only, through a directory
-        # handle that never follows a link. An unknown run, another tenant's run
-        # and a legacy ownerless record all answer the same 404.
+        # host artifact may be served — read-only, through a directory handle
+        # that never follows a link. An unknown run, another tenant's run and an
+        # ownerless (single-user) record all answer the same 404.
         location = self.server.store.report_location(record) if record else None
         if location is None:
             self._send_json(
@@ -688,7 +687,7 @@ class RoutesMixin:
                 data = tree.read(location.relative, max_bytes=REPORT_MAX_BYTES)
         except (ArtifactError, OSError) as exc:
             logger.warning(
-                "report refused run=%s layout=%s: %s", run_id, location.layout, exc
+                "report refused run=%s: %s", run_id, exc
             )
             self._send_json(
                 HTTPStatus.NOT_FOUND,

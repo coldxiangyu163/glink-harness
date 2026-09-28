@@ -174,7 +174,7 @@ def open_execution(
     adapter: Any = None,
 ) -> _Execution:
     """An open execution without a kernel: the typed-event commit seam."""
-    record = store.create("子代理进度", run_id=run_id, workspace=workspace)
+    record = store.create("子代理进度", run_id=run_id, workspace=workspace, harness="pi", harness_pack="pi", executor="inproc")
     execution = _Execution(record=record, workspace=workspace)
     execution.adapter = adapter
     manager.bus.open_run(record.run_id)

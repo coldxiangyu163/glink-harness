@@ -95,7 +95,7 @@ def record_hold(
     released: bool = False,
 ) -> None:
     """A terminal record whose cleanup did not confirm the release."""
-    store.create("泄漏的 run", run_id=run_id, tenant_id=tenant_id)
+    store.create("泄漏的 run", run_id=run_id, tenant_id=tenant_id, harness="pi", harness_pack="pi", executor="inproc")
     store.update(
         run_id,
         status=FINISHED,
@@ -170,7 +170,7 @@ def test_the_ledger_survives_a_restart(tmp_path: Path) -> None:
 def test_a_corrupt_record_is_hidden_from_lists_but_holds_globally(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
-    store.create("正常", run_id="good", tenant_id="tenant-a")
+    store.create("正常", run_id="good", tenant_id="tenant-a", harness="pi", harness_pack="pi", executor="inproc")
     store.update(
         "good",
         status=FINISHED,
@@ -710,7 +710,8 @@ def test_the_run_state_helper_keeps_its_meaning() -> None:
     from pi_glink.store import RunRecord
 
     record = RunRecord(
-        run_id="x", prompt="p", status=RUNNING, created_at=time.time(), workspace="/tmp/x"
+        run_id="x", prompt="p", status=RUNNING, created_at=time.time(), workspace="/tmp/x",
+        harness="pi", harness_pack="pi", executor="inproc",
     )
     assert record.holds_resources is True
 
@@ -720,7 +721,7 @@ def test_reconcile_closes_leftover_children_and_summarizes_them(tmp_path: Path) 
     frame carries the same ``children`` summary as a normal verdict."""
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
-    store.create("遗留 run", run_id="leftover-kids")
+    store.create("遗留 run", run_id="leftover-kids", harness="pi", harness_pack="pi", executor="inproc")
     store.write_child(
         "leftover-kids",
         {"n": 0, "toolCallId": "c1", "agent": "researcher", "task": "调研甲",

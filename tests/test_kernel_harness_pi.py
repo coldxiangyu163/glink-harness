@@ -77,7 +77,7 @@ def test_acp_validate_credentials_is_a_noop(tmp_path: Path) -> None:
 
 def test_pi_resume_value(tmp_path: Path) -> None:
     _config, store, family = make_family(tmp_path)
-    parent = store.create("第一轮", harness="pi", executor="inproc")
+    parent = store.create("第一轮", harness="pi", executor="inproc", harness_pack="pi")
     assert family.resume_value(parent) == "continued.jsonl"
     assert family.resume_value(None) is None
 
@@ -97,7 +97,7 @@ def test_pi_verifies_continuation_before_turn_per_executor(tmp_path: Path) -> No
 def test_continuation_workspace_defaults_to_none(tmp_path: Path) -> None:
     """pi 每 run 独立工作区（基类默认）；ACP 覆写见 test_kernel_harness_acp。"""
     _config, store, family = make_family(tmp_path)
-    parent = store.create("第一轮", harness="pi", executor="inproc")
+    parent = store.create("第一轮", harness="pi", executor="inproc", harness_pack="pi")
     assert family.continuation_workspace(parent) is None
 
 

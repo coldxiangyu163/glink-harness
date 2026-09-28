@@ -56,7 +56,7 @@ def build_context(tmp_path: Path, run_id: str) -> tuple[RunManager, RunStore, Ru
     manager = RunManager(config, EventBus(), store)
     workspace = tmp_path / "ws"
     workspace.mkdir(exist_ok=True)
-    record = store.create("收尾扫描", run_id=run_id, workspace=workspace)
+    record = store.create("收尾扫描", run_id=run_id, workspace=workspace, harness="pi", harness_pack="pi", executor="inproc")
     return manager, store, record, workspace
 
 

@@ -543,8 +543,8 @@ class RunManager:
                     else ()
                 ),
                 # 准入时冻结的宿主事实，与 run id/owner 同一次原子写入：
-                # 追问门禁此后比父记录自己的族/包与执行面，不再用当前配置反推
-                # 历史 run。
+                # 追问门禁比父记录自己的族/包与执行面，不用当前配置反推
+                # 历史 run（docs/adr/0002）。
                 harness=self._family.name,
                 harness_pack=self.config.harness_pack,
                 executor=self.config.executor,
@@ -637,7 +637,7 @@ class RunManager:
         """The parent this run may resume, or ``None`` (same as an unknown run).
 
         The tenant gate runs before any other field of the parent is read. In
-        multi-tenant mode an unknown, foreign or ownerless (legacy) parent is
+        multi-tenant mode an unknown, foreign or ownerless (single-user) parent is
         therefore invisible: the caller cannot learn its status, session,
         report, children or existence. Local mode has no tenant identity and
         keeps the original single-user behaviour.
@@ -668,17 +668,14 @@ class RunManager:
         a parent that is not terminal is ``run_busy``, one that already has a
         follow-up turn is ``stale_run``.
 
-        原义务：门禁不感知 harness 族——宿主从 acp 切到 pi 后，追问一个已知
-        ACP 父 run 会被误放进会话读取，读到一个 ``session_file=None`` 的父
-        run。新义务：同族判定优先比父记录自己的 ``harness`` 字段（准入时随
-        冻结配置原子写入），字段已知且不等即 fail-closed
-        （``session_unavailable``），无论父 run 状态，也不再触发后续扫描；
-        判定放在 owner 门禁之后（跨租户父 run 仍是 ``unknown_run``，不泄露
-        存在性）、状态检查之前。无字段的旧记录走 legacy：pi 族 legacy 不
-        新增任何拒绝（harness 未知即无法证明跨族，fail-closed 只适用于
-        「已知不等」），ACP 族 legacy 由族方法
-        :meth:`pi_glink.kernel.harness_acp.AcpHarnessFamily.recorded_capabilities`
-        的帧扫描继续证明。
+        Between the owner gate and the state checks the parent must have run
+        under the host's own family and pack: the record's ``harness`` and
+        ``harness_pack`` (frozen at admission) must equal the current ones,
+        otherwise the follow-up is ``session_unavailable`` whatever the
+        parent's status — a foreign parent is still ``unknown_run`` first, so
+        existence is not disclosed across tenants. The family-specific facts
+        (ACP capability matrix, state root) follow in
+        :meth:`HarnessFamily.check_continuation`.
 
         One admission calls this twice: outside the lock, to fail fast before
         the parent's session file is read, and inside it, where the decision is
@@ -688,14 +685,11 @@ class RunManager:
         parent = self._authorized_parent(context, parent_run_id)
         if parent is None:
             raise FollowupUnavailable("unknown_run")
-        if parent.harness is not None and parent.harness != self._family.name:
+        if parent.harness != self._family.name:
             raise FollowupUnavailable("session_unavailable")
-        if (
-            parent.harness_pack is not None
-            and parent.harness_pack != self.config.harness_pack
-        ):
+        if parent.harness_pack != self.config.harness_pack:
             # 同族不同包（例如 dsh → opencode）的会话不能续接：agent 自己的状态根
-            # 与续接能力都是按包声明的，fail-closed 胜过猜一个兼容映射。
+            # 与续接能力都是按包声明的，fail-closed 胜过猜一个映射。
             raise FollowupUnavailable("session_unavailable")
         if not parent.is_terminal:
             raise FollowupUnavailable("run_busy")
@@ -784,7 +778,7 @@ class RunManager:
         by default and an over-limit request is refused immediately (no
         unbounded queue). An unreleased hold **consumes slots** instead of
         blocking everyone: it counts against its owner tenant's ceiling and
-        against the global one (an ownerless legacy or unreadable record has no
+        against the global one (an ownerless single-user or unreadable record has no
         tenant and therefore only consumes the global ceiling). A leak is never
         forgotten — it keeps eating capacity, and once the holds reach the global
         ceiling every new admission is refused — but one tenant's leftover no
@@ -846,7 +840,7 @@ class RunManager:
 
         ``context`` is the verified identity in multi-tenant mode. The owner
         and role check runs under the run's own lock, so it cannot race the
-        verdict commit: another tenant (or a legacy ownerless record) is
+        verdict commit: another tenant (or an ownerless single-user record) is
         answered like an unknown run, while a same-tenant member who did not
         create the run is refused with ``forbidden``.
         """
@@ -903,7 +897,7 @@ class RunManager:
     ) -> StopDecision | None:
         """Owner/role gate for cancellation; ``None`` means allowed.
 
-        Another tenant and an ownerless legacy record are answered exactly like
+        Another tenant and an ownerless single-user record are answered exactly like
         an unknown run (404, no side effect). A same-tenant member who is not
         the creator is refused; the creator and tenant admins may stop it.
         Local mode has no identity and keeps its original behaviour.
@@ -1010,11 +1004,9 @@ class RunManager:
             if execution.parent_run_id and self._family.verifies_continuation_before_turn(
                 self.config.executor
             ):
-                # 两族三面同规则（GLINK-ARCH-3 收敛后恒 True）：RPC
-                # ``get_state`` 在 session_ready 即知会话身份，续接身份不符
-                # 在回合前、第一次模型调用前拒 session_unavailable。原义务
-                # （pi e2b 面流中才发现 session id，回合后才校验）已随旧
-                # ``--mode json`` 适配器删除。
+                # 两族三面同规则：RPC ``get_state`` 在 session_ready 即知
+                # 会话身份，续接身份不符在回合前、第一次模型调用前拒
+                # session_unavailable（docs/adr/0004）。
                 parent = self._authorized_parent(
                     execution.context, execution.parent_run_id
                 )
@@ -1314,7 +1306,7 @@ class RunManager:
 
         The parent is owner-checked again here (it was authorized at admission):
         a report is copied only from a run this run's tenant may read, never
-        from another tenant or an ownerless legacy record.
+        from another tenant or an ownerless single-user record.
         """
         if not execution.parent_run_id:
             return
@@ -1688,8 +1680,7 @@ class RunManager:
         会话日志在宿主的 session 目录里，可以重写；ACP 的状态根是 agent 自己
         的会话存储，只读扫描并把凭据形状值并入本 run 边界（不改写文件，见
         ``docs/acp-integration-notes.md`` §10.2/§14.1）。runner 只消费契约，
-        不再询问具体 runtime 类型的属性（原实现在 ACP 面因缺 ``session_dir``
-        逐次抛错、被外层 ``except`` 吞掉：整个会话面脱敏被跳过）。
+        不询问具体 runtime 类型的属性。
         """
         if execution.runtime is None:
             return False
@@ -1794,9 +1785,8 @@ class RunManager:
     ) -> None:
         """Delete the host-injected credential copies from one state root.
 
-        原义务：注入的凭据副本随 run 目录生命周期保留（``acp-integration-notes``
-        §6.6）。新义务（GLINK-OBS-01 用户决定 C）：run 收尾在只读扫描之后删除这些
-        **已知相对路径**的副本——追问由 ``prepare_acp_runtime`` 从源重新注入、
+        run 收尾在只读扫描之后删除这些**已知相对路径**的副本（docs/adr/0003）
+        ——追问由 ``prepare_acp_runtime`` 从源重新注入、
         继承已 skip ``credential_dests``，副本收尾后没有用途。只删列出的路径本身：
         不做模式匹配、不跟随链接（链接或越界路径只记失败，不碰目标）、不删目录。
         删除失败记入收尾事实并告警，**不改变 run 终态**。

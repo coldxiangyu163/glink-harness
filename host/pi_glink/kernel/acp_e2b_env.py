@@ -183,9 +183,7 @@ class SandboxCommandProcess:
         """``subprocess.Popen`` 形状：退出后是状态（无码为 -1，同 poll()），否则 None。
 
         pi 的 RPC 客户端在 ``exit_code`` 与 ``_write`` 两处读这个属性（ACP
-        客户端不读它）；自 GLINK-ARCH-3 收敛起由生产类直接提供，spike 的
-        探针子类（``scripts/spikes/pi_e2b_rpc/rpc_channel_probe.py``）是它的
-        前瞻。
+        客户端不读它）。
         """
         return self.poll() if self._exited.is_set() else None
 

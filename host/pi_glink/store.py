@@ -98,6 +98,8 @@ _CHILD_DOC_MAX_BYTES = 64 * 1024
 _CHILD_VISIT_LIMIT = 4 * CHILD_READ_LIMIT
 #: Bounded retries when a generated run id collides with an existing directory.
 _RUN_ID_ATTEMPTS = 5
+#: ``meta.json`` fields a record must carry as non-empty strings to be read.
+_REQUIRED_TEXT_FIELDS = ("run_id", "prompt", "status", "workspace", "harness", "harness_pack", "executor")
 _TAIL_CHUNK = 64 * 1024
 _STATUS_BY_EVENT = {
     "run_finished": FINISHED,
@@ -115,6 +117,18 @@ class RunRecord:
     status: str
     created_at: float
     workspace: str
+    #: Harness family this run executed under (``pi`` | ``acp``), recorded at
+    #: admission from the frozen config. Required: the follow-up gate compares
+    #: it with the host's family and never derives it from the current config.
+    harness: str
+    #: Harness pack this run executed under (``harnesses/<pack>/``, e.g. ``dsh``),
+    #: recorded in the same atomic admission write; a follow-up requires the
+    #: same pack.
+    harness_pack: str
+    #: Execution face this run used (``inproc`` | ``docker`` | ``e2b``),
+    #: recorded at admission; the ACP state root a follow-up inherits is
+    #: derived from it.
+    executor: str
     #: Previous execution in the same research conversation; None for its first turn.
     parent_run_id: str | None = None
     finished_at: float | None = None
@@ -135,7 +149,7 @@ class RunRecord:
     report_status: str = "none"
     #: ``{"released": true|false|null, "failures": [...], "external": {...}}`` —
     #: whether the process/container/sandbox is confirmed released (``null`` means
-    #: unknown). ``None`` for records written before resources were tracked.
+    #: unknown). ``None`` while the run has not committed a terminal frame.
     cleanup: Mapping[str, Any] | None = None
     #: Durable external identity for restart reconciliation (never guessed).
     container_name: str | None = None
@@ -144,9 +158,9 @@ class RunRecord:
     #: (``{"decision": "released", "note": …, "at": …}``); never set automatically.
     resource_adjudication: Mapping[str, Any] | None = None
     #: Owner of the run, written atomically with admission. Records written by
-    #: the single-user surface (or before owner tracking) carry ``None`` and are
-    #: therefore invisible to every multi-tenant read: history is never
-    #: imported into a tenant and never rewritten.
+    #: the single-user surface carry ``None`` and are therefore invisible to
+    #: every multi-tenant read: they are never imported into a tenant and never
+    #: rewritten.
     tenant_id: str | None = None
     creator_user_id: str | None = None
     #: Session blueprint this run was admitted with (the stem of
@@ -155,26 +169,14 @@ class RunRecord:
     blueprint: str | None = None
     #: The blueprint's stages as parsed at admission
     #: (``id``/``title``/``goal``/``deliverable``/``checkpoint``). Empty for a run
-    #: without a blueprint and for records written before blueprints existed.
+    #: for a run without a blueprint.
     blueprint_stages: tuple[Mapping[str, Any], ...] = ()
-    #: Harness family this run executed under ("pi" | "acp"), recorded at
-    #: admission from the frozen config. ``None`` for records written before
-    #: the fact was tracked; those records keep the legacy fallbacks.
-    harness: str | None = None
-    #: Harness pack this run executed under (``harnesses/<pack>/``, e.g. ``dsh``),
-    #: recorded in the same atomic admission write as ``harness``. A follow-up
-    #: requires the same pack when the parent carries the field; ``None`` for
-    #: legacy records, which keep the existing proof path.
-    harness_pack: str | None = None
-    #: Execution face this run used ("inproc" | "docker" | "e2b"), recorded at
-    #: admission. ``None`` for legacy records.
-    executor: str | None = None
     #: Agent identity the kernel itself reported (ACP ``agentInfo.name`` from the
     #: negotiated initialize result), written back at the session_ready commit
     #: point like ``session_id``. ``None`` for pi-family runs (the pi protocol
     #: reports no agent identity; the model id stays a session_ready payload
     #: fact, never a stand-in for agent identity), for ACP runs that never
-    #: reached session_ready, and for legacy records.
+    #: reached session_ready.
     agent: str | None = None
 
     def __post_init__(self) -> None:
@@ -201,8 +203,9 @@ class RunRecord:
 
         A run that is still ``running`` holds its resources by definition; a
         terminal run holds them until its cleanup reported ``released: true`` or
-        an operator adjudicated them. Records that predate resource tracking
-        (no ``cleanup``) carry no claim either way.
+        an operator adjudicated them. A terminal record without a ``cleanup``
+        fact makes no claim either way (every terminal frame the runner and
+        the resource ledger commit carries one).
         """
         if not self.is_terminal:
             return True
@@ -336,7 +339,6 @@ class ReportLocation:
 
     root: Path
     relative: str
-    layout: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,14 +391,14 @@ class RunStore:
         run_id: str | None = None,
         workspace: Path | None = None,
         workspace_root: Path | None = None,
+        harness: str,
+        harness_pack: str,
+        executor: str,
         tenant_id: str | None = None,
         creator_user_id: str | None = None,
         parent_run_id: str | None = None,
         blueprint: str | None = None,
         blueprint_stages: Sequence[Mapping[str, Any]] = (),
-        harness: str | None = None,
-        harness_pack: str | None = None,
-        executor: str | None = None,
     ) -> RunRecord:
         """Admit a run and write its assignment facts in one atomic meta write.
 
@@ -414,9 +416,8 @@ class RunStore:
         ``blueprint`` / ``blueprint_stages`` record the session template the run
         was admitted with: facts decided before admission, never progression
         state. ``harness`` / ``harness_pack`` / ``executor`` are frozen-config
-        facts of the same kind, written in this same atomic admission write;
-        ``agent`` is not a
-        create parameter because it is only known after the run starts (the
+        facts of the same kind, required and written in this same atomic
+        admission write; ``agent`` is not a create parameter because it is only known after the run starts (the
         ``session_id`` precedent: written back at the session_ready commit).
         """
         identifier, directory = self._create_run_directory(run_id)
@@ -483,8 +484,8 @@ class RunStore:
     def get_for(self, run_id: str, tenant_id: str) -> RunRecord | None:
         """The run only when it belongs to ``tenant_id``.
 
-        An unknown run, another tenant's run and a legacy record without an
-        owner are all ``None``: the HTTP layer turns every one of them into the
+        An unknown run, another tenant's run and an ownerless
+        (single-user) record are all ``None``: the HTTP layer turns every one of them into the
         same 404, so existence is not disclosed across tenants.
         """
         record = self.get(run_id)
@@ -493,7 +494,7 @@ class RunStore:
         return record
 
     def list_for(self, tenant_id: str, limit: int | None = 50) -> list[RunRecord]:
-        """Runs of exactly one tenant, newest first (legacy records excluded)."""
+        """Runs of exactly one tenant, newest first (ownerless records excluded)."""
         records = [record for record in self._records() if record.tenant_id == tenant_id]
         return records if limit is None else records[:limit]
 
@@ -505,7 +506,7 @@ class RunStore:
         """Records whose execution resources are not confirmed released.
 
         ``tenant_id`` selects one tenant's holds; ``None`` returns every hold,
-        including records without an owner (legacy and reconciled leftovers),
+        including records without an owner (single-user runs and reconciled leftovers),
         because those still consume the global capacity. Newest first, like
         :meth:`list`.
 
@@ -599,28 +600,18 @@ class RunStore:
             return self._write(_apply_terminal(record, terminal))
 
     def report_location(self, record: RunRecord) -> ReportLocation | None:
-        """The only places a record's ``report_path`` may point to.
+        """The only place a record's ``report_path`` may point to.
 
-        * ``runs/<id>/artifacts/report.md`` — the host-owned redacted copy;
-        * ``<workspace>/report.md`` of the run's own workspace
-          (``workspaces/<id>``) — the layout written before host copies
-          existed; served read-only, never rewritten.
-
+        ``runs/<id>/artifacts/report.md`` — the host-owned redacted copy.
         Anything else is not a report, whatever the record says.
         """
         if not record.report_path:
             return None
-        reported = Path(record.report_path)
-        if reported == self.report_artifact_path(record.run_id):
-            return ReportLocation(
-                self.run_dir(record.run_id),
-                f"{ARTIFACTS_DIRNAME}/{REPORT_FILENAME}",
-                "artifact",
-            )
-        workspace = Path(record.workspace)
-        if workspace.name == record.run_id and reported == workspace / REPORT_FILENAME:
-            return ReportLocation(workspace, REPORT_FILENAME, "legacy-workspace")
-        return None
+        if Path(record.report_path) != self.report_artifact_path(record.run_id):
+            return None
+        return ReportLocation(
+            self.run_dir(record.run_id), f"{ARTIFACTS_DIRNAME}/{REPORT_FILENAME}"
+        )
 
     # -- events ---------------------------------------------------------------
 
@@ -960,8 +951,18 @@ class RunStore:
             return None, True
         if not isinstance(data, dict):
             return None, True
+        if any(not isinstance(data.get(name), str) or not data[name] for name in _REQUIRED_TEXT_FIELDS):
+            # A record without the admission facts (written before they were
+            # required) is not served: the follow-up gate and the ledger would
+            # otherwise have to guess them. It counts as unreadable (a global
+            # hold until adjudicated), like any other unusable meta.json.
+            return None, True
         known = {field.name for field in fields(RunRecord)}
-        return RunRecord(**{key: value for key, value in data.items() if key in known}), False
+        try:
+            record = RunRecord(**{key: value for key, value in data.items() if key in known})
+        except TypeError:
+            return None, True
+        return record, False
 
     def _read_meta(self, run_id: str) -> RunRecord | None:
         return self._load_meta(run_id)[0]

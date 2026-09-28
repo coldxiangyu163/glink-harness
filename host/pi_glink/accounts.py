@@ -161,7 +161,7 @@ def _check_sidecars(path: Path) -> None:
     """Require owner-only WAL/SHM/journal sidecars.
 
     SQLite creates these with the database file's mode, so they should already
-    be 0600. If one is wider (a legacy database, an unusual umask, a crash), it
+    be 0600. If one is wider (an unusual umask, a crash, a copied database), it
     is corrected with ``chmod`` — it is a host-created derivative of our own
     database, not a user file, and it can carry committed pages.
     """
@@ -375,7 +375,7 @@ class AccountsStore:
         self._lock = threading.RLock()
         # Owner-only creation/validation happens before SQLite sees the path:
         # the database, its directory and later its WAL sidecars must never be
-        # group/world readable, and a legacy wide-permission file is refused
+        # group/world readable, and an existing wide-permission file is refused
         # untouched (see docs/multitenancy-plan.md §3.1).
         self._identity = _prepare_database(self.path)
         connection = sqlite3.connect(

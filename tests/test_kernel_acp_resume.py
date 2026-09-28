@@ -398,7 +398,13 @@ def test_acp_followup_refuses_a_parent_that_is_not_an_acp_run(tmp_path: Path) ->
     """A pi-shaped parent is invisible to the ACP continuation gate."""
     settings = {"FAKE_ACP_WRITE_REPORT": True}
     config, store, manager = build_manager(tmp_path, settings)
-    record = store.create("pi 父 run", workspace_root=config.workspace_root)
+    record = store.create(
+        "pi 父 run",
+        workspace_root=config.workspace_root,
+        harness="pi",
+        harness_pack="pi",
+        executor="inproc",
+    )
     session_file = Path(config.session_dir) / record.run_id / "pi-session.jsonl"
     session_file.parent.mkdir(parents=True, exist_ok=True)
     session_file.write_text('{"type":"message"}\n', encoding="utf-8")
@@ -672,22 +678,16 @@ def craft_parent(
     store: RunStore,
     run_id: str,
     *,
-    harness: str | None = None,
-    executor: str | None = None,
-    frame_marker: bool = True,
+    harness: str = "acp",
+    harness_pack: str = "dsh",
+    executor: str = "inproc",
     state_root: str = "home",
     session_id: str | None = SESSION_ID,
     capabilities: Mapping[str, Any] | None = None,
 ) -> Any:
     """手写一份 ACP 追问门禁能消费的父记录（不真的执行、不经过 create）。
 
-    手写 meta.json 而不用 ``store.create`` 是为了让红→绿机制落在行为上：
-    旧代码读回时把 harness/executor 当未知键过滤、帧扫描仍兼作族证明，
-    于是「字段证明族」「按父记录 executor 推状态根」两类测试在旧代码上
-    因拒绝路径不同而变红，而不是死在 create 的签名差异（TypeError）上。
-
-    ``frame_marker=False`` 模拟能力帧缺 ``harness: "acp"`` 标记；
-    ``harness=None`` / ``executor=None`` 模拟本次改动之前写入的 legacy 记录。
+    手写 meta.json 以便直接给出终态、session id 与准入事实（族、包、执行面）。
     """
     directory = store.run_dir(run_id)
     meta: dict[str, Any] = {
@@ -698,11 +698,10 @@ def craft_parent(
         "workspace": str(directory / "workspace"),
         "session_id": session_id,
         "finished_at": time.time(),
+        "harness": harness,
+        "harness_pack": harness_pack,
+        "executor": executor,
     }
-    if harness is not None:
-        meta["harness"] = harness
-    if executor is not None:
-        meta["executor"] = executor
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     (directory / "meta.json").write_text(
         json.dumps(meta, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -714,9 +713,8 @@ def craft_parent(
             if capabilities is not None
             else {"sessionCapabilities": {"resume": {}}}
         ),
+        "harness": harness,
     }
-    if frame_marker:
-        payload["harness"] = "acp"
     store.append_event(run_id, {"type": "session_ready", "seq": 1, "payload": payload})
     root = directory / "acp-agent" / state_root
     root.mkdir(parents=True, exist_ok=True)
@@ -762,39 +760,14 @@ def test_agent_identity_is_redacted_and_capped_on_writeback(tmp_path: Path) -> N
     assert len(final.agent) <= 128
 
 
-def test_family_proof_prefers_the_record_field_over_the_frame_marker(
+def test_an_acp_parent_without_a_resume_channel_is_refused(
     tmp_path: Path,
 ) -> None:
-    """父记录 harness="acp" 但事件流无标记帧（能力帧保留）→ 仍受理。
-
-    能力矩阵仍只能来自 ``session_ready`` 帧；帧扫描不再兼作族证明。
-    红→绿机制：旧代码的扫描要求帧自带 ``harness: "acp"`` 标记，扫不到标
-    记返回 None → ``session_unavailable``，本测试因意外拒绝而变红。
-    """
-    _config, store, manager = build_manager(tmp_path, {})
-    parent = craft_parent(
-        store, "fieldproof01", harness="acp", executor="inproc", frame_marker=False
-    )
-    admitted = manager._resumable_parent(None, parent.run_id)  # noqa: SLF001
-    manager._family.check_continuation(admitted)  # noqa: SLF001
-    assert admitted.run_id == parent.run_id
-
-
-def test_a_field_proven_parent_without_a_capability_frame_is_still_refused(
-    tmp_path: Path,
-) -> None:
-    """已知字段的 ACP 父 run 扫不到续接通道 → 仍按无通道拒绝（语义不变）。
-
-    帧扫描此时只是能力来源：族已由记录字段证明，但能力矩阵只能来自帧，
-    空矩阵 = 无续接通道。新旧代码同拒绝，本测试钉住这一不变式。
-    """
+    """ACP 父 run 的能力矩阵没有续接通道 → 按无通道拒绝，不降格为新会话。"""
     _config, store, manager = build_manager(tmp_path, {})
     parent = craft_parent(
         store,
         "nocap0000001",
-        harness="acp",
-        executor="inproc",
-        frame_marker=False,
         capabilities={},  # 无续接通道的能力矩阵
     )
     with pytest.raises(FollowupUnavailable) as excinfo:
@@ -807,16 +780,14 @@ def test_a_field_proven_parent_without_a_capability_frame_is_still_refused(
 def test_state_home_follows_the_parent_recorded_executor(tmp_path: Path) -> None:
     """宿主从 e2b 切到 inproc 后，e2b 父 run 的合法追问仍受理。
 
-    状态根按父 run 自己记录的 executor 推导到 ``acp-agent/recovered``。
-    红→绿机制：旧代码用当前配置推导出 ``acp-agent/home``（不存在）→
-    ``session_unavailable``，本测试因误拒而变红。
+    状态根按父 run 自己记录的 executor 推导到 ``acp-agent/recovered``；按
+    宿主当前配置推导会得到不存在的 ``acp-agent/home`` 而误拒。
     """
     config, store, manager = build_manager(tmp_path, {})
     assert config.executor == "inproc"
     parent = craft_parent(
         store,
         "e2bparent001",
-        harness="acp",
         executor="e2b",
         state_root="recovered",
     )
@@ -825,41 +796,3 @@ def test_state_home_follows_the_parent_recorded_executor(tmp_path: Path) -> None
     admitted = manager._resumable_parent(None, parent.run_id)  # noqa: SLF001
     manager._family.check_continuation(admitted)  # noqa: SLF001
     assert admitted.run_id == parent.run_id
-
-
-def test_legacy_parent_keeps_the_frame_marker_family_proof(tmp_path: Path) -> None:
-    """legacy 规则 1a：无 harness 字段 + 帧带 ``harness:"acp"`` 标记 → 受理。
-
-    帧扫描为 legacy 记录兼作族证明的路径逐断言保留。行为断言（受理）在旧
-    代码上同绿；``parent.harness is None`` 的准备断言访问新字段，在旧代码
-    上因 AttributeError 变红——红在字段不存在，不是行为差异。
-    """
-    _config, store, manager = build_manager(tmp_path, {})
-    parent = craft_parent(store, "legacyparent", frame_marker=True)
-    assert parent.harness is None
-    admitted = manager._resumable_parent(None, parent.run_id)  # noqa: SLF001
-    manager._family.check_continuation(admitted)  # noqa: SLF001
-    assert admitted.run_id == parent.run_id
-
-
-def test_legacy_parent_without_the_marker_is_still_refused(tmp_path: Path) -> None:
-    """legacy 规则 1b：无 harness 字段 + 帧无标记 → session_unavailable（原行为）。"""
-    _config, store, manager = build_manager(tmp_path, {})
-    parent = craft_parent(store, "legacyparent", frame_marker=False)
-    assert parent.harness is None
-    with pytest.raises(FollowupUnavailable) as excinfo:
-        manager._family.check_continuation(  # noqa: SLF001
-            manager._resumable_parent(None, parent.run_id)  # noqa: SLF001
-        )
-    assert excinfo.value.code == "session_unavailable"
-
-
-def test_legacy_parent_state_home_falls_back_to_the_current_executor(
-    tmp_path: Path,
-) -> None:
-    """legacy 规则 3：无 executor 字段 → 按当前 config.executor 推导（原行为）。"""
-    _config, store, manager = build_manager(tmp_path, {}, LOCAL_WEB_EXECUTOR="e2b")
-    parent = craft_parent(store, "legacyparent")
-    assert parent.executor is None
-    state_home = manager._family.state_home(parent)  # noqa: SLF001
-    assert state_home == store.run_dir(parent.run_id) / "acp-agent" / "recovered"

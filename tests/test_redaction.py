@@ -671,7 +671,7 @@ def test_report_download_is_redacted_and_flagged(tmp_path: Path) -> None:
         # echo would). The artifact lives under the run directory: the download
         # path only serves validated regular files from there.
         store = server.store
-        store.create("含密钥的报告", run_id="leakreport", workspace=tmp_path / "ws")
+        store.create("含密钥的报告", run_id="leakreport", workspace=tmp_path / "ws", harness="pi", harness_pack="pi", executor="inproc")
         artifact_dir = store.run_dir("leakreport") / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact = artifact_dir / "report.md"
@@ -699,7 +699,7 @@ def test_clean_report_is_not_flagged(tmp_path: Path) -> None:
     thread.start()
     try:
         store = server.store
-        store.create("干净", run_id="cleanreport", workspace=tmp_path / "ws")
+        store.create("干净", run_id="cleanreport", workspace=tmp_path / "ws", harness="pi", harness_pack="pi", executor="inproc")
         artifact_dir = store.run_dir("cleanreport") / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact = artifact_dir / "report.md"
@@ -728,11 +728,11 @@ def test_report_download_refuses_paths_outside_the_run_directory(tmp_path: Path)
         original = f"# 外部文件\n\nOPENAI_API_KEY={AUDIT_SECRET}\n"
         outside.write_text(original, encoding="utf-8")
         # Direct escape: the stored path points outside the run directory.
-        store.create("越界", run_id="escape", workspace=tmp_path / "ws")
+        store.create("越界", run_id="escape", workspace=tmp_path / "ws", harness="pi", harness_pack="pi", executor="inproc")
         store.update("escape", status="finished", report_path=str(outside))
         assert _get(server, "/api/runs/escape/report")[0] == 404
         # Symlink escape: a link inside the run directory is refused too.
-        store.create("链接", run_id="linked", workspace=tmp_path / "ws")
+        store.create("链接", run_id="linked", workspace=tmp_path / "ws", harness="pi", harness_pack="pi", executor="inproc")
         artifact_dir = store.run_dir("linked") / "artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         (artifact_dir / "report.md").symlink_to(outside)

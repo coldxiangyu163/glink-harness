@@ -95,6 +95,9 @@ def seed_history(
         workspace=server.config.workspace_root / run_id,
         tenant_id=tenant,
         creator_user_id=user,
+        harness="pi",
+        harness_pack="pi",
+        executor="inproc",
     )
     for seq in range(1, frames + 1):
         store.append_event(
@@ -761,8 +764,8 @@ def test_foreign_parent_state_is_not_probed(
     assert json.loads(raw)["error"] == "run_busy"
 
 
-def test_unknown_and_legacy_parents_are_unknown_runs(server: PiGlinkServer) -> None:
-    """Ownerless legacy records are never resumable in multi-tenant mode."""
+def test_unknown_and_ownerless_parents_are_unknown_runs(server: PiGlinkServer) -> None:
+    """Ownerless records (single-user surface) are never resumable in multi-tenant mode."""
     alpha = assertion("tenant-alpha", "user-a")
     status, _headers, raw = request(
         server,
@@ -773,18 +776,18 @@ def test_unknown_and_legacy_parents_are_unknown_runs(server: PiGlinkServer) -> N
     )
     assert status == 404 and json.loads(raw)["error"] == "unknown_run"
 
-    workspace = server.config.workspace_root / "legacyparent"
+    workspace = server.config.workspace_root / "ownerlessparent"
     workspace.mkdir(parents=True, exist_ok=True)
-    session_dir = Path(server.config.session_dir) / "legacyparent"
+    session_dir = Path(server.config.session_dir) / "ownerlessparent"
     session_dir.mkdir(parents=True, exist_ok=True)
-    session_file = session_dir / "legacy.jsonl"
-    original = '{"legacy": true}\n'
+    session_file = session_dir / "ownerless.jsonl"
+    original = '{"ownerless": true}\n'
     session_file.write_text(original, encoding="utf-8")
-    server.store.create("旧研究", run_id="legacyparent", workspace=workspace)
+    server.store.create("旧研究", run_id="ownerlessparent", workspace=workspace, harness="pi", harness_pack="pi", executor="inproc")
     server.store.update(
-        "legacyparent",
+        "ownerlessparent",
         status="finished",
-        session_id="legacy-session",
+        session_id="ownerless-session",
         session_file=str(session_file),
         finished_at=time.time(),
     )
@@ -792,7 +795,7 @@ def test_unknown_and_legacy_parents_are_unknown_runs(server: PiGlinkServer) -> N
         server,
         "/api/runs",
         method="POST",
-        body={"prompt": "追问旧数据", "parentRunId": "legacyparent"},
+        body={"prompt": "追问旧数据", "parentRunId": "ownerlessparent"},
         token=alpha,
     )
     assert status == 404 and json.loads(raw)["error"] == "unknown_run"
@@ -880,26 +883,26 @@ def test_same_tenant_member_followup_records_the_new_creator(
     assert request(server, f"/api/runs/{child['runId']}", token=creator)[0] == 200
 
 
-def test_legacy_ownerless_records_are_invisible_to_every_tenant(
+def test_ownerless_records_are_invisible_to_every_tenant(
     server: PiGlinkServer, tmp_path: Path
 ) -> None:
-    workspace = server.config.workspace_root / "legacy01"
+    workspace = server.config.workspace_root / "ownerless01"
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "report.md").write_text("# 旧报告\n", encoding="utf-8")
-    server.store.create("历史研究", run_id="legacy01", workspace=workspace)
+    server.store.create("历史研究", run_id="ownerless01", workspace=workspace, harness="pi", harness_pack="pi", executor="inproc")
     server.store.update(
-        "legacy01",
+        "ownerless01",
         status="finished",
         report_path=str(workspace / "report.md"),
         finished_at=time.time(),
     )
     token = assertion("tenant-alpha", "user-a")
     assert json.loads(request(server, "/api/runs", token=token)[2])["runs"] == []
-    assert request(server, "/api/runs/legacy01", token=token)[0] == 404
-    assert request(server, "/api/runs/legacy01/report", token=token)[0] == 404
-    assert request(server, "/api/runs/legacy01/events", token=token)[0] == 404
-    assert request(server, "/api/runs/legacy01/stop", method="POST", token=token)[0] == 404
-    assert request(server, "/api/runs/legacy01/children", token=token)[0] == 404
+    assert request(server, "/api/runs/ownerless01", token=token)[0] == 404
+    assert request(server, "/api/runs/ownerless01/report", token=token)[0] == 404
+    assert request(server, "/api/runs/ownerless01/events", token=token)[0] == 404
+    assert request(server, "/api/runs/ownerless01/stop", method="POST", token=token)[0] == 404
+    assert request(server, "/api/runs/ownerless01/children", token=token)[0] == 404
     assert (workspace / "report.md").read_text(encoding="utf-8") == "# 旧报告\n"
 
 

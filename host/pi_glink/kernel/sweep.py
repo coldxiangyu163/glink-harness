@@ -14,11 +14,11 @@ runner 里的类型分支。
   与 ``subagent-artifacts/`` 同树同边界（架构 §6.1）。
 * ``rewrite=False``：只读扫描，把文本里的凭据形状值并入本 run 的脱敏边界，
   文件字节不动。ACP 状态根是 **agent 自己的会话存储**：改写会破坏追问要
-  续接的会话，因此既有义务是「不重写，边界靠 redactor 知道这些值保持」
+  续接的会话，因此不重写，边界靠 redactor 知道这些值保持
   （``docs/acp-integration-notes.md`` §10.2、§14.1）。
 * ``credential_copies``：宿主注入的凭据副本在该根下的**已知相对路径**，只读
-  扫描完成之后逐个删除（GLINK-OBS-01：原义务「副本随 run 目录生命周期保留」
-  → 新义务「收尾删除」，见 ``docs/acp-integration-notes.md`` §18.4）。只删
+  扫描完成之后逐个删除（docs/adr/0003、``docs/acp-integration-notes.md``
+  §18.4）。只删
   列出的路径本身（不按模式匹配、不跟随链接、路径必须在根内）；删除失败记入
   收尾事实并告警，不改变 run 终态。
 * ``scan=False``：该根只做 ``credential_copies`` 删除，不扫描内容。pi 的运行期
@@ -27,7 +27,7 @@ runner 里的类型分支。
   ``npm/``）不是内核写出的会话，逐文件扫描只有开销。
 
 runner 只按契约遍历：主会话文件是否属于某个根、根能否重写都由运行时声明，
-runner 不再询问具体 runtime 类型的属性。
+runner 不询问具体 runtime 类型的属性。
 """
 
 from __future__ import annotations
