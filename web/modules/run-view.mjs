@@ -290,7 +290,7 @@ export function createRunView({
     const last = [...model.items].reverse().find((item) => item.kind !== 'turn' && item.kind !== 'stage');
     if (!last) return { label: '正在准备研究', live: false };
     if (last.kind === 'tool' && last.status === 'running') {
-      return { label: describeTool(last.name, last.args).active, live: true };
+      return { label: describeTool(last.name, last.args, last.presentation).active, live: true };
     }
     if (last.kind === 'subagent' && last.status === 'running') {
       return { label: describeChild(last).active, live: true };
@@ -467,7 +467,7 @@ export function createRunView({
       }
       case 'tool': {
         node.dataset.status = item.status;
-        const described = describeTool(item.name, item.args);
+        const described = describeTool(item.name, item.args, item.presentation);
         const iconNode = node.querySelector('.pi-tool-head .icon');
         if (iconNode.dataset.icon !== described.icon) iconNode.dataset.icon = described.icon;
         const nameNode = node.querySelector('.pi-tool-name');

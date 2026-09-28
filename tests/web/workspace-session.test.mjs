@@ -13,7 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createWorkspace } from '../../web/modules/workspace.mjs';
-import { ApiError, getCsrfToken, setCsrfToken } from '../../web/modules/api.mjs';
+import { ApiError, createApi, getCsrfToken, setCsrfToken } from '../../web/modules/api.mjs';
 import { EVENT_VERSIONS } from '../../web/modules/event-schema.gen.mjs';
 import { createDomStub } from './dom-stub.mjs';
 
@@ -256,6 +256,33 @@ test('entering with a session records the CSRF token and the real identity', asy
   assert.equal(h.dom.getElement('account-logout').hidden, false);
   assert.equal(h.dom.getElement('account-invite').hidden, false);
   assert.equal(h.auth.shown.at(-1).mode, 'hide');
+});
+
+test('a live workspace refreshes /api/me after csrf_invalid and retries with the new token', async (t) => {
+  const calls = [];
+  let token = 'old';
+  let refused = false;
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    const respond = (status, payload) => ({ ok: status === 200, status, text: async () => JSON.stringify(payload) });
+    if (url === '/api/me') return respond(200, { ...ACCOUNTS_ME, csrfToken: token });
+    if (url === '/api/health') return respond(200, { pi: { available: true }, configured: { model: true } });
+    if (url === '/api/config') return respond(200, { model: 'test-model' });
+    if (url === '/api/runs' && init.method === 'GET') return respond(200, { runs: [] });
+    if (url === '/api/runs' && init.method === 'POST') {
+      if (!refused) { refused = true; token = 'new'; return respond(403, { error: 'csrf_invalid' }); }
+      return respond(200, { run: runView('new-run', '重试的问题') });
+    }
+    throw new Error(`unexpected ${url}`);
+  };
+  const h = harness({ api: createApi({ fetchImpl }), eventSourceFactory: () => ({ addEventListener() {}, close() {} }) });
+  t.after(() => h.dom.restore());
+  await h.workspace.init();
+  await h.workspace.startRun('重试的问题');
+  assert.deepEqual(calls.filter(({ url, init }) => url === '/api/runs' && init.method === 'POST').map(({ init }) => init.headers['X-Pi-Glink-CSRF']), ['old', 'new']);
+  assert.equal(calls.filter(({ url }) => url === '/api/me').length, 2);
+  assert.equal(getCsrfToken(), 'new');
+  assert.equal(h.dom.getElement('app-shell').hidden, false);
 });
 
 test('a 401 while reading history closes the stream, clears the screen and returns to login', async (t) => {

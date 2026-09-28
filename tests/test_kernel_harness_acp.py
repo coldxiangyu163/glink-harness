@@ -21,6 +21,7 @@ from acp_pack import apply_acp_pack
 from pi_glink.contracts import FollowupUnavailable
 from pi_glink.kernel.harness import select_family
 from pi_glink.kernel.harness_acp import AcpHarnessFamily
+from pi_glink.kernel.acp_projection import AcpProjector
 from pi_glink.redaction import SecretRedactor
 from pi_glink.store import FINISHED, RunSpec, RunStore
 
@@ -105,6 +106,33 @@ def craft_parent(store: RunStore, run_id: str, **kwargs: Any) -> Any:
     """write_parent + store.get（单父记录的便捷封装）。"""
     write_parent(store, run_id, **kwargs)
     return store.get(run_id)
+
+
+@pytest.mark.parametrize(
+    ("acp_kind", "expected"),
+    [
+        ("read", "read"), ("edit", "edit_file"), ("delete", "delete"),
+        ("move", "move"), ("search", "find"), ("execute", "execute"),
+        ("think", "think"), ("fetch", "fetch_page"),
+        ("switch_mode", "switch_mode"), ("other", "generic"),
+        ("unknown", "generic"),
+    ],
+)
+def test_acp_tool_kind_projects_its_own_presentation(
+    acp_kind: str, expected: str
+) -> None:
+    projector = AcpProjector(SecretRedactor())
+    produced = projector.project({
+        "method": "session/update", "params": {"update": {
+            "sessionUpdate": "tool_call", "toolCallId": "c1", "name": "bash",
+            "kind": acp_kind, "status": "pending", "rawInput": {"command": "pwd"},
+        }}
+    })
+    assert produced[0][1]["kind"] == acp_kind
+    assert produced[0][1]["presentation"] == expected
+    # A generic ACP kind never gets pi's bash/command label by name.
+    if acp_kind == "other":
+        assert produced[0][1]["presentation"] != "execute"
 
 
 # -- (e) 终态词汇归一化 ----------------------------------------------------------

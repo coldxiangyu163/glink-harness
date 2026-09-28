@@ -176,6 +176,7 @@ SPECS: tuple[EventSpec, ...] = (
             _f("toolName", "string"),
             _f("args", "object"),
             _opt("kind", "string"),
+            _opt("presentation", "string", doc="族投影的工具呈现提示；缺失时旧帧由读侧回退"),
         ),
     ),
     EventSpec(

@@ -16,6 +16,7 @@ import {
   formatDuration,
   formatTokens,
   modelLabel,
+  noticeText,
   reportFileName,
   researchTitle,
   stageText,
@@ -112,6 +113,18 @@ test('tool rows speak in actions and objects, never engine tool names', () => {
   }
 });
 
+test('projected presentation wins over names; legacy tool frames still use their old names', () => {
+  const projected = describeTool('bash', { command: 'pwd' }, 'fetch_page');
+  assert.equal(projected.action, '读取网页');
+  assert.equal(projected.icon, 'globe');
+  assert.equal(describeTool('bash', { command: 'pwd' }).action, '执行');
+  const acpOther = describeTool('web_search', { query: '甲' }, 'generic');
+  assert.equal(acpOther.action, '调用工具', 'ACP other must not inherit pi tool-name meaning');
+  assert.equal(describeTool('tool', {}, 'delete').action, '删除');
+  assert.equal(describeTool('tool', {}, 'think').action, '思考');
+  assert.equal(describeTool('tool', {}, 'unknown_hint').action, '调用工具');
+});
+
 test('only unusual tool states get a word', () => {
   assert.equal(toolStateLabel({ status: 'done' }), '');
   assert.equal(toolStateLabel({ status: 'running' }), '');
@@ -126,6 +139,26 @@ test('lifecycle stages stay hidden; stages that change expectations are shown', 
   assert.equal(stageText({ stage: 'finished' }), null);
   assert.match(stageText({ stage: 'auto_retry_start', attempt: 2 }), /第 2 次/);
   assert.match(stageText({ stage: 'compaction_start' }), /整理上下文/);
+  assert.equal(stageText({ stage: 'plan', entries: [{ content: '查询资料', status: 'in_progress' }] }), '正在整理研究计划');
+  assert.equal(stageText({ stage: 'plan', entries: [] }), '正在整理研究计划');
+  assert.equal(stageText({ stage: 'plan', entries: [{ content: '完成', status: 'completed' }] }), '研究计划已更新');
+});
+
+test('warnings use reader vocabulary instead of exposing protocol or failure codes', () => {
+  const messages = {
+    report_rejected: '研究报告未能保存',
+    child_progress_failed: '子代理的进度暂时无法更新',
+    child_enrichment_failed: '子代理的附加资料暂时无法读取',
+    acp_permission_denied: '一项工具操作未获授权',
+    acp_content_not_projected: '部分研究内容无法显示',
+    acp_usage_invalid: '使用量信息暂时无法显示',
+  };
+  for (const [message, expected] of Object.entries(messages)) {
+    assert.equal(noticeText({ message }), expected);
+    assert.ok(!/acp_|child_|report_/.test(expected));
+  }
+  assert.notEqual(noticeText({ message: 'acp_future_notice' }), '研究过程中出现了一条提示');
+  assert.notEqual(noticeText({ message: 'child_future_failed' }), '研究过程中出现了一条提示');
 });
 
 test('usage, model and download names are reader-facing', () => {

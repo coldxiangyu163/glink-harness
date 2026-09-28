@@ -19,6 +19,7 @@ Design rules:
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Iterable, Mapping
 
 from .. import event_schema, events
@@ -56,6 +57,28 @@ _DELTA_EVENTS = {
     "text_delta": events.ASSISTANT_DELTA,
     "thinking_delta": events.THINKING_DELTA,
 }
+
+# pi-family tool semantics belong here, not in the cross-harness reader. The
+# browser keeps its name-based rules only for immutable historical tool frames.
+_PI_TOOL_PRESENTATION = (
+    (r"^(web_?search|search_web|websearch)$", "search_web"),
+    (r"^get_search_content$", "read_search"),
+    (r"fetch|browse|webfetch|http|scrape", "fetch_page"),
+    (r"^(bash|shell|terminal|exec|run_command)$", "execute"),
+    (r"^(read|view|cat|open_file|read_file)$", "read_file"),
+    (r"^(write|create|create_file|write_file)$", "write_file"),
+    (r"edit|apply|patch", "edit_file"),
+    (r"^(subagent|task|spawn_agent|delegate)$", "delegate"),
+    (r"^(grep|find|glob|ls|list|search)$", "find"),
+    (r"todo|plan", "plan"),
+)
+
+
+def _pi_tool_presentation(name: str) -> str:
+    for pattern, hint in _PI_TOOL_PRESENTATION:
+        if re.search(pattern, name, re.IGNORECASE):
+            return hint
+    return "generic"
 
 
 def project_event(
@@ -362,6 +385,7 @@ def _tool_execution_start(
                 "toolCallId": str(frame.get("toolCallId") or ""),
                 "toolName": str(frame.get("toolName") or ""),
                 "args": project_args(frame.get("args")),
+                "presentation": _pi_tool_presentation(str(frame.get("toolName") or "")),
             },
         )
     ]

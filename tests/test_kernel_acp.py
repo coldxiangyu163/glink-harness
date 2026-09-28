@@ -334,6 +334,7 @@ def test_tool_call_lifecycle_projects_to_started_updated_finished() -> None:
                 "toolName": "bash",
                 "args": {"command": "ls -la"},
                 "kind": "execute",
+                "presentation": "execute",
             },
         )
     ]

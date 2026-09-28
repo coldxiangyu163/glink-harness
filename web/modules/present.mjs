@@ -214,10 +214,29 @@ const TOOL_RULES = [
     object: () => '' },
 ];
 
-export function describeTool(name, args = {}) {
+// The projector chooses a semantic hint per family; these are only the
+// reader-facing words and object formatting. The name rules below are read
+// solely for old persisted frames without a hint (including child progress).
+const PRESENTATION_RULES = {
+  search_web: TOOL_RULES[0], read_search: TOOL_RULES[1], fetch_page: TOOL_RULES[2],
+  execute: TOOL_RULES[3], read_file: TOOL_RULES[4], write_file: TOOL_RULES[5],
+  edit_file: TOOL_RULES[6], delegate: TOOL_RULES[7], find: TOOL_RULES[8],
+  plan: TOOL_RULES[9],
+  read: { icon: 'file-text', action: '读取', active: '正在读取',
+    object: (args) => firstText([args.path, args.url, args.query]) },
+  delete: { icon: 'new-chat', action: '删除', active: '正在删除',
+    object: (args) => pathObject(args.path ?? '') },
+  move: { icon: 'new-chat', action: '移动', active: '正在移动',
+    object: (args) => pathObject(args.path ?? '') },
+  think: { icon: 'checklist', action: '思考', active: '正在思考', object: () => '' },
+  switch_mode: { icon: 'checklist', action: '切换工作方式', active: '正在切换工作方式', object: () => '' },
+};
+
+export function describeTool(name, args = {}, presentation) {
   const safeArgs = args && typeof args === 'object' ? args : {};
-  const text = String(name ?? '');
-  const rule = TOOL_RULES.find((candidate) => candidate.test.test(text));
+  const rule = typeof presentation === 'string'
+    ? PRESENTATION_RULES[presentation]
+    : TOOL_RULES.find((candidate) => candidate.test.test(String(name ?? '')));
   if (rule) {
     return {
       icon: rule.icon,
@@ -338,21 +357,41 @@ const VISIBLE_STAGES = {
   compaction_end: '上下文整理完成',
   auto_retry_start: '模型服务暂时不可用，正在自动重试',
   auto_retry_end: '重试完成',
+  plan: '正在整理研究计划',
 };
 
 export function stageText(item) {
   const base = VISIBLE_STAGES[item.stage];
   if (!base) return null;
   if (item.stage === 'auto_retry_start' && item.attempt) return `${base}（第 ${item.attempt} 次）`;
+  if (item.stage === 'plan' && Array.isArray(item.entries) && item.entries.length > 0 &&
+      item.entries.every((entry) => entry?.status === 'completed')) return '研究计划已更新';
   return base;
 }
 
 const NOTICE_TEXT = {
   extension_error: '有一项扩展能力未能正常加载，研究会继续进行，但部分能力可能不可用',
+  report_rejected: '研究报告未能保存',
+  child_doc_failed: '子代理记录暂时无法保存',
+  child_progress_failed: '子代理的进度暂时无法更新',
+  child_enrichment_failed: '子代理的附加资料暂时无法读取',
+  acp_session_resumed: '已接续此前的研究',
+  acp_permission_allowed: '已允许一项工具操作',
+  acp_permission_denied: '一项工具操作未获授权',
+  acp_content_not_projected: '部分研究内容无法显示',
+  acp_update_not_projected: '部分研究进度无法显示',
+  acp_available_commands: '可用研究操作已更新',
+  acp_usage_invalid: '使用量信息暂时无法显示',
+  acp_usage_cost_invalid: '费用信息暂时无法显示',
 };
 
 export function noticeText(item) {
-  return NOTICE_TEXT[item.message] ?? '研究过程中出现了一条提示';
+  if (Object.hasOwn(NOTICE_TEXT, item.message)) return NOTICE_TEXT[item.message];
+  if (String(item.message ?? '').startsWith('child_') && String(item.message).endsWith('_failed')) {
+    return '子代理的部分记录暂时无法更新';
+  }
+  if (String(item.message ?? '').startsWith('acp_')) return '部分研究进度暂时无法显示';
+  return '研究过程中出现了一条提示';
 }
 
 /** A download name the reader can file away: 研究报告-<title>.md. */

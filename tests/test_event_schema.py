@@ -98,6 +98,16 @@ def test_violations_are_named(event_type: str, payload: Any, needle: str) -> Non
     assert found and any(needle in problem for problem in found), found
 
 
+def test_tool_presentation_is_additive_and_old_tool_frames_remain_valid() -> None:
+    old = {"toolCallId": "c1", "toolName": "bash", "args": {"command": "ls"}}
+    assert event_schema.EVENT_VERSIONS[events.TOOL_STARTED] == 1
+    assert event_schema.problems(events.TOOL_STARTED, old) == []
+    assert event_schema.problems(events.TOOL_STARTED, {**old, "presentation": "execute"}) == []
+    assert any("presentation" in p for p in event_schema.problems(
+        events.TOOL_STARTED, {**old, "presentation": {"action": "execute"}}
+    ))
+
+
 def test_an_integer_satisfies_a_number_field_and_open_payloads_pass_extra_keys() -> None:
     terminal = {**_minimal(event_schema.BY_TYPE["run_finished"]), "durationSeconds": 3}
     assert event_schema.problems("run_finished", terminal) == []

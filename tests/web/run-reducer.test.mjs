@@ -88,6 +88,18 @@ test('cumulative tool snapshots replace, deltas append, the authoritative messag
   );
 });
 
+test('old tool frame replays unchanged; optional presentation survives new frame projection', () => {
+  const old = load('tool-snapshot').find((frame) => frame.type === 'tool_started');
+  const saved = JSON.stringify(old);
+  const previous = reduce(createRunState({ runId: old.runId }), old);
+  assert.equal(previous.items[0].presentation, undefined);
+  assert.equal(JSON.stringify(old), saved, 'replay must not rewrite historical input');
+  const withHint = { ...old, payload: { ...old.payload, presentation: 'execute' } };
+  const next = reduce(createRunState({ runId: old.runId }), withHint);
+  assert.equal(next.items[0].presentation, 'execute');
+  assert.equal(JSON.stringify(old), saved);
+});
+
 test('a mid-run snapshot shows the latest accumulated output, not a concatenation', () => {
   const frames = load('tool-snapshot');
   const upTo = frames.findLastIndex((frame) => frame.type === 'tool_updated');
