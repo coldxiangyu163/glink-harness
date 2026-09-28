@@ -38,6 +38,7 @@ from pi_glink.runs.runner import (
     UnsupportedCommand,
 )
 from pi_glink.store import CANCELLED, FAILED, FINISHED, RunStore
+from store_helpers import events_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"
@@ -78,10 +79,8 @@ def build_manager(
 
 
 def read_events(store: RunStore, run_id: str) -> list[Mapping[str, Any]]:
-    path = store.events_path(run_id)
-    if not path.is_file():
-        return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    text = events_text(store, run_id)
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
 def read_log(path: Path) -> list[Mapping[str, Any]]:
@@ -896,7 +895,7 @@ def test_injected_credential_values_are_redacted_from_the_run(tmp_path: Path) ->
     )
     assert (run_home / "state").stat().st_mode & 0o777 == 0o700
     assert source.read_text(encoding="utf-8") == json.dumps({"seedToken": secret})
-    raw = store.events_path(record.run_id).read_text(encoding="utf-8")
+    raw = events_text(store, record.run_id)
     assert secret not in raw
     assert "[REDACTED]" in raw
     # The host config did not carry the secret: only the copied file could
@@ -1061,7 +1060,7 @@ def test_acp_secrets_streamed_by_the_agent_are_redacted(tmp_path: Path) -> None:
     record = manager.start("SECRET 请回显凭据")
     final = manager.wait(record.run_id, timeout=30)
     assert final is not None and final.status == FINISHED
-    raw = store.events_path(record.run_id).read_text(encoding="utf-8")
+    raw = events_text(store, record.run_id)
     assert secret not in raw
     assert "[REDACTED]" in raw
 

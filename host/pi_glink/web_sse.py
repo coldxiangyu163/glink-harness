@@ -25,7 +25,7 @@ logger = logging.getLogger("pi_glink.host")
 
 
 def persisted_sse(event: Mapping[str, Any]) -> str:
-    """SSE frame for an event read back from events.jsonl (same shape as live frames)."""
+    """SSE frame for an event read back from the event store (same shape as live frames)."""
     body = json.dumps(event, ensure_ascii=False)
     return f"id: {event.get('seq', '')}\nevent: {event['type']}\ndata: {body}\n\n"
 
@@ -147,9 +147,9 @@ class SseMixin:
         live = bus.is_open(run_id)
         # The durable log is the replay source of truth; the bus only knows runs
         # started by this host process and is used for the live tail. A run from
-        # an earlier process is replayed from events.jsonl — otherwise every
-        # history entry would 404 after a restart.
-        persisted = store.events_path(run_id).is_file()
+        # an earlier process is replayed from the run database — otherwise
+        # every history entry would 404 after a restart.
+        persisted = store.get(run_id) is not None
         if not live and not persisted:
             self._send_json(
                 HTTPStatus.NOT_FOUND, {"error": "unknown_run", "runId": run_id},

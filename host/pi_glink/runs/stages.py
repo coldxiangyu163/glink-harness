@@ -668,10 +668,8 @@ class CommitStage:
 
         try:
             if committed:
-                try:
-                    self.s.store.settle(run_id)
-                except Exception:  # noqa: BLE001 - readers project the committed frame
-                    logger.exception("settling the run record failed run=%s", run_id)
+                # The terminal frame and the terminal record were one store
+                # transaction: every reader already sees the terminal state.
                 self.s.bus.close(run_id)
                 self._on_committed(run_id)
             else:

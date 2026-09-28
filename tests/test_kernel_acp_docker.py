@@ -37,6 +37,7 @@ from pi_glink.kernel.execution import ExecutionSpec
 from pi_glink.kernel.sandbox import DockerSandbox, E2BSandbox, open_sandbox
 from pi_glink.runs.runner import RunManager
 from pi_glink.store import FAILED, FINISHED, RunStore, RunSpec
+from store_helpers import finish
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 NOTES = REPO_ROOT / "docs" / "acp-integration-notes.md"
@@ -449,13 +450,8 @@ def test_the_acp_container_identity_is_reconciled_by_its_persisted_name(
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
     store = RunStore(config.data_root / "runs")
     store.create("残留的 ACP run", run_id="acp-leak", spec=RunSpec(family="acp", pack="dsh", executor="docker"))
-    store.update(
-        "acp-leak",
-        status=FINISHED,
-        finished_at=1.0,
-        container_name=docker_env.container_name_for("acp-leak"),
-        cleanup={"released": False, "failures": ["synthetic"], "external": {}},
-    )
+    store.update("acp-leak", container_name=docker_env.container_name_for("acp-leak"))
+    finish(store, "acp-leak", FINISHED, finished_at=1.0, cleanup={"released": False, "failures": ["synthetic"], "external": {}})
     probed: list[str] = []
 
     def probe(name: str) -> tuple[bool, str]:

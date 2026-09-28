@@ -55,6 +55,7 @@ from pi_glink.kernel.sandbox import E2BSandbox, open_sandbox
 from pi_glink.kernel.rpc import PiRpcClient
 from pi_glink.runs.runner import RunManager
 from pi_glink.store import RunStore
+from store_helpers import events_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -453,7 +454,7 @@ def test_e2b_run_mirrors_and_redacts_subagent_files(tmp_path: Path) -> None:
     terminal = _event_kinds(storage, record.run_id)[-1]
     assert terminal == "run_finished"
     last_frame = json.loads(
-        (storage.run_dir(record.run_id) / "events.jsonl").read_text("utf-8").strip().splitlines()[-1]
+        events_text(storage, record.run_id).strip().splitlines()[-1]
     )
     assert last_frame["payload"].get("artifactFailures", []) == []
 
@@ -530,12 +531,10 @@ def _manager(config, sandbox, tmp_path: Path):
 
 
 def _event_kinds(storage: RunStore, run_id: str) -> list[str]:
-    path = storage.events_path(run_id)
-    if not path.is_file():
-        return []
+    text = events_text(storage, run_id)
     return [
         json.loads(line)["type"]
-        for line in path.read_text(encoding="utf-8").splitlines()
+        for line in text.splitlines()
         if line.strip()
     ]
 

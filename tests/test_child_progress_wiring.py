@@ -44,6 +44,7 @@ from pi_glink.runs.child_progress_observer import ChildProgressObserver
 from pi_glink.runs.runner import RunManager
 from pi_glink.runs.state import RunExecution as _Execution
 from pi_glink.store import RunStore
+from store_helpers import events_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -78,12 +79,10 @@ def build_manager(tmp_path: Path, **overrides: str):
 
 
 def read_events(store: RunStore, run_id: str) -> list[Mapping[str, Any]]:
-    path = store.events_path(run_id)
-    if not path.is_file():
-        return []
+    text = events_text(store, run_id)
     return [
         json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
+        for line in text.splitlines()
         if line.strip()
     ]
 

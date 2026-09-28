@@ -106,7 +106,6 @@ class HostConfig:
     #: time and are also the accepted ``/<name> <topic>`` slash commands; a
     #: missing directory offers no names and never fails startup.
     blueprints_dir: Path
-    session_dir: Path
     workspace_root: Path
     openai_base_url: str
     openai_model: str
@@ -455,7 +454,6 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         agent_config_dir=agent_config_dir,
         methodology_dir=methodology_dir,
         blueprints_dir=blueprints_dir,
-        session_dir=_path(values, "PI_CODING_AGENT_SESSION_DIR", data_root / "sessions"),
         workspace_root=_path(values, "PI_GLINK_WORKSPACE_ROOT", data_root / "workspaces"),
         openai_base_url=base_url,
         openai_model=model,

@@ -32,6 +32,7 @@ from pi_glink.kernel.execution import (
     SessionInfo,
 )
 from pi_glink.tenancy import ASSERTION_HEADER, issue_assertion
+from store_helpers import finish
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUDIENCE = "pi-glink-test"
@@ -708,7 +709,8 @@ def test_foreign_parent_is_unknown_and_copies_nothing(
     assert parent_record is not None and parent_record.session_file
     session_path = Path(parent_record.session_file)
     session_bytes = session_path.read_bytes()
-    sessions_before = sorted(p.name for p in Path(server.config.session_dir).iterdir())
+    runs_root = Path(server.config.data_root) / "runs"
+    sessions_before = sorted(str(p) for p in runs_root.glob("*/sessions/*"))
 
     status, _headers, raw = request(
         server,
@@ -721,7 +723,7 @@ def test_foreign_parent_is_unknown_and_copies_nothing(
     assert json.loads(raw) == {"error": "unknown_run"}
     assert server.store.list_for("tenant-beta", limit=None) == []
     assert (
-        sorted(p.name for p in Path(server.config.session_dir).iterdir()) == sessions_before
+        sorted(str(p) for p in runs_root.glob("*/sessions/*")) == sessions_before
     ), "异租户追问不得创建会话目录或复制会话"
     assert session_path.read_bytes() == session_bytes
     assert server.store.get(parent["runId"]).event_count == parent_record.event_count
@@ -778,19 +780,18 @@ def test_unknown_and_ownerless_parents_are_unknown_runs(server: PiGlinkServer) -
 
     workspace = server.config.workspace_root / "ownerlessparent"
     workspace.mkdir(parents=True, exist_ok=True)
-    session_dir = Path(server.config.session_dir) / "ownerlessparent"
+    server.store.create("旧研究", run_id="ownerlessparent", workspace=workspace, spec=RunSpec(family="pi", pack="pi", executor="inproc"))
+    session_dir = server.store.session_dir("ownerlessparent")
     session_dir.mkdir(parents=True, exist_ok=True)
     session_file = session_dir / "ownerless.jsonl"
     original = '{"ownerless": true}\n'
     session_file.write_text(original, encoding="utf-8")
-    server.store.create("旧研究", run_id="ownerlessparent", workspace=workspace, spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     server.store.update(
         "ownerlessparent",
-        status="finished",
         session_id="ownerless-session",
         session_file=str(session_file),
-        finished_at=time.time(),
     )
+    finish(server.store, "ownerlessparent", cleanup={"released": True})
     status, _headers, raw = request(
         server,
         "/api/runs",
@@ -838,7 +839,7 @@ def test_same_tenant_followup_resumes_private_session_and_report(
     assert child_record.session_id == parent_record.session_id
     # 父会话未被改写；子会话是本 run 专属的副本并带上追问。
     assert parent_session.read_bytes() == parent_bytes
-    child_session = Path(server.config.session_dir) / child["runId"] / "continued.jsonl"
+    child_session = (server.config.data_root / "runs" / child["runId"] / "sessions") / "continued.jsonl"
     assert child_session.is_file()
     assert "追问细节" in child_session.read_text(encoding="utf-8")
     # 上一轮报告已复制进子工作区，但本轮没有新报告。
@@ -890,12 +891,7 @@ def test_ownerless_records_are_invisible_to_every_tenant(
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "report.md").write_text("# 旧报告\n", encoding="utf-8")
     server.store.create("历史研究", run_id="ownerless01", workspace=workspace, spec=RunSpec(family="pi", pack="pi", executor="inproc"))
-    server.store.update(
-        "ownerless01",
-        status="finished",
-        report_path=str(workspace / "report.md"),
-        finished_at=time.time(),
-    )
+    finish(server.store, "ownerless01", "finished", report_path=str(workspace / "report.md"), finished_at=time.time())
     token = assertion("tenant-alpha", "user-a")
     assert json.loads(request(server, "/api/runs", token=token)[2])["runs"] == []
     assert request(server, "/api/runs/ownerless01", token=token)[0] == 404
@@ -1212,21 +1208,23 @@ def test_unreleased_resources_occupy_slots_inside_the_commit_window(
     )
     thread = start_server(instance)
     try:
-        original_settle = instance.store.settle
+        # The terminal commit is one store transaction; the window under test
+        # is the stream close that follows it and precedes table removal.
+        original_close = instance.bus.close
         gate = threading.Event()
         entered = threading.Event()
 
-        def gated_settle(run_id: str):
+        def gated_close(run_id: str):
             entered.set()
             assert gate.wait(timeout=10.0)
-            return original_settle(run_id)
+            return original_close(run_id)
 
-        monkeypatch.setattr(instance.store, "settle", gated_settle)
+        monkeypatch.setattr(instance.bus, "close", gated_close)
         alpha = assertion("tenant-alpha", "user-a")
         beta = assertion("tenant-beta", "user-b")
         run = start_run(instance, "窗口内未释放", token=alpha)
         try:
-            assert entered.wait(timeout=10.0), "run 没有走到落定副本阶段"
+            assert entered.wait(timeout=10.0), "run 没有走到终态提交之后的窗口"
             assert wait_for_terminal(instance, run["runId"], alpha)["status"] == "finished"
             status, _headers, raw = request(
                 instance, "/api/runs", method="POST", body={"prompt": "窗口内下一条"}, token=beta

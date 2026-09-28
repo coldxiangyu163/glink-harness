@@ -216,8 +216,8 @@ def test_argv_and_env_redirect_pi_to_the_runtime_directory(
     env = spawn.env
     assert env["PI_CODING_AGENT_DIR"] == str(runtime.directory)
     assert env["PI_CODING_AGENT_SESSION_DIR"] == str(runtime.session_dir)
-    assert str(config.session_dir) not in env["PI_CODING_AGENT_SESSION_DIR"], (
-        "the session directory is the run's own, not the shared base"
+    assert Path(env["PI_CODING_AGENT_SESSION_DIR"]) == tmp_path / "runs" / "run-1" / "sessions", (
+        "the session directory is the run's own, inside its run directory"
     )
     assert "OPENAI_API_KEY" not in env, "the model key travels via auth.json, not the environment"
     assert env["PATH"] == "/usr/bin"

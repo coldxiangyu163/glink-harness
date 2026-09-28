@@ -17,6 +17,7 @@ from pi_glink.store import RunSpec
 from pi_glink.app import PiGlinkServer, create_server
 from pi_glink.config import build_config
 from pi_glink.kernel.rpc import PiRpcClient
+from store_helpers import finish
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
@@ -284,7 +285,7 @@ def test_followup_refuses_a_kernel_that_did_not_resume_parent_session(tmp_path: 
         assert final["status"] == "failed"
         assert instance.store.get(child_id).parent_run_id == parent_id
         # The child never prompted the wrong session; only the copied seed exists.
-        copied = Path(instance.config.session_dir) / child_id / "continued.jsonl"
+        copied = (instance.config.data_root / "runs" / child_id / "sessions") / "continued.jsonl"
         assert "不应交给错误的会话" not in copied.read_text(encoding="utf-8")
     finally:
         instance.shutdown()
@@ -474,7 +475,7 @@ def test_event_stream_replays_runs_from_an_earlier_host_process(tmp_path: Path) 
     """History replay must survive a host restart.
 
     The in-memory bus only knows runs this process started; a run from an
-    earlier process is replayed from its persisted events.jsonl instead of
+    earlier process is replayed from its persisted event rows instead of
     answering 404 (which left the browser with an empty timeline).
     """
     first = create_server(make_config(tmp_path), client_factory=fake_factory())
@@ -626,8 +627,7 @@ def _workspace_report_record(server: PiGlinkServer, run_id: str, *, report: str 
         target.write_text(report, encoding="utf-8")
     store.create("研究", run_id=run_id, workspace=workspace,
                  spec=RunSpec(family="pi", pack="pi", executor="inproc"))
-    store.update(run_id, status="finished", report_path=str(report_path or target),
-                 finished_at=time.time(), event_count=0)
+    finish(store, run_id, "finished", report_path=str(report_path or target), finished_at=time.time())
     return target
 
 
@@ -673,8 +673,7 @@ def test_a_host_artifact_behind_a_directory_link_is_not_served(server: PiGlinkSe
     store = server.store
     store.create("产物目录被替换", run_id="swapartifact", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     (store.run_dir("swapartifact") / "artifacts").symlink_to(outside, target_is_directory=True)
-    store.update("swapartifact", status="finished",
-                 report_path=str(store.run_dir("swapartifact") / "artifacts" / "report.md"))
+    finish(store, "swapartifact", "finished", report_path=str(store.run_dir("swapartifact") / "artifacts" / "report.md"))
     assert _view(server, "swapartifact")["hasReport"] is False
     assert request(server, "/api/runs/swapartifact/report")[0] == 404
 

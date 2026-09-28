@@ -230,7 +230,7 @@ class RunChannel:
                 agent_name = agent_info.get("name")
                 if isinstance(agent_name, str) and agent_name:
                     # 与事件载荷同一边界：内核自报的身份同样过 run 的脱敏并
-                    # 限幅，落进 meta.json 的永远是脱敏后的值。
+                    # 限幅，落进 run 记录的永远是脱敏后的值。
                     changes["agent"] = self._secrets_of(execution).redact(agent_name)[:128]
             self.store.update(run_id, **changes)
         payload: dict[str, Any] = dict(session.payload)

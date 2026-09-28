@@ -259,7 +259,7 @@ def _message_update(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]
 
 #: How much of an assistant message's authoritative text the event log keeps.
 #: The streamed deltas already carried the whole answer to the browser; this
-#: bound exists so one frame cannot blow up ``events.jsonl`` and the replay ring.
+#: bound exists so one frame cannot blow up the ``events`` table and the replay ring.
 #: When it clips, the payload says so (``truncated: true``) and the front-end
 #: keeps the longer streamed body instead of replacing it with less.
 ASSISTANT_TEXT_LIMIT = TOOL_TEXT_LIMIT * 4

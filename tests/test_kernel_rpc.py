@@ -352,7 +352,7 @@ def test_projection_matches_the_shared_payload_corpus() -> None:
 #
 # GLINK-INTEG-01: the streamed deltas carry the whole answer to the browser while
 # the terminal ``assistant_message`` keeps only ``ASSISTANT_TEXT_LIMIT`` of it
-# (one frame must not blow up events.jsonl). A client that already holds the
+# (one frame must not blow up the event log). A client that already holds the
 # longer streamed body needs to know the authoritative copy is incomplete
 # instead of silently replacing more with less.
 

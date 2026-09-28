@@ -19,6 +19,7 @@ from ..store import (
     CHILDREN_DIRNAME,
     FAILED,
     FINISHED,
+    SESSIONS_DIRNAME,
     SUBAGENTS_DIRNAME,
     RunRecord,
 )
@@ -85,7 +86,7 @@ class PiHarnessFamily(HarnessFamily):
     ) -> bytes | None:
         # The recorded path is not a capability. It must be a direct file in
         # that run's own session directory; ArtifactTree refuses links.
-        session_dir = Path(self._config.session_dir) / parent.run_id
+        session_dir = self._store.session_dir(parent.run_id)
         path = Path(parent.session_file or "")
         if path.parent != session_dir or path.suffix != ".jsonl":
             raise FollowupUnavailable("session_unavailable")
@@ -144,7 +145,7 @@ class PiHarnessFamily(HarnessFamily):
         runtime = prepare_agent_dir(
             self._config,
             runtime_dir=run_dir / RUNTIME_DIRNAME,
-            session_dir=Path(self._config.session_dir) / run_id,
+            session_dir=run_dir / SESSIONS_DIRNAME,
             egress=egress,
             # An isolated sandbox runs pi from its image: settings.json names
             # the image-local prebaked packages (the guard verifies them).

@@ -3,7 +3,7 @@
 The host necessarily holds credentials (model key, sandbox key, search key), and
 pi's tools can surface them: a `bash` call can run `env`, a `read` call can open
 the runtime config file, and the model may quote either back into its answer.
-The event stream, `events.jsonl`, the report download and the browser are all
+The event stream, the persisted event log, the report download and the browser are all
 *product* surfaces, so a secret appearing there has already crossed the boundary
 the objective defines: **密钥不进前端**.
 

@@ -25,6 +25,7 @@ from pi_glink.app import create_server
 from pi_glink.config import build_config
 from pi_glink.kernel.rpc import PiRpcClient
 from pi_glink.store import FAILED, RUNNING, RunStore, RunSpec
+from store_helpers import events_text, finish
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
@@ -90,8 +91,8 @@ def test_a_second_host_cannot_reconcile_a_live_owners_run(tmp_path: Path, same_p
     thread.start()
     try:
         run_id = _start_owned_run(first)
-        log_before = first.store.events_path(run_id).read_bytes()
-        meta_before = (first.store.run_dir(run_id) / "meta.json").read_bytes()
+        log_before = events_text(first.store, run_id)
+        meta_before = first.store.get(run_id)
         port = first.server_address[1] if same_port else 0
 
         refusal: Exception | None = None
@@ -105,8 +106,8 @@ def test_a_second_host_cannot_reconcile_a_live_owners_run(tmp_path: Path, same_p
         # The live owner's run is untouched, however the second start ended.
         observed = first.store.get(run_id)
         assert observed.status == RUNNING and observed.stop_reason is None
-        assert first.store.events_path(run_id).read_bytes() == log_before
-        assert (first.store.run_dir(run_id) / "meta.json").read_bytes() == meta_before
+        assert events_text(first.store, run_id) == log_before
+        assert first.store.get(run_id) == meta_before
         assert first.manager.active_run_id == run_id
         # And it was refused for the ownership, not by a later bind failure.
         assert type(refusal).__name__ == "DataRootBusy", refusal
@@ -153,12 +154,12 @@ def test_reconcile_without_ownership_is_refused_and_changes_nothing(tmp_path: Pa
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
     store.create("别的宿主的 run", run_id="theirs", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
-    meta_before = (store.run_dir("theirs") / "meta.json").read_bytes()
+    meta_before = store.get("theirs")
     manager = RunManager(config, EventBus(), store)
     with pytest.raises(OwnershipRequired):
         manager.reconcile()
-    assert (store.run_dir("theirs") / "meta.json").read_bytes() == meta_before
-    assert not store.events_path("theirs").exists()
+    assert store.get("theirs") == meta_before
+    assert store.last_seq("theirs") == 0
 
 
 def test_a_dead_owners_running_record_is_reconciled_by_the_next_owner(tmp_path: Path) -> None:
@@ -184,12 +185,7 @@ def test_resource_adjudication_requires_the_host_to_be_stopped(
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
     store.create("资源未确认", run_id="held", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
-    store.update(
-        "held",
-        status="finished",
-        finished_at=time.time(),
-        cleanup={"released": False, "failures": ["synthetic kill failed"], "external": {}},
-    )
+    finish(store, "held", "finished", finished_at=time.time(), cleanup={"released": False, "failures": ["synthetic kill failed"], "external": {}})
     host = create_server(config, client_factory=fake_factory)
     try:
         assert _resource_command(config, "held", "已核对") == 2

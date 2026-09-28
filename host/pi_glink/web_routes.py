@@ -524,8 +524,8 @@ class RoutesMixin:
     def _run_view_live(self, record: RunRecord) -> dict[str, Any]:
         """Run view with the live event count while the run is still open.
 
-        ``meta.json`` is only rewritten at state transitions, so the persisted
-        count is stale during a run; an open run's count comes from the bus.
+        The persisted ``event_count`` is only written with the terminal frame, so
+        it is absent during a run; an open run's count comes from the bus.
         Once the run is closed the persisted count is authoritative (the bus
         drops its per-run window at close).
         """
