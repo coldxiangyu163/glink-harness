@@ -77,9 +77,9 @@ def test_run_manager_resolves_the_configured_family_at_init(tmp_path: Path) -> N
     for harness, family_type in (("pi", PiHarnessFamily), ("acp", AcpHarnessFamily)):
         config = make_config(tmp_path / harness, harness)
         manager = RunManager(config, EventBus(), RunStore(config.data_root / "runs"))
-        family = manager._family_for(config.harness)  # noqa: SLF001
+        family = manager._admission.family_for(config.harness)  # noqa: SLF001
         assert type(family) is family_type
         assert family.name == config.harness
-        assert manager._families == {config.harness: family}  # noqa: SLF001
-        assert manager._family_for(config.harness) is family  # noqa: SLF001
-        assert manager._admission_spec(None).family == config.harness  # noqa: SLF001
+        assert manager._admission.families == {config.harness: family}  # noqa: SLF001
+        assert manager._admission.family_for(config.harness) is family  # noqa: SLF001
+        assert manager._admission.spec(None).family == config.harness  # noqa: SLF001

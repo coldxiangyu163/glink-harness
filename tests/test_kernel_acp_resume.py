@@ -773,8 +773,8 @@ def test_an_acp_parent_without_a_resume_channel_is_refused(
         capabilities={},  # 无续接通道的能力矩阵
     )
     with pytest.raises(FollowupUnavailable) as excinfo:
-        manager._family_for("acp").check_continuation(  # noqa: SLF001
-            manager._resumable_parent(None, parent.run_id, manager._admission_spec(None))  # noqa: SLF001
+        manager._admission.family_for("acp").check_continuation(  # noqa: SLF001
+            manager._admission.resumable_parent(None, parent.run_id, manager._admission.spec(None))  # noqa: SLF001
         )
     assert excinfo.value.code == "session_unavailable"
 
@@ -793,8 +793,8 @@ def test_state_home_follows_the_parent_recorded_executor(tmp_path: Path) -> None
         executor="e2b",
         state_root="recovered",
     )
-    state_home = manager._family_for("acp").state_home(parent)  # noqa: SLF001
+    state_home = manager._admission.family_for("acp").state_home(parent)  # noqa: SLF001
     assert state_home == store.run_dir(parent.run_id) / "acp-agent" / "recovered"
-    admitted = manager._resumable_parent(None, parent.run_id, manager._admission_spec(None))  # noqa: SLF001
-    manager._family_for("acp").check_continuation(admitted)  # noqa: SLF001
+    admitted = manager._admission.resumable_parent(None, parent.run_id, manager._admission.spec(None))  # noqa: SLF001
+    manager._admission.family_for("acp").check_continuation(admitted)  # noqa: SLF001
     assert admitted.run_id == parent.run_id

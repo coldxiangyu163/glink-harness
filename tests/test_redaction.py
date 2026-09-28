@@ -25,6 +25,7 @@ from pi_glink.events import EventBus
 from pi_glink.kernel.projection import project_event
 from pi_glink.kernel.rpc import PiRpcClient
 from pi_glink.runs.runner import RunManager
+from pi_glink.runs.secrets import RunSecretBoundary
 from pi_glink.redaction import REPLACEMENT, SecretRedactor, redactor_from_config
 from pi_glink.store import RunStore, RunSpec
 
@@ -425,9 +426,8 @@ def test_session_file_is_redacted_on_the_way_out(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    changed = manager._sanitize_session_file(  # noqa: SLF001
-        str(session), root=session_dir, redactor=manager.redactor
-    )
+    boundary = RunSecretBoundary(manager.redactor)
+    changed = boundary.sanitize_session_file(str(session), root=session_dir)
 
     assert changed is True
     text = session.read_text(encoding="utf-8")
@@ -449,12 +449,12 @@ def test_session_file_outside_the_run_directory_is_refused(tmp_path: Path) -> No
     linked = allowed / "link.jsonl"
     linked.symlink_to(outside)
 
-    assert (  # noqa: SLF001
-        manager._sanitize_session_file(str(outside), root=allowed, redactor=manager.redactor)
+    assert (
+        RunSecretBoundary(manager.redactor).sanitize_session_file(str(outside), root=allowed)
         is False
     )
-    assert (  # noqa: SLF001
-        manager._sanitize_session_file(str(linked), root=allowed, redactor=manager.redactor)
+    assert (
+        RunSecretBoundary(manager.redactor).sanitize_session_file(str(linked), root=allowed)
         is False
     )
     assert outside.read_text(encoding="utf-8") == original, "the target bytes must not change"
@@ -468,8 +468,8 @@ def test_session_file_without_secrets_is_left_untouched(tmp_path: Path) -> None:
     session = session_dir / "clean.jsonl"
     original = json.dumps({"type": "message", "text": "普通内容"}) + "\n"
     session.write_text(original, encoding="utf-8")
-    assert (  # noqa: SLF001
-        manager._sanitize_session_file(str(session), root=session_dir, redactor=manager.redactor)
+    assert (
+        RunSecretBoundary(manager.redactor).sanitize_session_file(str(session), root=session_dir)
         is False
     )
     assert session.read_text(encoding="utf-8") == original
@@ -551,9 +551,7 @@ def test_workspace_artifacts_are_swept_for_credentials(tmp_path: Path) -> None:
     binary = workspace / "image.bin"
     binary.write_bytes(b"\x00\x01\x02binary")
 
-    changed = manager._sanitize_workspace(  # noqa: SLF001 - the boundary unit itself
-        workspace, manager.redactor
-    )
+    changed = RunSecretBoundary(manager.redactor).sweep_tree(workspace)  # the boundary unit itself
 
     assert changed is True
     dirty_text = dirty.read_text(encoding="utf-8")
@@ -578,7 +576,7 @@ def test_workspace_sweep_never_writes_through_a_symlink(tmp_path: Path) -> None:
     (outside_dir / "nested.md").write_text(original, encoding="utf-8")
     (workspace / "linked-dir").symlink_to(outside_dir, target_is_directory=True)
 
-    changed = manager._sanitize_workspace(workspace, manager.redactor)  # noqa: SLF001
+    changed = RunSecretBoundary(manager.redactor).sweep_tree(workspace)
 
     assert changed is False, "nothing readable through a link may be swept"
     assert outside.read_text(encoding="utf-8") == original
@@ -613,9 +611,7 @@ def test_workspace_sweep_cannot_be_redirected_by_an_ancestor_swap(
         return original_redact(text)
 
     monkeypatch.setattr(manager.redactor, "redact", swapping_redact)
-    manager._sanitize_workspace(  # noqa: SLF001 - the sweep entry itself
-        workspace, manager.redactor
-    )
+    RunSecretBoundary(manager.redactor).sweep_tree(workspace)  # the sweep entry itself
 
     assert swapped == [True]
     assert external.read_text(encoding="utf-8") == "外部原文，不应被改写\n"

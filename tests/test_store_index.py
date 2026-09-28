@@ -206,7 +206,7 @@ def test_a_reconciled_interruption_reaches_the_index(tmp_path: Path) -> None:
     store.create("上一进程遗留", run_id="orphan", tenant_id="tenant-a", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     manager = RunManager(make_config(tmp_path), EventBus(), store)
 
-    manager._commit_interrupted("orphan")  # noqa: SLF001 - the restart path
+    manager._ledger._commit_interrupted("orphan")  # noqa: SLF001 - the restart path
     assert store.get("orphan").status == "failed"
     assert store.get("orphan").stop_reason == "interrupted"
     assert store.get("orphan").holds_resources is True, "unknown release still holds"

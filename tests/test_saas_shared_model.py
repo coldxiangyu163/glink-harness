@@ -248,7 +248,7 @@ def test_shared_mode_has_no_tenant_credential_store(tmp_path: Path, monkeypatch:
     try:
         assert server.tenancy is not None
         assert server.tenancy.credentials is None
-        assert server.manager._credential_store is None
+        assert server.manager._admission.credential_store is None
     finally:
         server.server_close()
 

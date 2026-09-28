@@ -1,6 +1,6 @@
 """收尾扫描契约的回归（GLINK-OBS-01 第 1 项）。
 
-原缺陷：``runner._sanitize_session`` 无条件访问 ``runtime.session_dir``，ACP
+原缺陷：runner 收尾的会话扫描（现为 ``SealStage.sweep`` → ``RunSecretBoundary.seal_sessions``） 无条件访问 ``runtime.session_dir``，ACP
 运行时没有该属性，于是每次 ACP run 收尾都抛 ``AttributeError`` 并被外层
 ``except`` 吞掉（``session credential sweep failed``）——整个会话面脱敏被跳过。
 
@@ -12,7 +12,7 @@
 * 注入凭据副本（``credential_copies``）在扫描**之后**从两个状态根逐个删除，
   且只删已知相对路径（链接/越界不跟随也不删）；
 * pi 面的声明与行为不变（会话目录允许重写，主会话文件来自 run 记录）；
-* 整个 ``_sanitize_session`` 路径在 ACP 运行时上不再抛错；
+* 整个会话扫描路径（``SealStage.sweep``）在 ACP 运行时上不再抛错；
 * pi 运行期配置目录里宿主渲染的 ``auth.json`` / ``web-search.json`` 收尾删除
   （决定 C 的 pi 面延伸），其余配置文件不动、不被扫描。
 """
@@ -27,7 +27,9 @@ from pi_glink.events import EventBus
 from pi_glink.kernel.acp_env import ACP_HOME_DIRNAME, ACP_RECOVERED_DIRNAME, AcpRuntime
 from pi_glink.kernel.agent_env import AgentRuntime
 from pi_glink.redaction import REPLACEMENT, SecretRedactor
-from pi_glink.runs.runner import RunManager, _Execution
+from pi_glink.runs.runner import RunManager
+from pi_glink.runs.secrets import RunSecretBoundary
+from pi_glink.runs.state import RunExecution as _Execution
 from pi_glink.store import RunRecord, RunStore, RunSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +60,18 @@ def build_context(tmp_path: Path, run_id: str) -> tuple[RunManager, RunStore, Ru
     workspace.mkdir(exist_ok=True)
     record = store.create("收尾扫描", run_id=run_id, workspace=workspace, spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     return manager, store, record, workspace
+
+
+def sweep(manager: RunManager, execution: _Execution) -> tuple[bool, list[str]]:
+    """Seal 阶段的扫描入口本身：绑定运行时声明后走 ``SealStage.sweep``。
+
+    生产里运行时在 Prepare 阶段绑定到边界；这里直接构造的 execution 手动绑定。
+    """
+    secrets = manager._pipeline.secrets(execution)  # noqa: SLF001 - the sweep entry itself
+    secrets.bind_runtime(execution.runtime)
+    failures: list[str] = []
+    changed = manager._pipeline.seal.sweep(execution, failures)  # noqa: SLF001
+    return changed, failures
 
 
 def test_acp_runtime_declares_read_only_state_roots(tmp_path: Path) -> None:
@@ -106,10 +120,10 @@ def test_acp_session_sweep_learns_credentials_without_rewriting_state(tmp_path: 
     execution.runtime = runtime
     # 非空边界（生产里总是含 host 秘密与本 run 凭据）：避开 "空则回退 host" 分支，
     # 使断言直接证明值是本次扫描学到的。
-    execution.redactor = SecretRedactor(["bootstrap-secret-0123456789"])
-    boundary = execution.redactor
+    execution.secrets = RunSecretBoundary(SecretRedactor(["bootstrap-secret-0123456789"]))
+    boundary = execution.secrets
 
-    changed = manager._sanitize_session(execution)  # noqa: SLF001 - the sweep entry itself
+    changed, _failures = sweep(manager, execution)
 
     assert changed is True, "扫描出的凭据形状值必须并入本 run 的边界"
     assert YAML_SECRET in boundary.known_values
@@ -145,15 +159,15 @@ def test_acp_session_sweep_deletes_copies_from_both_state_roots(tmp_path: Path) 
     )
     execution = _Execution(record=record, workspace=workspace)
     execution.runtime = runtime
-    execution.redactor = SecretRedactor(["bootstrap-secret-0123456789"])
+    execution.secrets = RunSecretBoundary(SecretRedactor(["bootstrap-secret-0123456789"]))
 
-    manager._sanitize_session(execution)  # noqa: SLF001
+    _changed, failures = sweep(manager, execution)
 
     for root in (home, recovered):
         assert not (root / ".dsh" / ".credentials.yaml").exists()
         assert (root / ".dsh" / "settings.yaml").is_file(), "非凭据状态文件必须保留"
         assert (root / ".dsh" / "sessions" / "session.v3.jsonl").is_file(), "会话文件必须保留"
-    assert execution.artifact_facts.artifact_failures == []
+    assert failures == []
 
 
 def test_acp_session_sweep_never_follows_a_linked_or_escaping_dest(tmp_path: Path) -> None:
@@ -173,13 +187,13 @@ def test_acp_session_sweep_never_follows_a_linked_or_escaping_dest(tmp_path: Pat
     )
     execution = _Execution(record=record, workspace=workspace)
     execution.runtime = runtime
-    execution.redactor = SecretRedactor(["bootstrap-secret-0123456789"])
+    execution.secrets = RunSecretBoundary(SecretRedactor(["bootstrap-secret-0123456789"]))
 
-    manager._sanitize_session(execution)  # noqa: SLF001
+    _changed, failures = sweep(manager, execution)
 
     assert outside.read_text(encoding="utf-8") == f"apiKey: {YAML_SECRET}\n", "不跟随链接"
     assert (home / ".dsh" / ".credentials.yaml").is_symlink(), "链接本身也不删（拒绝处理）"
-    details = "\n".join(execution.artifact_facts.artifact_failures)
+    details = "\n".join(failures)
     assert ".dsh/.credentials.yaml" in details
     assert "outside-credentials.yaml" in details
 
@@ -192,9 +206,9 @@ def test_acp_session_sweep_ignores_a_missing_recovered_root(tmp_path: Path) -> N
     home.mkdir(parents=True)
     execution = _Execution(record=record, workspace=workspace)
     execution.runtime = AcpRuntime(directory=directory, home=home, command="dsh")
-    execution.redactor = SecretRedactor(["bootstrap-secret-0123456789"])
+    execution.secrets = RunSecretBoundary(SecretRedactor(["bootstrap-secret-0123456789"]))
 
-    assert manager._sanitize_session(execution) is False  # noqa: SLF001
+    assert sweep(manager, execution)[0] is False
 
 
 def test_pi_runtime_sweep_declaration_keeps_rewriting_sessions(tmp_path: Path) -> None:
@@ -227,9 +241,9 @@ def test_pi_runtime_sweep_declaration_keeps_rewriting_sessions(tmp_path: Path) -
     store.update(record.run_id, session_file=str(session))
     execution = _Execution(record=store.get(record.run_id), workspace=workspace)
     execution.runtime = runtime
-    execution.redactor = SecretRedactor(["bootstrap-secret-0123456789"])
+    execution.secrets = RunSecretBoundary(SecretRedactor(["bootstrap-secret-0123456789"]))
 
-    assert manager._sanitize_session(execution) is True  # noqa: SLF001
+    assert sweep(manager, execution)[0] is True
     text = session.read_text(encoding="utf-8")
     assert YAML_SECRET not in text
     assert REPLACEMENT in text

@@ -873,12 +873,12 @@ def test_child_documents_and_the_terminal_summary_survive_a_restart(tmp_path: Pa
     with execution.lock:
         # The typed events are the projection layer's output; the seam under
         # test starts at their commit (docs/architecture.md §3.5).
-        assert manager._emit_frame(  # noqa: SLF001
+        assert manager._pipeline.channel.emit_frame(  # noqa: SLF001
             execution,
             "subagent_started",
             {"n": 0, "toolCallId": "call_1", "agent": "researcher", "task": "调研甲"},
         )
-        assert manager._emit_frame(  # noqa: SLF001
+        assert manager._pipeline.channel.emit_frame(  # noqa: SLF001
             execution,
             "subagent_finished",
             {
@@ -889,7 +889,7 @@ def test_child_documents_and_the_terminal_summary_survive_a_restart(tmp_path: Pa
                 "resultPreview": "甲的结论摘要",
             },
         )
-        assert manager._emit_frame(  # noqa: SLF001
+        assert manager._pipeline.channel.emit_frame(  # noqa: SLF001
             execution,
             "subagent_started",
             {"n": 1, "toolCallId": "call_2", "agent": "researcher", "task": "调研乙"},

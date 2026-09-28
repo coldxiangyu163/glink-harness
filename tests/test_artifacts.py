@@ -368,7 +368,7 @@ def test_symlinked_report_is_rejected_and_the_target_is_untouched(tmp_path: Path
 def test_oversized_report_is_rejected_not_served(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("pi_glink.runs.runner.REPORT_MAX_BYTES", 64)
+    monkeypatch.setattr("pi_glink.runs.limits.REPORT_MAX_BYTES", 64)
     config = _config(tmp_path)
     manager, _store = _manager(config, tmp_path)
     record = manager.start("超大报告")

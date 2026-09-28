@@ -1341,7 +1341,7 @@ def test_the_runner_wires_the_acp_e2b_plan_from_the_frozen_configuration(tmp_pat
         sandbox_factory=factory,
     )
     assert isinstance(e2b, E2BSandbox)
-    adapter = manager._family_for("acp").build_adapter(  # noqa: SLF001
+    adapter = manager._admission.family_for("acp").build_adapter(  # noqa: SLF001
         spec, e2b, on_frame=lambda _frame: None
     )
     assert isinstance(adapter, AcpExecutionAdapter)

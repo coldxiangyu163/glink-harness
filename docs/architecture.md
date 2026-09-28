@@ -56,7 +56,7 @@
 （`family`：`pi`/`acp`）、harness 包（`pack`：`harnesses/<pack>/`）、执行面（`executor`：
 `inproc`/`docker`/`e2b`）、会话蓝图名（`blueprint`，无蓝图为 `null`）与凭据来源
 （`credential_origin`：`host`/`tenant`/`shared`，只记来源，不含凭据值）。RunManager 在准入时
-由冻结配置解析一次（`_admission_spec`），与 run id、owner 同一次原子写入 `meta.json` 的 `"spec"`
+由冻结配置解析一次（`RunAdmission.spec`），与 run id、owner 同一次原子写入 `meta.json` 的 `"spec"`
 对象；此后族、执行面、追问门禁与 ACP 状态根继承一律读记录里的 spec，不读宿主当前配置。
 `family`/`pack`/`executor`/`credential_origin` 是必填非空字段，缺 `"spec"` 或缺字段的 meta 按不可读
 处理（列表/详情/重放隐藏，资源台账按损坏记录计入全局持有，见 §4「准入与资源」）。
@@ -82,10 +82,10 @@
 
 组合只有一条路径：`HarnessFamily.build_adapter(spec, sandbox, ...)` 即
 `driver(sandbox.spawn(launch(spec)))`。旧的 `execution.build_adapter` 字符串分派、族上的 plan
-回调（`_unused_pi_plan` 与重复的 docker plan）已删除。`runs/runner.py` 的 RunManager 只依赖抽象
+回调（`_unused_pi_plan` 与重复的 docker plan）已删除。`runs/` 编排层（RunManager 与生命周期管线）只依赖抽象
 （`HarnessFamily` / `HarnessRuntime` / `FrameProjector` / `Sandbox` / `ExecutionAdapter`），不导入
 任何具体族、执行面或 runtime 类型，也不承担任何单面的收尾逻辑（§5.1）；该规则由
-`tests/test_repository_boundaries.py` 的 runner 导入白名单卡住。
+`tests/test_repository_boundaries.py` 的编排层导入白名单卡住。
 ACP 族的协议事实、能力矩阵与冒烟证据见 [ACP 集成笔记](acp-integration-notes.md) 与
 [多 harness 方案](multi-harness-plan.md)。
 
@@ -297,8 +297,8 @@ pi 族另有 `_meta.json` 增强（R2，见下「R2 增强与关联」）。
 进度由观察者 seam 供给：`ExecutionAdapter.child_progress_source()` 是 **ABC 默认空实现**
 （与 `recovered_session` / `recover_subagents` 同例，不覆写即该面无进度）。每 run 的观察者
 对象、轮询线程、停止事件、closed 标志、节流/单调钳制与有界退避都在
-`runs/child_progress_observer.py`；`RunManager` 只在已提交的 started/finished 帧与
-finalize 第一步调用它，每 run 至多起**一个**轮询线程，finalize 时退出，连续失败按有界退避
+`runs/child_progress_observer.py`；它由 Observe 阶段插件 `runs/plugins.py::ChildProgressPlugin` 持有，
+只在已提交的 started/finished 帧与收尾第一步（`ObserveStage.finish`）被调用，每 run 至多起**一个**轮询线程，finalize 时退出，连续失败按有界退避
 **继续重试**（不设「失败预算后停止」：真实 E2B run 里一次沙箱请求超时就能把当时的预算花完，
 临时故障不得变成 run 生命周期内的永久失明——GLINK-OBS-01），且**不在准入锁内**。E2B 面的
 单次 ``files.list`` / ``files.read`` 显式传 ``request_timeout``（不使用 SDK 默认 60s），
@@ -344,7 +344,7 @@ child 在前端显示为普通「进行中」，不伪造进度。
    按 `LOCAL_WEB_EXECUTOR` 选择执行面（见 §5）；
 3. 事件投影 → `EventBus.commit`：先落 `events.jsonl`，再实时给 SSE（见 §3.1）；
 4. 执行面把冻结输入交给内核，等待「落定」或超时/取消/进程退出；
-5. 收尾把四类事实分开，各有唯一 owner 与提交点（`runs/runner.py`）：
+5. 收尾把四类事实分开，各有唯一 owner 与提交点（`runs/pipeline.py` 与 `runs/stages.py`，见下「生命周期管线」）：
 
    1. **执行事实**：执行面 outcome、最终模型结果、事件日志健康度，run 处于 open 阶段时收集；
    2. **产物事实**：先向执行面回收产物（E2B 从沙箱拉到工作区），再 `close()` 执行面；随后经
@@ -364,8 +364,8 @@ child 在前端显示为普通「进行中」，不伪造进度。
 **族接口（HarnessFamily）**：上文中一切「pi 族做 X、ACP 族做 Y」的策略都收敛在
 `kernel/harness.py` 的 `HarnessFamily` 后面，两个实现是 `harness_pi.py` 的 `PiHarnessFamily`
 与 `harness_acp.py` 的 `AcpHarnessFamily`；族实例由 `select_family` 构造、按 `RunSpec.family`
-缓存在 RunManager（`_family_for`；`__init__` 先解析配置的族，配置错误在启动时失败），每个 run
-的族取自**它自己记录里的** `spec.family`（`_family_of`），不读当前配置做族分支——准入时
+缓存在 `RunAdmission`（`family_for`；RunManager `__init__` 先解析配置的族，配置错误在启动时失败），每个 run
+的族取自**它自己记录里的** `spec.family`（`family_of`），不读当前配置做族分支——准入时
 `RunSpec` 随记录原子写入是冻结点本身，留在 runner；GLINK-ARCH-6 起 `select_family` 的输入是
 `harnesses/<pack>/harness.toml` 解析出的包清单：`family` 决定实现，包的能力提示与 ACP 包的
 `home/` 覆盖层由该包提供，包名随 `spec.pack` 写入 run 记录）。族接口覆盖六面职责：(a) 准入
@@ -380,16 +380,39 @@ child 在前端显示为普通「进行中」，不伪造进度。
 知道的身份（E2B 沙箱 id）由 sandbox 经 `on_identity` 回调交给 runner——两族同行为，是执行面事实；
 (e) 终态词汇归一化——`model_stop_verdict` 把各族自己的 stop 词汇（pi 的
 error/aborted/length，ACP 的 StopReason 集合）译成产品终态词汇，译不了即落入 runner 的交付
-策略（报告检查）；产品词汇本身（status 三值与 stop_reason 字符串集合）仍由 runner `_decide`
+策略（报告检查）；产品词汇本身（status 三值与 stop_reason 字符串集合）仍由 `DecideStage`
 定义；(f) 子代理增强与运行中事实——pi 族的产物关联（`meta`/`unmatched`/`none`）、按族的进度
 配对（pi=transcript index+agent 同名，ACP=call_id 精确命中）与按族的用量累计（pi 去重累加，
-ACP 累计快照替换）。runner 保留：锁与相位（open/committed/uncommitted）、准入并发与配额、
-stop()/StopDecision、`_execute` 骨架、`_finalize` 的**顺序控制**（观察者先死 → projector
-首 flush → `_recover_face_artifacts` → `_close_face` → `_sweep_run_artifacts` → 子代理增强
-→ 报告回收 → `_commit_verdict` 临界区 → 提交后簿记）、`_decide` 的共同前缀与交付策略收尾、
-终帧 payload 组装与持久化、事件提交路径、资源台账转发、共享追问门禁
+ACP 累计快照替换）。编排层保留：锁与相位（open/committed/uncommitted）、准入并发与配额、
+stop()/StopDecision、生命周期管线的**顺序控制**、`DecideStage` 的共同前缀与交付策略收尾、
+终帧 payload 组装与持久化、事件提交路径（`RunChannel`）、资源台账转发、共享追问门禁
 （owner→`spec.family`/`spec.pack`→terminal→stale 的拒绝次序是生命周期策略）与 harness 无关的蓝图/命令
 门禁。
+
+**生命周期管线**（`runs/pipeline.py::RunPipeline`）：一个 run 依次经过 Admit → Prepare →
+Launch → Observe → Recover → Seal → Decide → Commit 八个阶段，每个阶段只接收上一阶段冻结的
+事实，次序由管线定义保证：
+
+| 阶段 | 实现 | 输入 → 输出 |
+|---|---|---|
+| Admit | `runs/admission.py::RunAdmission`：`prepare`（锁外：蓝图解析、凭据、秘密边界、追问种子 IO）+ `admit`（准入锁内：父 run 权威复核、建记录）；并发/配额检查在 `RunManager.start` 的锁内 | 请求 → `AdmittedRun` |
+| Prepare | `runs/stages.py::PrepareStage`：报告种子、运行时渲染（运行时绑定到秘密边界并构造 projector）、出口端点、adapter | `RunExecution` → `LaunchPlan` |
+| Launch | `LaunchStage`：启动执行面并等待落定，执行事实写入可变的 `LiveExecutionFacts` | `LaunchPlan` → 执行事实 |
+| Observe | `ObserveStage.finish`：插件 `close`（子代理进度观察者先死）→ projector 首 flush | — |
+| Recover | `RecoverStage`：`face_artifacts`（向执行面回收产物、会话事实、子代理镜像）→ `close_face` | → `RecoveryFacts`（含 `ResourceFacts`） |
+| Seal | `SealStage`：`sweep`（工作区/子代理镜像/会话与状态根）→ `enrich`（插件 `seal`：子代理增强）→ `report` | `RecoveryFacts` → `ArtifactFacts` |
+| Decide | `DecideStage`：在 run 锁内把执行事实冻结为 `ExecutionFacts`，与取消标志一起判定 | → `Verdict` |
+| Commit | `CommitStage`：同一锁内插件 `settle`、终帧提交（线性化点）、提交后簿记、出口授权释放 | `Verdict` → committed |
+
+`RunManager`（`runs/runner.py`）只保留公共 API（start/stop/wait/shutdown/reconcile 与资源台账转发）
+和准入锁；阶段数据类型在 `runs/state.py`，事件提交路径（提交前再脱敏、用量累计、插件
+`on_committed`）在 `runs/channel.py`。**秘密边界** `runs/secrets.py::RunSecretBoundary` 把一个 run
+的脱敏器、出口 token 授权、清扫根（工作区、子代理镜像、运行时声明的会话/状态根）与注入凭据
+副本收成一个对象：各阶段经它脱敏与学习新值，只有 Seal 阶段调用它的收尾扫描（`seal_trees` /
+`seal_sessions`）。子代理进度与增强是 Observe / Recover–Seal 阶段的插件（`runs/plugins.py`：
+`ChildDocumentsPlugin`、`ChildProgressPlugin`、`ChildEnrichmentPlugin`，钩子为
+`on_committed` / `close` / `seal` / `settle`），族差异经 `HarnessFamily` 的 seam（进度配对、
+进度源、`enrich_children`）供给，不是 runner 方法。
 
 **终态判定**（`agent_settled` 不是成功信号）：
 
@@ -666,12 +689,12 @@ run 只拿到宿主凭据出口代理（`host/pi_glink/egress.py::EgressProxy`�
 | 出口 | 处理 | 代码 |
 |---|---|---|
 | 事件投影 | 载荷里每个字符串递归脱敏；delta 走尾部暂存（§3.3） | `kernel/projection.py::project_event(frame, redactor)`、`redaction.py::StreamRedactor` |
-| 事件总线 / `events.jsonl` | 提交（先落盘）前再脱敏一次 | `runs/runner.py::_emit` |
-| 报告文件 | 经工作区目录句柄读取、脱敏、在 run 目录句柄内原子写入 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `runs/runner.py::_recover_report` |
-| 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源；子代理分支会话与 `subagent-artifacts/` 同目录被同一边界清扫 | `runs/runner.py::_sanitize_session_file`、`sandbox.DockerSandbox.host_path`（`docker_env.translate_container_path`） |
-| ACP 状态根 | 收尾扫描范围与处置由运行时契约声明：agent 自己的会话存储（`acp-agent/home`，E2B 回收后 `acp-agent/recovered`）**只读扫描**——凭据形状值并入本 run 边界，文件字节不改写（改写会破坏追问要续接的会话，与 §10.2 继承口径同一义务）；**注入凭据副本**（`PI_GLINK_ACP_CREDENTIAL_FILES` 的 dest）在扫描之后逐个删除（只删已知相对路径：不按模式匹配、不跟随链接、必须在根内；追问会从源重新注入，继承已 skip 这些目标）；删除失败记入终帧 `artifactFailures` 并告警，不改变终态；缺失的根按「无可扫之物」处理 | `kernel/sweep.py::SessionSweep`、`kernel/acp_env.py::AcpRuntime.session_sweeps`、`runs/runner.py::_sanitize_session`、`_absorb_session_secrets`、`_remove_credential_copies`、`artifacts.py::ArtifactTree.remove` |
-| 子代理镜像 | E2B 面回收的 `runs/<id>/subagents/`（分支会话 + 产物）收尾时经目录句柄清扫，与 §5.2 同一条边界 | `runs/runner.py::_sanitize_workspace`、`kernel/e2b_env.py::recover_subagent_files` |
-| 子代理文档 | `runs/<id>/children/<n>/child.json` 只由已过两道脱敏的事件载荷构造（投影 → 提交前再脱敏），`GET /api/runs/{id}/children` 按存储原样下发，不引入新秘密；`children/<n>/<file>` 产物下载按报告下载同一套规则（服务前再脱敏、`X-Redacted`） | `runs/runner.py::_emit`、`store.py::read_children`、`web_routes.py` |
+| 事件总线 / `events.jsonl` | 提交（先落盘）前再脱敏一次 | `runs/channel.py::RunChannel.emit` |
+| 报告文件 | 经工作区目录句柄读取、脱敏、在 run 目录句柄内原子写入 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `runs/stages.py::SealStage.report` |
+| 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源；子代理分支会话与 `subagent-artifacts/` 同目录被同一边界清扫 | `runs/secrets.py::RunSecretBoundary.sanitize_session_file`、`sandbox.DockerSandbox.host_path`（`docker_env.translate_container_path`） |
+| ACP 状态根 | 收尾扫描范围与处置由运行时契约声明：agent 自己的会话存储（`acp-agent/home`，E2B 回收后 `acp-agent/recovered`）**只读扫描**——凭据形状值并入本 run 边界，文件字节不改写（改写会破坏追问要续接的会话，与 §10.2 继承口径同一义务）；**注入凭据副本**（`PI_GLINK_ACP_CREDENTIAL_FILES` 的 dest）在扫描之后逐个删除（只删已知相对路径：不按模式匹配、不跟随链接、必须在根内；追问会从源重新注入，继承已 skip 这些目标）；删除失败记入终帧 `artifactFailures` 并告警，不改变终态；缺失的根按「无可扫之物」处理 | `kernel/sweep.py::SessionSweep`、`kernel/acp_env.py::AcpRuntime.session_sweeps`、`runs/secrets.py::RunSecretBoundary.seal_sessions`、`absorb`、`remove_credential_copies`、`artifacts.py::ArtifactTree.remove` |
+| 子代理镜像 | E2B 面回收的 `runs/<id>/subagents/`（分支会话 + 产物）收尾时经目录句柄清扫，与 §5.2 同一条边界 | `runs/secrets.py::RunSecretBoundary.sweep_tree`（`seal_trees`）、`kernel/e2b_env.py::recover_subagent_files` |
+| 子代理文档 | `runs/<id>/children/<n>/child.json` 只由已过两道脱敏的事件载荷构造（投影 → 提交前再脱敏），`GET /api/runs/{id}/children` 按存储原样下发，不引入新秘密；`children/<n>/<file>` 产物下载按报告下载同一套规则（服务前再脱敏、`X-Redacted`） | `runs/channel.py::RunChannel.emit`、`runs/plugins.py::ChildDocumentsPlugin`、`store.py::read_children`、`web_routes.py` |
 | 报告下载 | `report_path` 不是下载能力：只认一个固定位置——宿主产物副本 `runs/<id>/artifacts/report.md`；工作区 `workspaces/<id>/report.md` 及其他路径一律视为无报告（[ADR 0007](adr/0007-report-served-only-from-host-artifact.md)）。服务前再脱敏，响应头 `X-Redacted` 标明是否发生；`hasReport` 用同一位置规则与同一拒绝条件计算 | `store.py::report_location`、`web_routes.py::_send_report`、`artifacts.py` |
 
 **产物路径安全**（`artifacts.py::ArtifactTree`）：宿主从不「先 realpath 校验、再按路径打开」。
@@ -716,7 +739,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `host/pi_glink/web_*.py` | 宿主 HTTP 层 | `web_routes`（路由与 run/health/报告 API）/ `web_sse`（事件流与连接额度）/ `web_security`（身份、会话与请求防护）/ `web_http`（请求体、响应、静态资源、脱敏访问日志）；一个 `HostRequestHandler` 由它们组合而成 |
 | `host/pi_glink/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
 | `host/pi_glink/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env` / `subagent_artifacts`（pi-subagents 产物布局解析与关联，R2）；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）；两族的 run 生命周期策略：`harness` / `harness_pi` / `harness_acp`。不导入 `runs/` 或宿主编排模块 |
-| `host/pi_glink/runs/` | 编排层 | run 准入与执行骨架、收尾顺序、终态提交与资源台账：`runner`（RunManager）/ `resource_ledger`（外部资源台账、重启对账、人工裁决与在线身份探测扫描）/ `child_progress_observer`（R3a 每 run 进度观察者） |
+| `host/pi_glink/runs/` | 编排层 | run 准入与执行骨架、收尾顺序、终态提交与资源台账：`runner`（RunManager 公共 API 与准入锁）/ `admission`（两段式准入）/ `pipeline` + `stages`（生命周期管线与各阶段）/ `state`（阶段事实类型）/ `channel`（事件提交路径）/ `secrets`（run 秘密边界）/ `plugins`（子代理文档/进度/增强插件）/ `errors` / `limits` / `resource_ledger`（外部资源台账、重启对账、人工裁决与在线身份探测扫描）/ `child_progress_observer`（R3a 每 run 进度观察者） |
 | `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
 | `harnesses/<pack>/` | Harness 包 | `harness.toml`（清单：`family`、ACP 的 `command` 与上游 `package`/`version`、可选 `session_config`/`permission_allow`）、可选 `capabilities.md`（能力提示，拼入系统提示）、ACP 包的 `home/`（每 run HOME 覆盖层，先于凭据注入）；pi 包另有 `settings.json`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
 | `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |

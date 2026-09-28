@@ -532,7 +532,7 @@ def test_the_acp_docker_plan_feeds_the_adapter_through_the_runner(
     sandbox = open_sandbox(
         config.executor, config=config, run_id="abc123", workspace=tmp_path / "workspace"
     )
-    adapter = manager._family_for("acp").build_adapter(  # noqa: SLF001
+    adapter = manager._admission.family_for("acp").build_adapter(  # noqa: SLF001
         spec, sandbox, on_frame=lambda _frame: None
     )
     expected = make_plan(config, runtime, tmp_path)

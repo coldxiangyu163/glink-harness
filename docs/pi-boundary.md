@@ -18,7 +18,7 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | skills | docs/skills.md | 目录预留（`harnesses/pi/skills/`） |
 | prompt templates | docs/prompt-templates.md | **本仓已不使用**（GLINK-ARCH-6）：方法论在 `methodology/`（`work-agreement.md` + `blueprints/*.md`），`/<蓝图名> <题目>` 由宿主解释为蓝图请求，不再依赖 pi 的模板展开 |
 | `AGENTS.md` | docs/quickstart.md 等 | 目录预留（`harnesses/pi/AGENTS.md`），当前约定走 §下一条 |
-| `--append-system-prompt` | `pi --help` | `methodology/work-agreement.md`（最小工作约定：产品契约）+ 选中包的 `capabilities.md`（如 pi 的 `subagent`/`researcher` 委派）+ 蓝图渲染 → `runs/runner.py::_extra_argv`，内核系统提示词本身不改 |
+| `--append-system-prompt` | `pi --help` | `methodology/work-agreement.md`（最小工作约定：产品契约）+ 选中包的 `capabilities.md`（如 pi 的 `subagent`/`researcher` 委派）+ 蓝图渲染 → `runs/stages.py::PrepareStage.extra_argv`，内核系统提示词本身不改 |
 | headless 协议 | docs/rpc.md | 三面均 `--mode rpc`（共享 `kernel/rpc.py::PiRpcClient`；本机直接 spawn，Docker 跨容器 stdio，E2B 经沙箱后台命令 `stdin=True` + `SandboxCommandProcess` 以 `popen=` 注入，GLINK-ARCH-3 收敛）；三面都只按 LF 分帧（`kernel/framing.py`，共享语料 `tests/fixtures/lf-framing.json`） |
 | 环境变量 | docs/environment-variables.md | `PI_CODING_AGENT_DIR`、`PI_CODING_AGENT_SESSION_DIR`、`PI_SKIP_VERSION_CHECK`、`PI_TELEMETRY`（模型凭据不经环境变量；运行期 `auth.json` 只含出口代理 token；两个目录都是每 run 独立） |
 | CLI 参数 | docs/cli.md、docs/sessions.md | `--provider`、`--model`、`--name`；追问用 `--session <path>` 打开上一轮会话的独立副本（`kernel/agent_env.py::build_pi_argv`、`runs/runner.py`、`kernel/e2b_env.py`） |

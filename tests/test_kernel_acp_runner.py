@@ -31,6 +31,7 @@ from pi_glink.kernel.execution import ExecutionAdapter, ExecutionSpec
 from pi_glink.kernel.harness_pi import PiExecutionAdapter
 from pi_glink.kernel.sandbox import SANDBOXES, open_sandbox
 from pi_glink.redaction import REPLACEMENT
+from pi_glink.runs.stages import DecideStage
 from pi_glink.runs.runner import (
     FollowupUnavailable,
     RunManager,
@@ -480,7 +481,7 @@ def test_acp_timeout_error_text_survives_a_late_kernel_exit_write(
     A hung agent ignores ``session/cancel`` (``FAKE_ACP_CANCEL_HANG``), so the
     driver's ``session/prompt`` request only unblocks when the host's teardown
     closes the stream -- after ``wait()`` has already decided ``timeout``. The
-    window is held open deterministically: the run-level ``_decide`` joins the
+    window is held open deterministically: the Decide stage (``DecideStage.run``) joins the
     driver thread before reading the outcome, so the late ``kernel_exit`` write
     lands exactly where it lands under load. Without a freeze the record keeps
     ``stop_reason=timeout`` but its error text becomes the kernel-exit report.
@@ -490,7 +491,7 @@ def test_acp_timeout_error_text_survives_a_late_kernel_exit_write(
     _config, _store, manager = build_manager(
         tmp_path, settings, LOCAL_WEB_TASK_TIMEOUT_SECONDS="1"
     )
-    original_decide = RunManager._decide
+    original_decide = DecideStage.run
     driver_states: list[bool] = []
 
     def decide_after_the_driver_stops(self, execution):
@@ -500,7 +501,7 @@ def test_acp_timeout_error_text_survives_a_late_kernel_exit_write(
             driver_states.append(driver.is_alive())
         return original_decide(self, execution)
 
-    monkeypatch.setattr(RunManager, "_decide", decide_after_the_driver_stops)
+    monkeypatch.setattr(DecideStage, "run", decide_after_the_driver_stops)
     record = manager.start("NOSETTLE 收到取消也不回答")
     assert wait_for(lambda: any(entry["event"] == "prompt" for entry in read_log(log)))
     final = manager.wait(record.run_id, timeout=30)

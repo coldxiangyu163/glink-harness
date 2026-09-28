@@ -12,7 +12,7 @@ single-warning flag. The runner touches it only on the committed
 started/finished frames (via :meth:`track`) and as the first finalize step
 (via :meth:`stop`).
 
-Locking contract (unchanged from when this state lived on ``_Execution``): the
+Locking contract (the observer is owned by ``plugins.ChildProgressPlugin``): the
 in-flight table, the closed flag and the emitted/throttle maps are only read or
 written under the run lock; the polling thread takes the run lock to compute
 and emit one poll's frames, and the runner's emit callback commits under that

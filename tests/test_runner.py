@@ -624,7 +624,7 @@ def test_process_death_after_the_prompt_converges_quickly(tmp_path: Path) -> Non
 def test_usage_is_summed_across_requests_and_not_double_counted(tmp_path: Path) -> None:
     """100 + 200 tokens must add up to 300; a repeated identity counts once."""
     from pi_glink.kernel.projection import Projector  # noqa: PLC0415
-    from pi_glink.runs.runner import _Execution  # noqa: PLC0415 - private unit under test
+    from pi_glink.runs.state import RunExecution as _Execution  # noqa: PLC0415 - private unit under test
 
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
@@ -645,9 +645,9 @@ def test_usage_is_summed_across_requests_and_not_double_counted(tmp_path: Path) 
             "toolResults": [],
         }
 
-    manager._on_frame(execution, turn(1, 100))  # noqa: SLF001
-    manager._on_frame(execution, turn(2, 200))  # noqa: SLF001
-    manager._on_frame(execution, turn(2, 200))  # duplicate identity: ignore
+    manager._pipeline.channel.on_frame(execution, turn(1, 100))  # noqa: SLF001
+    manager._pipeline.channel.on_frame(execution, turn(2, 200))  # noqa: SLF001
+    manager._pipeline.channel.on_frame(execution, turn(2, 200))  # duplicate identity: ignore
 
     events = read_events(store, record.run_id)
     usage_events = [event for event in events if event["type"] == "usage_reported"]
@@ -937,14 +937,15 @@ def test_a_stop_accepted_during_finalization_becomes_the_verdict(
     _config, store, manager = scripted_manager(tmp_path, monkeypatch, adapter)
     entered = threading.Event()
     if phase == "report":
-        original = manager._recover_report  # noqa: SLF001 - timing hook only
+        seal = manager._pipeline.seal  # noqa: SLF001 - timing hook only
+        original = seal.report
 
         def slow_report(execution):
             entered.set()
             assert gate.wait(10)
-            original(execution)
+            return original(execution)
 
-        monkeypatch.setattr(manager, "_recover_report", slow_report)
+        monkeypatch.setattr(seal, "report", slow_report)
     else:
         entered = adapter.entered[phase]
 
@@ -1118,9 +1119,9 @@ def test_two_concurrent_followups_of_one_parent_admit_exactly_one_child(
     )
 
     both_snapshotting = threading.Barrier(2, timeout=10)
-    # 锁边界在 pi 族的种子读取上：runner._resume_seed 只做共享门禁与委托，
+    # 锁边界在 pi 族的种子读取上：RunAdmission.resume_seed 只做共享门禁与委托，
     # 快照 IO（读取 + 脱敏）在族方法里，仍在准入锁外。
-    family = manager._family_for("pi")  # noqa: SLF001 - the lock boundary under test
+    family = manager._admission.family_for("pi")  # noqa: SLF001 - the lock boundary under test
     snapshot = family.resume_seed
 
     def gated_snapshot(parent, *, redactor):
@@ -1204,12 +1205,12 @@ def test_run_data_directories_are_created_private(tmp_path: Path) -> None:
 
 def open_execution(manager: RunManager, store: RunStore, workspace: Path, run_id: str):
     """An open execution without a kernel: the typed-event commit seam."""
-    from pi_glink.runs.runner import _Execution  # noqa: PLC0415
+    from pi_glink.runs.state import RunExecution as _Execution  # noqa: PLC0415
 
     # The run's spec is the manager's own admission spec: the family that
     # handles its frames is the one its record names.
     record = store.create(
-        "子代理", run_id=run_id, workspace=workspace, spec=manager._admission_spec(None)  # noqa: SLF001
+        "子代理", run_id=run_id, workspace=workspace, spec=manager._admission.spec(None)  # noqa: SLF001
     )
     execution = _Execution(record=record, workspace=workspace)
     manager.bus.open_run(record.run_id)
@@ -1218,7 +1219,7 @@ def open_execution(manager: RunManager, store: RunStore, workspace: Path, run_id
 
 def emit(manager: RunManager, execution, event_type: str, payload: Mapping[str, Any]) -> None:
     with execution.lock:
-        assert manager._emit_frame(execution, event_type, payload) is True  # noqa: SLF001
+        assert manager._pipeline.channel.emit_frame(execution, event_type, payload) is True  # noqa: SLF001
 
 
 def test_pi_subagent_frames_flow_through_the_real_projection_into_documents(
@@ -1254,7 +1255,7 @@ def test_pi_subagent_frames_flow_through_the_real_projection_into_documents(
         },
     ]
     for frame in frames:
-        manager._on_frame(execution, frame)  # noqa: SLF001
+        manager._pipeline.channel.on_frame(execution, frame)  # noqa: SLF001
 
     logged = read_events(store, "subdoc0")
     assert [event["type"] for event in logged] == [
@@ -1407,7 +1408,7 @@ def finalize_with(manager: RunManager, execution, **facts) -> None:
     }
     for name, value in facts.items():
         setattr(groups.get(name, execution), name, value)
-    manager._finalize(execution)  # noqa: SLF001 - the verdict path under test
+    manager._pipeline.close_out(execution)  # noqa: SLF001 - the verdict path under test
 
 
 def test_open_children_follow_a_cleanly_finished_run(tmp_path: Path) -> None:
@@ -1672,7 +1673,7 @@ def test_known_cross_family_parent_is_refused_before_its_session_is_read(
     """宿主从 acp 切到 pi 后，追问已知 ACP 父 run：fail-closed，且不读其会话。
 
     父记录的会话文件被刻意布置成完全合法：旧代码（门禁不含族检查，读回时
-    harness 键被未知键过滤）会把这次追问放行到 ``_resume_seed`` 的会话读
+    harness 键被未知键过滤）会把这次追问放行到 ``RunAdmission.resume_seed`` 的会话读
     取并受理——本测试因没有任何拒绝而变红；新代码在读取之前的族判定处拒
     绝（绿）。
     """
@@ -1771,11 +1772,11 @@ def test_foreign_parent_stays_unknown_even_when_its_family_is_known(
 def test_finalize_drives_its_steps_in_the_contract_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """顺序探针：回收 → 关闭 → 清扫 → 增强 → 报告 → 提交。
+    """顺序探针：观察结束 → 回收 → 关闭 → 清扫 → 增强 → 报告 → 提交。
 
-    `_finalize` 拆成命名私有方法后，本测试用记录型替身钉住编排次序（步骤
-    本身的行为由本文件其余 finalize 用例覆盖）。观察者先死与 projector 首
-    flush 由 `_stop_progress_observer` 与本体承担，不在探针面内。
+    收尾由 ``RunPipeline.close_out`` 按 Observe → Recover → Seal →
+    Decide/Commit 编排；本测试用记录型替身替换各阶段的命名步骤，钉住编排
+    次序（步骤本身的行为由本文件其余 finalize 用例覆盖）。
     """
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
@@ -1783,41 +1784,50 @@ def test_finalize_drives_its_steps_in_the_contract_order(
     record = store.create("顺序探针", run_id="orderprobe01", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    from pi_glink.runs.runner import _Execution  # noqa: PLC0415, SLF001
+    from pi_glink.runs.state import ReportFacts, RunExecution  # noqa: PLC0415
 
-    execution = _Execution(record=record, workspace=workspace)
+    execution = RunExecution(record=record, workspace=workspace)
+    pipeline = manager._pipeline  # noqa: SLF001
 
     calls: list[str] = []
 
+    def observe(execution_):
+        calls.append("observe")
+
     def recover(execution_, adapter):
         calls.append("recover")
+        return ()
 
     def close(execution_, adapter):
         calls.append("close")
-        execution_.resource_facts.cleanup = CleanupReport(released=True)
+        return CleanupReport(released=True)
 
-    def sweep(execution_):
+    def sweep(execution_, failures):
         calls.append("sweep")
+        return False
 
-    def enrich(execution_):
+    def enrich(execution_, failures):
         calls.append("enrich")
+        return False
 
     def report(execution_):
         calls.append("report")
+        return ReportFacts(status="missing")
 
-    def commit(execution_, projector):
+    def commit(execution_):
         calls.append("commit")
         execution_.verdict = Verdict(FINISHED, None, None)
         return True
 
-    monkeypatch.setattr(manager, "_recover_face_artifacts", recover)
-    monkeypatch.setattr(manager, "_close_face", close)
-    monkeypatch.setattr(manager, "_sweep_run_artifacts", sweep)
-    monkeypatch.setattr(manager, "_enrich_children", enrich)
-    monkeypatch.setattr(manager, "_recover_report", report)
-    monkeypatch.setattr(manager, "_commit_verdict", commit)
+    monkeypatch.setattr(pipeline.observe, "finish", observe)
+    monkeypatch.setattr(pipeline.recover, "face_artifacts", recover)
+    monkeypatch.setattr(pipeline.recover, "close_face", close)
+    monkeypatch.setattr(pipeline.seal, "sweep", sweep)
+    monkeypatch.setattr(pipeline.seal, "enrich", enrich)
+    monkeypatch.setattr(pipeline.seal, "report", report)
+    monkeypatch.setattr(pipeline.commit, "run", commit)
 
-    manager._finalize(execution)  # noqa: SLF001
+    pipeline.close_out(execution)
 
-    assert calls == ["recover", "close", "sweep", "enrich", "report", "commit"]
+    assert calls == ["observe", "recover", "close", "sweep", "enrich", "report", "commit"]
     assert execution.finalized.is_set()

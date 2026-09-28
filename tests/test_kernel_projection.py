@@ -349,7 +349,7 @@ def test_project_args_non_text_scalar_array_items_degrade_to_empty_strings() -> 
 #
 # 分工：投影层把 turn_end.message.usage 的**本次请求原始快照**原样交出（只求和
 # 白名单字段，不预先累计、不造 requestUsage）；跨请求求和与同 message 去重是
-# runner._accumulate_usage 的职责，下方不经 HTTP/RunManager 实例直接钉住它。
+# runs.channel.accumulate_usage 的职责，下方不经 HTTP/RunManager 实例直接钉住它。
 # 端到端形态另由 tests/test_runner.py 的 usage 回归钉住。
 
 
@@ -415,11 +415,11 @@ def test_assistant_message_embeds_usage_when_present() -> None:
 
 
 def _accumulate(runner: Any, execution: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
-    """Drive one turn_end frame through projection then the runner's accumulator."""
-    from pi_glink.runs.runner import RunManager  # noqa: PLC0415
+    """Drive one turn_end frame through projection then the run's accumulator."""
+    from pi_glink.runs.channel import accumulate_usage  # noqa: PLC0415
 
     payload = project_event(frame)[1][1]
-    return RunManager._accumulate_usage(runner, execution, frame, payload)  # noqa: SLF001
+    return accumulate_usage(runner._family_of(execution), execution.execution_facts, frame, payload)
 
 
 def _turn(timestamp: Any, tokens: int, **usage_extra: Any) -> dict[str, Any]:
@@ -433,9 +433,9 @@ def _turn(timestamp: Any, tokens: int, **usage_extra: Any) -> dict[str, Any]:
 
 
 def _bare_runner() -> Any:
-    """Just the one member ``_accumulate_usage`` reads off ``self`` — no bus,
-    no store, no RunManager instance. 求和算法已搬进 pi 族（config/store 在
-    这条路径上不被读取），runner 方法只剩按 run 的族委托。"""
+    """Just the run's family — no bus, no store, no RunManager instance. 求和
+    算法已搬进 pi 族（config/store 在这条路径上不被读取），
+    ``accumulate_usage`` 只剩按 run 的族委托。"""
     from pi_glink.kernel.harness_pi import PiHarnessFamily  # noqa: PLC0415
 
     family = PiHarnessFamily(config=None, store=None)  # type: ignore[arg-type]

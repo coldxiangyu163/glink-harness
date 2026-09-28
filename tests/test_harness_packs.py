@@ -352,7 +352,7 @@ def test_a_run_record_carries_the_pack_and_a_foreign_pack_cannot_continue(
 
     # 同包但父 run 未结束：按状态的既有拒绝（run_busy），不是包名拒绝。
     with pytest.raises(FollowupUnavailable) as excinfo:
-        manager._resumable_parent(None, "parent-run", manager._admission_spec(None))  # noqa: SLF001
+        manager._admission.resumable_parent(None, "parent-run", manager._admission.spec(None))  # noqa: SLF001
     assert excinfo.value.code == "run_busy"
 
     # 异包（同族）：fail-closed 为 session_unavailable，不再读父会话。
@@ -363,5 +363,5 @@ def test_a_run_record_carries_the_pack_and_a_foreign_pack_cannot_continue(
     )
     store.update("foreign-run", status=FINISHED)
     with pytest.raises(FollowupUnavailable) as excinfo:
-        manager._resumable_parent(None, "foreign-run", manager._admission_spec(None))  # noqa: SLF001
+        manager._admission.resumable_parent(None, "foreign-run", manager._admission.spec(None))  # noqa: SLF001
     assert excinfo.value.code == "session_unavailable"

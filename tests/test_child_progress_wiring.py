@@ -41,7 +41,8 @@ from pi_glink.kernel.sandbox import Launch, Sandbox, open_sandbox
 from pi_glink.kernel.child_progress import E2bChildProgressSource
 from pi_glink.runs import child_progress_observer as observer_module
 from pi_glink.runs.child_progress_observer import ChildProgressObserver
-from pi_glink.runs.runner import RunManager, _Execution
+from pi_glink.runs.runner import RunManager
+from pi_glink.runs.state import RunExecution as _Execution
 from pi_glink.store import RunStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -171,7 +172,7 @@ def open_execution(
     """An open execution without a kernel: the typed-event commit seam."""
     # The run is admitted with the manager's own RunSpec, so an ACP-configured
     # host records an ACP run and the family-specific progress mapping applies.
-    spec = manager._admission_spec(None)  # noqa: SLF001
+    spec = manager._admission.spec(None)  # noqa: SLF001
     record = store.create("子代理进度", run_id=run_id, workspace=workspace, spec=spec)
     execution = _Execution(record=record, workspace=workspace)
     execution.adapter = adapter
@@ -181,7 +182,7 @@ def open_execution(
 
 def emit(manager: RunManager, execution: _Execution, event_type: str, payload: Mapping[str, Any]) -> None:
     with execution.lock:
-        assert manager._emit_frame(execution, event_type, payload) is True  # noqa: SLF001
+        assert manager._pipeline.channel.emit_frame(execution, event_type, payload) is True  # noqa: SLF001
 
 
 def started(manager: RunManager, execution: _Execution, n: int, call_id: str, agent: str = "researcher") -> None:
@@ -193,10 +194,21 @@ def started(manager: RunManager, execution: _Execution, n: int, call_id: str, ag
     )
 
 
+def progress_of(manager: RunManager, execution: _Execution) -> Any:
+    """The run's progress observer, owned by its ``ChildProgressPlugin``."""
+    from pi_glink.runs.plugins import ChildProgressPlugin  # noqa: PLC0415
+
+    plugin = next(
+        p for p in manager._pipeline.plugins(execution) if isinstance(p, ChildProgressPlugin)  # noqa: SLF001
+    )
+    assert plugin.observer is not None
+    return plugin.observer
+
+
 def finalize_ok(manager: RunManager, execution: _Execution) -> None:
     """Drive the real finalizer with a settled outcome (a clean finish)."""
     execution.execution_facts.outcome = ExecutionOutcome(settled=True)
-    manager._finalize(execution)  # noqa: SLF001
+    manager._pipeline.close_out(execution)  # noqa: SLF001
 
 
 # -- adapter seam: child_progress_source() --------------------------------------
@@ -310,8 +322,8 @@ def test_no_subagent_means_no_observer(tmp_path: Path) -> None:
 
     finalize_ok(manager, execution)
 
-    assert execution.progress.started is False
-    assert execution.progress.thread is None
+    assert progress_of(manager, execution).started is False
+    assert progress_of(manager, execution).thread is None
     assert source.polls == 0 and source.closed is False
 
 
@@ -350,8 +362,8 @@ def test_an_adapter_inheriting_the_default_seam_gets_no_thread(tmp_path: Path) -
 
     started(manager, execution, 0, "call_1")
 
-    assert execution.progress.started is True
-    assert execution.progress.thread is None
+    assert progress_of(manager, execution).started is True
+    assert progress_of(manager, execution).thread is None
     assert progress_events(store, "prog01") == []
     assert not [
         e for e in read_events(store, "prog01") if e["type"] == events.KERNEL_STATUS
@@ -404,7 +416,7 @@ def test_unchanged_facts_emit_once_and_throttle_bounds_the_rate(tmp_path: Path) 
     with execution.lock:
         # 重置该 child 的发射时刻为「现在」：窗口由此确定，与此前耗时无关。
         # facts 尚未变化，此刻不可能有新发射，顺序无竞态。
-        execution.progress.emit_ts[0] = time.monotonic()
+        progress_of(manager, execution).emit_ts[0] = time.monotonic()
     source.facts = [PiProgressFact("researcher", 0, 2, "read", "a.md", 20)]
     time.sleep(0.06)  # 节流窗口内：变化可见但暂不发
     assert len(progress_events(store, "prog03")) == 1
@@ -463,7 +475,7 @@ def test_finalize_stops_the_thread_and_closes_the_source(tmp_path: Path) -> None
     execution = open_execution(manager, store, tmp_path / "ws", "prog06", adapter=FakeAdapter(source))
     started(manager, execution, 0, "call_1")
     assert wait_for(lambda: len(progress_events(store, "prog06")) == 1)
-    thread = execution.progress.thread
+    thread = progress_of(manager, execution).thread
     assert thread is not None and thread.is_alive()
 
     finalize_ok(manager, execution)
@@ -488,7 +500,7 @@ def test_repeated_poll_failures_back_off_then_recover(tmp_path: Path) -> None:
     source = FakeSource(error=OSError("simulated unreadable directory"))
     execution = open_execution(manager, store, tmp_path / "ws", "prog07", adapter=FakeAdapter(source))
     started(manager, execution, 0, "call_1")
-    thread = execution.progress.thread
+    thread = progress_of(manager, execution).thread
     assert thread is not None
 
     # 越过当初触发永久停止的阈值（5 次）后线程必须仍在轮询。
@@ -527,7 +539,7 @@ def test_a_failing_source_factory_is_one_warning_not_a_crash(tmp_path: Path) -> 
     )
     started(manager, execution, 0, "call_1")
 
-    assert execution.progress.thread is None
+    assert progress_of(manager, execution).thread is None
     warnings = [
         event
         for event in read_events(store, "prog08")
@@ -570,11 +582,11 @@ def test_a_started_after_the_observer_stop_starts_no_thread(tmp_path: Path) -> N
     source = FakeSource([PiProgressFact("researcher", 0, 1, "read", "a.md", 10)])
     execution = open_execution(manager, store, tmp_path / "ws", "prog07", adapter=FakeAdapter(source))
 
-    manager._stop_progress_observer(execution)  # noqa: SLF001 - finalize 的停止点
+    manager._pipeline.observe.finish(execution)  # noqa: SLF001 - Observe 阶段的停止点
     started(manager, execution, 0, "call_1")
     time.sleep(0.3)
 
-    assert execution.progress.thread is None, "closed 之后不得再起线程"
+    assert progress_of(manager, execution).thread is None, "closed 之后不得再起线程"
     assert progress_events(store, "prog07") == []
     finalize_ok(manager, execution)
 
