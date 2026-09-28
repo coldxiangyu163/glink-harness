@@ -83,9 +83,6 @@ THINKING_FORMAT = "openrouter"
 #: finds it in every face. ``extensions`` carries both the pi-glink
 #: foreground-dispatch guard and pi-subagents' own extension config.
 TEMPLATE_ENTRIES = ("settings.json", "AGENTS.md", "agents", "extensions", "skills")
-#: Backwards-compatible private alias (the list is part of the module contract
-#: for the E2B upload manifest, so it is exported under a public name).
-_TEMPLATE_ENTRIES = TEMPLATE_ENTRIES
 #: Image-local pi package root, installed at build time by both
 #: ``docker/Dockerfile.worker`` and ``docker/e2b/Dockerfile.e2b``. It is
 #: deliberately outside ``PI_CODING_AGENT_DIR``: the runtime directory is a

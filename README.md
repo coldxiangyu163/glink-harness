@@ -239,10 +239,8 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 - **回退**：切回 `PI_GLINK_AUTH_MODE=gateway`（或关闭多租户）即可；账号库保留只读，不自动改写 run
   历史，也不降低 owner 校验。
 
-> **合并窗口兼容**：静态前端由宿主逐次读盘，先更新代码、后重启宿主时，运行中的旧 `local` 宿主
-> 没有 `GET /api/me`。前端仅在 `/api/me` 明确 404 且 `/api/config` 成功返回严格 `multiTenant:false`
-> 时按旧 local 流程初始化（旧历史照常显示）；401、网络错误、多租户或含糊配置一律 fail-closed，
-> 不会因此绕过账号身份。宿主重启后该兼容分支即失效。
+> **前端不回退**：`/api/me` 除 401 外的任何失败（含 404、网络错误）一律显示「服务暂时连不上」，
+> 不探测 `/api/config`、不按 local 流程进入。更新代码后需重启宿主，旧宿主不再兼容。
 
 ### 模型凭据策略：`PI_GLINK_MODEL_CREDENTIALS`（默认 `tenant`）
 

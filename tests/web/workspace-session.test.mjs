@@ -123,40 +123,10 @@ test('local mode enters the workbench without any login face', async (t) => {
   assert.equal(h.dom.getElement('account-area').hidden, true);
 });
 
-test('a 404 /api/me plus a successful multiTenant:false config runs the old local workbench', async (t) => {
-  // Merge-window compatibility: the running host predates /api/me (the new
-  // static modules load immediately), but it is the old single-user local
-  // surface. The old history must stay visible instead of "服务连不上".
-  let configCalls = 0;
-  const h = harness({
-    me: async () => {
-      throw new ApiError('unknown_endpoint', {
-        status: 404,
-        code: 'unknown_endpoint',
-        payload: { error: 'unknown_endpoint', path: '/api/me' },
-      });
-    },
-    api: {
-      config: async () => {
-        configCalls += 1;
-        return { model: 'test-model', multiTenant: false, configured: { model: true } };
-      },
-      listRuns: async () => ({ runs: [runView('legacy-1', '旧历史一'), runView('legacy-2', '旧历史二')] }),
-    },
-  });
-  t.after(() => h.dom.restore());
-  await h.workspace.init();
-  assert.equal(h.dom.getElement('app-shell').hidden, false);
-  assert.equal(h.workspace.identity.mode, 'local');
-  assert.equal(h.workspace.runs.length, 2, 'old local history must be shown');
-  assert.equal(h.dom.getElement('run-list').children.length > 0, true);
-  assert.equal(h.dom.getElement('account-area').hidden, true);
-  assert.equal(getCsrfToken(), null, 'the local surface has no session to protect');
-  assert.equal(configCalls >= 1, true);
-  assert.deepEqual(h.auth.shown.filter((entry) => entry.mode !== 'hide'), [], 'no unauthenticated face');
-});
-
-test('the legacy fallback fails closed for every other /api/me outcome', async (t) => {
+test('every /api/me failure other than 401 fails closed without probing /api/config', async (t) => {
+  // A 404 from /api/me (e.g. a host that predates accounts) is not a local
+  // workbench signal: there is no fallback, so no config shape can reveal the
+  // shell without an identity.
   const notFound = () =>
     new ApiError('unknown_endpoint', {
       status: 404,
@@ -166,12 +136,13 @@ test('the legacy fallback fails closed for every other /api/me outcome', async (
   const cases = [
     { name: '401 accounts', me: () => { throw unauthorized('accounts'); }, config: async () => ({ multiTenant: false }), expect: 'login', probes: 0 },
     { name: '401 gateway', me: () => { throw unauthorized('gateway'); }, config: async () => ({ multiTenant: false }), expect: 'gateway', probes: 0 },
+    { name: '404 with multiTenant:false', me: () => { throw notFound(); }, config: async () => ({ multiTenant: false }), expect: 'unavailable', probes: 0 },
     { name: 'network error', me: () => { throw Object.assign(new Error('down'), { status: 0 }); }, config: async () => ({ multiTenant: false }), expect: 'unavailable', probes: 0 },
-    { name: 'multitenant config', me: () => { throw notFound(); }, config: async () => ({ multiTenant: true }), expect: 'unavailable', probes: 1 },
-    { name: 'missing multiTenant', me: () => { throw notFound(); }, config: async () => ({ model: 'x' }), expect: 'unavailable', probes: 1 },
-    { name: 'string false', me: () => { throw notFound(); }, config: async () => ({ multiTenant: 'false' }), expect: 'unavailable', probes: 1 },
-    { name: 'config 401', me: () => { throw notFound(); }, config: () => { throw unauthorized('accounts'); }, expect: 'unavailable', probes: 1 },
-    { name: 'config network error', me: () => { throw notFound(); }, config: () => { throw Object.assign(new Error('down'), { status: 0 }); }, expect: 'unavailable', probes: 1 },
+    { name: 'multitenant config', me: () => { throw notFound(); }, config: async () => ({ multiTenant: true }), expect: 'unavailable', probes: 0 },
+    { name: 'missing multiTenant', me: () => { throw notFound(); }, config: async () => ({ model: 'x' }), expect: 'unavailable', probes: 0 },
+    { name: 'string false', me: () => { throw notFound(); }, config: async () => ({ multiTenant: 'false' }), expect: 'unavailable', probes: 0 },
+    { name: 'config 401', me: () => { throw notFound(); }, config: () => { throw unauthorized('accounts'); }, expect: 'unavailable', probes: 0 },
+    { name: 'config network error', me: () => { throw notFound(); }, config: () => { throw Object.assign(new Error('down'), { status: 0 }); }, expect: 'unavailable', probes: 0 },
   ];
   for (const item of cases) {
     let probes = 0;

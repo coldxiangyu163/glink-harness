@@ -870,27 +870,6 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
     }
   }
 
-  /**
-   * Whether the running host predates `/api/me` but is the old local surface.
-   *
-   * Merge-window compatibility only: static modules are served from disk, so a
-   * host started before the accounts work can be running the new front-end
-   * without `/api/me`. The signature is *exactly* a 404 from `/api/me`
-   * followed by a 200 `/api/config` whose `multiTenant` is boolean `false`.
-   * Everything else — 401, network errors, multitenant/gateway/accounts, a
-   * missing or non-boolean flag, a config that fails — stays fail-closed: the
-   * local workbench (which has no identity at all) is never revealed by
-   * accident, so no account-identity path can be bypassed through it.
-   */
-  async function isLegacyLocalHost() {
-    try {
-      const config = await api.config();
-      return config?.multiTenant === false;
-    } catch {
-      return false;
-    }
-  }
-
   /** Ask the server who we are before revealing anything about the workbench. */
   async function refreshSession() {
     let me;
@@ -899,15 +878,6 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         showAuthFace(error.payload?.mode);
-      } else if (
-        error instanceof ApiError &&
-        error.status === 404 &&
-        (await isLegacyLocalHost())
-      ) {
-        // The old host has no identity system at all; its config says "local".
-        // Run the pre-accounts flow so the existing history stays usable until
-        // the host is restarted. A restart makes this branch dead.
-        await enterSession({ mode: 'local', authenticated: false });
       } else if (auth) {
         auth.show({ mode: 'unavailable', notice: '服务暂时连不上，无法确认登录状态。请稍后重试。' });
       }
