@@ -79,6 +79,54 @@ test('the CSRF header only appears when a session supplied a token', async () =>
   assert.equal(calls[4].init.headers['X-Pi-Glink-CSRF'], undefined);
 });
 
+test('403 csrf_invalid refreshes the accounts token and retries the same POST once', async () => {
+  const calls = [];
+  setCsrfToken('stale');
+  const api = createApi({ onCsrfInvalid: async () => { setCsrfToken((await api.me()).csrfToken); return true; }, fetchImpl: async (path, init) => {
+    calls.push({ path, init });
+    if (path === '/api/me') return { ok: true, status: 200, text: async () => '{"csrfToken":"fresh"}' };
+    return calls.filter((call) => call.path === path).length === 1
+      ? { ok: false, status: 403, text: async () => '{"error":"csrf_invalid"}' }
+      : { ok: true, status: 200, text: async () => '{"run":{"id":"new"}}' };
+  } });
+  const result = await api.startRun('同一个问题');
+  assert.equal(result.run.id, 'new');
+  assert.deepEqual(calls.map(({ path }) => path), ['/api/runs', '/api/me', '/api/runs']);
+  assert.equal(calls[0].init.headers['X-Pi-Glink-CSRF'], 'stale');
+  assert.equal(calls[2].init.headers['X-Pi-Glink-CSRF'], 'fresh');
+  assert.equal(calls[2].init.body, calls[0].init.body);
+  assert.equal(getCsrfToken(), 'fresh');
+  setCsrfToken(null);
+});
+
+test('a second csrf_invalid reaches the failure surface without a refresh loop', async () => {
+  const paths = [];
+  setCsrfToken('stale');
+  const api = createApi({ onCsrfInvalid: async () => { setCsrfToken((await api.me()).csrfToken); return true; }, fetchImpl: async (path, init) => {
+    paths.push({ path, init });
+    if (path === '/api/me') return { ok: true, status: 200, text: async () => '{"csrfToken":"fresh"}' };
+    return { ok: false, status: 403, text: async () => '{"error":"csrf_invalid"}' };
+  } });
+  await assert.rejects(() => api.stopRun('r1'), (error) => error.status === 403 && error.code === 'csrf_invalid');
+  assert.deepEqual(paths.map(({ path }) => path), ['/api/runs/r1/stop', '/api/me', '/api/runs/r1/stop']);
+  assert.equal(paths[2].init.headers['X-Pi-Glink-CSRF'], 'fresh');
+  setCsrfToken(null);
+});
+
+test('GET, 401, and other 403 failures never refresh or retry', async () => {
+  for (const [method, status, code] of [['GET', 403, 'csrf_invalid'], ['POST', 401, 'unauthenticated'], ['POST', 403, 'forbidden']]) {
+    let calls = 0;
+    let refreshes = 0;
+    const api = createApi({ onCsrfInvalid: async () => { refreshes += 1; return true; }, fetchImpl: async () => {
+      calls += 1;
+      return { ok: false, status, text: async () => JSON.stringify({ error: code }) };
+    } });
+    await assert.rejects(() => method === 'GET' ? api.me() : api.startRun('问题'), (error) => error.status === status && error.code === code);
+    assert.equal(calls, 1);
+    assert.equal(refreshes, 0);
+  }
+});
+
 test('a failed response becomes an ApiError carrying status and code', async () => {
   const api = createApi({
     fetchImpl: async () => ({

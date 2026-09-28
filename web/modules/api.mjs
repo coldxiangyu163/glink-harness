@@ -44,7 +44,7 @@ async function parse(response) {
   }
 }
 
-async function call(path, { method = 'GET', body = null, fetchImpl = globalThis.fetch } = {}) {
+async function call(path, { method = 'GET', body = null, fetchImpl = globalThis.fetch, onCsrfInvalid } = {}, retried = false) {
   // Same-origin credentials travel by default; making it explicit documents the
   // multi-tenant contract: either an authentication gateway in front of this
   // host injects the short-lived identity from the session cookie it already
@@ -58,6 +58,13 @@ async function call(path, { method = 'GET', body = null, fetchImpl = globalThis.
   const response = await fetchImpl(path, init);
   const payload = await parse(response);
   if (!response.ok) {
+    // Only this server-defined CSRF rejection is safe to retry. Rebuild the
+    // request after /api/me refreshes the module's in-memory token; never loop.
+    if (method !== 'GET' && !retried && response.status === 403 &&
+        payload?.error === 'csrf_invalid' && typeof onCsrfInvalid === 'function' &&
+        await onCsrfInvalid()) {
+      return call(path, { method, body, fetchImpl, onCsrfInvalid }, true);
+    }
     throw new ApiError(payload?.message ?? payload?.error ?? `HTTP ${response.status}`, {
       status: response.status,
       code: payload?.error ?? null,
@@ -67,9 +74,11 @@ async function call(path, { method = 'GET', body = null, fetchImpl = globalThis.
   return payload;
 }
 
-export function createApi({ fetchImpl = globalThis.fetch } = {}) {
-  const options = { fetchImpl };
+export function createApi({ fetchImpl = globalThis.fetch, onCsrfInvalid = null } = {}) {
+  const options = { fetchImpl, onCsrfInvalid };
   return {
+    /** The workbench owns identity verification; the client owns retry shape. */
+    setCsrfRecovery: (verify) => { options.onCsrfInvalid = verify; },
     /** Host health: pi availability, configured model, active run. */
     health: () => call('/api/health', options),
     /** Public config: executor, model, configured flags. Never credentials. */

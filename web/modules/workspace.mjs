@@ -1046,20 +1046,22 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
     }
   }
 
-  /** Re-check the session (visibility change, dead SSE stream). */
+  /** Re-check the session (visibility change, dead SSE stream, CSRF rejection). */
   async function verifySession() {
-    if (!identity || disposed) return;
+    if (!identity || disposed) return false;
     const generation = identityGeneration;
     try {
       const me = await api.me();
-      if (identityStale(generation)) return;
+      if (identityStale(generation)) return false;
       setCsrfToken(me?.csrfToken ?? null);
       identity = me;
       account.setIdentity(me);
+      return Boolean(me?.csrfToken);
     } catch (error) {
       if (!disposed && error instanceof ApiError && error.status === 401) {
         sessionExpired('登录状态已过期，请重新登录。');
       }
+      return false;
     }
   }
 
@@ -1110,6 +1112,10 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       verifySession();
     });
   }
+
+  // Keep 401/session handling in this workspace; the shared HTTP client only
+  // retries the original POST if verification actually refreshed this session.
+  api.setCsrfRecovery?.(() => identity?.mode === 'accounts' && verifySession());
 
   return {
     async init() {
