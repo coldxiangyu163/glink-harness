@@ -9,6 +9,7 @@ fake pi kernel, temporary data roots. No real model, search, Docker or E2B.
 from __future__ import annotations
 
 import json
+import socket
 import sys
 import threading
 import urllib.error
@@ -231,6 +232,32 @@ def test_a_revoked_token_is_refused_and_the_idle_listener_closes(
     assert proxy.revoke(second.token) is not None
     assert proxy.port is None, "no live grant, no open egress port"
     assert proxy.revoke(second.token) is None
+
+
+def test_a_fixed_port_rebinds_right_after_the_last_grant_is_revoked(
+    upstream: FakeUpstream,
+) -> None:
+    # A public URL pins PI_GLINK_EGRESS_PORT, so back-to-back runs revoke and
+    # re-issue on the same port; the old socket must be closed by then.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    fixed = probe.getsockname()[1]
+    probe.close()
+    proxy = EgressProxy(
+        model_upstream=f"{upstream.origin}/v1",
+        search_upstream=f"{upstream.origin}/exa",
+        port=fixed,
+    )
+    try:
+        for round_no in range(5):
+            grant = proxy.issue(run_id=f"run-{round_no}", tenant=None, model_key=MODEL_KEY)
+            assert proxy.port == fixed
+            url = f"http://127.0.0.1:{fixed}/model/chat/completions"
+            assert post(url, headers={"Authorization": f"Bearer {grant.token}"})[0] == 200
+            assert proxy.revoke(grant.token) is not None
+            assert proxy.port is None
+    finally:
+        proxy.close()
 
 
 def test_search_needs_its_own_grant_and_forwards_the_search_key(

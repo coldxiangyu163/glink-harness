@@ -627,7 +627,7 @@ run 只拿到宿主凭据出口代理（`host/pi_glink/egress.py::EgressProxy`�
 
 * **代理**：宿主进程内一个独立的 loopback 监听（`PI_GLINK_EGRESS_HOST`，默认 `127.0.0.1`；
   `PI_GLINK_EGRESS_PORT`，默认 0 = 随机端口），与 Web 端口分开。首个 grant 签发时绑定，最后一个 grant
-  吊销后停止，空闲宿主没有打开的出口端口。路由只有两条：`/model/…` 转发到宿主冻结的
+  吊销后同步停止（在锁内等监听 socket 关闭后才返回，所以固定端口下紧接着的签发可以立即重新绑定），空闲宿主没有打开的出口端口。路由只有两条：`/model/…` 转发到宿主冻结的
   `OPENAI_BASE_URL`（替换为 `Authorization: Bearer <真实 key>`），`/search/…` 转发到宿主冻结的
   `PI_GLINK_WEB_SEARCH_UPSTREAM`（默认 `https://api.exa.ai`，替换为 `x-api-key`）。内核送来的
   `Authorization` / `x-api-key` / `Cookie` 与逐跳头不透传；上游重定向原样返回、不跟随（跟随会把真实

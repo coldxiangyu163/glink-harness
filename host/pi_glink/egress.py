@@ -201,15 +201,14 @@ class EgressProxy:
         """Invalidate ``token``; returns its final usage (``None`` if unknown).
 
         The listener stops once no grant is live, so an idle host has no open
-        egress port.
+        egress port. The stop is synchronous and happens under the lock: the
+        listening socket is closed before a concurrent :meth:`issue` can bind
+        again, which a fixed ``port`` (required with a public URL) depends on.
         """
-        server: ThreadingHTTPServer | None = None
         with self._lock:
             grant = self._grants.pop(_digest(token), None)
-            if not self._grants and self._server is not None:
-                server, self._server, self._thread = self._server, None, None
-        if server is not None:
-            _stop_server(server)
+            if not self._grants:
+                self._stop_listening()
         return grant.usage() if grant is not None else None
 
     def grant_for(self, token: str) -> EgressGrant | None:
@@ -224,9 +223,7 @@ class EgressProxy:
     def close(self) -> None:
         with self._lock:
             self._grants.clear()
-            server, self._server, self._thread = self._server, None, None
-        if server is not None:
-            _stop_server(server)
+            self._stop_listening()
 
     def _ensure_listening(self) -> None:
         if self._server is not None:
@@ -243,6 +240,24 @@ class EgressProxy:
         self._server, self._thread = server, thread
         logger.info("egress proxy listening on %s:%s", self.host, server.server_address[1])
 
+    def _stop_listening(self) -> None:
+        """Close the listener and wait until its socket is released (lock held).
+
+        ``shutdown`` only waits for the ``serve_forever`` loop (at most one
+        ``poll_interval``); request handlers run on their own daemon threads and
+        never call back into this path, so holding the lock cannot deadlock.
+        """
+        server, thread = self._server, self._thread
+        self._server, self._thread = None, None
+        if server is None:
+            return
+        try:
+            server.shutdown()
+        finally:
+            server.server_close()
+        if thread is not None:
+            thread.join()
+
     # -- forwarding --------------------------------------------------------------
 
     def upstream_for(self, route: str) -> str:
@@ -251,16 +266,6 @@ class EgressProxy:
 
 def _digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def _stop_server(server: ThreadingHTTPServer) -> None:
-    def stop() -> None:
-        try:
-            server.shutdown()
-        finally:
-            server.server_close()
-
-    threading.Thread(target=stop, name="pi-glink-egress-stop", daemon=True).start()
 
 
 class _EgressServer(ThreadingHTTPServer):

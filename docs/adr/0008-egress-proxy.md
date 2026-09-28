@@ -15,7 +15,7 @@
 ## 决定
 
 1. 宿主进程内运行一个凭据出口代理：独立 loopback 监听（`PI_GLINK_EGRESS_HOST` / `PI_GLINK_EGRESS_PORT`），
-   首个 grant 签发时绑定、最后一个吊销后停止。`/model/…` 转发到宿主冻结的 `OPENAI_BASE_URL`，
+   首个 grant 签发时绑定、最后一个吊销后同步停止（socket 关闭后才释放锁，固定端口下下一次签发可立即重绑）。`/model/…` 转发到宿主冻结的 `OPENAI_BASE_URL`，
    `/search/…` 转发到宿主冻结的 `PI_GLINK_WEB_SEARCH_UPSTREAM`，由宿主替换 `Authorization` /
    `x-api-key`。不跟随重定向；上游只接受 https 或 loopback http。
 2. 每个 run 一个短期 token（`pge_…`），绑定 `run_id` 与 tenant，只存内存；终帧提交时吊销，宿主重启

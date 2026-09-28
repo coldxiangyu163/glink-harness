@@ -1257,24 +1257,28 @@ class RunManager:
                 logger.exception("terminal commit failed run=%s", run_id)
             execution.phase = _COMMITTED if committed else _UNCOMMITTED
 
-        # The kernel is gone by now: the run's token stops working whether or
-        # not the verdict was committed (an uncommitted run never runs again;
-        # a restart reconciles it without a kernel).
-        self._revoke_egress(execution)
-        if committed:
-            try:
-                self.store.settle(run_id)
-            except Exception:  # noqa: BLE001 - readers project the committed frame
-                logger.exception("settling the run record failed run=%s", run_id)
-            self.bus.close(run_id)
-            with self._lock:
-                self._executions.pop(run_id, None)
-        else:
-            # Every reader still sees ``running`` (nothing is committed), so the
-            # run keeps its slot and its live stream; a restart reconciles it.
-            logger.critical(
-                "run 终态未能提交，保持占用直至重启对账 run=%s status=%s", run_id, verdict.status
-            )
+        try:
+            if committed:
+                try:
+                    self.store.settle(run_id)
+                except Exception:  # noqa: BLE001 - readers project the committed frame
+                    logger.exception("settling the run record failed run=%s", run_id)
+                self.bus.close(run_id)
+                with self._lock:
+                    self._executions.pop(run_id, None)
+            else:
+                # Every reader still sees ``running`` (nothing is committed), so the
+                # run keeps its slot and its live stream; a restart reconciles it.
+                logger.critical(
+                    "run 终态未能提交，保持占用直至重启对账 run=%s status=%s", run_id, verdict.status
+                )
+        finally:
+            # The kernel is gone by now: the run's token stops working whether or
+            # not the verdict was committed (an uncommitted run never runs again;
+            # a restart reconciles it without a kernel). It runs after the record
+            # is settled because stopping the last grant's listener is synchronous
+            # (up to one serve_forever poll) and must not delay the settled record.
+            self._revoke_egress(execution)
         return committed
 
     # -- the verdict ----------------------------------------------------------
