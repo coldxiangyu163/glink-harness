@@ -123,7 +123,7 @@ seq=88  len=495  同前 53 字符 + '\nPI vars:\nPI_CODING_AGENT_DIR=…'
 
 **终帧与最后一次更新帧是同一段文本**：同一 run 的 `seq=89 tool_finished.result` 与
 `seq=88 tool_updated.output` 逐字相同（均 495 字符）。终帧去重同样属于前端责任：
-`run-stream.mjs::finishTool` 在 `result === item.output` 时清空 output，卡片只渲染
+`run-reducer.mjs::finishTool`（原 `run-stream.mjs`，事件 schema 重构后迁入纯 reducer）在 `result === item.output` 时清空 output，卡片只渲染
 result 一次；两者不同的工具仍保留两份内容。校验：
 `tests/web/run-stream.test.mjs` 的 `the audited run ebf75f590601 replays with replacement semantics (real fixture)`
 断言 `output + result` 只渲染 495 字符且前缀仅出现一次；浏览器回归以

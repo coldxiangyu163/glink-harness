@@ -13,7 +13,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { applyEvent, createRunModel } from '../../web/modules/run-stream.mjs';
+import { EVENT_VERSIONS } from '../../web/modules/event-schema.gen.mjs';
+import { createRunState, reduce } from '../../web/modules/run-reducer.mjs';
 import { collectSources } from '../../web/modules/progress-panel.mjs';
 import { describeTool } from '../../web/modules/present.mjs';
 
@@ -22,11 +23,11 @@ const corpus = JSON.parse(
 );
 
 function modelFromProjectedEvents(events) {
-  let model = createRunModel({ runId: 'r1' });
+  let model = createRunState({ runId: 'r1' });
   let seq = 0;
   for (const event of events) {
     seq += 1;
-    model = applyEvent(model, { ...event, seq, runId: 'r1' });
+    model = reduce(model, { ...event, v: EVENT_VERSIONS[event.type], seq, runId: 'r1' });
   }
   return model;
 }

@@ -3,7 +3,8 @@
  * progress & context panel.
  *
  * The shell owns navigation and layout and nothing else. Run semantics live in
- * `run-stream.mjs` (event → model) and `run-view.mjs` (model → DOM); every word
+ * `run-reducer.mjs` (pure event → state), `run-stream.mjs` (SSE subscription
+ * folded through the reducer) and `run-view.mjs` (state → DOM); every word
  * the reader sees about a run comes from `present.mjs`. Nothing here names the
  * engine or the execution surface — which process ran the research is an
  * operator concern (see `/api/health`), not a reader concern.
@@ -20,12 +21,14 @@
 import { createApi, ApiError, setCsrfToken } from './api.mjs';
 import { createAccountArea } from './account.mjs';
 import { createNavGuard } from './nav-guard.mjs';
-import { applyEvent, createRunModel, createRunSubscription, TERMINAL_EVENT_TYPES } from './run-stream.mjs';
+import { createRunState } from './run-reducer.mjs';
+import { createRunFeed } from './run-stream.mjs';
+import { renderRunLists } from './run-list-view.mjs';
 import { createRunView } from './run-view.mjs';
 import { createProgressPanel } from './progress-panel.mjs';
 import { installTooltips } from './tooltip.mjs';
 import { renderMarkdown } from './markdown.mjs';
-import { formatDuration, relativeTime, reportFileName, researchTitle, statusLabel } from './present.mjs';
+import { reportFileName, researchTitle } from './present.mjs';
 
 const MAX_PROMPT = 32000;
 /** The counter is noise while typing; it appears only near the limit. */
@@ -44,9 +47,6 @@ const PLACEHOLDERS = {
   idle: '继续追问或提出修改要求…',
   busy: '研究进行中，完成或停止后可以继续追问',
 };
-
-/* Only the two states that need the reader get a word in the sidebar. */
-const NAV_META = { running: '进行中', failed: '未完成' };
 
 const TOAST_ICONS = { success: 'check-circle', info: 'check-circle', warning: 'alert-circle', error: 'alert-circle' };
 
@@ -101,7 +101,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
   /** Two columns need 560 + 1 + 360; below that the report floats over the conversation. */
   const isOverlay = () => shell.classList.contains('slot-overlay');
 
-  let current = null; // { runId, model, subscription, view, prompt (root), history, events }
+  let current = null; // { runId, model, feed, view, prompt (root), history }
   let latestRuns = [];
   let slot = null; // null | 'report' | 'progress'
   let conversationCollapsed = false;
@@ -414,134 +414,12 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
 
   // -- research records ------------------------------------------------------
 
-  function emptyState({ title, description, size = 'sm' }) {
-    const wrap = document.createElement('div');
-    wrap.className = 'empty-state';
-    wrap.dataset.size = size;
-    wrap.dataset.variant = 'no-data';
-    wrap.setAttribute('role', 'status');
-    const image = document.createElement('img');
-    image.src = '/empty-state/no-data.svg';
-    image.alt = '';
-    const heading = document.createElement('p');
-    heading.className = 'empty-state-title';
-    heading.textContent = title;
-    wrap.append(image, heading);
-    if (description) {
-      const text = document.createElement('p');
-      text.className = 'empty-state-desc';
-      text.textContent = description;
-      wrap.append(text);
-    }
-    return wrap;
-  }
-
   function renderRunList(runs) {
     latestRuns = runs;
-    runList.replaceChildren();
-    homeRunList.replaceChildren();
-    homeReportList.replaceChildren();
-    if (!runs.length) {
-      runList.append(emptyState({ title: '还没有研究记录' }));
-      homeRunList.append(emptyState({ title: '还没有研究', description: '在上方描述问题，开始第一项研究' }));
-      homeReportList.append(emptyState({ title: '还没有报告', description: '研究完成后生成的报告会出现在这里' }));
-      return;
-    }
-    const children = new Set(runs.map((run) => run.parentRunId).filter(Boolean));
-    const byId = new Map(runs.map((run) => [run.runId, run]));
-    const nextByParent = new Map(runs.filter((run) => run.parentRunId)
-      .map((run) => [run.parentRunId, run.runId]));
-    const latestOf = (run) => {
-      const seen = new Set();
-      let leaf = run.runId;
-      while (nextByParent.has(leaf) && !seen.has(leaf)) {
-        seen.add(leaf);
-        leaf = nextByParent.get(leaf);
-      }
-      return leaf;
-    };
-    const titleOf = (run) => {
-      const seen = new Set();
-      let root = run;
-      while (root.parentRunId && byId.has(root.parentRunId) && !seen.has(root.runId)) {
-        seen.add(root.runId);
-        root = byId.get(root.parentRunId);
-      }
-      return root.prompt;
-    };
-    for (const run of runs.filter((item) => !children.has(item.runId))) {
-      runList.append(navRow(run, titleOf(run)));
-      homeRunList.append(homeRow(run, titleOf(run)));
-    }
-    const reports = runs.filter((run) => run.hasReport);
-    if (!reports.length) {
-      homeReportList.append(emptyState({ title: '还没有报告', description: '研究完成后生成的报告会出现在这里' }));
-    }
-    for (const run of reports) homeReportList.append(reportRow(run, latestOf(run)));
-  }
-
-  function iconNode(name) {
-    const node = document.createElement('span');
-    node.className = 'icon';
-    node.dataset.icon = name;
-    node.setAttribute('aria-hidden', 'true');
-    return node;
-  }
-
-  function span(className, text) {
-    const node = document.createElement('span');
-    node.className = className;
-    node.textContent = text;
-    return node;
-  }
-
-  function navRow(run, title = run.prompt) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'nav-item';
-    button.dataset.runId = run.runId;
-    button.dataset.status = run.status;
-    button.dataset.tip = researchTitle(title, 40);
-    button.dataset.tipSide = 'right';
-    button.dataset.tipWhen = 'collapsed';
-    if (current?.runId === run.runId) button.setAttribute('aria-current', 'page');
-    button.append(iconNode('chat'), span('nav-title', researchTitle(title)));
-    if (NAV_META[run.status]) button.append(span('nav-meta', NAV_META[run.status]));
-    button.addEventListener('click', () => openRun(run.runId));
-    return button;
-  }
-
-  function homeRow(run, title = run.prompt) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'home-row';
-    button.dataset.runId = run.runId;
-    button.dataset.status = run.status;
-    const body = span('home-row-body', '');
-    const duration = formatDuration(run.durationSeconds);
-    body.append(
-      span('home-row-title', researchTitle(title, 40)),
-      span('home-row-meta', duration ? `${statusLabel(run.status)} · ${duration}` : statusLabel(run.status)),
-    );
-    button.append(iconNode('history'), body, span('home-row-time', relativeTime(run.createdAt)));
-    button.addEventListener('click', () => openRun(run.runId));
-    return button;
-  }
-
-  function reportRow(run, conversationRunId = run.runId) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'home-row';
-    button.dataset.reportRunId = run.runId;
-    const tile = document.createElement('img');
-    tile.className = 'home-row-tile';
-    tile.src = '/icons/markdown-32.png';
-    tile.alt = '';
-    const body = span('home-row-body', '');
-    body.append(span('home-row-title', researchTitle(run.prompt, 40)), span('home-row-meta', 'report.md · 待核验草稿'));
-    button.append(tile, body, span('home-row-time', relativeTime(run.finishedAt || run.createdAt)));
-    button.addEventListener('click', () => openRun(conversationRunId, { withReport: run.runId }));
-    return button;
+    renderRunLists({ runList, homeRunList, homeReportList }, runs, {
+      currentRunId: current?.runId ?? null,
+      onOpen: (runId, options) => openRun(runId, options),
+    });
   }
 
   async function refreshRuns() {
@@ -627,7 +505,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       }
     }
     if (disposed || !nav.isCurrent(token)) return;
-    const model = createRunModel(run);
+    const model = createRunState(run);
     // A view belongs to one run: `dispose()` is permanent.
     const view = createRunView({
       root: runHost,
@@ -640,8 +518,8 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       reportDownloadName: (value) => reportFileName(value.prompt),
       childFileHref: (id, n, name) => api.childFileUrl(id, n, name),
     });
-    current = { runId, model, subscription: null, view,
-      prompt: ancestors[0]?.prompt ?? run.prompt, history: [], events: 0 };
+    current = { runId, model, feed: null, view,
+      prompt: ancestors[0]?.prompt ?? run.prompt, history: [] };
     earlierTurns.replaceChildren();
     for (const ancestor of ancestors) {
       const exchange = document.createElement('section');
@@ -653,20 +531,19 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       pastRoot.className = 'pi-run';
       exchange.append(pastQuestion, pastRoot);
       earlierTurns.append(exchange);
-      const past = { runId: ancestor.runId, model: createRunModel(ancestor), subscription: null,
+      const past = { runId: ancestor.runId, model: createRunState(ancestor), feed: null,
         view: createRunView({ root: pastRoot, renderMarkdown, onOpenReport: openReport,
           onCopy: copyText, reportHref: api.reportUrl,
           reportDownloadName: (value) => reportFileName(value.prompt) }) };
       current.history.push(past);
       past.view.render(past.model);
-      past.subscription = createRunSubscription({ runId: past.runId, eventsUrl: api.eventsUrl,
-        eventSourceFactory, onEvent: (event) => {
-          if (disposed || current?.runId !== runId) return;
-          past.model = applyEvent(past.model, event);
-          past.view.render(past.model);
-          if (TERMINAL_EVENT_TYPES.has(event.type)) past.subscription?.close();
+      past.feed = createRunFeed({ run: ancestor, initialState: past.model, eventsUrl: api.eventsUrl,
+        eventSourceFactory, isActive: () => !disposed && current?.runId === runId,
+        onState: (state) => {
+          past.model = state;
+          past.view.render(state);
         }, onStatus: (status) => {
-          if (status === 'failed') past.subscription?.close();
+          if (status === 'failed') past.feed?.close();
         } });
     }
     question.textContent = run.prompt;
@@ -681,28 +558,27 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       }
     }
 
-    current.subscription = createRunSubscription({
-      runId,
+    const owner = current;
+    current.feed = createRunFeed({
+      run,
+      initialState: model,
       eventsUrl: api.eventsUrl,
       eventSourceFactory,
-      onEvent: (event) => {
-        if (disposed || current?.runId !== runId) return; // late frames from a replaced run
-        current.events += 1;
-        current.model = applyEvent(current.model, event);
-        current.view.render(current.model);
+      // Late frames from a replaced run are dropped.
+      isActive: () => !disposed && current === owner,
+      onState: (state) => {
+        current.model = state;
+        current.view.render(state);
         afterModelChange();
-        // Closing on the terminal *frame* (not on the model's status) is what
-        // makes history replay work: a finished run starts at status=finished.
-        if (TERMINAL_EVENT_TYPES.has(event.type)) {
-          current.subscription?.close();
-          setConnection(null);
-          refreshRuns();
-        }
       },
-      onStatus: (status) => {
-        if (disposed || current?.runId !== runId) return;
-        onStreamStatus(status);
+      // The feed closes the stream on the terminal *frame* (not on the state's
+      // status): that is what makes history replay work, since a finished run
+      // starts at status=finished.
+      onTerminal: () => {
+        setConnection(null);
+        refreshRuns();
       },
+      onStatus: (status) => onStreamStatus(status),
       onError: () => showToast('有一条过程记录无法显示，已跳过。', 'warning'),
     });
   }
@@ -713,10 +589,10 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       setConnection(null);
     } else if (status === 'reconnecting') {
       reconnectTimer = setTimeout(() => {
-        if (current?.subscription?.status === 'reconnecting') setConnection('reconnecting');
+        if (current?.feed?.status === 'reconnecting') setConnection('reconnecting');
       }, RECONNECT_GRACE_MS);
     } else if (status === 'failed') {
-      current?.subscription?.close();
+      current?.feed?.close();
       setConnection('unavailable');
       // In accounts mode a stream that dies can mean the server ended it because
       // the session was revoked, disabled or expired; verify before trusting the
@@ -746,10 +622,10 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
   function closeCurrent() {
     nav.invalidate();
     clearTimeout(reconnectTimer);
-    current?.subscription?.close();
+    current?.feed?.close();
     current?.view?.dispose();
     for (const past of current?.history ?? []) {
-      past.subscription?.close();
+      past.feed?.close();
       past.view.dispose();
     }
     earlierTurns?.replaceChildren();

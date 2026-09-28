@@ -110,7 +110,9 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 
 传输细节：
 
-* SSE 帧形如 `id: <seq>` / `event: <type>` / `data: {…}`，与既有工作台前端一致；
+* SSE 帧形如 `id: <seq>` / `event: <type>` / `data: {…}`，与既有工作台前端一致；`data`
+  与事件日志的一行是同一个信封 `{type, v, runId, seq, ts, payload}`（`v` 是该类型的
+  payload 版本，§3.6）；
 * `seq` 每 run 单调递增；重连时浏览器发 `Last-Event-ID`，服务端重放之后的帧；
 * 前端模型按 `seq` 水位去重（重复帧丢弃、缺口计数可见），因此**迟到/重复事件不会破坏状态**；
 * 载荷有界：工具结果与文本按上限裁剪并显式标注 `truncated`；工具参数里的数组
@@ -217,7 +219,7 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 * **工具终态跟随 run**：未收到自身 `tool_finished` 的工具不会默认标 `done`——
   run 正常收尾为 `done`，失败为 `interrupted`，取消为 `cancelled`；已拿到终态帧的工具保持原状态。
 
-前端从不解析终端文本：`tests/web/run-stream.test.mjs` 里有对应断言。
+前端从不解析终端文本：`tests/web/run-stream.test.mjs` 里有对应断言（扫描 reducer、订阅与视图模块）。
 
 ### 3.5 子代理（ChildRun）模型
 
@@ -323,6 +325,48 @@ pi 族另有 `_meta.json` 增强（R2，见下「R2 增强与关联」）。
 各面能力：pi 族 inproc/docker/e2b 与 ACP 族 inproc/docker（dsh 0.1.7+）为 **steps**
 （逐步进度）；ACP e2b 面本次不实现，能力如实停留 **coarse**。没有进度源或关联失败的
 child 在前端显示为普通「进行中」，不伪造进度。
+
+### 3.6 事件 schema 与版本
+
+**单一来源**：`host/pi_glink/event_schema.py` 声明全部产品事件类型、每个类型的 payload
+字段（名称、JSON 类型、是否必填、枚举、数组元素类型）以及 payload 版本 `v`（按类型、从 1
+起）。`events.py` 的类型常量与终帧集合在导入时与 schema 核对，不一致即启动失败；上表是
+它的阅读版，字段以 schema 为准。
+
+**校验边界**：
+
+* `EventBus.commit` 在分配 `seq` 之前校验每一帧，并把 `v` 写进信封（`RunEvent.as_dict`
+  / SSE `data` / `events.jsonl` 同形）；
+* 两个内核投影（pi `Projector` / `project_event`、ACP `AcpProjector`）经共享的
+  `projection.checked` 校验自己产出的每个 `(type, payload)`，漂移在产生处就被点名；
+* 资源台账为遗留 run 直接写入的中断终帧（不经总线）同样先校验、带 `v`。
+
+**违规处理**：`PI_GLINK_EVENT_SCHEMA=strict`（测试套件在 `tests/conftest.py` 设置）时违规帧
+抛 `EventSchemaError`，不落盘、不发布、不消耗 `seq`；未设置时记录错误日志后**仍提交**
+——生产 run 不因契约缺陷中断，但日志点名来源与字段。两种模式都把违规记入进程内列表，
+测试在每个用例结束时断言它为空，后台线程吞掉的违规也会让用例失败。
+
+**前端生成物**：`scripts/gen-event-schema.py` 把 schema 渲染为
+`web/modules/event-schema.gen.mjs`（JSDoc typedef、`EVENT_SCHEMA`、`EVENT_TYPES`、
+`EVENT_VERSIONS`、`TERMINAL_EVENT_TYPES`），勿手改；`scripts/check.sh` 以 `--check` 校验
+它与 schema 一致，过期即失败。
+
+**前端分层**（`web/modules/`）：
+
+* `run-reducer.mjs` —— 纯 `reduce(state, event)`：`seq` 水位去重与缺口计数、累计快照
+  替换（`tool_updated` / `subagent_updated`）、增量追加（`*_delta`）、权威终帧收口
+  （`assistant_message`、`tool_finished`、run 终帧及其 `children` 摘要）。不触碰 DOM、
+  网络与时钟（结束时间取终帧自身的 `ts`），由 `tests/fixtures/events/*.jsonl` 驱动的
+  `tests/web/run-reducer.test.mjs` 覆盖；
+* `run-stream.mjs` —— `createRunSubscription`（`EventSource`、有界重试、状态上报，监听的
+  具名帧来自生成物）与 `createRunFeed`（订阅折叠进 reducer，按终帧**类型**关闭流）；
+* 视图 —— `run-view.mjs`（单个 run）、`run-list-view.mjs`（导航/首页/报告列表），
+  `workspace.mjs` 只做编排。
+
+**版本与旧数据**：reducer 只应用 `v` 与 `EVENT_VERSIONS[type]` 严格相等的帧；其余帧（含
+未知类型）不渲染、计入 `rejectedFrames`，但 `seq` 仍推进水位。改变某类型 payload 含义且旧
+读者会误读时，提升该类型的 `v` 并同步 reducer。**schema 引入之前写下的事件日志没有 `v`，
+当前前端不可读，也没有迁移**：回放这类 run 时时间线为空，状态停在 REST 记录给出的值。
 
 ## 4. run 生命周期
 

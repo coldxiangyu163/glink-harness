@@ -1,0 +1,6 @@
+{"type": "run_started", "v": 1, "runId": "fx-trunc", "seq": 1, "ts": 1790000000.5, "payload": {"prompt": "长回答"}}
+{"type": "turn_started", "v": 1, "runId": "fx-trunc", "seq": 2, "ts": 1790000001.0, "payload": {}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-trunc", "seq": 3, "ts": 1790000001.5, "payload": {"text": "答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答"}}
+{"type": "assistant_message", "v": 1, "runId": "fx-trunc", "seq": 4, "ts": 1790000002.0, "payload": {"text": "答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答\n…[truncated 200 chars]", "truncated": true}}
+{"type": "turn_finished", "v": 1, "runId": "fx-trunc", "seq": 5, "ts": 1790000002.5, "payload": {}}
+{"type": "run_finished", "v": 1, "runId": "fx-trunc", "seq": 6, "ts": 1790000003.0, "payload": {"status": "finished", "stopReason": null, "error": null, "reportPath": null, "reportStatus": "none", "cleanup": {"released": true, "failures": [], "external": {}}, "children": []}}
