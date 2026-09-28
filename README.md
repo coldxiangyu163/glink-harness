@@ -33,7 +33,7 @@
 | 云沙箱 | `e2b` | pi 与工作区都在 E2B 沙箱内（沙箱后台命令 `stdin=True` 的 RPC 双向 stdio，与另两面同一套 `--mode rpc`）；真实模型/检索 key 不进沙箱，只上传本 run 的出口代理 token（须配置 `PI_GLINK_EGRESS_PUBLIC_URL`） |
 
 三面共享同一套输入/事件/收尾契约（`kernel/execution.py` 的 `ExecutionAdapter`）：每个 run 拥有
-自己的运行期配置（`runs/<id>/pi-agent/`）、session 目录（会话根基目录下的 `<id>/`，默认 `<数据根>/sessions/<id>/`）与工作区；
+自己的运行期配置（`runs/<id>/pi-agent/`）、session 目录（`runs/<id>/sessions/`）与工作区；
 完成后在同一对话发送追问会提交 `POST /api/runs {"prompt":"…","parentRunId":"<上一轮 runId>"}`，
 返回新 run 的 `parentRunId`。它复制上一轮经安全校验的会话副本，通过 pi 官方 `--session` 续接，
 不会另起会话或改写旧 run；侧栏按研究汇总，旧报告仍可打开。会话记录不可续接时返回
@@ -86,7 +86,7 @@ LOCAL_WEB_EXECUTOR=docker scripts/run-local-web.sh                     # 用容�
 的 `npm:` 声明渲染成 `/opt/pi-packages` 本地包，并以镜像内守卫脚本作为容器 `--entrypoint`：镜像早于
 宿主或包缺失时容器明确失败（exit 78 / 127），不会静默丢掉 `web_search`。镜像名在宿主启动时冻结，
 运行中的环境变量变化不会让已接收的 run 换镜像。容器内 pi 报告的会话路径（`/sessions/…`）由宿主映射
-回本 run 的 `<会话根>/<id>/…` 后再做收尾脱敏。
+回本 run 的 `runs/<id>/sessions/…` 后再做收尾脱敏。
 网络受限环境可用 `--build-arg DEBIAN_MIRROR=mirrors.aliyun.com --build-arg NPM_REGISTRY=https://registry.npmmirror.com`。
 证据：[docs/evidence/docker-run.txt](docs/evidence/docker-run.txt)、
 [docs/evidence/prebaked-packages.txt](docs/evidence/prebaked-packages.txt)。
@@ -119,7 +119,7 @@ scripts/run-local-web.sh --mark-released <runId> --note "已核对容器/沙箱�
 
 `--host` / `--port` 覆盖与构造走同一套校验（`validate_host_config`）：非 loopback 主机、或超出
 0–65535 的端口直接拒绝启动（退出码 2）。数据目录（默认 `~/.pi-glink`）由宿主以 0700 创建
-（`runs/`、`sessions/`、`workspaces/` 与各 run 子目录同样）；已存在的数据目录若是符号链接、不是目录，
+（`runs/`、`workspaces/` 与各 run 子目录同样）；已存在的数据目录若是符号链接、不是目录，
 或带组/其他人写权限，宿主拒绝启动并提示操作员自行 `chmod 700`，不会自动改动已有目录权限。
 
 一个数据目录同一时间只能被一个宿主进程持有（`<数据根>/host.lock`）；第二个宿主无论用哪个端口都会
@@ -128,7 +128,8 @@ scripts/run-local-web.sh --mark-released <runId> --note "已核对容器/沙箱�
 多租户模式把持有计入其 owner 租户与全局槽位，额度用尽时返回 `429 quota_exceeded`。Docker/E2B 宿主会按
 记录里持久化的容器名/沙箱 id 周期性自动对账（`PI_GLINK_RESOURCE_RECONCILE_SECONDS`，默认 60 秒，0 关闭；
 只探测、不猜名字），确认资源不存在后归还额度；核对真实资源后也可用 `--mark-released` 记录人工裁决。
-`--unreleased` 列出待核对项，`meta.json` 损坏的记录标注 `corrupt`。
+`--unreleased` 列出待核对项。run 记录与事件存放在 `<数据根>/runs/runs.db`（SQLite）；此前版本的
+`runs/<id>/meta.json` / `events.jsonl` 与 `<数据根>/sessions/` 不再被读取，旧 run 不可见、不可追问，不提供迁移。
 
 ## 运行一次真实研究
 
@@ -312,7 +313,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 ## 安全边界
 
-- **凭据不进产品面**：事件流、`events.jsonl`、报告文件与下载、pi 会话文件都经过
+- **凭据不进产品面**：事件流、持久事件（`runs.db`）、报告文件与下载、pi 会话文件都经过
   `host/pi_glink/redaction.py` 的脱敏（值 + 形状双重检测）；流式回答只释放不可能再构成凭据的前缀、
   从不切开完整命中，释放结果等于整段脱敏，同一凭据被拆到多帧（含前后缀重叠的凭据）也无法拼回；
   暂存最多 8192 字符，超界时本段改输出 `[REDACTED]` 而不释放未判定原文；
@@ -346,7 +347,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | `web/` | 前端：按百鉴 UI 标准库逐值对齐的静态 ESM 资源（token 层 + 组件层 + 外壳） |
 | `docs/` | `architecture.md`（进程拓扑、事件契约、执行器契约）、`pi-boundary.md`（扩展点与禁止项）、`multitenancy-plan.md`（下一阶段设计与决策点） |
 | `tests/` | 宿主与内核的回归 |
-| `<数据根>`（默认 `~/.pi-glink`） | 运行态：`host.lock`、`runs/<id>/{meta.json,events.jsonl,pi-agent/,artifacts/}`、`sessions/<id>/`、`workspaces/<id>/` |
+| `<数据根>`（默认 `~/.pi-glink`） | 运行态：`host.lock`、`runs/runs.db`（run 记录与事件）、`runs/<id>/{pi-agent/,sessions/,artifacts/}`、`workspaces/<id>/` |
 
 ## 前端与 UI 标准库对齐
 

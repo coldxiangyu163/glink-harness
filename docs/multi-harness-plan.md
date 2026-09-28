@@ -106,7 +106,7 @@ pi、dsh、codex（codex-acp）、opencode（均开源），**Claude（claude-ag
 
 | 已 harness 无关（不动） | harness 专有（进 `harnesses/<pack>/` 或其族） | 包/族的形态 |
 |---|---|---|
-| 产品事件词汇、EventBus、RunStore、提交水位、SSE 重放 | `kernel/projection.py`（pi 事件 → 产品事件） | 每族一个 projector |
+| 产品事件词汇、EventBus、RunStore（SQLite）、SSE 重放 | `kernel/projection.py`（pi 事件 → 产品事件） | 每族一个 projector |
 | 租户、准入、资源台账、数据根所有权 | `kernel/agent_env.py`（渲染 models/auth/settings、argv、每 run 配置目录） | pi 包自带 `settings.json`/`extensions/`/`agents/`；ACP 包以 `home/` 覆盖层 + 每 run 凭据注入承载 |
 | `redaction.py` 流式脱敏（作用于文本） | `kernel/rpc.py` + `framing.py`（pi 双向 RPC） | 每族一个协议客户端；LF 分帧复用 |
 | report.md 产物契约（prompt 约束） | 工作约定与蓝图 | 宿主级内容（`methodology/`），不再放进包 |
@@ -199,7 +199,7 @@ harnesses/<pack>/
 ### 3.4 run 记录与追问
 
 * 准入时解析一次 `RunSpec{family, pack, executor, blueprint, credential_origin}`，作为
-  `meta.json` 的 `"spec"` 对象与 run id/owner 同一次原子写入（[架构](architecture.md) §2）；
+  run 记录的 `"spec"` 对象与 run id/owner 在同一数据库事务内写入（[架构](architecture.md) §2）；
   此后族、执行面与追问门禁只读记录里的 spec。
 * 追问：`spec.family` 或 `spec.pack` 与本 run 不同即 `session_unavailable`（fail-closed）。
 * **旧记录不再可读**（S2 重新设计，无迁移）：顶层 `harness` / `harness_pack` / `executor`

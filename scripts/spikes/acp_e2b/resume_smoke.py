@@ -50,6 +50,36 @@ TERMINAL = {"finished", "failed", "cancelled"}
 DIGEST_MAX_BYTES = 16 * 1024 * 1024
 
 
+def _run_record(run_dir: Path) -> dict:
+    """run 记录：存于 ``<runs>/runs.db``（ADR 0009），只读打开；不存在时返回空对象。"""
+    import sqlite3
+    from contextlib import closing
+
+    database = run_dir.parent / "runs.db"
+    if not database.is_file():
+        return {}
+    with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as connection:
+        row = connection.execute(
+            "SELECT record FROM runs WHERE run_id = ?", (run_dir.name,)
+        ).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def _run_events(run_dir: Path) -> list[dict]:
+    """run 的已提交事件（``events`` 表按 seq 顺序），只读打开。"""
+    import sqlite3
+    from contextlib import closing
+
+    database = run_dir.parent / "runs.db"
+    if not database.is_file():
+        return []
+    with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as connection:
+        rows = connection.execute(
+            "SELECT body FROM events WHERE run_id = ? ORDER BY seq", (run_dir.name,)
+        ).fetchall()
+    return [json.loads(body) for (body,) in rows]
+
+
 def free_port() -> int:
     import socket
 
@@ -327,18 +357,11 @@ def main(argv: list[str] | None = None) -> int:
     child = results["child"]["run"]
     parent_dir = data_root / "runs" / parent["runId"]
     child_dir = data_root / "runs" / child["runId"]
-    parent_meta = json.loads((parent_dir / "meta.json").read_text(encoding="utf-8"))
-    child_meta = json.loads((child_dir / "meta.json").read_text(encoding="utf-8"))
+    parent_meta = _run_record(parent_dir)
+    child_meta = _run_record(child_dir)
 
     def events_of(run_dir: Path) -> list[dict]:
-        path = run_dir / "events.jsonl"
-        if not path.is_file():
-            return []
-        return [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        return _run_events(run_dir)
 
     parent_events = events_of(parent_dir)
     child_events = events_of(child_dir)
@@ -466,7 +489,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  child 助手正文尾部: {child_text[-400:]!r}")
 
     print()
-    print("终态与清理事实（meta.json）")
+    print("终态与清理事实（runs.db 记录）")
     for label, meta in (("parent", parent_meta), ("child", child_meta)):
         print(
             f"  [{label}] status={meta.get('status')} modelStopReason={meta.get('model_stop_reason')} "

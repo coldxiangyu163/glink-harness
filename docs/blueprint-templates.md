@@ -130,9 +130,9 @@ checkpoint = "进入下一阶段前必须成立的自检声明。"
 
 ## 5. 记录
 
-* run 记录（`meta.json` 与 `RunRecord`）新增：`blueprint`（模板标识或 `None`）与
+* run 记录（`runs.db` 的 `record` 与 `RunRecord`）新增：`blueprint`（模板标识或 `None`）与
   `blueprint_stages`（阶段元数据：`id`/`title`/`goal`/`deliverable`/`checkpoint`，保持顺序）。
-  新记录的 `meta.json` 因此多出这两个字段；读取端过滤未知键，旧版本读新记录时忽略它们。
+  新记录因此多出这两个字段；读取端过滤未知键。
 * HTTP 视图 `run_view` 对应 `blueprint` 与 `blueprintStages`，列表与详情同源；旧记录没有这两个
   字段时按空值读出（向后兼容，不改写历史）。
 * **只记录，不推进**：宿主不维护阶段状态、不做检查点闸门。

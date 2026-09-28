@@ -56,6 +56,36 @@ PARENT_PROMPT = (
 )
 
 
+def _run_record(run_dir: Path) -> dict:
+    """run 记录：存于 ``<runs>/runs.db``（ADR 0009），只读打开；不存在时返回空对象。"""
+    import sqlite3
+    from contextlib import closing
+
+    database = run_dir.parent / "runs.db"
+    if not database.is_file():
+        return {}
+    with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as connection:
+        row = connection.execute(
+            "SELECT record FROM runs WHERE run_id = ?", (run_dir.name,)
+        ).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def _run_events(run_dir: Path) -> list[dict]:
+    """run 的已提交事件（``events`` 表按 seq 顺序），只读打开。"""
+    import sqlite3
+    from contextlib import closing
+
+    database = run_dir.parent / "runs.db"
+    if not database.is_file():
+        return []
+    with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as connection:
+        rows = connection.execute(
+            "SELECT body FROM events WHERE run_id = ? ORDER BY seq", (run_dir.name,)
+        ).fetchall()
+    return [json.loads(body) for (body,) in rows]
+
+
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -77,28 +107,11 @@ def sanitize(text: str, workdir: Path) -> str:
 
 
 def read_meta(run_dir: Path) -> dict:
-    path = run_dir / "meta.json"
-    if not path.is_file():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
+    return _run_record(run_dir)
 
 
 def read_events(run_dir: Path) -> list[dict]:
-    path = run_dir / "events.jsonl"
-    if not path.is_file():
-        return []
-    events: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return events
+    return _run_events(run_dir)
 
 
 def payloads(events: list[dict], event_type: str) -> list[dict]:

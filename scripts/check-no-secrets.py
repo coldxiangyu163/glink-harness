@@ -34,13 +34,13 @@ from pi_glink.redaction import (  # noqa: E402
 
 #: File names worth scanning inside the data root.
 _TARGET_GLOBS = (
-    "runs/*/events.jsonl",
-    "runs/*/meta.json",
+    # run 记录与事件在 SQLite 中；JSON 文本按 UTF-8 原样存储，逐行按文本扫描即可命中。
+    "runs/runs.db",
+    "runs/runs.db-wal",
     "runs/*/artifacts/*.md",
     "runs/*/sessions/**/*.jsonl",
     "workspaces/*/*.md",
     "workspaces/*/*.txt",
-    "sessions/**/*.jsonl",  # pre-hardening shared session directory
 )
 
 
