@@ -85,6 +85,18 @@ SESSION_ID = "synthetic-browser-session"
 SCENARIOS = ("default", "tools", "subagent", "slow", "fail", "length")
 _SCENARIO_RE = re.compile(r"\[scenario:([a-z]+)\]")
 
+# The real pi path sends model calls through the credential egress proxy, whose
+# per-run counters are the authoritative terminal usage (the message-level
+# usage remains available as kernelUsage). FakeAdapter never makes that HTTP
+# call, so the fixture must advance the same grant counters explicitly or the
+# browser sees a truthful but useless all-zero egress total.
+SCENARIO_EGRESS_USAGE = {
+    "default": {"requests": 1, "input": 120, "output": 40, "cacheRead": 0, "totalTokens": 160},
+    "tools": {"requests": 1, "input": 300, "output": 90, "cacheRead": 0, "totalTokens": 390},
+    "subagent": {"requests": 1, "input": 800, "output": 200, "cacheRead": 0, "totalTokens": 1000},
+}
+_usage_recorder = None
+
 
 def scenario_of(prompt: str) -> str:
     match = _SCENARIO_RE.search(prompt or "")
@@ -216,6 +228,9 @@ class FakeAdapter(ExecutionAdapter):
         self._stop.set()
         if self._worker is not None:
             self._worker.join(timeout=10)
+        usage = SCENARIO_EGRESS_USAGE.get(self._scenario)
+        if usage is not None and _usage_recorder is not None:
+            _usage_recorder(self.spec, usage)
         return ExecutionOutcome(settled=True)
 
     def cancel(self) -> None:
@@ -521,6 +536,8 @@ def config_values(mode: str, state_dir: Path, tenants_file: Path, gateway_secret
 
 
 def main() -> int:
+    global _usage_recorder
+
     parser = argparse.ArgumentParser(description="isolated host for browser acceptance")
     parser.add_argument("--state-dir", required=True, help="temporary directory for all runtime state")
     parser.add_argument(
@@ -571,12 +588,29 @@ def main() -> int:
         tenants_file.chmod(0o600)
 
     config = build_config(config_values(args.mode, state_dir, tenants_file, gateway_secret), REPO_ROOT)
+    server = create_server(config)
+
+    def record_egress_usage(spec, usage: dict) -> None:
+        """Mirror the one synthetic model response into its live egress grant."""
+        auth = json.loads((Path(spec.runtime.directory) / "auth.json").read_text(encoding="utf-8"))
+        provider = auth.get(spec.runtime.provider_id)
+        token = provider.get("key") if isinstance(provider, dict) else None
+        grant = server.manager.egress.grant_for(token) if isinstance(token, str) else None
+        if grant is None:
+            raise RuntimeError("browser fixture could not find the run's egress grant")
+        with grant.lock:
+            grant.requests = int(usage.get("requests", 0))
+            grant.input = int(usage.get("input", 0))
+            grant.output = int(usage.get("output", 0))
+            grant.cache_read = int(usage.get("cacheRead", 0))
+            grant.total_tokens = int(usage.get("totalTokens", 0))
+
+    _usage_recorder = record_egress_usage
     # Replace only the execution face, exactly like the Python regressions do
     # (``monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", …)``):
     # the real Runner, store, event bus, HTTP/SSE and front-end all stay in the
     # loop, but no pi binary, Docker daemon or sandbox is contacted.
     pi_family.PiExecutionAdapter = build_fake
-    server = create_server(config)
     bootstrap = bootstrap_accounts(server.accounts) if args.mode == "accounts" else {"password": None, "users": {}}
     state = {
         "mode": args.mode,

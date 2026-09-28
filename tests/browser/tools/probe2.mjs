@@ -89,8 +89,8 @@ async function signIn(page, host, user) {
     page.evaluate(() => ({
       status: document.querySelector('#run-view')?.dataset.status,
       answer: document.querySelector('.pi-answer-body')?.innerText?.slice(0, 80),
-      outputHidden: document.querySelector('.pi-output')?.hidden,
-      outputText: document.querySelector('.pi-output')?.innerText?.slice(0, 120),
+      outputHidden: document.querySelector('[aria-label="生成的文件"]')?.hidden,
+      outputText: document.querySelector('[aria-label="生成的文件"]')?.innerText?.slice(0, 120),
       distance: (() => {
         const scroll = document.querySelector('#conversation-scroll');
         return Math.round(scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight);

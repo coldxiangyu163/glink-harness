@@ -246,7 +246,15 @@ try {
   let replayRun = null;
   for (const candidate of replayCandidates) {
     await page.click(`#run-list [data-run-id="${candidate.runId}"]`);
-    await page.waitForTimeout(1500);
+    // A finished REST record paints immediately, then its SSE history replay
+    // fills the answer and terminal report fact. The child panel deliberately
+    // reuses `.pi-output` chrome and precedes the file section in DOM order, so
+    // the old generic selector read the hidden child panel even while the
+    // archived screenshot showed the report card. Wait on the semantic file
+    // section and sample that same reader-visible contract.
+    await page.waitForSelector('#run-view[data-status="finished"] [aria-label="生成的文件"]:not([hidden])', {
+      timeout: TERMINAL_TIMEOUT,
+    }).catch(() => {});
     const probe = await page.evaluate(() => ({
       thinking: document.querySelectorAll('.pi-thinking').length,
       tools: document.querySelectorAll('.pi-tool').length,
@@ -254,7 +262,7 @@ try {
       status: document.querySelector('#run-view')?.dataset.status,
       folded: document.querySelector('.pi-process-toggle')?.getAttribute('aria-expanded') === 'false',
       draft: !document.querySelector('.pi-answer-head')?.hidden && document.querySelector('.pi-answer-head .badge')?.textContent,
-      output: !document.querySelector('.pi-output')?.hidden,
+      output: !document.querySelector('[aria-label="生成的文件"]')?.hidden,
       actions: [...document.querySelectorAll('.pi-answer-actions > *')].filter((node) => !node.hidden).map((node) => node.getAttribute('aria-label')),
       unavailable: /读不到/.test(document.querySelector('.pi-outcome')?.textContent ?? ''),
       distance: (() => {
@@ -557,7 +565,16 @@ try {
     await page.route(`**/api/runs/${replayRun.id}/events`, (route) => route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"unknown_run"}' }));
     await boot();
     await page.click(`#run-list [data-run-id="${replayRun.id}"]`);
-    await page.waitForTimeout(2000);
+    // The product deliberately retries a refused EventSource after
+    // 1.5s + 4s + 10s before declaring it unavailable. The former fixed 2s
+    // sample only observed the reconnecting phase. Wait for the bounded retry
+    // contract to settle, while keeping a timeout so a real regression records
+    // the assertion below instead of wedging the suite.
+    await page.waitForFunction(() => {
+      const outcome = document.querySelector('#run-view .pi-outcome');
+      return outcome && !outcome.hidden &&
+        outcome.querySelector('.pi-outcome-title')?.textContent === '过程记录暂时读不到';
+    }, { timeout: 20_000 }).catch(() => {});
     const unreadable = await page.evaluate(() => {
       const outcome = document.querySelector('.pi-outcome');
       return {

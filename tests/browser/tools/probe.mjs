@@ -157,8 +157,8 @@ await snap('defaultRun', () =>
     outcomeHidden: document.querySelector('.pi-outcome')?.hidden,
     outcomeText: document.querySelector('.pi-outcome')?.innerText,
     answerText: document.querySelector('.pi-answer-body')?.innerText?.slice(0, 200),
-    outputHidden: document.querySelector('.pi-output')?.hidden,
-    outputText: document.querySelector('.pi-output')?.innerText?.slice(0, 200),
+    outputHidden: document.querySelector('[aria-label="生成的文件"]')?.hidden,
+    outputText: document.querySelector('[aria-label="生成的文件"]')?.innerText?.slice(0, 200),
     actions: [...document.querySelectorAll('.pi-answer-actions > *')]
       .filter((node) => !node.hidden)
       .map((node) => node.getAttribute('aria-label')),

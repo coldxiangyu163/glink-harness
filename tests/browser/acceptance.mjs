@@ -69,7 +69,10 @@ const ctx = {
   outDir,
   requestLog,
   removeSessionFile(runId) {
-    rmSync(join(stateDir, 'data', 'sessions', runId, 'session.jsonl'), { force: true });
+    // RunStore owns every run's state below runs/<id>; the pre-SQLite fixture
+    // path (data/sessions/<id>) silently removed nothing and turned the 409
+    // continuation gate check into a false failure.
+    rmSync(join(stateDir, 'data', 'runs', runId, 'sessions', 'session.jsonl'), { force: true });
   },
 };
 

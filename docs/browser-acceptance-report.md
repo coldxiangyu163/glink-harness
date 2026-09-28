@@ -44,6 +44,26 @@ acceptance 直接把 `--out` 指到仓库时会把 fixture state 一并放进仓
 
 提交前移除了会暴露 fixture 合成密码的 `fixture.log`，并用主 `.env` 的真实凭据值、fixture 合成凭据值及通用模式扫描全部保留证据（含 PNG 字节）；`credential-scan.txt` 结果为 PASS。
 
+### UIFIX follow-up 闭环（`GLINK-ARCH-UIFIX-20260928`）
+
+基于 `0139fb3` 的逐项归因确认：R1/R2/R3 都是历史浏览器脚本的测量前置、选择器或等待时机问题，产品 UI 本身没有对应回归；因此没有修改 `web/` 或 `host/`。S1/S2 则是 acceptance fixture 没有同步 egress 权威用量与 SQLite run 目录，已修复。
+
+| 层 | follow-up 结果 | 退出码 |
+|---|---:|---:|
+| acceptance accounts | 101 通过 / 1 失败（102）；只剩范围外已知 F-1 | 1（预期红） |
+| acceptance local | 78 通过 / 0 失败 / 3 跳过（81） | 0 |
+| ui-parity | 30 个角色中 29 OK / 0 mismatch / 1 SKIPPED；0 个逐值差异 | 0 |
+| ui-features | 54 / 54 | 0 |
+| `bash scripts/check.sh` | Python 1252 通过 / 1 deselected；Node 151 + 42 通过 | 0 |
+
+- **R1**：首页卡随真实 run 数量增长；旧宿主数据填满时目标恰为 380px，本次一条 run 时为 124px。修正 `ui-parity` 的内容高度测量口径，卡片 chrome 与行几何仍逐值比较。
+- **R2**：同一次红测截图已经显示文件卡。子代理面板复用 `.pi-output` 且排在真实文件区前，旧脚本选中了隐藏的 `.pi-output.pi-children`；改用 `[aria-label="生成的文件"]` 后转绿，并同步 run-smoke/probe 消费者。
+- **R3**：产品 404 恢复卡正常。旧脚本在 2s 取样，但 EventSource 的既定有界重试预算为 1.5s + 4s + 10s；改为等待恢复卡（20s 上限）后得到“过程记录暂时读不到”和“重试 / 打开报告”。
+- **S1**：FakeAdapter 现在在终帧提交前把合成模型响应计入 live egress grant；accounts/local 均显示“用量 · 1,000 token”。
+- **S2**：删除路径改为 `data/runs/<runId>/sessions/session.jsonl`；accounts/local 均验证 `409 session_unavailable`。
+
+绿证据与 PID 清理记录见 `docs/evidence/browser-acceptance-2026-09-28/uifix/`。真实参考站/宿主 PID 73857/73861 已按 PID 停止，端口释放、临时 data root 删除；acceptance 的定向/全量 fixture PID 71649/88651/91960 均 code 0。增量凭据扫描结果为 PASS。
+
 ### 未覆盖
 
 未执行 Docker/E2B、真实网关已认证路径、HTTPS/反向代理、Safari/Firefox/移动真机、多宿主并发、生产数据迁移或模型质量评估。此次真实面只证明本地 `inproc` 浏览器链路；隔离 acceptance 仍使用脚本化执行替身。

@@ -1,0 +1,35 @@
+task_id: GLINK-ARCH-UIFIX-20260928
+started_utc: 2026-09-28T13:34:38Z
+reference_port: 62482
+host_port: 62483
+data_root: /tmp/pi-glink-uifix-live-data.dYzCOt
+pre_start_port_check:
+reference port free
+host port free
+reference_command: cd /Users/coldxiangyu/work/BR/glink-ui-library/dist && python3 -m http.server 62482 --bind 127.0.0.1
+reference_pid: 73857
+host_command: cd /Users/coldxiangyu/AI/git/pi-glink && LOCAL_WEB_EXECUTOR=inproc PI_GLINK_TENANCY=local PI_GLINK_AUTH_MODE=gateway PI_GLINK_MODEL_CREDENTIALS=tenant LOCAL_WEB_DATA_ROOT=<temporary> LOCAL_WEB_PORT=62483 scripts/run-local-web.sh
+host_pid: 73861
+post_start_port_check:
+COMMAND   PID        USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+Python  73857 coldxiangyu    3u  IPv4 0x266f062493d3de08      0t0  TCP 127.0.0.1:62482 (LISTEN)
+COMMAND     PID        USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+python3.1 73861 coldxiangyu    7u  IPv4 0xa886d6f19b15349f      0t0  TCP 127.0.0.1:62483 (LISTEN)
+reference_ready: 1
+host_ready: 1
+startup_result: ready
+host_health: {"status": "ok", "executor": "inproc", "pi": {"bin": "pi", "available": true}, "configured": {"model": true, "e2b": false}, "activeRunId": null}
+cleanup_utc: 2026-09-28T13:41:38Z
+host_cleanup: SIGTERM exact pid 73861
+reference_cleanup: SIGTERM exact pid 73857
+post_cleanup:
+host pid 73861 stopped
+reference pid 73857 stopped
+host port 62483 free
+reference port 62482 free
+temporary_data_root_removed: /tmp/pi-glink-uifix-live-data.dYzCOt
+acceptance_fixture_processes:
+targeted_accounts_pid: 71649 exit_code: 0
+full_accounts_pid: 88651 exit_code: 0
+full_local_pid: 91960 exit_code: 0
+note: acceptance.mjs owns each child and terminates only its recorded PID; host-exit.json retained for full runs

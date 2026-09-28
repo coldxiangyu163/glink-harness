@@ -1,0 +1,10 @@
+purpose: create an isolated real-model run with tool rows and report for ui-parity/ui-features green verification
+prompt: UIFIX 浏览器回归预置：先使用 bash 执行 python3 --version，再读取工作区 README.md 的前 20 行，然后用中文总结观察并把完整结果写入 report.md。
+started_utc: 2026-09-28T13:34:53Z
+finished_utc: 2026-09-28T13:35:29Z
+run_id: 2eb28b6e859d
+status: finished
+has_report: True
+event_count: 157
+stop_reason: None
+error_present: False

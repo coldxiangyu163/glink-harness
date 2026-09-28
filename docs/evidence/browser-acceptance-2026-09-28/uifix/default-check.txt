@@ -1,0 +1,260 @@
+command: PATH=/Users/coldxiangyu/AI/git/pi-glink/.venv/bin:$PATH bash scripts/check.sh
+started_utc: 2026-09-28T13:45:47Z
+finished_utc: 2026-09-28T13:48:28Z
+exit_code: 0
+--- console ---
+Python 3.12.10 pytest 9.1.1
+Node 24.16.0
+
+[SKIP] 外部标准库逐值对齐：不读取个人标准库，不计入本次通过范围。
+
+[RUN] 事件 schema 生成物是最新的
+命令： /Users/coldxiangyu/AI/git/pi-glink/.venv/bin/python3 scripts/gen-event-schema.py --check
+[OK] event-schema.gen.mjs 是最新的
+[PASS] 事件 schema 生成物是最新的（exit 0）
+
+[RUN] Python（含仓库边界和检查入口回归）
+命令： /Users/coldxiangyu/AI/git/pi-glink/.venv/bin/python3 -m pytest tests -ra -p no:cacheprovider --basetemp=/var/folders/78/dy70php52d9gpp38b_dx__w40000gn/T//pi-glink-check.7dLN4wXb/pytest --deselect=tests/test_ui_tokens.py::test_ui_tokens_match_standard_library
+........................................................................ [  5%]
+........................................................................ [ 11%]
+........................................................................ [ 17%]
+........................................................................ [ 23%]
+........................................................................ [ 28%]
+........................................................................ [ 34%]
+........................................................................ [ 40%]
+........................................................................ [ 46%]
+........................................................................ [ 51%]
+........................................................................ [ 57%]
+........................................................................ [ 63%]
+........................................................................ [ 69%]
+........................................................................ [ 74%]
+........................................................................ [ 80%]
+........................................................................ [ 86%]
+........................................................................ [ 92%]
+........................................................................ [ 97%]
+............................                                             [100%]
+1252 passed, 1 deselected in 152.72s (0:02:32)
+[PASS] Python（含仓库边界和检查入口回归）（exit 0）
+
+[RUN] Node（前端回归 + 扩展单元测试）
+命令： /Users/coldxiangyu/.nvm/versions/node/v24.16.0/bin/node --test tests/web/account-menu.test.mjs tests/web/api-client.test.mjs tests/web/auth-view.test.mjs tests/web/conversation-layout.test.mjs tests/web/present.test.mjs tests/web/run-outcome.test.mjs tests/web/run-reducer.test.mjs tests/web/run-stream.test.mjs tests/web/subagent.test.mjs tests/web/tool-args-payload.test.mjs tests/web/workspace-lifecycle.test.mjs tests/web/workspace-session.test.mjs tests/extensions/subagent-foreground-guard.test.mjs
+(node:1995) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///Users/coldxiangyu/AI/git/pi-glink-uialign/harnesses/pi/extensions/subagent-foreground-guard.ts is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to /Users/coldxiangyu/package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ 非 subagent 的工具调用不被本扩展介入 (0.705167ms)
+✔ subagent_wait 被阻止并说明“没有后台作业可等” (1.591ms)
+✔ async:true 被改写为前台同步（不阻止） (0.276834ms)
+✔ 没有 async 字段时也显式写成 false（盖掉 agent/配置默认值） (0.094ms)
+✔ agent frontmatter 的 async:true 默认值被显式 false 覆盖（执行路径必经此处） (0.104833ms)
+✔ 同步 tasks 数组并行原样放行（feynman 同款前台形态） (0.818375ms)
+✔ chain 形态同样被拉回前台 (0.306834ms)
+✔ 执行形态别名（action: single/parallel/tasks）按执行处理，不是管理动作 (0.281625ms)
+✔ 空串 action 与 pi-subagents 的归一化一致：按执行处理 (0.329584ms)
+✔ 只读管理动作放行：status / doctor / list / get / models (0.208917ms)
+✔ 后台/定时/恢复/控制类 action 全部阻止 (0.245209ms)
+✔ 改定义/删定义的 action 阻止（避免运行中改写子代理定义） (0.089875ms)
+✔ 未知或非字符串 action 阻止（fail-closed） (0.0575ms)
+✔ share:true 阻止（会话上传外部 Gist） (0.084791ms)
+✔ worktree:true 阻止（run 目录之外的 git worktree 生命周期不由本 run 保证） (0.07025ms)
+✔ 工作区外的 cwd / sessionDir / output 被阻止（含 ~ 展开） (0.157375ms)
+✔ 工作区内的相对/绝对路径放行 (1.505542ms)
+✔ chainDir 被强制改写进工作区（pi-subagents 默认落在 OS 临时目录） (0.134459ms)
+✔ 没有 chainDir 时也写进工作区（不给 OS 临时目录留缺口） (0.090333ms)
+✔ handler 内部异常按 fail-closed 阻止（属性访问器抛错） (0.116625ms)
+✔ 回调路径上的异常同样阻止该次调用 (0.078833ms)
+✔ 参数不是对象时阻止 (0.064709ms)
+✔ 正常派发经注册的 handler 走通并落回前台 (0.06475ms)
+✔ an admin identity shows the real organisation, name and both menu actions (7.010667ms)
+✔ a member sees no invitation entry (0.451375ms)
+✔ gateway mode shows identity only: no logout this host does not own (0.372458ms)
+✔ local mode and an expired identity hide the account area entirely (0.486333ms)
+✔ the account menu opens, closes on Escape and on an outside click (0.500042ms)
+✔ logout goes through the callback after closing the menu (0.392375ms)
+✔ the invitation dialog generates a one-time code and a copyable link (7.013791ms)
+✔ invitation failures explain the reason without leaking anything else (4.340917ms)
+✔ dispose detaches the document listeners (0.295208ms)
+✔ every mutating call is JSON with same-origin credentials (1.4415ms)
+✔ the CSRF header only appears when a session supplied a token (1.54375ms)
+✔ a failed response becomes an ApiError carrying status and code (0.639417ms)
+✔ a successful login hands the session to the workspace and keeps storage untouched (5.1855ms)
+✔ a wrong password keeps the email and shows a retryable form error (4.59525ms)
+✔ throttling and disabled identities get their own explanations (7.807583ms)
+✔ the invitation fragment is removed before the server answers (1.262584ms)
+✔ a valid invitation prefills the read-only identity and registers once (3.758666ms)
+✔ short passwords and missing names are caught before the server (4.632458ms)
+✔ an invalid or used invitation returns to login with an explanation (0.450208ms)
+✔ registration without an invitation explains that one is required (0.299791ms)
+✔ gateway mode shows an explanation instead of a form that has no backend (0.335375ms)
+✔ an unreachable service offers a retry instead of pretending to be logged out (0.567209ms)
+✔ hide clears credential fields and the invitation from memory (0.299708ms)
+✔ process and answer share the centered reading column; details stay within it (1.453833ms)
+✔ durations read as minutes and seconds, never raw floats (0.706584ms)
+✔ status words: stopping is not a failure, finishing is not success-coloured copy (0.109625ms)
+✔ research titles are the first clause, at most 20 characters (0.337666ms)
+✔ a delegated batch shows its agents and tasks, not empty strings (1.28925ms)
+✔ workspace paths from every execution surface collapse to 工作区 (0.11125ms)
+✔ tool rows speak in actions and objects, never engine tool names (0.384167ms)
+✔ only unusual tool states get a word (0.100333ms)
+✔ lifecycle stages stay hidden; stages that change expectations are shown (0.109583ms)
+✔ usage, model and download names are reader-facing (17.513292ms)
+✔ sources panel lists queries and pages the run touched, deduplicated (0.87ms)
+✔ the shipped UI never names the engine or the execution surface (3.306708ms)
+✔ a run cut off at the output limit is shown as an incomplete delivery (0.781208ms)
+✔ a normally finished run keeps no outcome card (0.107333ms)
+✔ the existing outcome states are unchanged (0.401166ms)
+✔ the generated schema module is the reducer vocabulary (1.282333ms)
+✔ every versioned fixture frame is current; the legacy fixture has none (1.111917ms)
+✔ cumulative tool snapshots replace, deltas append, the authoritative message wins (1.086625ms)
+✔ a mid-run snapshot shows the latest accumulated output, not a concatenation (0.319042ms)
+✔ a truncated authoritative frame keeps the longer streamed answer (0.240166ms)
+✔ subagent progress is latest-wins and the terminal children summary settles every child (1.398291ms)
+✔ a failed run interrupts the tool that never saw its terminal frame (0.402167ms)
+✔ an event log written before the schema (no v) is not applied (0.340958ms)
+✔ a frame whose v differs from the schema version is rejected, not guessed (0.264208ms)
+✔ replayed frames at or below the watermark are ignored; the reducer never mutates its input (0.415583ms)
+✔ a missing seq range is recorded as a gap (0.207959ms)
+✔ a feed reduces every frame, notifies the owner and closes on the terminal frame (3.149042ms)
+✔ a finished run replaying its history keeps the stream open until the terminal frame (0.454333ms)
+✔ a feed drops frames once its owner is no longer active (0.232666ms)
+✔ a malformed frame reaches onError and leaves the state untouched (0.1325ms)
+✔ markdown renderer is importable without a document (2.716875ms)
+✔ thinking and text deltas accumulate into blocks per turn (1.185917ms)
+✔ tool cards track streaming output and final status (1.122958ms)
+✔ cumulative tool snapshots replace the display instead of duplicating prefixes (0.2265ms)
+✔ the audited run ebf75f590601 replays with replacement semantics (real fixture) (0.602291ms)
+✔ a failed or cancelled run never leaves a running tool looking done (0.379084ms)
+✔ replayed or duplicate frames never rewrite the model (0.1115ms)
+✔ a gap in sequence numbers is recorded, not hidden (0.102417ms)
+✔ the terminal frame decides the run status and closes running tools (0.160584ms)
+✔ pi authoritative message replaces the streamed text (0.218375ms)
+✔ notices and stages carry readable labels (0.158584ms)
+✔ usage frames carry run-cumulative totals and are not summed again (0.113084ms)
+✔ a run with no reported usage shows none rather than a fabricated value (0.070292ms)
+✔ unknown event types are ignored, not rendered as noise (0.083875ms)
+✔ the front-end carries no Glink-specific report layer (2.123ms)
+✔ the shipped front-end never parses terminal text (1.806791ms)
+✔ a refused stream is retried a bounded number of times, then fails (0.357167ms)
+✔ a retry that reaches live resets the retry budget (0.097167ms)
+✔ closing the subscription cancels a pending retry (0.108458ms)
+✔ a dropped connection still reports reconnecting, not failed (0.05725ms)
+✔ a truncated authoritative frame never shortens a longer streamed answer (0.090125ms)
+✔ an untruncated authoritative frame still replaces the streamed text (0.069834ms)
+✔ a truncated frame still lands when nothing was streamed before it (0.068209ms)
+✔ subagent_started opens a ChildRun and a dispatch card; finished settles every child of the call (1.7545ms)
+✔ a failed dispatch degrades to the isError fact when the payload carries no status (0.141833ms)
+✔ the terminal frame children summary is the replay-time source of truth (0.323625ms)
+✔ a child still running at the verdict follows the run, like tools do (0.194708ms)
+✔ a summary entry without a matching typed event still lands in the collection (0.204ms)
+✔ duplicate typed frames are dropped by the seq watermark, not applied twice (0.181666ms)
+✔ historical logs with toolName=subagent keep rendering as plain tool cards (1.082792ms)
+✔ childrenPanel rows drive the panel: empty stays hidden, children render rows (0.243291ms)
+✔ the subscription listens for the typed frames (named SSE frames never reach onmessage) (0.285791ms)
+✔ child wording comes from present.mjs and stays reader language (0.263958ms)
+✔ a malformed started payload without a valid n is ignored, not rendered (0.121ms)
+✔ R2 enrichment rides the terminal summary into the panel rows (0.166917ms)
+✔ childFacts formats duration and tool count, empty without enrichment (0.114459ms)
+✔ subagent_updated attaches progress to the child and its card; the latest frame wins (0.224167ms)
+✔ the step counter never regresses on stale or malformed updated frames (0.088333ms)
+✔ an updated frame for an unknown child is ignored, not materialised (0.065875ms)
+✔ a replay applies every updated frame in order, so only the last one stands (0.103917ms)
+✔ the card shows progress only while running; a settled card goes back to its status word (0.457792ms)
+✔ a running child without a progress source renders no progress line (0.058791ms)
+✔ childProgressText speaks reader language and bounds the target (0.242833ms)
+✔ the subscription also listens for subagent_updated (named SSE frames never reach onmessage) (0.099417ms)
+✔ the projected payload keeps multi-query and multi-URL arrays (1.193208ms)
+✔ collectSources recovers every query and every page from the projected events (0.421291ms)
+✔ a flattened payload would have collapsed the sources (negative case) (0.153708ms)
+✔ the tool description reads the first query and reports the count (0.536583ms)
+✔ a completed research accepts a follow-up in the same conversation (5.231583ms)
+✔ sidebar groups linked runs into one research while retaining both reports (2.606625ms)
+✔ a slow navigation response cannot replace a newer run (A slow, B fast) (1.625375ms)
+✔ a late navigation error does not surface after a newer navigation (0.686875ms)
+✔ dispose during a navigation creates no view and no subscription (0.478042ms)
+✔ dispose stops the run view and the reconnect timer (0.435541ms)
+✔ a stale report response cannot overwrite the current run report (0.568958ms)
+✔ an accepted stop tells the reader the run is stopping (0.619667ms)
+✔ a stop past the commit point reports the finished run instead of failing (3.846333ms)
+✔ a stop answer that arrives after navigating away stays quiet (0.47025ms)
+✔ a start refused for unreleased resources explains the hold (0.352583ms)
+✔ local mode enters the workbench without any login face (3.986917ms)
+✔ every /api/me failure other than 401 fails closed without probing /api/config (4.387333ms)
+✔ a 401 in accounts mode shows the login face and keeps the shell hidden (0.543792ms)
+✔ a /register#invite fragment goes straight to the invitation registration face (0.5565ms)
+✔ an invite fragment arriving in the same document still opens registration (3.337584ms)
+✔ gateway mode gets a gateway explanation, never a login form (1.806625ms)
+✔ an unreachable host shows the retry face instead of guessing a session (0.371958ms)
+✔ entering with a session records the CSRF token and the real identity (1.755333ms)
+✔ a 401 while reading history closes the stream, clears the screen and returns to login (2.309667ms)
+✔ a session that ends during a run closes the stream and clears the run view (1.592041ms)
+✔ logout revokes the server session, then returns to login (0.455833ms)
+✔ a failed logout keeps the session and the screen (no pretending) (0.386917ms)
+✔ returning to the tab re-checks an accounts session (1.936667ms)
+✔ the service alert follows the tenant-aware /api/config, not the host-level health probe (0.856666ms)
+✔ an in-flight history response from an ended session never renders (1.075791ms)
+✔ a run accepted for an ended session never opens on the login screen (2.0475ms)
+ℹ tests 151
+ℹ suites 0
+ℹ pass 151
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 5189.340042
+[PASS] Node（前端回归 + 扩展单元测试）（exit 0）
+
+[RUN] Node（dsh fetch bundle 单元测试）
+命令： /Users/coldxiangyu/.nvm/versions/node/v24.16.0/bin/node --import ./harnesses/dsh/bundles/dsh-web-fetch-jina/tests/support/register-stubs.mjs --test harnesses/dsh/bundles/dsh-web-fetch-jina/tests/index.test.mjs harnesses/dsh/bundles/dsh-web-fetch-jina/tests/policy.test.mjs harnesses/dsh/bundles/dsh-web-fetch-jina/tests/provider.test.mjs
+✔ the plugin declares its role and config surface (0.862792ms)
+✔ apply registers the jina provider and resolves JINA_API_KEY through the credentials service (17.11075ms)
+✔ apply falls back to the launch environment when no credentials service is mounted (0.427958ms)
+✔ a missing credential fails the fetch explicitly with the configured reference name (0.274333ms)
+✔ one successful retrieval appends the audit event with the provider facts (0.446583ms)
+✔ an invalid configuration fails at apply time instead of at the first fetch (0.330792ms)
+✔ validateFetchUrl accepts http and https URLs (0.665125ms)
+✔ validateFetchUrl rejects a missing, non-string, or over-long URL (0.185125ms)
+✔ validateFetchUrl rejects non-http(s) protocols and embedded credentials (0.106667ms)
+✔ assertPublicDestination accepts public IPv4 and IPv6 literals (3.243333ms)
+✔ assertPublicDestination refuses private IPv4 ranges (0.262916ms)
+✔ assertPublicDestination refuses private IPv6 ranges and mapped private IPv4 (2.23625ms)
+✔ assertPublicDestination judges IPv4-mapped and NAT64 addresses by their embedded IPv4 (0.119292ms)
+✔ assertPublicDestination refuses local hostnames and normalizes numeric IPv4 spellings (0.215292ms)
+✔ isNonPublicIpv4 classifies public and private addresses (0.791333ms)
+✔ parseIpv6 handles compressed, embedded-IPv4, zoned, and invalid forms (0.714666ms)
+✔ isNonPublicIpv6 covers the documented non-public prefixes (0.149084ms)
+✔ assertPublicResolution refuses any non-public answer and tolerates resolution failure (0.347667ms)
+✔ classifyJinaPayload keeps the target status and content (0.136167ms)
+✔ classifyJinaPayload falls back on unusable envelope fields (0.150958ms)
+✔ the provider registers under the jina id and is available (0.687292ms)
+✔ a successful fetch returns the seam result shape and posts the target to Jina (21.526417ms)
+✔ a base URL with a path keeps its path and gains one trailing slash (0.439375ms)
+✔ a target 404 stays a result, not an error (Jina reports the target status) (0.468917ms)
+✔ a PDF target yields extracted text through the same result path (0.577ms)
+✔ the character cap truncates the decoded content and flags it (0.456625ms)
+✔ a declared body over the byte cap fails as WEB_FETCH_TOO_LARGE (0.449ms)
+✔ a streamed body over the byte cap fails as WEB_FETCH_TOO_LARGE (5.8315ms)
+✔ a body that is not JSON fails as WEB_PROVIDER_ERROR (0.439584ms)
+✔ an envelope without content fails as WEB_PROVIDER_ERROR (0.407792ms)
+✔ provider HTTP failures map to WebError with an actionable message (1.32825ms)
+✔ a 429 keeps the response snippet bounded and sanitized (0.243916ms)
+✔ the provider deadline reports WEB_FETCH_TIMEOUT (27.341083ms)
+✔ caller cancellation reports WEB_ABORTED and stops the request (5.718834ms)
+✔ an already-aborted caller signal never dispatches a request (0.232ms)
+✔ a missing credential fails as WEB_PROVIDER_CREDENTIAL_MISSING before dispatch (0.1555ms)
+✔ credential resolution failure is a WebError, never a raw rejection (0.136417ms)
+✔ non-http(s) and non-public destinations are refused before any request reaches Jina (0.687709ms)
+✔ a hostname that resolves to a private address is refused, and a resolver failure is tolerated (0.425584ms)
+✔ an unexpected transport failure becomes a WebError, not the original TypeError (0.146083ms)
+✔ an invalid live configuration fails as WEB_PROVIDER_ERROR instead of throwing raw (0.13625ms)
+✔ one successful retrieval is recorded once, and a throwing audit hook cannot fail it (0.324042ms)
+ℹ tests 42
+ℹ suites 0
+ℹ pass 42
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 162.877792
+[PASS] Node（dsh fetch bundle 单元测试）（exit 0）
+
+[PASS] 无模型必需检查完成；不包含浏览器、UI 对齐、真实 pi、Docker/E2B 或多租户验收。

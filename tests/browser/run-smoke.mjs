@@ -106,7 +106,7 @@ try {
     stages: document.querySelectorAll('.pi-stage').length,
     answer: document.querySelectorAll('.pi-answer-body .pi-text').length,
     draftBadge: !document.querySelector('.pi-answer-head')?.hidden,
-    reportButton: !document.querySelector('.pi-output')?.hidden,
+    reportButton: !document.querySelector('[aria-label="生成的文件"]')?.hidden,
     stopHidden: document.querySelector('#stop-run')?.hidden,
     runListEntries: document.querySelectorAll('#run-list [data-run-id]').length,
   }));

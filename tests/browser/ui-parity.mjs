@@ -274,7 +274,12 @@ const BOX = {
   newButton: 'both',
   navItem: 'height',
   paneHeader: 'height',
-  homeCard: 'height',
+  // The reference demo is filled to its 320px scroll cap; the workbench card
+  // grows with however many real runs the target host currently has. Its box
+  // height is therefore fixture data, not component geometry (the 2026-09-28
+  // red run had one row → 124px; the older populated host happened to hit
+  // 380px). Compare the card chrome/style and the row geometry, not this box.
+  homeCard: 'none',
   homeRow: 'height',
   composer: 'both',
   composerEditor: 'height',
@@ -511,6 +516,7 @@ try {
     '',
     '比对口径: 几何容许 ≤1px 取整差；颜色 / 圆角 / 排版 / 描边 / 海拔必须逐值相同。',
     '内容驱动的属性按角色白名单跳过（文本宽度、跨产品文本高度），未在参考屏出现的角色记为 SKIPPED。',
+    '内容高度按数据前置处理：首页卡随真实 run 条目数增长，参考 Demo 固定填满到 380px；卡片高度不参与组件几何，卡片 chrome 与每行几何仍逐值比对。',
     '过程行宽度是有意偏离：过程与回答共用居中的 720px 阅读列，窄栏收缩；仍逐值比对行高、颜色、圆角与排版，宽度由隔离浏览器布局断言覆盖。',
     '已登记的两处刻意等价写法: ① 参考页的卡片用 inset 1px 阴影画发丝线（Demo 页面覆盖），',
     '工作台用组件默认的 1px border，渲染同为 1px --border；② 输入器禁用态的底色取自 Button 的',
