@@ -122,6 +122,10 @@ def image_present(image: str) -> bool:
     return result.returncode == 0
 
 
+#: Hostname under which a container reaches the host (the egress proxy).
+DOCKER_HOST_GATEWAY = "host.docker.internal"
+
+
 def run_argv(
     config: HostConfig,
     launch: "Launch",
@@ -155,6 +159,9 @@ def run_argv(
         "--name", container_name_for(run_id),
         "--label", f"pi-glink.run={run_id}",
         *_isolation_argv(config),
+        # The egress proxy runs in the host process; the container reaches it
+        # by this alias (docs/adr/0008). It is the only host route handed in.
+        "--add-host", f"{DOCKER_HOST_GATEWAY}:host-gateway",
     ]
     if launch.guard:
         argv.extend(["--entrypoint", launch.guard])
@@ -200,9 +207,9 @@ def _isolation_argv(config: HostConfig) -> list[str]:
 def build_env(*, base_env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Environment for the *docker CLI*, not for the container.
 
-    The container's configuration — including the credential in ``auth.json`` —
-    arrives through the mounted config directory, so nothing credential-shaped
-    is placed on the CLI's environment or argv. The whitelist additionally keeps
+    The container's configuration — including the run's egress token in
+    ``auth.json`` — arrives through the mounted config directory, so nothing
+    credential-shaped is placed on the CLI's environment or argv. The whitelist additionally keeps
     a host shell full of unrelated tokens out of this child process.
     """
     source = dict(base_env) if base_env is not None else dict(os.environ)

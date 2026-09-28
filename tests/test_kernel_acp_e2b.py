@@ -319,7 +319,6 @@ def make_config(tmp_path: Path, **overrides: str):
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_EXECUTOR": "e2b",
         "E2B_API_KEY": "e2b-secret-key",
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "PI_GLINK_HARNESS": "acp",
         "PI_GLINK_ACP_COMMAND": "dsh --profile acp",
     }

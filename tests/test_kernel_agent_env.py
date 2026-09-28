@@ -18,7 +18,7 @@ from pi_glink.kernel.agent_env import (
     template_manifest,
 )
 
-from harness_helpers import compose_launch, execution_spec
+from harness_helpers import TEST_EGRESS_TOKEN, compose_launch, execution_spec, test_egress
 from pi_glink.kernel.sandbox import SANDBOXES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -50,24 +50,27 @@ def _config(tmp_path: Path, template_dir: Path, **overrides: str):
         "OPENAI_MODEL": "openai/gpt-5.6-sol",
         "PI_CODING_AGENT_DIR": str(template_dir),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        # Never fall back to the operator's own credential file in a test.
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "operator-web-search.json"),
     }
     values.update(overrides)
+    if values.get("LOCAL_WEB_EXECUTOR") == "e2b":
+        # A sandbox reaches the egress proxy only through a public URL (ADR 0008).
+        values.setdefault("PI_GLINK_EGRESS_PUBLIC_URL", "https://egress.example.test")
     return build_config(values, REPO_ROOT)
 
 
-def _prepare(config, tmp_path: Path, name: str = "run-1"):
+def _prepare(config, tmp_path: Path, name: str = "run-1", *, search: bool = False):
     """Render a per-run runtime directory (the only supported call shape).
 
     ``image_packages`` is the sandbox fact the pi family passes in production
-    (``Sandbox.isolated`` of the run's executor).
+    (``Sandbox.isolated`` of the run's executor); ``egress`` is the run's
+    credential proxy endpoint (docs/adr/0008-egress-proxy.md).
     """
     run_dir = tmp_path / "runs" / name
     return prepare_agent_dir(
         config,
         runtime_dir=run_dir / "pi-agent",
         session_dir=run_dir / "sessions",
+        egress=test_egress(search=search),
         image_packages=SANDBOXES[config.executor].isolated,
     )
 
@@ -77,7 +80,9 @@ def test_models_json_uses_literal_endpoint_and_model(tmp_path: Path, template_di
     runtime = _prepare(config, tmp_path)
     document = json.loads((runtime.directory / "models.json").read_text(encoding="utf-8"))
     provider = document["providers"][PROVIDER_ID]
-    assert provider["baseUrl"] == "https://example.invalid/v1"
+    # pi talks to the run's egress route, never the upstream directly.
+    assert provider["baseUrl"] == "http://127.0.0.1:9/model"
+    assert "example.invalid" not in json.dumps(document)
     assert provider["api"] == "openai-completions"
     model = provider["models"][0]
     assert model["id"] == "openai/gpt-5.6-sol"
@@ -112,7 +117,7 @@ def test_models_json_does_not_fabricate_a_price_table(
     assert "cost" not in model
 
 
-def test_model_credential_goes_to_auth_json_not_the_environment(
+def test_only_the_egress_token_reaches_auth_json_not_the_environment(
     tmp_path: Path, template_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path, template_dir)
@@ -123,11 +128,14 @@ def test_model_credential_goes_to_auth_json_not_the_environment(
     assert "sk-secret-value" not in rendered
     assert "$OPENAI_API_KEY" not in rendered
 
-    # …the key lives in pi's own credential store, mode 0600…
+    # …pi's own credential store holds only the run's egress token, mode 0600…
     auth = runtime.directory / AUTH_FILENAME
     payload = json.loads(auth.read_text(encoding="utf-8"))
-    assert payload == {PROVIDER_ID: {"type": "api_key", "key": "sk-secret-value"}}
+    assert payload == {PROVIDER_ID: {"type": "api_key", "key": TEST_EGRESS_TOKEN}}
     assert auth.stat().st_mode & 0o777 == 0o600
+    for path in runtime.directory.rglob("*"):
+        if path.is_file():
+            assert "sk-secret-value" not in path.read_text(encoding="utf-8", errors="replace")
 
     # …and the kernel process environment does not contain it at all, even
     # when the operator's shell exports it.
@@ -162,7 +170,10 @@ def test_removed_template_entry_and_credential_do_not_survive_a_rerender(
     config = _config(tmp_path, template_dir, PI_GLINK_WEB_SEARCH_KEY="exa-secret")
     run_dir = tmp_path / "runs" / "run-1"
     runtime = prepare_agent_dir(
-        config, runtime_dir=run_dir / "pi-agent", session_dir=run_dir / "sessions"
+        config,
+        runtime_dir=run_dir / "pi-agent",
+        session_dir=run_dir / "sessions",
+        egress=test_egress(search=True),
     )
     assert (runtime.directory / "extensions" / "hello.js").is_file()
     assert (runtime.directory / WEB_SEARCH_FILENAME).is_file()
@@ -175,6 +186,7 @@ def test_removed_template_entry_and_credential_do_not_survive_a_rerender(
         bare,
         runtime_dir=run_dir / "pi-agent",
         session_dir=run_dir / "sessions",
+        egress=test_egress(search=False),
     )
     assert not (rerendered.directory / "extensions").exists()
     assert not (rerendered.directory / WEB_SEARCH_FILENAME).exists()
@@ -220,36 +232,35 @@ def test_config_repr_does_not_leak_the_key(tmp_path: Path, template_dir: Path) -
 # -- pi-web-access credentials ------------------------------------------------
 
 
-def test_web_search_key_is_rendered_into_the_runtime_directory(
+def test_web_search_grant_renders_the_token_and_the_egress_search_route(
     tmp_path: Path, template_dir: Path
 ) -> None:
     config = _config(tmp_path, template_dir, PI_GLINK_WEB_SEARCH_KEY="exa-secret")
-    runtime = _prepare(config, tmp_path)
-    payload = json.loads((runtime.directory / WEB_SEARCH_FILENAME).read_text(encoding="utf-8"))
-    assert payload == {"exaApiKey": "exa-secret"}
-    assert (runtime.directory / WEB_SEARCH_FILENAME).stat().st_mode & 0o777 == 0o600
+    runtime = _prepare(config, tmp_path, search=True)
+    target = runtime.directory / WEB_SEARCH_FILENAME
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload == {"exaApiKey": TEST_EGRESS_TOKEN, "exaBaseUrl": "http://127.0.0.1:9/search"}
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert "exa-secret" not in target.read_text(encoding="utf-8")
     assert config.has_web_search_key is True
 
 
-def test_operator_web_search_file_is_copied_when_no_env_key(
+def test_operator_web_search_file_is_no_longer_read(
     tmp_path: Path, template_dir: Path
 ) -> None:
+    """``PI_GLINK_WEB_SEARCH_CONFIG`` / ``~/.pi/web-search.json`` are gone (ADR 0008)."""
     source = tmp_path / "operator-web-search.json"
     source.write_text('{"braveApiKey": "BSA_operator"}\n', encoding="utf-8")
-    config = _config(
-        tmp_path, template_dir, PI_GLINK_WEB_SEARCH_CONFIG=str(source)
-    )
+    config = _config(tmp_path, template_dir, PI_GLINK_WEB_SEARCH_CONFIG=str(source))
     runtime = _prepare(config, tmp_path)
-    copied = json.loads((runtime.directory / WEB_SEARCH_FILENAME).read_text(encoding="utf-8"))
-    assert copied == {"braveApiKey": "BSA_operator"}
+    assert not (runtime.directory / WEB_SEARCH_FILENAME).exists()
+    assert config.has_web_search_key is False
 
 
 def test_missing_web_search_credential_is_not_an_error(
     tmp_path: Path, template_dir: Path
 ) -> None:
-    config = _config(
-        tmp_path, template_dir, PI_GLINK_WEB_SEARCH_CONFIG=str(tmp_path / "absent.json")
-    )
+    config = _config(tmp_path, template_dir)
     runtime = _prepare(config, tmp_path)
     # Keyless pi-web-access (Exa MCP) stays available; the run contract does not
     # require a credential for a working search.

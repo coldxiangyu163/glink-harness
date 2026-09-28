@@ -216,15 +216,12 @@ def test_pi_runtime_sweep_declaration_keeps_rewriting_sessions(tmp_path: Path) -
 
     sweeps = runtime.session_sweeps()
 
-    # 原义务：pi 只声明会话目录。新义务：再声明运行期配置目录里宿主渲染的凭据文件
-    # 收尾删除（不扫描内容），会话目录的声明与行为不变。
+    # 原义务（GLINK-OBS-01）：另声明运行期配置目录，收尾删除渲染的凭据文件。
+    # 新义务（ADR 0008）：渲染文件只含已吊销的 egress token，pi 只声明会话目录。
     assert [
-        (sweep.root, sweep.rewrite, sweep.carries_session_file, sweep.scan, sweep.credential_copies)
+        (sweep.root, sweep.rewrite, sweep.carries_session_file, sweep.credential_copies)
         for sweep in sweeps
-    ] == [
-        (session_dir, True, True, True, ()),
-        (tmp_path / "pi-agent", True, False, False, ("auth.json", "web-search.json")),
-    ]
+    ] == [(session_dir, True, True, ())]
 
     manager, store, record, workspace = build_context(tmp_path, "pi-sweep")
     store.update(record.run_id, session_file=str(session))
@@ -237,66 +234,3 @@ def test_pi_runtime_sweep_declaration_keeps_rewriting_sessions(tmp_path: Path) -
     assert YAML_SECRET not in text
     assert REPLACEMENT in text
     assert json.loads(text.splitlines()[0])["text"].endswith(REPLACEMENT)
-
-
-def test_pi_runtime_sweep_deletes_rendered_credentials_and_keeps_the_rest(tmp_path: Path) -> None:
-    """pi 面收尾删除 ``auth.json`` / ``web-search.json``；模板副本与会话保留。
-
-    原义务：运行期 ``auth.json`` 随 run 目录生命周期保留（架构 §6.2 残留风险）。
-    新义务：收尾删除——每次 run 从凭据源重新渲染自己的配置目录，追问不读父 run 的
-    配置目录，副本收尾后没有用途。该根不扫描内容（``scan=False``）：值在准入时已进
-    本 run 边界，其余文件不是内核写出的会话。
-    """
-    manager, _store, record, workspace = build_context(tmp_path, "pi-creds")
-    directory = tmp_path / "data" / "runs" / "pi-creds" / "pi-agent"
-    directory.mkdir(parents=True)
-    (directory / "auth.json").write_text(
-        json.dumps({"frontier": {"type": "api_key", "key": JSON_SECRET}}), encoding="utf-8"
-    )
-    (directory / "web-search.json").write_text(json.dumps({"key": YAML_SECRET}), encoding="utf-8")
-    (directory / "models.json").write_text("{}", encoding="utf-8")
-    # 非渲染文件即使含凭据形状文本也不被改写（不扫描该根）。
-    (directory / "settings.json").write_text(json.dumps({"note": YAML_SECRET}), encoding="utf-8")
-    session_dir = tmp_path / "data" / "sessions" / "pi-creds"
-    session_dir.mkdir(parents=True)
-    (session_dir / "session.jsonl").write_text("{\"type\": \"message\"}\n", encoding="utf-8")
-    execution = _Execution(record=record, workspace=workspace)
-    execution.runtime = AgentRuntime(
-        directory=directory,
-        provider_id="frontier",
-        model_id="test/model",
-        models_path=directory / "models.json",
-        session_dir=session_dir,
-    )
-    execution.redactor = SecretRedactor([JSON_SECRET, YAML_SECRET])
-
-    manager._sanitize_session(execution)  # noqa: SLF001
-
-    assert not (directory / "auth.json").exists()
-    assert not (directory / "web-search.json").exists()
-    assert (directory / "models.json").is_file()
-    assert YAML_SECRET in (directory / "settings.json").read_text(encoding="utf-8"), "不扫描该根"
-    assert (session_dir / "session.jsonl").is_file()
-    assert execution.artifact_facts.artifact_failures == []
-
-
-def test_pi_runtime_sweep_without_web_search_credential_is_not_a_failure(tmp_path: Path) -> None:
-    """未配置检索凭据时 ``web-search.json`` 本就不存在：按「无可删之物」处理。"""
-    manager, _store, record, workspace = build_context(tmp_path, "pi-noweb")
-    directory = tmp_path / "data" / "runs" / "pi-noweb" / "pi-agent"
-    directory.mkdir(parents=True)
-    (directory / "auth.json").write_text("{}", encoding="utf-8")
-    execution = _Execution(record=record, workspace=workspace)
-    execution.runtime = AgentRuntime(
-        directory=directory,
-        provider_id="frontier",
-        model_id="test/model",
-        models_path=directory / "models.json",
-        session_dir=tmp_path / "absent-sessions",
-    )
-    execution.redactor = SecretRedactor(["bootstrap-secret-0123456789"])
-
-    manager._sanitize_session(execution)  # noqa: SLF001
-
-    assert not (directory / "auth.json").exists()
-    assert execution.artifact_facts.artifact_failures == []

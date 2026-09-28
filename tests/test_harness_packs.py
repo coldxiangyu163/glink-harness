@@ -47,7 +47,6 @@ def build_values(tmp_path: Path, harnesses_dir: Path, **overrides: str) -> dict[
         "OPENAI_MODEL": "test/model",
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "PI_GLINK_HARNESSES_DIR": str(harnesses_dir),
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
     }
     values.update(overrides)
     return values

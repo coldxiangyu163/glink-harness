@@ -31,7 +31,7 @@ from acp_pack import apply_acp_pack
 from pi_glink.events import EventBus
 from pi_glink.kernel import docker_env
 from pi_glink.kernel.acp_env import prepare_acp_runtime
-from harness_helpers import compose_launch, execution_spec, family
+from harness_helpers import compose_launch, execution_spec, family, test_egress
 from pi_glink.kernel.acp_execution import AcpExecutionAdapter
 from pi_glink.kernel.execution import ExecutionSpec
 from pi_glink.kernel.sandbox import DockerSandbox, E2BSandbox, open_sandbox
@@ -52,7 +52,6 @@ def make_config(tmp_path: Path, **overrides: str):
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         # 测试绝不触碰操作员的真实数据根（~/.pi-glink）。
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "PI_GLINK_HARNESS": "acp",
         "PI_GLINK_ACP_COMMAND": "dsh --profile acp",
     }
@@ -202,6 +201,7 @@ def test_the_plan_reuses_the_pi_face_isolation_contract(tmp_path: Path) -> None:
         runtime_dir=tmp_path / "pi" / "pi-agent",
         session_dir=tmp_path / "pi" / "sessions",
         image_packages=True,
+        egress=test_egress(),
     )
     pi_plan = make_pi_plan(config, pi_runtime, tmp_path)
 
@@ -231,6 +231,7 @@ def test_the_pi_docker_plan_is_unchanged_by_the_acp_plan(tmp_path: Path) -> None
         runtime_dir=tmp_path / "pi" / "pi-agent",
         session_dir=tmp_path / "pi" / "sessions",
         image_packages=True,
+        egress=test_egress(),
     )
     plan = make_pi_plan(config, runtime, tmp_path)
     argv = plan.argv

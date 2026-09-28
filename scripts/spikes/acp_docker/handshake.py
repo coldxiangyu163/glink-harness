@@ -72,7 +72,6 @@ def main(argv: list[str] | None = None) -> int:
         "LOCAL_WEB_DATA_ROOT": str(workdir / "data"),
         "LOCAL_WEB_ACP_WORKER_IMAGE": args.image,
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": str(args.timeout),
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(workdir / "absent-web-search.json"),
     }
     if args.env:
         values["PI_GLINK_ACP_ENV"] = ";".join(args.env)

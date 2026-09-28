@@ -42,6 +42,7 @@ from .docker_env import (
     CONTAINER_SESSIONS,
     CONTAINER_WORKSPACE,
     cli_env as docker_cli_env,
+    DOCKER_HOST_GATEWAY,
     container_name_for,
     is_available as docker_available,
     run_argv as docker_run_argv,
@@ -184,6 +185,26 @@ class Sandbox(ABC):
     def identity(self) -> Mapping[str, str]:
         return {}
 
+    def egress_origin(self, port: int) -> str:
+        """The host's egress proxy origin as this face's process reaches it.
+
+        ``port`` is the proxy's bound listener port. ``PI_GLINK_EGRESS_PUBLIC_URL``
+        (when set) always wins: it is the operator's statement of where the
+        proxy is reachable from outside the host (docs/adr/0008).
+        """
+        public = self.config.egress_public_url
+        if public:
+            return public
+        return self._default_egress_origin(port)
+
+    def _default_egress_origin(self, port: int) -> str:
+        host = self.config.egress_host
+        if host in ("0.0.0.0", "::", ""):
+            host = "127.0.0.1"
+        if ":" in host:
+            host = f"[{host}]"
+        return f"http://{host}:{port}"
+
     def close(self) -> CleanupReport:
         return CleanupReport(released=True, external=dict(self.identity()))
 
@@ -254,6 +275,13 @@ class DockerSandbox(Sandbox):
     def identity(self) -> Mapping[str, str]:
         return {"container": self.container_name}
 
+    def _default_egress_origin(self, port: int) -> str:
+        # The container reaches the host through the gateway alias that
+        # run_argv adds (``--add-host host.docker.internal:host-gateway``).
+        # The listener must be bound where the bridge can reach it
+        # (PI_GLINK_EGRESS_HOST; loopback works on Docker Desktop only).
+        return f"http://{DOCKER_HOST_GATEWAY}:{port}"
+
     def close(self) -> CleanupReport:
         failures: list[str] = []
         if self._opened:
@@ -308,6 +336,15 @@ class E2BSandbox(Sandbox):
 
     def place(self, role: str, host: Path) -> str:
         return self._PLACES[role]
+
+    def _default_egress_origin(self, port: int) -> str:
+        # A cloud sandbox cannot reach the host's loopback. Without an explicit
+        # public URL the run is refused — never handed the real key instead
+        # (fail closed, docs/adr/0008).
+        raise ConfigError(
+            "LOCAL_WEB_EXECUTOR=e2b requires PI_GLINK_EGRESS_PUBLIC_URL: the "
+            "sandbox must reach the host's credential egress proxy"
+        )
 
     def open(self, launch: Launch, *, timeout_seconds: int) -> None:
         if self._handle is not None:

@@ -123,7 +123,6 @@ def main(argv: list[str] | None = None) -> int:
         "PI_GLINK_HARNESSES_DIR": str(packs),
         "LOCAL_WEB_DATA_ROOT": str(workdir / "data"),
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": str(args.timeout),
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(workdir / "absent-web-search.json"),
     }
     if credentials:
         values["PI_GLINK_ACP_CREDENTIAL_FILES"] = ";".join(credentials)

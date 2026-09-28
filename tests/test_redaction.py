@@ -118,20 +118,6 @@ def test_assistant_text_args_and_headers_are_redacted() -> None:
         assert AUDIT_SECRET not in rendered, frame["type"]
 
 
-def test_redactor_learns_the_web_search_file(tmp_path: Path) -> None:
-    config = make_config(tmp_path)
-    runtime_dir = tmp_path / "agent-runtime"
-    runtime_dir.mkdir(parents=True)
-    (runtime_dir / "web-search.json").write_text(
-        json.dumps({"exaApiKey": "exa-unknown0123456789abcdef", "workflow": "none"}),
-        encoding="utf-8",
-    )
-    redactor = redactor_from_config(config)
-    assert redactor.contains_secret("exa-unknown0123456789abcdef") is not None
-    redactor.add_from_file(runtime_dir / "web-search.json")
-    assert redactor.redact("token exa-unknown0123456789abcdef") == f"token {REPLACEMENT}"
-
-
 def test_redactor_hides_values_in_repr_and_known_list(tmp_path: Path) -> None:
     config = make_config(tmp_path)
     redactor = redactor_from_config(config)
@@ -493,7 +479,7 @@ def test_minimal_child_environment_does_not_inherit_host_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The pi process gets a whitelisted environment, not the operator's shell."""
-    from harness_helpers import compose_launch, execution_spec
+    from harness_helpers import compose_launch, execution_spec, test_egress
     from pi_glink.kernel import agent_env
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-host-secret-0123456789")
@@ -504,6 +490,7 @@ def test_minimal_child_environment_does_not_inherit_host_credentials(
         config,
         runtime_dir=tmp_path / "runtime",
         session_dir=tmp_path / "sessions",
+        egress=test_egress(),
     )
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -854,7 +841,7 @@ def test_runner_never_emits_a_long_known_value(tmp_path: Path, length: int) -> N
 
     secret = _long_secret(length)
     pieces = ["前文，", secret[:-1], secret[-1:], "，后文"]
-    config = make_config(tmp_path, OPENAI_API_KEY=secret, PI_GLINK_WEB_SEARCH_CONFIG=str(tmp_path / "absent.json"))
+    config = make_config(tmp_path, OPENAI_API_KEY=secret)
     store = RunStore(config.data_root / "runs")
     bus = EventBus()
 

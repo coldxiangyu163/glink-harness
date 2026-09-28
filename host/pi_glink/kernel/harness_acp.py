@@ -40,7 +40,7 @@ from .sandbox import Launch, Mount, Sandbox
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only
     from ..redaction import SecretRedactor
-    from .agent_env import RunCredentials
+    from .agent_env import EgressEndpoint, RunCredentials
 
 logger = logging.getLogger("pi_glink.kernel.harness_acp")
 
@@ -210,7 +210,7 @@ class AcpHarnessFamily(HarnessFamily):
         *,
         parent: RunRecord | None,
         session_seed: bytes | None,
-        credentials: "RunCredentials | None",
+        egress: "EgressEndpoint | None",
         sandbox: Sandbox,
     ) -> PreparedRuntime:
         # A follow-up inherits the authorized parent's agent state root into

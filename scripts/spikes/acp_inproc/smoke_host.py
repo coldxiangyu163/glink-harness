@@ -201,7 +201,6 @@ def main(argv: list[str] | None = None) -> int:
         env["PI_GLINK_ACP_CREDENTIAL_FILES"] = ";".join(credentials)
     if env_entries:
         env["PI_GLINK_ACP_ENV"] = ";".join(env_entries)
-    env.pop("PI_GLINK_WEB_SEARCH_CONFIG", None)
 
     print("ACP M4 最小真实冒烟（inproc）")
     print("=" * 44)

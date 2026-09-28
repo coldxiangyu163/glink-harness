@@ -39,7 +39,7 @@ from e2b_fake import BrokenHandle, FakeSandbox, IdleHandle
 from pi_glink.config import build_config
 from pi_glink.events import EventBus
 from pi_glink.kernel import agent_env, e2b_env
-from harness_helpers import compose_launch, execution_spec, family
+from harness_helpers import compose_launch, execution_spec, family, test_egress
 from pi_glink.kernel.e2b_env import (
     ARTIFACT_MAX_BYTES,
     SANDBOX_PACKAGE_GUARD,
@@ -69,7 +69,7 @@ def make_config(tmp_path: Path, **overrides: str):
         "LOCAL_WEB_EXECUTOR": "e2b",
         "E2B_API_KEY": "e2b-secret-key",
         "LOCAL_WEB_E2B_TEMPLATE": "pi-glink-worker",
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
+        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
     }
     values.update(overrides)
     return build_config(values, REPO_ROOT)
@@ -82,6 +82,7 @@ def _prepare(config, tmp_path: Path, name: str = "run-1"):
         runtime_dir=run_dir / "pi-agent",
         session_dir=run_dir / "sessions",
         image_packages=True,
+        egress=test_egress(),
     )
 
 

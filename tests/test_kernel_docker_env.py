@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from harness_helpers import compose_launch, execution_spec
+from harness_helpers import compose_launch, execution_spec, test_egress
 from pi_glink.config import build_config
 from pi_glink.kernel import agent_env, docker_env
 from pi_glink.kernel.sandbox import DockerSandbox
@@ -28,6 +28,7 @@ def _prepare(config, tmp_path: Path, name: str = "run-1"):
         runtime_dir=run_dir / "pi-agent",
         session_dir=run_dir / "sessions",
         image_packages=True,  # the Docker sandbox is isolated
+        egress=test_egress(),
     )
 
 
@@ -51,7 +52,6 @@ def config(tmp_path: Path):
             "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
             "LOCAL_WEB_EXECUTOR": "docker",
-            "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         },
         REPO_ROOT,
     )

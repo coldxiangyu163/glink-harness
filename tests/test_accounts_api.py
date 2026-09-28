@@ -166,6 +166,8 @@ def make_config(tmp_path: Path, tenant_files: tuple[Path, Path], **overrides: st
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_PORT": "0",
         "LOCAL_WEB_EXECUTOR": "docker",
+        # Docker web search goes through an https egress URL (ADR 0008).
+        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
         "PI_GLINK_TENANCY": "multitenant",
         "PI_GLINK_AUTH_MODE": "accounts",
         "PI_GLINK_GATEWAY_SECRET_FILE": str(secret),
@@ -183,7 +185,6 @@ def make_config(tmp_path: Path, tenant_files: tuple[Path, Path], **overrides: st
         "PI_GLINK_REGISTER_MAX_ATTEMPTS": "50",
         "PI_GLINK_REGISTER_WINDOW_SECONDS": "60",
         "PI_GLINK_INVITE_CHECK_MAX_ATTEMPTS": "200",
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "60",
     }
     values.update(overrides)

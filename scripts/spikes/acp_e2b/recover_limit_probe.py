@@ -183,7 +183,6 @@ def run_axis(axis: str, args: argparse.Namespace, api_key: str, workdir: Path) -
         "LOCAL_WEB_E2B_ACP_TEMPLATE": args.template,
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": str(args.timeout),
         "E2B_API_KEY": api_key,
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(axis_dir / "absent-web-search.json"),
     }
     config = build_config(values, REPO_ROOT)
     run_dir = axis_dir / "data" / "runs" / f"limit-{axis}"

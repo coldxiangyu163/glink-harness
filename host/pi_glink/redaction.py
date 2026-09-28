@@ -174,14 +174,6 @@ class SecretRedactor:
     def __bool__(self) -> bool:
         return bool(self._values)
 
-    def add_from_file(self, path: Path) -> None:
-        """Register every credential-shaped value inside a JSON config file."""
-        try:
-            document = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return
-        _add_json_secrets(self, document)
-
     # -- detection ------------------------------------------------------------
 
     def spans(self, text: str) -> list[tuple[int, int]]:
@@ -376,34 +368,17 @@ def find_credential_shapes(text: str) -> list[str]:
     return found
 
 
-def redactor_from_config(config: Any, runtime: Any = None) -> SecretRedactor:
-    """Collect every credential this host can know about.
+def redactor_from_config(config: Any) -> SecretRedactor:
+    """Collect every credential the host's frozen configuration carries.
 
-    Sources: the frozen configuration (model / sandbox / search keys from `.env`)
-    and the rendered runtime `web-search.json` (the file pi-web-access reads, whose
-    values the host never keeps in its own config).
+    Sources: the model / sandbox / search keys from `.env`. No rendered file is
+    read: since the egress proxy (docs/adr/0008) a pi run's files carry only
+    its token, which the runner adds to that run's own boundary.
     """
     redactor = SecretRedactor()
     for attribute in ("openai_api_key", "e2b_api_key", "web_search_key"):
         redactor.add(getattr(config, attribute, None))
-    if runtime is not None:
-        directory = getattr(runtime, "directory", None)
-        if isinstance(directory, Path):
-            redactor.add_from_file(directory / "web-search.json")
     return redactor
-
-
-def _add_json_secrets(redactor: SecretRedactor, document: Any, key_hint: str = "") -> None:
-    if isinstance(document, Mapping):
-        for key, value in document.items():
-            _add_json_secrets(redactor, value, f"{key_hint}{key}")
-    elif isinstance(document, list):
-        for item in document:
-            _add_json_secrets(redactor, item, key_hint)
-    elif isinstance(document, str):
-        lowered = key_hint.lower()
-        if any(hint in lowered for hint in ("key", "token", "secret", "password")):
-            redactor.add(document)
 
 
 # -- credential files: values a copied credential document carries ----------------

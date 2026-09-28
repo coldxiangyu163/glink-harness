@@ -105,6 +105,9 @@ class PiGlinkServer(ThreadingHTTPServer):
             # The ledger sweep is host lifecycle: stop it before the manager and
             # the data-root lock go away, so no probe runs against a closed host.
             self.manager.stop_resource_watch()
+            # The egress listener only exists for live grants; close it with
+            # the host so no forwarder outlives the web surface.
+            self.manager.egress.close()
             if self.tenancy is not None:
                 self.tenancy.close()
             if self.ownership is not None:

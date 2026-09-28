@@ -59,7 +59,8 @@ from ..blueprints import (
     load_blueprint,
     render_blueprint,
 )
-from ..config import HostConfig
+from ..config import ConfigError, HostConfig
+from ..egress import MODEL_ROUTE, SEARCH_ROUTE, EgressGrant, EgressProxy
 from ..ownership import DataRootOwnership
 from ..redaction import SecretRedactor, credential_secrets_from_text, redactor_from_config
 from ..store import (
@@ -87,6 +88,7 @@ from ..kernel.execution import (
 # it) and re-exported here: ``web_routes`` and existing importers keep their
 # ``runs.runner`` import unchanged.
 from ..kernel.harness import (
+    EgressEndpoint,
     FollowupUnavailable,
     FrameProjector,
     HarnessFamily,
@@ -302,6 +304,9 @@ class _Execution:
     blueprint: Blueprint | None = None
     blueprint_prompt: str = ""
     seeded_report_digest: str | None = None
+    #: The run's credential egress grant (families that ``uses_egress``):
+    #: memory only, revoked when the verdict commit is attempted.
+    egress_grant: EgressGrant | None = None
     #: Guards the phase, the cancellation flag and every frame commit.
     lock: threading.RLock = field(default_factory=threading.RLock)
     phase: str = _OPEN
@@ -349,14 +354,13 @@ class RunManager:
         self._sandbox_factory = sandbox_factory
         self._credential_store = credential_store
         # The host-level redaction boundary: it carries the host's own secrets
-        # (global model/search keys, sandbox key, the operator's own search
-        # file). Each run derives its own copy and adds only its own credentials
-        # to it, so tenant secrets stay apart. Reading the operator file here —
-        # rather than while rendering a run — also keeps the download boundary
-        # able to mask old reports after a restart.
+        # (global model/search keys, sandbox key). Each run derives its own copy
+        # and adds only its own credentials and egress token to it, so tenant
+        # secrets stay apart.
         self.redactor: SecretRedactor = redactor_from_config(config)
-        if config.web_search_config_path is not None:
-            self.redactor.add_from_file(config.web_search_config_path)
+        # The credential egress proxy (docs/adr/0008): holds the real keys for
+        # families that ``uses_egress``; each such run gets one token.
+        self.egress = EgressProxy.from_config(config)
         self._lock = threading.RLock()
         self._executions: dict[str, _Execution] = {}
         #: Harness families by name (``RunSpec.family``). Every "the pi family
@@ -627,7 +631,6 @@ class RunManager:
             return RunCredentials(
                 model_api_key=tenant.model_api_key,
                 web_search_key=tenant.web_search_key,
-                web_search_config_path=None,
                 origin="tenant",
             )
         return RunCredentials.from_host(self.config)
@@ -980,7 +983,14 @@ class RunManager:
             logger.error(
                 "宿主退出时仍有 run 的终态或执行资源未确认: %s", ", ".join(unconfirmed)
             )
+        # Tokens are memory-only; nothing outlives the host process.
+        self.egress.close()
         return unconfirmed
+
+    def _revoke_egress(self, execution: _Execution) -> None:
+        grant, execution.egress_grant = execution.egress_grant, None
+        if grant is not None:
+            self.egress.revoke(grant.token)
 
     # -- restart reconciliation and resource adjudication ---------------------
     #
@@ -1247,6 +1257,10 @@ class RunManager:
                 logger.exception("terminal commit failed run=%s", run_id)
             execution.phase = _COMMITTED if committed else _UNCOMMITTED
 
+        # The kernel is gone by now: the run's token stops working whether or
+        # not the verdict was committed (an uncommitted run never runs again;
+        # a restart reconciles it without a kernel).
+        self._revoke_egress(execution)
         if committed:
             try:
                 self.store.settle(run_id)
@@ -1324,7 +1338,19 @@ class RunManager:
             "modelStopReason": execution.execution_facts.model_stop_reason,
             "sessionId": current.session_id,
             "sessionFile": current.session_file,
-            "usage": execution.execution_facts.usage_total or None,
+            # The egress proxy's metered total is the authoritative usage of a
+            # run whose calls went through it (docs/adr/0008); the kernel's own
+            # reports stay as a separate, non-authoritative field.
+            "usage": (
+                execution.egress_grant.usage()
+                if execution.egress_grant is not None
+                else execution.execution_facts.usage_total or None
+            ),
+            "kernelUsage": (
+                execution.execution_facts.usage_total or None
+                if execution.egress_grant is not None
+                else None
+            ),
             "redacted": execution.artifact_facts.redacted,
             "durationSeconds": round(time.time() - current.created_at, 3),
             "cleanup": {
@@ -1377,9 +1403,17 @@ class RunManager:
         unreadable to this tenant between admission and here is never used as a
         resume source), the redactor fallback construction (a pure, side-effect
         -free object), merging the render's newly learned secrets into the run's
-        boundary, and only then the projector — so the original order (ACP
-        ``runtime.secrets`` and pi's ``web-search.json`` enter the boundary
-        before the projector is built) is preserved.
+        boundary, and only then the projector — so every secret (ACP
+        ``runtime.secrets``, the pi run's egress token) is in the boundary
+        before the projector is built.
+
+        A family that ``uses_egress`` never receives the run's real
+        credentials: the runner issues the run's egress grant (the proxy keeps
+        the keys), adds the token to the run's boundary, and hands the family
+        only the proxy URLs as the sandbox reaches them plus that token
+        (docs/adr/0008). The grant is stored on the execution first, so a
+        refusal below (E2B without a public URL) still revokes it at the
+        verdict commit.
         """
         run_id = execution.record.run_id
         run_dir = self.store.run_dir(run_id)
@@ -1388,32 +1422,54 @@ class RunManager:
             parent = self._authorized_parent(execution.context, execution.parent_run_id)
             if parent is None:
                 raise FollowupUnavailable("session_unavailable")
-        prepared = self._family_of(execution).prepare_runtime(
+        family = self._family_of(execution)
+        credentials = execution.credentials or RunCredentials.from_host(self.config)
+        # This run's own redaction boundary: the host's secrets plus the
+        # credentials this run was actually given. Newly learned secret shapes
+        # (the egress token, the ACP ``runtime.secrets``) join the run's
+        # boundary — never the host-level one — and never a log.
+        if execution.redactor is None:
+            execution.redactor = self._redactor_for(credentials)
+        egress = self._egress_endpoint(execution, credentials, sandbox) if family.uses_egress else None
+        prepared = family.prepare_runtime(
             run_id,
             run_dir,
             parent=parent,
             session_seed=execution.session_seed,
-            credentials=execution.credentials,
+            egress=egress,
             sandbox=sandbox,
         )
         execution.runtime = prepared.runtime
         if prepared.seed_consumed:
             execution.session_seed = None
-        # This run's own redaction boundary: the host's secrets plus the
-        # credentials this run was actually given. Newly learned secret shapes
-        # (the ACP ``runtime.secrets``, pi's rendered ``web-search.json``) join
-        # the run's boundary — never the host-level one — and never a log.
-        if execution.redactor is None:
-            execution.redactor = self._redactor_for(
-                execution.credentials or RunCredentials.from_host(self.config)
-            )
         for value in prepared.secret_values:
             execution.redactor.add(value)
-        for path in prepared.secret_files:
-            execution.redactor.add_from_file(path)
         execution.projector = self._family_of(execution).make_projector(execution.redactor)
         return prepared.runtime
 
+    def _egress_endpoint(
+        self, execution: _Execution, credentials: RunCredentials, sandbox: Sandbox
+    ) -> EgressEndpoint:
+        """Issue the run's egress grant and describe it as the sandbox sees it."""
+        context = execution.context
+        grant = self.egress.issue(
+            run_id=execution.record.run_id,
+            tenant=context.tenant_id if context is not None else None,
+            model_key=credentials.model_api_key,
+            search_key=credentials.web_search_key,
+        )
+        execution.egress_grant = grant
+        assert execution.redactor is not None
+        execution.redactor.add(grant.token)
+        port = self.egress.port
+        if port is None:  # pragma: no cover - issue() binds the listener
+            raise ConfigError("credential egress proxy is not listening")
+        origin = sandbox.egress_origin(port).rstrip("/")
+        return EgressEndpoint(
+            model_base_url=f"{origin}/{MODEL_ROUTE}",
+            token=grant.token,
+            search_base_url=f"{origin}/{SEARCH_ROUTE}" if grant.has_search else None,
+        )
 
     # -- adapters -------------------------------------------------------------
 
@@ -1714,7 +1770,7 @@ class RunManager:
                     session_file, root=target.root, redactor=redactor
                 ):
                     changed = True
-            if target.scan and self._scan_sweep_root(target, redactor):
+            if self._scan_sweep_root(target, redactor):
                 changed = True
             if target.credential_copies:
                 # 删除必须在只读扫描之后：先让本 run 的边界记住这些值，再从

@@ -118,7 +118,6 @@ def main(argv: list[str] | None = None) -> int:
             "E2B_API_KEY": api_key,
         }
     )
-    env.pop("PI_GLINK_WEB_SEARCH_CONFIG", None)
     print("ACP M3b 最小真实冒烟")
     print(f"日期: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"宿主命令: python -m pi_glink.app --port {port}（harness=acp, executor=e2b）")

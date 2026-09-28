@@ -83,7 +83,6 @@ def make_config(
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "PI_GLINK_HARNESS": "acp",
         "PI_GLINK_ACP_COMMAND": acp_command(tmp_path, settings or {}),
     }
@@ -548,7 +547,6 @@ def test_acp_followup_refuses_a_parent_owned_by_another_tenant(
         "PI_GLINK_GATEWAY_SECRET_FILE": str(secret_file),
         "PI_GLINK_TENANT_CONFIG_FILE": str(tenants_file),
         "PI_GLINK_TENANCY_AUDIENCE": AUDIENCE,
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "60",
         "PI_GLINK_HARNESS": "dsh",
         "PI_GLINK_HARNESSES_DIR": str(write_acp_pack(tmp_path, acp_command(tmp_path, {}))),

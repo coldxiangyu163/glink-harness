@@ -9,11 +9,12 @@ pi stop 词汇归一化，以及 pi-subagents 的子代理增强与进度配对�
 from __future__ import annotations
 
 import logging
+import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Mapping, TYPE_CHECKING
 
 from ..artifacts import ArtifactError, ArtifactTree
-from ..config import ConfigError
+from ..config import ConfigError, is_loopback_hostname
 from ..store import (
     CHILDREN_DIRNAME,
     FAILED,
@@ -44,7 +45,7 @@ from .subagent_artifacts import (
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only
     from ..redaction import SecretRedactor
-    from .agent_env import RunCredentials
+    from .agent_env import EgressEndpoint, RunCredentials
 
 logger = logging.getLogger("pi_glink.kernel.harness_pi")
 
@@ -65,6 +66,7 @@ class PiHarnessFamily(HarnessFamily):
     """pi 族：宿主渲染配置、宿主凭据准入、会话文件续接。"""
 
     name = "pi"
+    uses_egress = True
 
     # -- (a) 准入 --------------------------------------------------------------
 
@@ -122,14 +124,28 @@ class PiHarnessFamily(HarnessFamily):
         *,
         parent: RunRecord | None,
         session_seed: bytes | None,
-        credentials: "RunCredentials | None",
+        egress: "EgressEndpoint | None",
         sandbox: Sandbox,
     ) -> PreparedRuntime:
+        if egress is None:
+            # The pi family never renders a real key (docs/adr/0008): without
+            # an egress grant there is nothing safe to put in auth.json.
+            raise ConfigError("pi runs require a credential egress grant")
+        if egress.search_base_url is not None and not _search_url_allowed(
+            egress.search_base_url
+        ):
+            # pi-web-access only accepts an https exaBaseUrl (http only on a
+            # loopback host). Refuse instead of silently dropping search or
+            # rendering the real key.
+            raise ConfigError(
+                "web search via the egress proxy needs an https "
+                "PI_GLINK_EGRESS_PUBLIC_URL on this sandbox"
+            )
         runtime = prepare_agent_dir(
             self._config,
             runtime_dir=run_dir / RUNTIME_DIRNAME,
             session_dir=Path(self._config.session_dir) / run_id,
-            credentials=credentials,
+            egress=egress,
             # An isolated sandbox runs pi from its image: settings.json names
             # the image-local prebaked packages (the guard verifies them).
             image_packages=sandbox.isolated,
@@ -141,16 +157,9 @@ class PiHarnessFamily(HarnessFamily):
                     "continued.jsonl", session_seed, max_bytes=REPORT_MAX_BYTES
                 )
             seed_consumed = True
-        # This run's own redaction boundary: the host's secrets plus the
-        # credentials this run was actually given. The rendered search
-        # credential only exists in the file, so it is learned here (never
-        # logged, never returned). Adding it to the run's boundary — not to the
-        # host-level one — keeps two tenants' secrets from mixing.
-        return PreparedRuntime(
-            runtime=runtime,
-            secret_files=(runtime.directory / "web-search.json",),
-            seed_consumed=seed_consumed,
-        )
+        # The only secret rendered is the run token, which the runner already
+        # added to this run's redaction boundary when it issued the grant.
+        return PreparedRuntime(runtime=runtime, seed_consumed=seed_consumed)
 
     def make_projector(self, redactor: "SecretRedactor") -> Projector:
         return Projector(redactor)
@@ -414,3 +423,11 @@ class PiHarnessFamily(HarnessFamily):
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 return f"{name}:{value}"
         return None
+
+
+def _search_url_allowed(url: str) -> bool:
+    """pi-web-access 0.31.0's ``exaBaseUrl`` rule: https, or http on loopback."""
+    split = urllib.parse.urlsplit(url)
+    if split.scheme == "https":
+        return True
+    return split.scheme == "http" and is_loopback_hostname(split.hostname)

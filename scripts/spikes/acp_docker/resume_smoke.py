@@ -434,7 +434,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.env:
         env["PI_GLINK_ACP_ENV"] = ";".join(args.env)
-    env.pop("PI_GLINK_WEB_SEARCH_CONFIG", None)
 
     code = codename()
     first = first_prompt(code)

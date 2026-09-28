@@ -282,11 +282,12 @@ def make_config(tmp_path: Path, tenant_files: tuple[Path, Path], **overrides: st
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_PORT": "0",
         "LOCAL_WEB_EXECUTOR": "docker",
+        # Docker web search goes through an https egress URL (ADR 0008).
+        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
         "PI_GLINK_TENANCY": "multitenant",
         "PI_GLINK_GATEWAY_SECRET_FILE": str(secret),
         "PI_GLINK_TENANT_CONFIG_FILE": str(tenants),
         "PI_GLINK_TENANCY_AUDIENCE": AUDIENCE,
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "60",
     }
     values.update(overrides)
@@ -947,6 +948,17 @@ def test_children_follow_the_same_owner_rules_as_the_run_detail(server: PiGlinkS
 def test_each_run_renders_only_its_own_tenants_credentials(
     server: PiGlinkServer, adapters: AdapterBehavior
 ) -> None:
+    """The kernel sees only an egress token; the grant behind it holds the
+    tenant's own key (docs/adr/0008-egress-proxy.md)."""
+    issued: list = []
+    original_issue = server.manager.egress.issue
+
+    def recording_issue(**kwargs):
+        grant = original_issue(**kwargs)
+        issued.append(grant)
+        return grant
+
+    server.manager.egress.issue = recording_issue  # type: ignore[method-assign]
     alpha = start_run(server, "alpha", token=assertion("tenant-alpha", "user-a"))
     beta = start_run(server, "beta", token=assertion("tenant-beta", "user-b"))
     assert wait_for_terminal(server, alpha["runId"], assertion("tenant-alpha", "user-a"))
@@ -959,16 +971,31 @@ def test_each_run_renders_only_its_own_tenants_credentials(
         assert len(matched) == 1, f"run {run_id} 应恰好有一个执行面"
         return matched[0]
 
+    def grant_for(run_id: str):
+        matched = [grant for grant in issued if grant.run_id == run_id]
+        assert len(matched) == 1, f"run {run_id} 应恰好签发一个 egress token"
+        return matched[0]
+
     alpha_adapter = adapter_for(alpha["runId"])
     beta_adapter = adapter_for(beta["runId"])
-    assert alpha_adapter.auth_key == ALPHA_KEY
-    assert beta_adapter.auth_key == BETA_KEY
-    assert alpha_adapter.web_search_present is True
+    alpha_grant = grant_for(alpha["runId"])
+    beta_grant = grant_for(beta["runId"])
+    # 执行面只见到本 run 的 token，真实 key 只在宿主内存的 grant 里。
+    assert alpha_adapter.auth_key == alpha_grant.token
+    assert beta_adapter.auth_key == beta_grant.token
+    assert alpha_grant.token != beta_grant.token
+    assert (alpha_grant.tenant, alpha_grant.model_key) == ("tenant-alpha", ALPHA_KEY)
+    assert (beta_grant.tenant, beta_grant.model_key) == ("tenant-beta", BETA_KEY)
+    assert alpha_adapter.web_search_present is True and alpha_grant.has_search
     assert beta_adapter.web_search_present is False, "缺搜索 key 时应回退无 key 检索"
+    assert not beta_grant.has_search
     for adapter in (alpha_adapter, beta_adapter):
-        assert HOST_KEY not in adapter.auth_key, "宿主全局 key 不得回退给租户"
-        assert ALPHA_KEY not in beta_adapter.auth_key
-        assert BETA_KEY not in alpha_adapter.auth_key
+        for real in (HOST_KEY, ALPHA_KEY, BETA_KEY):
+            assert real not in adapter.auth_key, "真实 key 不得进入执行面"
+    assert HOST_KEY not in (alpha_grant.model_key, beta_grant.model_key), "宿主全局 key 不得回退给租户"
+    # 终帧提交后两枚 token 均已吊销。
+    for grant in (alpha_grant, beta_grant):
+        assert server.manager.egress.grant_for(grant.token) is None
 
 
 def test_a_tenant_without_configured_model_key_is_refused_admission(

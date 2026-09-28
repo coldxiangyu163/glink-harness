@@ -24,6 +24,7 @@ from typing import Any, Callable, Mapping, Protocol, TYPE_CHECKING
 
 from ..config import ConfigError, HostConfig
 from ..store import RunRecord, RunStore
+from .agent_env import EgressEndpoint
 from .execution import ExecutionAdapter, ExecutionSpec
 from .sandbox import Launch, Sandbox
 
@@ -92,8 +93,6 @@ class PreparedRuntime:
     runtime: HarnessRuntime
     #: 渲染中新知的凭据形值：并入本 run 的脱敏边界（ACP 的 runtime.secrets）。
     secret_values: tuple[str, ...] = ()
-    #: 需 add_from_file 并入边界的文件（pi 的 web-search.json）。
-    secret_files: tuple[Path, ...] = ()
     #: pi 族消费了 session_seed（写入 continued.jsonl）；runner 据此清空。
     seed_consumed: bool = False
 
@@ -108,6 +107,11 @@ class HarnessFamily(ABC):
     """
 
     name: str = "unknown"  # "pi" | "acp"，与 RunSpec.family 的取值同表
+    #: 本族的模型/检索调用是否经宿主凭据出口代理（docs/adr/0008）。True 时
+    #: runner 为 run 签发短期 token，并以 ``EgressEndpoint`` 交给
+    #: ``prepare_runtime``；真实 key 不进执行环境。ACP 族为 False（agent
+    #: 自带模型配置，出口代理未覆盖）。
+    uses_egress: bool = False
 
     def __init__(self, *, config: HostConfig, store: RunStore) -> None:
         self._config = config
@@ -186,10 +190,14 @@ class HarnessFamily(ABC):
         *,
         parent: RunRecord | None,
         session_seed: bytes | None,
-        credentials: "RunCredentials | None",
+        egress: EgressEndpoint | None,
         sandbox: Sandbox,
     ) -> PreparedRuntime:
         """Render the run's per-harness configuration.
+
+        ``egress`` is the run's proxy endpoint (base URLs as the sandbox's
+        execution face reaches them plus the run token) when the family
+        ``uses_egress``; otherwise ``None``. No real credential is passed.
 
         ``sandbox`` is asked facts only: an ``isolated`` sandbox runs the
         kernel from its image, so pi's ``settings.json`` names the image-local
@@ -197,7 +205,7 @@ class HarnessFamily(ABC):
 
         调用前 runner 已做好父记录二次授权（``_authorized_parent`` 重查，
         失败即 ``session_unavailable``）。pi：prepare_agent_dir + 种子写入
-        continued.jsonl + web-search.json 入 secret_files。ACP：
+        continued.jsonl（凭据位只写 egress token）。ACP：
         prepare_acp_runtime（含 inherit_from=self.state_home(parent)、
         AcpStateInheritError 原文包装）；session_seed 非 None 抛
         ``session_unavailable``。

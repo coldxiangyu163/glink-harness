@@ -129,7 +129,6 @@ def main(argv: list[str] | None = None) -> int:
         "LOCAL_WEB_E2B_ACP_TEMPLATE": args.template,
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "300",
         "E2B_API_KEY": api_key,
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(workdir / "absent-web-search.json"),
     }
     if credential:
         values["PI_GLINK_ACP_CREDENTIAL_FILES"] = credential

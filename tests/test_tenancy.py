@@ -325,7 +325,6 @@ def make_values(tmp_path: Path, **overrides: str) -> dict[str, str]:
         "PI_GLINK_GATEWAY_SECRET_FILE": str(secret),
         "PI_GLINK_TENANT_CONFIG_FILE": str(tenants),
         "PI_GLINK_TENANCY_AUDIENCE": AUDIENCE,
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
     }
     values.update(overrides)
     return values
@@ -370,7 +369,6 @@ def test_local_mode_ignores_the_multitenant_material(tmp_path: Path) -> None:
         {
             "OPENAI_MODEL": "test/model",
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-            "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         },
         REPO_ROOT,
     )

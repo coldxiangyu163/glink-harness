@@ -8,9 +8,10 @@ of by each tenant. This module pins that contract and the unchanged fallbacks:
 * the ``shared`` policy is explicit, requires frozen ``OPENAI_*`` material, and
   refuses tenant entries that try to mix their own credentials in;
 * the default ``tenant`` policy keeps its per-tenant key semantics and errors;
-* the host credential reaches each run only through the per-run ``auth.json``
-  (and, for search, the host-level shared search key) — never the sandbox
-  environment, command line, HTTP payload, event log or report;
+* the host credential never enters a run: the per-run ``auth.json`` (and, for
+  search, ``web-search.json``) carries only the run's egress token, and the
+  host-level key stays in the egress grant (docs/adr/0008-egress-proxy.md) —
+  never the sandbox environment, command line, HTTP payload, event log or report;
 * the account/owner/quota surface is untouched: two tenants share one model
   configuration but never see each other's runs, and the quota stays per tenant;
 * invite bootstrap in ``shared`` mode validates the host configuration instead
@@ -42,7 +43,7 @@ from pi_glink.events import EventBus
 
 from e2b_fake import FakeSandbox
 from pi_glink.kernel.agent_env import RunCredentials, prepare_agent_dir
-from harness_helpers import compose_launch, execution_spec
+from harness_helpers import TEST_EGRESS_TOKEN, compose_launch, execution_spec, test_egress
 from pi_glink.kernel.e2b_env import SANDBOX_CONFIG, PiSandboxTransfer
 from pi_glink.kernel.execution import (
     ArtifactRecovery,
@@ -101,11 +102,12 @@ def shared_values(tmp_path: Path, **overrides: str) -> dict[str, str]:
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_PORT": "0",
         "LOCAL_WEB_EXECUTOR": "docker",
+        # Sandboxed runs reach the credential egress proxy via https (ADR 0008).
+        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
         "PI_GLINK_TENANCY": "multitenant",
         "PI_GLINK_AUTH_MODE": "accounts",
         "PI_GLINK_MODEL_CREDENTIALS": "shared",
         "PI_GLINK_WEB_SEARCH_KEY": SHARED_SEARCH_KEY,
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "PI_GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts" / "accounts.db"),
         "PI_GLINK_COOKIE_SECURE": "0",
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "60",
@@ -125,10 +127,11 @@ def tenant_values(tmp_path: Path, tenants: dict[str, Any] | None = None) -> dict
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_PORT": "0",
         "LOCAL_WEB_EXECUTOR": "docker",
+        # Sandboxed runs reach the credential egress proxy via https (ADR 0008).
+        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
         "PI_GLINK_TENANCY": "multitenant",
         "PI_GLINK_AUTH_MODE": "accounts",
         "PI_GLINK_TENANT_CONFIG_FILE": str(write_tenant_file(tmp_path, document)),
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "PI_GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts" / "accounts.db"),
         "PI_GLINK_COOKIE_SECURE": "0",
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "60",
@@ -137,13 +140,39 @@ def tenant_values(tmp_path: Path, tenants: dict[str, Any] | None = None) -> dict
 
 
 def _runtime_for(config, tmp_path: Path, name: str, credentials: RunCredentials):
+    """Render a run the way the pi family does: only the egress endpoint is
+    rendered; a search route exists only when ``credentials`` carry a search key."""
     run_dir = tmp_path / "runs" / name
     return prepare_agent_dir(
         config,
         runtime_dir=run_dir / "pi-agent",
         session_dir=run_dir / "sessions",
-        credentials=credentials,
+        egress=test_egress(
+            origin="https://egress.example.test", search=bool(credentials.web_search_key)
+        ),
     )
+
+
+def record_grants(manager: RunManager) -> list:
+    """Wrap the manager's egress proxy so a test sees every grant it issued."""
+    issued: list = []
+    original = manager.egress.issue
+
+    def recording(**kwargs: Any):
+        grant = original(**kwargs)
+        issued.append(grant)
+        return grant
+
+    manager.egress.issue = recording  # type: ignore[method-assign]
+    return issued
+
+
+def assert_used_the_host_grant(issued: list, adapter: "FakeAdapter") -> None:
+    """The run's grant holds the frozen host key; the face saw only its token."""
+    assert issued, "a pi run must be issued an egress grant"
+    grant = issued[-1]
+    assert grant.model_key == SHARED_KEY
+    assert adapter.auth_key == grant.token and SHARED_KEY not in adapter.auth_key
 
 
 # -- config gate ---------------------------------------------------------------
@@ -263,16 +292,26 @@ def test_tenant_policy_still_requires_per_tenant_keys(tmp_path: Path) -> None:
 # -- rendering: the credential lives in the run's own auth.json ----------------
 
 
-def test_shared_credentials_render_only_into_the_per_run_auth_file(tmp_path: Path) -> None:
+def test_shared_credentials_never_render_into_the_run(tmp_path: Path) -> None:
     config = build_config(
         shared_values(tmp_path, LOCAL_WEB_EXECUTOR="e2b", E2B_API_KEY="e2b-secret"), REPO_ROOT
     )
-    runtime = _runtime_for(config, tmp_path, "run-1", RunCredentials.from_shared_host(config))
+    credentials = RunCredentials.from_shared_host(config)
+    assert (credentials.model_api_key, credentials.web_search_key) == (SHARED_KEY, SHARED_SEARCH_KEY)
+    runtime = _runtime_for(config, tmp_path, "run-1", credentials)
     auth_path = runtime.directory / "auth.json"
-    assert SHARED_KEY in auth_path.read_text(encoding="utf-8")
+    auth_text = auth_path.read_text(encoding="utf-8")
+    assert TEST_EGRESS_TOKEN in auth_text and SHARED_KEY not in auth_text
     assert auth_path.stat().st_mode & 0o777 == 0o600
     search = json.loads((runtime.directory / "web-search.json").read_text(encoding="utf-8"))
-    assert search == {"exaApiKey": SHARED_SEARCH_KEY}
+    assert search == {
+        "exaApiKey": TEST_EGRESS_TOKEN,
+        "exaBaseUrl": "https://egress.example.test/search",
+    }
+    for path in runtime.directory.rglob("*"):
+        if path.is_file():
+            text = path.read_text(encoding="utf-8", errors="replace")
+            assert SHARED_KEY not in text and SHARED_SEARCH_KEY not in text
 
     # Docker delivers the credential only through the mounted config directory;
     # neither the container argv nor the CLI environment carries it.
@@ -286,6 +325,7 @@ def test_shared_credentials_render_only_into_the_per_run_auth_file(tmp_path: Pat
 
 
 def test_shared_mode_never_substitutes_the_operator_search_file(tmp_path: Path) -> None:
+    # The operator file (``PI_GLINK_WEB_SEARCH_CONFIG``) is no longer read at all.
     operator = tmp_path / "operator-web-search.json"
     operator.write_text(json.dumps({"exaApiKey": OPERATOR_SEARCH_KEY}), encoding="utf-8")
     operator.chmod(0o600)
@@ -295,6 +335,7 @@ def test_shared_mode_never_substitutes_the_operator_search_file(tmp_path: Path) 
         ),
         REPO_ROOT,
     )
+    assert RunCredentials.from_shared_host(config).web_search_key == ""
     runtime = _runtime_for(config, tmp_path, "run-2", RunCredentials.from_shared_host(config))
     assert not (runtime.directory / "web-search.json").exists()
     assert OPERATOR_SEARCH_KEY not in (runtime.directory / "auth.json").read_text(encoding="utf-8")
@@ -314,7 +355,7 @@ def _e2b_config(tmp_path: Path):
 
 
 def test_shared_model_key_stays_out_of_the_e2b_environment_and_command(tmp_path: Path) -> None:
-    """The E2B face may receive the key only through the uploaded auth.json."""
+    """The E2B face never receives the key: the uploaded auth.json holds a token."""
     config = _e2b_config(tmp_path)
     runtime = _runtime_for(config, tmp_path, "run-3", RunCredentials.from_shared_host(config))
     sandbox = FakeSandbox()
@@ -337,7 +378,9 @@ def test_shared_model_key_stays_out_of_the_e2b_environment_and_command(tmp_path:
     assert spawn.process is not None
     process = spawn.process()
     try:
-        assert SHARED_KEY in sandbox.written[f"{SANDBOX_CONFIG}/auth.json"]
+        uploaded_auth = sandbox.written[f"{SANDBOX_CONFIG}/auth.json"]
+        assert TEST_EGRESS_TOKEN in uploaded_auth and SHARED_KEY not in uploaded_auth
+        assert SHARED_KEY not in json.dumps(sandbox.written)
         assert SHARED_KEY not in sandbox.command
         assert "OPENAI_API_KEY" not in sandbox.command_envs
         assert SHARED_KEY not in json.dumps(sandbox.command_envs)
@@ -375,14 +418,22 @@ def test_shared_e2b_run_redacts_the_host_key_and_reconciles_the_sandbox_id(tmp_p
     )
     storage = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store=storage, sandbox_factory=lambda **_: sandbox)
+    grants = record_grants(manager)
     record = manager.start("合成问题", _context())
     final = manager.wait(record.run_id, timeout=30)
 
     assert final is not None and final.status == "finished"
     assert final.sandbox_id == "fake-sandbox"
-    assert final.usage and final.usage.get("requests") == 1
+    # The sandbox saw only the egress token (bound to the host key and tenant);
+    # usage is the proxy's meter — the fake kernel made no upstream call.
+    [grant] = grants
+    assert (grant.run_id, grant.tenant, grant.model_key) == (record.run_id, "tenant-alpha", SHARED_KEY)
+    assert SHARED_KEY not in json.dumps(sandbox.written)
+    assert final.usage and final.usage.get("source") == "egress"
+    assert final.usage.get("requests") == 0
+    assert manager.egress.grant_for(grant.token) is None, "终帧后 token 已吊销"
     events = storage.events_path(record.run_id).read_text(encoding="utf-8")
-    assert SHARED_KEY not in events
+    assert SHARED_KEY not in events and grant.token not in events
     assert "[REDACTED]" in events
     assert sandbox.killed is True
     assert final.report_path is not None
@@ -660,15 +711,33 @@ def test_shared_mode_serves_two_tenants_from_one_host_model(
         assert config["configured"]["model"] is True
         assert SHARED_KEY not in json.dumps(config)
 
+    grants = record_grants(server.manager)
     status, payload = alpha.start_run(f"研究 {SHARED_KEY}")
     assert status == 201, payload
     run_id = payload["run"]["runId"]
     final = wait_for_terminal(server, run_id)
     assert final is not None and final.status == "finished"
-    assert final.usage and final.usage.get("requests") == 1
+    # The proxy meter is authoritative (no call went through it here); the
+    # kernel's own turn report stays in the terminal frame as ``kernelUsage``.
+    assert final.usage and final.usage.get("source") == "egress"
+    assert final.usage.get("requests") == 0
+    terminal = [
+        json.loads(line)
+        for line in server.store.events_path(run_id).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ][-1]
+    assert terminal["payload"]["kernelUsage"]["requests"] == 1
 
-    # The run used the host credential, not a tenant entry.
-    assert behavior.created[-1].auth_key == SHARED_KEY
+    # The run's grant holds the host credential, not a tenant entry; the
+    # execution face only ever saw the grant's token.
+    [grant] = grants
+    assert (grant.tenant, grant.model_key, grant.search_key) == (
+        "tenant-alpha",
+        SHARED_KEY,
+        SHARED_SEARCH_KEY,
+    )
+    assert behavior.created[-1].auth_key == grant.token
+    assert SHARED_KEY not in behavior.created[-1].auth_key
     assert behavior.created[-1].web_search_present is True
     # The credential is redacted on every product surface.
     events = server.store.events_path(run_id).read_text(encoding="utf-8")
@@ -761,7 +830,8 @@ def test_shared_mode_refuses_client_supplied_model_fields(
     assert server.store.list(limit=None) == []
 
     # A query parameter or a header cannot relabel the model either: the run
-    # still renders the frozen host credential.
+    # still uses the frozen host credential.
+    grants = record_grants(server.manager)
     status, payload = client.call(
         "/api/runs?model=evil/model",
         method="POST",
@@ -772,7 +842,7 @@ def test_shared_mode_refuses_client_supplied_model_fields(
     run_id = payload["run"]["runId"]
     final = wait_for_terminal(server, run_id)
     assert final is not None and final.status == "finished"
-    assert behavior.created[0].auth_key == SHARED_KEY
+    assert_used_the_host_grant(grants, behavior.created[0])
 
 
 def test_shared_mode_bootstrap_uses_the_host_configuration(
@@ -835,11 +905,12 @@ def test_shared_mode_invite_registration_then_run_uses_host_credentials(
     )
     assert status == 201, payload
     client.login("invitee@example.test")
+    grants = record_grants(server.manager)
     status, payload = client.start_run("注册后的研究")
     assert status == 201, payload
     final = wait_for_terminal(server, payload["run"]["runId"])
     assert final is not None and final.status == "finished"
-    assert behavior.created[-1].auth_key == SHARED_KEY
+    assert_used_the_host_grant(grants, behavior.created[-1])
 
 
 def test_shared_gateway_mode_is_equally_explicit_and_uses_host_credentials(
@@ -856,6 +927,7 @@ def test_shared_gateway_mode_is_equally_explicit_and_uses_host_credentials(
     )
     server = create_server(build_config(values, REPO_ROOT))
     thread = start_server(server)
+    grants = record_grants(server.manager)
     try:
         token = issue_assertion(
             SECRET, tenant_id="tenant-x", user_id="user-x", audience=AUDIENCE, ttl_seconds=120
@@ -871,6 +943,6 @@ def test_shared_gateway_mode_is_equally_explicit_and_uses_host_credentials(
         run_id = json.loads(raw)["run"]["runId"]
         final = wait_for_terminal(server, run_id)
         assert final is not None and final.status == "finished"
-        assert behavior.created[-1].auth_key == SHARED_KEY
+        assert_used_the_host_grant(grants, behavior.created[-1])
     finally:
         stop_server(server, thread)

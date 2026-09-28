@@ -6,6 +6,7 @@ import json
 import re
 from pathlib import Path
 
+from harness_helpers import test_egress
 from pi_glink.config import build_config
 from pi_glink.kernel.agent_env import prepare_agent_dir, template_manifest
 
@@ -164,7 +165,6 @@ def test_the_pack_capabilities_reach_the_system_prompt(tmp_path: Path) -> None:
             "OPENAI_MODEL": "openai/gpt-5.6-sol",
             "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-            "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "operator-web-search.json"),
         },
         REPO_ROOT,
     )
@@ -282,7 +282,6 @@ def test_researcher_definition_and_guard_reach_the_run_directory(tmp_path: Path)
             "OPENAI_MODEL": "openai/gpt-5.6-sol",
             "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-            "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "operator-web-search.json"),
         },
         REPO_ROOT,
     )
@@ -291,6 +290,7 @@ def test_researcher_definition_and_guard_reach_the_run_directory(tmp_path: Path)
         config,
         runtime_dir=runtime_dir,
         session_dir=runtime_dir.parent / "sessions",
+        egress=test_egress(),
     )
     rendered = runtime.directory / "agents" / "researcher.md"
     assert rendered.read_text(encoding="utf-8") == RESEARCHER_PATH.read_text(encoding="utf-8")

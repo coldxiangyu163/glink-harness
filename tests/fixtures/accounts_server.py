@@ -477,7 +477,6 @@ def config_values(mode: str, state_dir: Path, tenants_file: Path, gateway_secret
         # without any network call (the adapter is replaced below).
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(state_dir / "absent-web-search.json"),
         "LOCAL_WEB_DATA_ROOT": str(state_dir / "data"),
         "LOCAL_WEB_PORT": "0",
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "120",

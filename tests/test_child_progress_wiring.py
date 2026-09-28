@@ -54,8 +54,6 @@ def make_config(tmp_path: Path, **overrides: str) -> HostConfig:
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        # Never fall back to the operator's own credential file in a test.
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
     }
     values.update(overrides)
     apply_acp_pack(values, tmp_path)

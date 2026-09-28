@@ -193,7 +193,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.env:
         env["PI_GLINK_ACP_ENV"] = ";".join(args.env)
-    env.pop("PI_GLINK_WEB_SEARCH_CONFIG", None)
 
     print("ACP M9 E2B 回收失败 → 追问准入拒绝实测")
     print("=" * 48)

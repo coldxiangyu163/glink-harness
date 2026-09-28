@@ -9,6 +9,7 @@ be relabelled by editing the environment afterwards.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from dataclasses import dataclass, field
@@ -69,6 +70,8 @@ _DEFAULT_E2B_TEMPLATE = "pi-glink-worker"
 _DEFAULT_ACP_E2B_TEMPLATE = "glink-acp-worker"
 #: Frozen default for the disposable worker image (shared with ``docker_env``).
 DEFAULT_WORKER_IMAGE = "pi-glink-worker:latest"
+#: pi-web-access's own Exa default; the egress proxy forwards ``/search`` here.
+DEFAULT_WEB_SEARCH_UPSTREAM = "https://api.exa.ai"
 #: Frozen default for the ACP worker image (``docker/Dockerfile.acp-worker``):
 #: the pi worker image carries pi, not the ACP agents, so the ACP docker face
 #: gets its own image instead of silently reusing the pi one.
@@ -179,7 +182,19 @@ class HostConfig:
     log_level: str = "INFO"
     task_timeout_seconds: int = 1800
     web_search_key: str = field(repr=False, default="")
-    web_search_config_path: Path | None = None
+    #: The search upstream the egress proxy forwards ``/search/…`` to
+    #: (``PI_GLINK_WEB_SEARCH_UPSTREAM``, default the Exa API). Host-frozen.
+    web_search_upstream: str = DEFAULT_WEB_SEARCH_UPSTREAM
+    #: Credential egress proxy (docs/adr/0008). The listener address
+    #: (``PI_GLINK_EGRESS_HOST``/``PI_GLINK_EGRESS_PORT``, port ``0`` = random),
+    #: the public base URL a remote/containers face reaches it at
+    #: (``PI_GLINK_EGRESS_PUBLIC_URL``; required for E2B) and the per-run quota
+    #: (``0`` = unlimited).
+    egress_host: str = "127.0.0.1"
+    egress_port: int = 0
+    egress_public_url: str = ""
+    egress_max_requests_per_run: int = 0
+    egress_max_tokens_per_run: int = 0
     #: ``local`` (single user) or ``multitenant`` (gateway-asserted identity).
     tenancy_mode: str = "local"
     #: Multi-tenant identity entry: ``gateway`` (signed assertion, default) or
@@ -275,10 +290,8 @@ class HostConfig:
 
     @property
     def has_web_search_key(self) -> bool:
-        """True when a usable credential source exists (env key or real file)."""
-        if self.web_search_key:
-            return True
-        return self.web_search_config_path is not None and self.web_search_config_path.is_file()
+        """True when the host froze a search credential (``PI_GLINK_WEB_SEARCH_KEY``)."""
+        return bool(self.web_search_key)
 
     @property
     def binds_loopback(self) -> bool:
@@ -467,10 +480,17 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
             values, "LOCAL_WEB_TASK_TIMEOUT_SECONDS", 1800
         ),
         web_search_key=_text(values, "PI_GLINK_WEB_SEARCH_KEY", ""),
-        web_search_config_path=_optional_path(
-            values,
-            "PI_GLINK_WEB_SEARCH_CONFIG",
-            _default_web_search_config(),
+        web_search_upstream=_upstream(
+            values, "PI_GLINK_WEB_SEARCH_UPSTREAM", DEFAULT_WEB_SEARCH_UPSTREAM
+        ),
+        egress_host=_text(values, "PI_GLINK_EGRESS_HOST", "127.0.0.1"),
+        egress_port=_non_negative_integer(values, "PI_GLINK_EGRESS_PORT", 0),
+        egress_public_url=_upstream(values, "PI_GLINK_EGRESS_PUBLIC_URL", ""),
+        egress_max_requests_per_run=_non_negative_integer(
+            values, "PI_GLINK_EGRESS_MAX_REQUESTS_PER_RUN", 0
+        ),
+        egress_max_tokens_per_run=_non_negative_integer(
+            values, "PI_GLINK_EGRESS_MAX_TOKENS_PER_RUN", 0
         ),
         tenancy_mode=tenancy_mode,
         auth_mode=auth_mode,
@@ -576,6 +596,39 @@ def validate_host_config(config: HostConfig) -> None:
             "PI_GLINK_TENANCY=multitenant 要求 Docker/E2B 执行面；inproc 仅用于本地单用户调试"
         )
     _acp_knobs_are_acp_only(config)
+    _egress_is_reachable(config)
+
+
+def _egress_is_reachable(config: HostConfig) -> None:
+    """Refuse an egress setup a pi run could never use (fail closed at startup).
+
+    The real key never enters the execution environment (docs/adr/0008), so a
+    face that cannot reach the proxy has no fallback: E2B needs the public URL;
+    Docker's host-gateway URL is plain http on a non-loopback name, which
+    pi-web-access refuses for its search base URL, so a host-frozen search key
+    on Docker also needs an https public URL.
+    """
+    if not 0 <= config.egress_port <= 65535:
+        raise ConfigError(f"PI_GLINK_EGRESS_PORT 必须在 0–65535 之间；当前 {config.egress_port}")
+    # A public URL is the operator's forwarding statement; pairing it with a
+    # fixed PI_GLINK_EGRESS_PORT is a deployment step (.env.example), not a
+    # host rule: a random port is merely unreachable, never a key leak.
+    if config.harness != "pi":
+        return
+    if config.executor == "e2b" and not config.egress_public_url:
+        raise ConfigError(
+            "LOCAL_WEB_EXECUTOR=e2b 需要 PI_GLINK_EGRESS_PUBLIC_URL：沙箱只经凭据出口代理"
+            "访问模型与检索，真实 key 不进沙箱"
+        )
+    if (
+        config.executor == "docker"
+        and config.web_search_key
+        and not config.egress_public_url.startswith("https://")
+    ):
+        raise ConfigError(
+            "Docker 执行面配置了 PI_GLINK_WEB_SEARCH_KEY 时需要 https 的 "
+            "PI_GLINK_EGRESS_PUBLIC_URL：pi-web-access 拒绝非 loopback 的 http 检索地址"
+        )
 
 
 def _require_multitenant(
@@ -807,6 +860,38 @@ def _flag(values: Mapping[str, str], key: str, default: bool) -> bool:
     raise ConfigError(f"{key} must be a boolean; got {raw!r}")
 
 
+def _upstream(values: Mapping[str, str], key: str, default: str) -> str:
+    """Freeze an egress-side base URL: https, or http only on a loopback host.
+
+    The same rule pi-web-access applies to its own base URL: a credential or
+    token must not travel in clear text beyond this machine. Credentials,
+    queries and fragments in the URL are refused; a trailing slash is dropped.
+    """
+    raw = _text(values, key, default)
+    if not raw:
+        return ""
+    parts = urlsplit(raw)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ConfigError(f"{key} 必须是 http(s) URL: {raw!r}")
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise ConfigError(f"{key} 不接受内嵌凭据、查询或片段: {raw!r}")
+    if parts.scheme == "http" and not is_loopback_hostname(parts.hostname):
+        raise ConfigError(f"{key} 非 loopback 地址必须使用 https: {raw!r}")
+    return raw.rstrip("/")
+
+
+def is_loopback_hostname(hostname: str | None) -> bool:
+    """``localhost``, ``127.0.0.0/8`` or ``::1`` (pi-web-access's own rule)."""
+    if not hostname:
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
 def _origin(values: Mapping[str, str], key: str, default: str) -> str:
     """Freeze the external HTTPS origin (scheme + host), or refuse the value."""
     raw = _text(values, key, default)
@@ -843,21 +928,3 @@ def _require_accounts_db(accounts_db: Path, data_root: Path, repo_root: Path) ->
         raise ConfigError(
             f"PI_GLINK_ACCOUNTS_DB 必须位于 LOCAL_WEB_DATA_ROOT 之内: {accounts_db}"
         )
-
-
-def _default_web_search_config() -> Path | None:
-    """The operator's own pi-web-access credential file, if they have one.
-
-    pi-web-access reads its config from ``PI_CODING_AGENT_DIR``, which this host
-    redirects to a runtime directory; without seeding the credential there, a
-    keyed setup would silently fall back to keyless search. The host never
-    invents its own credential format — it copies the file pi already uses.
-    """
-    candidates = (
-        Path.home() / ".pi" / "agent" / "web-search.json",
-        Path.home() / ".pi" / "web-search.json",
-    )
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    return None

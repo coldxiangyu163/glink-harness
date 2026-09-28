@@ -37,7 +37,7 @@ sys.path.insert(0, str(REPO_ROOT / "host"))
 
 from pi_glink.config import build_config  # noqa: E402
 from pi_glink.kernel import rpc as rpc_module  # noqa: E402
-from pi_glink.kernel.agent_env import prepare_agent_dir  # noqa: E402
+from pi_glink.kernel.agent_env import EgressEndpoint, prepare_agent_dir  # noqa: E402
 from pi_glink.kernel.e2b_env import (  # noqa: E402
     SANDBOX_WORKSPACE,
     PiSandboxTransfer,
@@ -130,7 +130,13 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             pass
 
-        runtime = prepare_agent_dir(config, runtime_dir=tmp_path / "agent")
+        # Spike only: a placeholder egress endpoint (docs/adr/0008); a live probe
+        # that needs the model must run behind a real host egress proxy.
+        runtime = prepare_agent_dir(
+            config,
+            runtime_dir=tmp_path / "agent",
+            egress=EgressEndpoint(model_base_url="http://127.0.0.1:9/model", token="pge_spike"),
+        )
         run_id = f"spike-{int(time.time())}"
         sandbox = E2BSandbox(config=config, run_id=run_id, workspace=tmp_path / "workspace")
         spec = ExecutionSpec(

@@ -50,11 +50,8 @@ def build_redactor(repo_root: Path, data_root: Path) -> SecretRedactor:
     redactor = SecretRedactor()
     for attribute in ("openai_api_key", "e2b_api_key", "web_search_key"):
         redactor.add(getattr(config, attribute, None))
-    # Each run renders its own credential file; the shared path is only read for
-    # data written before per-run runtime directories existed.
-    for credential in sorted(data_root.glob("runs/*/pi-agent/web-search.json")):
-        redactor.add_from_file(credential)
-    redactor.add_from_file(data_root / "pi-agent" / "web-search.json")
+    # Rendered run files carry only revoked egress tokens (docs/adr/0008); the
+    # real keys to look for are the host configuration's own.
     return redactor
 
 

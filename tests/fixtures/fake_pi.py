@@ -20,6 +20,13 @@ Behaviour is selected by the ``type`` of each incoming command:
 ``exit``                     terminates the process without responding
 anything else                error response (``Unknown command: …``)
 ===========================  ===========================================
+
+``FAKE_PI_CALL_MODEL=1`` makes a ``prompt`` call the model the way pi does: a
+POST to ``<models.json baseUrl>/chat/completions`` with the ``auth.json`` key
+as the bearer credential (``FAKE_PI_CALL_SEARCH=1`` adds a pi-web-access style
+POST to ``<exaBaseUrl>/search`` with ``x-api-key``). Each call's status is
+appended to ``FAKE_PI_CALL_LOG`` (a JSON line per call) when set. This drives
+the host's credential egress proxy end to end without a real model.
 """
 
 from __future__ import annotations
@@ -28,6 +35,8 @@ import json
 import copy
 import os
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 COMMANDS = {"get_state", "prompt", "abort", "proto_frames", "silent", "exit"}
@@ -152,9 +161,9 @@ def raw_chunk() -> None:
 def runtime_secret() -> str:
     """Read the credential the way a kernel tool could: from the runtime config.
 
-    The host no longer puts the model key in the process environment, so the
-    stand-in reads ``auth.json`` (pi's own credential store) exactly like the
-    ``read`` tool would.
+    The host puts only the run's egress token in ``auth.json`` (pi's own
+    credential store); the stand-in reads it exactly like the ``read`` tool
+    would, so an echo test sees what a kernel tool actually could.
     """
     config_dir = os.environ.get("PI_CODING_AGENT_DIR", "")
     if not config_dir:
@@ -167,6 +176,60 @@ def runtime_secret() -> str:
         if isinstance(entry, dict) and isinstance(entry.get("key"), str):
             return entry["key"]
     return ""
+
+
+def _runtime_json(name: str) -> dict:
+    config_dir = os.environ.get("PI_CODING_AGENT_DIR", "")
+    try:
+        data = json.loads((Path(config_dir) / name).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _post(url: str, headers: dict, body: dict) -> tuple[int, str]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", **headers},
+        method="POST",
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=30) as response:
+            return response.status, response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+    except OSError as exc:
+        return 0, type(exc).__name__
+
+
+def call_upstreams() -> None:
+    """Call the rendered model (and search) endpoint with the rendered key."""
+    calls: list[dict] = []
+    if os.environ.get("FAKE_PI_CALL_MODEL") == "1":
+        providers = _runtime_json("models.json").get("providers") or {}
+        for provider in providers.values():
+            base = str(provider.get("baseUrl") or "").rstrip("/")
+            status, text = _post(
+                f"{base}/chat/completions",
+                {"Authorization": f"Bearer {runtime_secret()}"},
+                {"model": "m", "stream": os.environ.get("FAKE_PI_STREAM") == "1", "messages": []},
+            )
+            calls.append({"route": "model", "status": status, "body": text[:2000]})
+    if os.environ.get("FAKE_PI_CALL_SEARCH") == "1":
+        search = _runtime_json("web-search.json")
+        base = str(search.get("exaBaseUrl") or "").rstrip("/")
+        if base:
+            status, text = _post(
+                f"{base}/search", {"x-api-key": str(search.get("exaApiKey") or "")}, {"query": "q"}
+            )
+            calls.append({"route": "search", "status": status, "body": text[:2000]})
+    log = os.environ.get("FAKE_PI_CALL_LOG")
+    if log:
+        with open(log, "a", encoding="utf-8") as handle:
+            for call in calls:
+                handle.write(json.dumps(call, ensure_ascii=False) + "\n")
 
 
 def write_report(prompt: str) -> None:
@@ -375,6 +438,7 @@ def main() -> int:
                 )
                 continue
             respond(request)
+            call_upstreams()
             if os.environ.get("FAKE_PI_WRITE_REPORT") == "1":
                 write_report(message)
             if "CRASH" in message:

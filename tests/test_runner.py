@@ -48,8 +48,6 @@ def make_config(tmp_path: Path, **overrides: str) -> HostConfig:
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        # Never fall back to the operator's own credential file in a test.
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
     }
     values.update(overrides)
     apply_acp_pack(values, tmp_path)
@@ -537,12 +535,12 @@ def test_the_blueprint_command_names_come_from_the_blueprint_directory(tmp_path:
 
 
 def test_two_runs_do_not_share_runtime_configuration_or_credentials(tmp_path: Path) -> None:
-    """B2: each run renders its own config, session and credential files.
+    """B2: each run renders its own config, session and egress token files.
 
-    The rendered credential files only exist while the kernel runs: the run's
-    finalization deletes ``auth.json`` / ``web-search.json`` (acp-integration-notes
-    §18.5). Isolation is therefore checked on what each kernel saw at launch,
-    and the deletion on what is left afterwards.
+    ``auth.json`` / ``web-search.json`` carry only the run's egress token
+    (docs/adr/0008-egress-proxy.md), never the real key; the token is revoked
+    at the verdict commit, so a file left in the runtime directory unlocks
+    nothing. Isolation is checked on what each kernel saw at launch.
     """
     import json as json_module
 
@@ -581,16 +579,27 @@ def test_two_runs_do_not_share_runtime_configuration_or_credentials(tmp_path: Pa
     assert without_key.session_dir / run_a.run_id != without_key.session_dir / run_b.run_id
     assert (without_key.session_dir / run_a.run_id).is_dir()
     assert (without_key.session_dir / run_b.run_id).is_dir()
-    # The generated model credential is per run and never shared.
+    # The rendered model credential is a per-run egress token, never the
+    # real key, and two runs never share one.
+    tokens = []
     for run_id in (run_a.run_id, run_b.run_id):
         auth = json_module.loads(seen[run_id]["auth.json"])
-        assert "sk-test" in json_module.dumps(auth)
-    # Finalization removed every rendered credential file from both runs; the
-    # rest of the runtime directory stays.
+        token = auth["frontier"]["key"]
+        assert token.startswith("pge_") and "sk-test" not in seen[run_id]["auth.json"]
+        tokens.append(token)
+    assert tokens[0] != tokens[1]
+    search = json_module.loads(seen[run_a.run_id]["web-search.json"])
+    assert search["exaApiKey"] == tokens[0]
+    assert "exa-secret-key" not in seen[run_a.run_id]["web-search.json"]
+    # Both tokens were revoked with the verdict; nothing on disk holds a real key.
+    for manager, token in ((manager_a, tokens[0]), (manager_b, tokens[1])):
+        assert manager.egress.grant_for(token) is None
     for runtime in (runtime_a, runtime_b):
-        names = {path.name for path in runtime.rglob("*")}
-        assert not names & {"auth.json", "web-search.json"}
-        assert "models.json" in names
+        assert "models.json" in {path.name for path in runtime.rglob("*")}
+        for path in runtime.rglob("*"):
+            if path.is_file():
+                text = path.read_text(encoding="utf-8", errors="replace")
+                assert "sk-test" not in text and "exa-secret-key" not in text
 
 
 def test_process_death_after_the_prompt_converges_quickly(tmp_path: Path) -> None:
@@ -724,7 +733,7 @@ def test_cleanup_failure_is_recorded_not_hidden(tmp_path: Path) -> None:
         tmp_path,
         LOCAL_WEB_EXECUTOR="e2b",
         E2B_API_KEY="e2b-secret",
-        PI_GLINK_WEB_SEARCH_CONFIG=str(tmp_path / "absent.json"),
+        PI_GLINK_EGRESS_PUBLIC_URL="https://egress.example.test",
     )
     sandbox = _PoorlyClosingSandbox(tmp_path / "sandbox")
     store = RunStore(config.data_root / "runs")

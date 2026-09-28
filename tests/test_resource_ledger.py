@@ -47,7 +47,6 @@ def make_config(tmp_path: Path, **overrides: str) -> HostConfig:
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
     }
     values.update(overrides)
     return build_config(values, REPO_ROOT)
@@ -70,6 +69,7 @@ def make_e2b_config(tmp_path: Path, **overrides: str) -> HostConfig:
         "LOCAL_WEB_EXECUTOR": "e2b",
         "E2B_API_KEY": "e2b-secret-key",
         "LOCAL_WEB_E2B_TEMPLATE": "pi-glink-worker",
+        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
     }
     values.update(overrides)
     return make_config(tmp_path, **values)
@@ -327,7 +327,11 @@ def test_a_probe_that_cannot_confirm_keeps_the_hold(tmp_path: Path, mode: str) -
 def test_a_probe_never_guesses_a_missing_identity(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="e2b")
+    config = make_config(
+        tmp_path,
+        LOCAL_WEB_EXECUTOR="e2b",
+        PI_GLINK_EGRESS_PUBLIC_URL="https://egress.example.test",
+    )
     store = RunStore(config.data_root / "runs")
     record_hold(store, "no-identity")
     calls: list[str] = []
@@ -347,7 +351,11 @@ def test_a_probe_never_guesses_a_missing_identity(
 def test_the_probe_face_follows_the_persisted_identity(tmp_path: Path) -> None:
     """An operator may have switched faces since the run; the record decides."""
     for executor in ("docker", "e2b"):
-        config = make_config(tmp_path / executor, LOCAL_WEB_EXECUTOR=executor)
+        config = make_config(
+            tmp_path / executor,
+            LOCAL_WEB_EXECUTOR=executor,
+            PI_GLINK_EGRESS_PUBLIC_URL="https://egress.example.test",
+        )
         store = RunStore(config.data_root / "runs")
         record_hold(store, "container-hold", container="pi-glink-container-hold")
         record_hold(store, "sandbox-hold", sandbox="sbx-hold")

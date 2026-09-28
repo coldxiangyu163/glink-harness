@@ -22,16 +22,14 @@ continuation upload, session and subagent-artifact recovery).
 
 **Credential flow (recorded per the task contract).**
 
-* The model credential is uploaded inside ``auth.json`` — pi's official credential
-  store — so the sandbox kernel never receives it through its environment: a shell
-  tool inside the sandbox cannot read it with ``env``. The file exists only for the
-  sandbox lifetime (destroyed on ``kill()``).
-* The pi-web-access credential is written to ``/home/user/config/web-search.json``
-  inside the sandbox. That file lives for the sandbox lifetime only (destroyed on
-  ``kill()``); the host keeps just its own local copy. This is deliberate: the
-  plugin resolves that file from ``PI_CODING_AGENT_DIR`` and has no
-  environment-variable form for it. A sandbox without the file still works
-  (keyless Exa MCP search).
+* No real model or search key is uploaded (docs/adr/0008). ``auth.json`` and
+  ``web-search.json`` carry only the run's short-lived egress token, and
+  ``models.json`` / ``exaBaseUrl`` point at the host's credential egress proxy
+  through ``PI_GLINK_EGRESS_PUBLIC_URL`` — without that URL an E2B pi run is
+  refused (fail closed), never given the real key. The token is still kept out
+  of the sandbox environment (a shell tool cannot read it with ``env``) and is
+  revoked when the run's verdict is committed. A run without a search grant has
+  no ``web-search.json`` (keyless Exa MCP search).
 
 **Configuration delivery.** The sandbox receives the *whole* per-run runtime
 directory (generated files plus the reviewed template entries: ``AGENTS.md``,

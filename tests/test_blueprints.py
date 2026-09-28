@@ -119,7 +119,6 @@ def make_config(tmp_path: Path, **overrides: str) -> HostConfig:
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_PORT": "0",
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "PI_GLINK_BLUEPRINTS_DIR": str(tmp_path / "blueprints"),
     }
     values.update(overrides)

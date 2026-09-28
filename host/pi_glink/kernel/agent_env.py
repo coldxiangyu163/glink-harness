@@ -20,9 +20,10 @@ reaches the provider as a literal string and every request fails with
 ``Invalid URL``). So the host renders a small runtime directory:
 
     <run_dir>/pi-agent/
-    ├── models.json          generated: literal baseUrl + literal model id
-    ├── auth.json            generated: model credential in pi's own store (0600)
-    ├── web-search.json      generated: pi-web-access credential (0600), if configured
+    ├── models.json          generated: egress-proxy baseUrl + literal model id
+    ├── auth.json            generated: the run's egress token in pi's own store (0600)
+    ├── web-search.json      generated: egress token + proxy base URL (0600), if the
+    │                        run has a search credential
     └── settings.json, AGENTS.md, extensions/, …   copied from the template
 
 **Container faces load prebaked packages from the image.** Docker and E2B run
@@ -38,13 +39,15 @@ keeps the (now pinned) ``npm:`` declaration and installs into its own runtime
 directory. ``harnesses/pi/settings.json`` is the repository template; only the per-run
 copy is rewritten.
 
-**The model credential lives in ``auth.json``, not in the process environment.**
-That is pi's official credential store — the same file ``/login`` writes — and
-using it keeps the key out of the kernel's environment, where its shell tool
-would otherwise read it with ``env``. The file sits in the run's runtime
-directory (outside the repository) with mode 0600 and is rewritten on every run.
-The same reasoning applies to the pi-web-access credential, which the plugin can
-only read from a file anyway.
+**No real credential is rendered (docs/adr/0008).** The host's credential
+egress proxy (:mod:`pi_glink.egress`) holds the real model and search keys; a
+run is given only an :class:`EgressEndpoint` — the proxy base URLs as its
+execution face sees them plus one short-lived token bound to the run. The token
+goes where pi and pi-web-access expect a key (``auth.json``, pi's own
+credential store, and ``web-search.json``'s ``exaApiKey`` next to
+``exaBaseUrl``), so pi needs no change; the proxy swaps it for the real key.
+The token is still a secret while the run lives (it joins the run's redaction
+boundary) and is revoked when the run's verdict is committed.
 
 No model price table is rendered: this host does not know the operator's rates,
 and inventing ``cost: 0`` would make pi report a fabricated price. Usage is
@@ -125,32 +128,31 @@ PASSTHROUGH_ENV = (
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "no_proxy",
 )
-#: pi-web-access credential file (read from PI_CODING_AGENT_DIR).
+#: pi-web-access config file (read from PI_CODING_AGENT_DIR).
 WEB_SEARCH_FILENAME = "web-search.json"
 #: pi's own credential store (same file `/login` writes).
 AUTH_FILENAME = "auth.json"
-#: Default provider key used when the credential comes from the environment.
-WEB_SEARCH_ENV_PROVIDER_KEY = "exaApiKey"
+#: pi-web-access's Exa key / base URL fields (pi-web-access 0.31.0 ``exa.ts``).
+WEB_SEARCH_KEY_FIELD = "exaApiKey"
+WEB_SEARCH_BASE_URL_FIELD = "exaBaseUrl"
 
 
 @dataclass(frozen=True, slots=True)
 class RunCredentials:
-    """The credentials one run may render, and where they came from.
+    """The real credentials one run's egress grant unlocks, and their origin.
 
+    These values stay in the host process: the egress proxy holds them and the
+    run only ever renders an :class:`EgressEndpoint` token (docs/adr/0008).
     ``origin`` is ``"host"`` in the single-user surface (the frozen
-    configuration and, for search, the operator's own pi file), ``"tenant"``
-    in multi-tenant mode when **only** the run's tenant may supply values, and
-    ``"shared"`` when the host provides one frozen credential for every tenant
-    (the explicit SaaS policy). ``tenant`` and ``shared`` both refuse to fall
-    back to the host's global ``.env`` key or to the operator's ``~/.pi``
-    search configuration — ``shared`` *is* the host configuration, but without
-    the operator's personal search file. The dataclass keeps the values out of
-    ``repr`` so an accidental log line cannot print them.
+    configuration), ``"tenant"`` in multi-tenant mode when **only** the run's
+    tenant may supply values, and ``"shared"`` when the host provides one frozen
+    credential for every tenant (the explicit SaaS policy). ``tenant`` never
+    falls back to the host's global ``.env`` key. The dataclass keeps the values
+    out of ``repr`` so an accidental log line cannot print them.
     """
 
     model_api_key: str = field(repr=False, default="")
     web_search_key: str = field(repr=False, default="")
-    web_search_config_path: Path | None = None
     origin: str = "host"
 
     @classmethod
@@ -159,25 +161,33 @@ class RunCredentials:
         return cls(
             model_api_key=config.openai_api_key,
             web_search_key=config.web_search_key,
-            web_search_config_path=config.web_search_config_path,
             origin="host",
         )
 
     @classmethod
     def from_shared_host(cls, config: HostConfig) -> "RunCredentials":
-        """The explicit SaaS ``shared`` policy: one host-frozen credential.
-
-        Every tenant renders this credential; no tenant entry is consulted.
-        ``web_search_config_path`` stays ``None`` on purpose: the shared policy
-        may use the host's own ``PI_GLINK_WEB_SEARCH_KEY``, but it must never
-        substitute the operator's personal ``~/.pi/web-search.json``.
-        """
+        """The explicit SaaS ``shared`` policy: one host-frozen credential."""
         return cls(
             model_api_key=config.openai_api_key,
             web_search_key=config.web_search_key,
-            web_search_config_path=None,
             origin="shared",
         )
+
+
+@dataclass(frozen=True, slots=True)
+class EgressEndpoint:
+    """What a run is given instead of a credential (docs/adr/0008).
+
+    ``model_base_url`` / ``search_base_url`` are the egress proxy's routes as
+    the run's execution face reaches them (:meth:`Sandbox.egress_origin`);
+    ``search_base_url`` is ``None`` when the run has no search credential
+    (pi-web-access then uses its keyless fallback). ``token`` is the run's
+    short-lived grant — a secret, kept out of ``repr``.
+    """
+
+    model_base_url: str
+    token: str = field(repr=False)
+    search_base_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,18 +215,10 @@ class AgentRuntime:
         session file is checked separately from the run record (its path is a
         kernel-reported fact, refused if it leaves this root).
         """
-        return (
-            SessionSweep(root=self.session_dir, carries_session_file=True),
-            # 运行期配置目录里宿主渲染的凭据文件：run 收尾删除（与 ACP 注入副本
-            # 同一口径，GLINK-OBS-01 决定 C 的 pi 面延伸）。每次 run 都从凭据源
-            # 重新渲染自己的目录，追问也不读父 run 的配置目录，副本收尾后没有用途；
-            # 值在准入时已进本 run 边界，所以不扫描内容。
-            SessionSweep(
-                root=self.directory,
-                scan=False,
-                credential_copies=(AUTH_FILENAME, WEB_SEARCH_FILENAME),
-            ),
-        )
+        # The runtime directory holds only the run's egress token (revoked at
+        # the verdict commit, docs/adr/0008) — no real credential, so there is
+        # nothing to remove at close-out.
+        return (SessionSweep(root=self.session_dir, carries_session_file=True),)
 
 
 def prepare_agent_dir(
@@ -224,7 +226,7 @@ def prepare_agent_dir(
     *,
     runtime_dir: Path,
     session_dir: Path | None = None,
-    credentials: RunCredentials | None = None,
+    egress: EgressEndpoint,
     image_packages: bool = False,
 ) -> AgentRuntime:
     """Render the per-run pi configuration directory and return its handle.
@@ -234,10 +236,10 @@ def prepare_agent_dir(
     credentials and extensions. ``session_dir`` defaults to a sibling
     ``sessions`` directory; the host always passes the run's own path.
 
-    ``credentials`` selects what the rendered ``auth.json`` / ``web-search.json``
-    contain. The default derives them from the host configuration (local mode);
-    multi-tenant runs pass the run's own tenant credentials, so one tenant's
-    key is never rendered into another tenant's directory.
+    ``egress`` is the run's proxy endpoint: ``models.json`` points pi at its
+    model route, ``auth.json`` carries its token, and ``web-search.json``
+    (only when the run has a search grant) carries the token plus the search
+    route. No real credential is ever written here.
 
     ``image_packages`` is the run's sandbox fact (``Sandbox.isolated``): an
     isolated kernel (container or cloud sandbox) resolves the prebaked pi
@@ -248,25 +250,20 @@ def prepare_agent_dir(
     if not config.openai_model:
         raise ConfigError("OPENAI_MODEL is required to launch the pi kernel")
 
-    source = credentials if credentials is not None else RunCredentials.from_host(config)
     directory = Path(runtime_dir)
     sessions = Path(session_dir) if session_dir is not None else directory.parent / "sessions"
     # One run's runtime configuration and session directory are host-owned data
-    # (they carry the rendered credentials): create them private.
+    # (they carry the run's token): create them private.
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     sessions.mkdir(parents=True, exist_ok=True, mode=0o700)
     _sync_template(config.agent_config_dir, directory)
     if image_packages:
         _map_prebaked_packages(directory)
-    _seed_web_search_config(source, directory)
-    _write_auth_json(source, directory)
+    _write_web_search_config(egress, directory)
+    _write_auth_json(egress, directory)
 
     models_path = directory / "models.json"
-    models_path.write_text(
-        json.dumps(_models_document(config), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    models_path.chmod(0o600)
+    _write_private(models_path, _models_document(config, egress))
     return AgentRuntime(
         directory=directory,
         provider_id=PROVIDER_ID,
@@ -407,16 +404,16 @@ def passthrough_env(base_env: Mapping[str, str] | None = None) -> dict[str, str]
     return {name: source[name] for name in PASSTHROUGH_ENV if name in source}
 
 
-def _models_document(config: HostConfig) -> dict[str, Any]:
+def _models_document(config: HostConfig, egress: EgressEndpoint) -> dict[str, Any]:
     return {
         "providers": {
             PROVIDER_ID: {
-                "baseUrl": config.openai_base_url,
+                # The egress proxy's model route, never the upstream itself:
+                # the upstream URL and key stay in the host (docs/adr/0008).
+                "baseUrl": egress.model_base_url,
                 "api": "openai-completions",
-                # No apiKey here on purpose: the credential comes from pi's own
-                # auth.json (see _write_auth_json), so `env` inside the kernel
-                # never sees it. pi resolves provider credentials from both
-                # sources; leaving this field out selects the safe one.
+                # No apiKey here: the token comes from pi's own auth.json (see
+                # _write_auth_json), so `env` inside the kernel never sees it.
                 "models": [
                     {
                         "id": config.openai_model,
@@ -440,31 +437,23 @@ def _models_document(config: HostConfig) -> dict[str, Any]:
     }
 
 
-def _write_auth_json(credentials: RunCredentials, directory: Path) -> Path | None:
-    """Store the run's model credential the way pi itself stores it.
+def _write_private(path: Path, document: Mapping[str, Any]) -> Path:
+    path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return path
 
-    ``auth.json`` is pi's official credential store — the same file ``/login``
-    writes, mode 0600, inside the run's runtime config directory (which lives
-    outside the repository). Using it instead of an environment variable is what
-    keeps the key **out of the kernel's process environment**, and therefore out
-    of reach of its shell tool: the objective allows "environment variables or
-    pi's official credential mechanism", and this is the narrower one.
 
-    The file is rewritten on every render, so a credential pi might clear while
-    rotating its own state is always restored before the next kernel start, and
-    a credential removed from the configuration is removed from the directory
-    rather than left behind.
+def _write_auth_json(egress: EgressEndpoint, directory: Path) -> Path:
+    """Store the run's egress token the way pi stores a key (``auth.json``).
+
+    pi's official credential store — the same file ``/login`` writes, mode
+    0600 — keeps the token out of the kernel's process environment. It is
+    rewritten on every render, so nothing from a previous render survives.
     """
-    target = directory / AUTH_FILENAME
-    if not credentials.model_api_key:
-        target.unlink(missing_ok=True)
-        return None
-    payload = {PROVIDER_ID: {"type": "api_key", "key": credentials.model_api_key}}
-    target.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    return _write_private(
+        directory / AUTH_FILENAME,
+        {PROVIDER_ID: {"type": "api_key", "key": egress.token}},
     )
-    target.chmod(0o600)
-    return target
 
 
 def _sync_template(template_dir: Path, target_dir: Path) -> None:
@@ -501,47 +490,24 @@ def _sync_template(template_dir: Path, target_dir: Path) -> None:
             shutil.copy2(source, target)
 
 
-def _seed_web_search_config(credentials: RunCredentials, directory: Path) -> Path | None:
-    """Seed pi-web-access credentials into the runtime config directory.
+def _write_web_search_config(egress: EgressEndpoint, directory: Path) -> Path | None:
+    """Point pi-web-access at the egress proxy's search route, or remove the file.
 
-    pi-web-access resolves its config directory from ``PI_CODING_AGENT_DIR``
-    (verified in its ``utils.ts``), so redirecting that variable would silently
-    hide the operator's own ``web-search.json`` and downgrade search to the
-    keyless fallback. Local mode has two sources, in order:
-
-    1. ``PI_GLINK_WEB_SEARCH_KEY`` — rendered as ``{"exaApiKey": …}``;
-    2. the operator's own file (``~/.pi/agent/web-search.json`` or
-       ``~/.pi/web-search.json``), copied verbatim.
-
-    Multi-tenant mode passes a :class:`RunCredentials` with ``origin="tenant"``
-    and an explicit ``web_search_config_path`` of ``None``: only the run's own
-    tenant key may be rendered, and a tenant without one gets no search
-    credential (keyless fallback) instead of another tenant's or the operator's.
-    The explicit SaaS ``shared`` policy is the same except that its search key
-    comes from the host's ``PI_GLINK_WEB_SEARCH_KEY``: any origin other than
-    ``host`` must never inherit the operator's personal file.
-
-    Having no credential at all is a supported state: pi-web-access still works
-    through keyless Exa MCP search, and the run contract does not require a key.
-    The target is removed when no source has a credential, so a per-run
-    directory can never keep a previous credential behind.
+    pi-web-access reads ``web-search.json`` from ``PI_CODING_AGENT_DIR``. With a
+    search grant the file carries the run token as ``exaApiKey`` and the proxy
+    route as ``exaBaseUrl`` (the plugin sends the key as ``x-api-key``; the
+    proxy swaps it). Without one the file is removed and the plugin falls back
+    to keyless Exa MCP search — a supported state that carries no secret. The
+    operator's own ``~/.pi`` search file is never read (docs/adr/0008).
     """
     target = directory / WEB_SEARCH_FILENAME
-    if credentials.web_search_key:
-        payload = {WEB_SEARCH_ENV_PROVIDER_KEY: credentials.web_search_key}
-        target.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
-        target.chmod(0o600)
-        return target
-    source = credentials.web_search_config_path
-    if credentials.origin != "host":
-        # Multi-tenant (per-tenant or shared): never inherit the operator's own
-        # credential file, even if a caller hands one in by mistake.
-        source = None
-    if source is not None and source.is_file():
-        shutil.copy2(source, target)
-        target.chmod(0o600)
-        return target
-    target.unlink(missing_ok=True)
-    return None
+    if egress.search_base_url is None:
+        target.unlink(missing_ok=True)
+        return None
+    return _write_private(
+        target,
+        {
+            WEB_SEARCH_KEY_FIELD: egress.token,
+            WEB_SEARCH_BASE_URL_FIELD: egress.search_base_url,
+        },
+    )

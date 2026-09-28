@@ -25,6 +25,7 @@ from typing import Any, Callable, Mapping
 
 import pytest
 
+from harness_helpers import test_egress
 from pi_glink.config import build_config
 from pi_glink.events import EventBus
 from pi_glink.kernel.execution import (
@@ -55,7 +56,6 @@ def make_config(tmp_path: Path, **overrides: str):
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
     }
     values.update(overrides)
     return build_config(values, REPO_ROOT)
@@ -175,6 +175,7 @@ def _run_face(tmp_path: Path, executor: str, monkeypatch: pytest.MonkeyPatch) ->
         # the stand-in CommandHandle (the ACP face's FakeAgentHandle shape);
         # only the carrier differs, the protocol drive is shared.
         overrides["E2B_API_KEY"] = "e2b-secret"
+        overrides["PI_GLINK_EGRESS_PUBLIC_URL"] = "https://egress.example.test"
         sandbox_factory = lambda **_: FakeSandbox(  # noqa: E731
             tmp_path / "sandbox-root",
             report=None,
@@ -283,6 +284,7 @@ def test_the_adapter_is_the_family_driver_over_the_frozen_executor_sandbox(
         config,
         runtime_dir=tmp_path / "runtime",
         session_dir=tmp_path / "sessions",
+        egress=test_egress(),
     )
     spec = ExecutionSpec(
         config=config,

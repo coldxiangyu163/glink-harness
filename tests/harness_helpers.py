@@ -67,3 +67,26 @@ def compose_launch(
     )
     launch = family(family_name, spec.config, store_root).launch(spec, sandbox)
     return launch, sandbox
+
+
+#: A synthetic egress token for renders that never reach the proxy.
+TEST_EGRESS_TOKEN = "pge_test-egress-token-0123456789abcdef"
+
+
+def test_egress(
+    *,
+    origin: str = "http://127.0.0.1:9",
+    token: str = TEST_EGRESS_TOKEN,
+    search: bool = False,
+):
+    """The :class:`EgressEndpoint` a pi render gets (docs/adr/0008)."""
+    from pi_glink.kernel.agent_env import EgressEndpoint
+
+    return EgressEndpoint(
+        model_base_url=f"{origin}/model",
+        token=token,
+        search_base_url=f"{origin}/search" if search else None,
+    )
+
+
+test_egress.__test__ = False  # not a pytest test despite the name

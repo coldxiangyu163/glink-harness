@@ -25,7 +25,7 @@ from acp_pack import apply_acp_pack
 from pi_glink.events import EventBus
 from pi_glink.kernel.acp_env import AcpRuntime
 from pi_glink.kernel.acp_execution import AcpExecutionAdapter
-from harness_helpers import family
+from harness_helpers import family, test_egress
 from pi_glink.kernel import docker_env
 from pi_glink.kernel.execution import ExecutionAdapter, ExecutionSpec
 from pi_glink.kernel.harness_pi import PiExecutionAdapter
@@ -60,7 +60,6 @@ def make_config(tmp_path: Path, settings: Mapping[str, Any] | None = None, **ove
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_WEB_SEARCH_CONFIG": str(tmp_path / "absent-web-search.json"),
         "PI_GLINK_HARNESS": "acp",
         "PI_GLINK_ACP_COMMAND": acp_command(tmp_path, settings or {}),
     }
@@ -1126,6 +1125,7 @@ def test_acp_adapter_is_composed_through_the_same_contract(tmp_path: Path) -> No
         config,
         runtime_dir=tmp_path / "pi" / "pi-agent",
         session_dir=tmp_path / "pi" / "sessions",
+        egress=test_egress(),
     )
     pi_spec = ExecutionSpec(
         config=config,
