@@ -29,9 +29,9 @@
 ## 不允许放什么
 
 - **不放置 pi 的源码或补丁。** 任何需要改内核才能实现的需求，先在 `docs/pi-boundary.md` 记录并作为设计决定提出，不得直接改内核。
-- **不放置密钥。** 凭据走 pi 官方凭据机制：`auth.json` 由宿主渲染到本 run 的运行期目录
-  `runs/<runId>/pi-agent/`（0600，仓库外），不进进程环境变量；本目录下的文件会进版本库。
-  检索凭据同理，渲染为同一个运行期目录下的 `web-search.json`。
+- **不放置密钥。** 真实模型/检索 key 只留在宿主凭据出口代理（docs/adr/0008-egress-proxy.md）：
+  宿主把本 run 的短期代理 token 渲染进运行期目录 `runs/<runId>/pi-agent/` 的 `auth.json` /
+  `web-search.json`（0600，仓库外），`models.json` 的 `baseUrl` 指向代理；本目录下的文件会进版本库。
 - **不放置宿主实现。** 宿主逻辑在 `host/pi_glink/`，这里只描述内核侧行为。
 
 本目录当前包含：
@@ -68,6 +68,6 @@
   `tool_call` 钩子不可达；宿主在准入层用 `/` 命令门禁挡住（只接受 `/<蓝图名> <题目>`，
   其余 `400 unsupported_command`，见 architecture.md §4 与 pi-integration-notes.md §10.4）。
 
-`models.json`、`auth.json` 与 `web-search.json` 不在本目录：它们含运行期值/凭据，由宿主渲染到
+`models.json`、`auth.json` 与 `web-search.json` 不在本目录：它们含运行期值与本 run 的代理 token，由宿主渲染到
 每个 run 自己的 `runs/<runId>/pi-agent/`（见 `host/pi_glink/kernel/agent_env.py`）。本目录里的
 文件都是常量，渲染时原样复制（先删再拷）。

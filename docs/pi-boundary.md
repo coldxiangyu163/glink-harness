@@ -12,7 +12,7 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | 扩展点 | 文档 | 本仓库的用法（实际文件） |
 |---|---|---|
 | `settings.json` | docs/settings.md | `harnesses/pi/settings.json`：`defaultThinkingLevel: "medium"`、`packages: ["npm:pi-web-access@0.31.0", "npm:pi-subagents@0.40.0"]`（两个精确 pin；docker/e2b 面渲染时改写为镜像内本地包路径，见 §3）、`subagents.watchdog` 关闭（pi-subagents 从这个键读 watchdog，见 pi-integration-notes.md §10.2） |
-| `models.json`（自定义 provider） | docs/models.md | 宿主渲染到每个 run 自己的运行期目录（`kernel/agent_env.py::_models_document`）：`baseUrl` 与模型 id 字面量、**不含 `apiKey`**（凭据写运行期 `auth.json`）、`compat.thinkingFormat: "openrouter"`；**不写 `cost` 价格表**，因为宿主不知道操作员费率，伪造价格会让 pi 报出假计费 |
+| `models.json`（自定义 provider） | docs/models.md | 宿主渲染到每个 run 自己的运行期目录（`kernel/agent_env.py::_models_document`）：`baseUrl` 与模型 id 字面量、**不含 `apiKey`**；`baseUrl` 是宿主凭据出口代理的 `/model` 地址，运行期 `auth.json` 只含本 run 的代理 token（ADR 0008）、`compat.thinkingFormat: "openrouter"`；**不写 `cost` 价格表**，因为宿主不知道操作员费率，伪造价格会让 pi 报出假计费 |
 | packages | docs/packages.md | `npm:pi-web-access@0.31.0`（检索能力全部来自它；inproc 运行期安装，docker/e2b 从 `/opt/pi-packages` 本地加载）；`npm:pi-subagents@0.40.0`（自 GLINK-SUB-02 加载：前台强制靠本仓自有 `tool_call` 扩展，不靠包开关，见 pi-integration-notes.md §10） |
 | extensions | docs/extensions.md | `harnesses/pi/extensions/subagent-foreground-guard.ts`：官方 `tool_call` 钩子把 pi-subagents 的派发改写为前台同步、其余后台/定时/控制入口阻止（含 fail-closed）；`harnesses/pi/extensions/subagent/config.json` 是同包读取的最保守 extension config |
 | skills | docs/skills.md | 目录预留（`harnesses/pi/skills/`） |
@@ -20,7 +20,7 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | `AGENTS.md` | docs/quickstart.md 等 | 目录预留（`harnesses/pi/AGENTS.md`），当前约定走 §下一条 |
 | `--append-system-prompt` | `pi --help` | `methodology/work-agreement.md`（最小工作约定：产品契约）+ 选中包的 `capabilities.md`（如 pi 的 `subagent`/`researcher` 委派）+ 蓝图渲染 → `runs/runner.py::_extra_argv`，内核系统提示词本身不改 |
 | headless 协议 | docs/rpc.md | 三面均 `--mode rpc`（共享 `kernel/rpc.py::PiRpcClient`；本机直接 spawn，Docker 跨容器 stdio，E2B 经沙箱后台命令 `stdin=True` + `SandboxCommandProcess` 以 `popen=` 注入，GLINK-ARCH-3 收敛）；三面都只按 LF 分帧（`kernel/framing.py`，共享语料 `tests/fixtures/lf-framing.json`） |
-| 环境变量 | docs/environment-variables.md | `PI_CODING_AGENT_DIR`、`PI_CODING_AGENT_SESSION_DIR`、`PI_SKIP_VERSION_CHECK`、`PI_TELEMETRY`（模型凭据不经环境变量，写运行期 `auth.json`；两个目录都是每 run 独立） |
+| 环境变量 | docs/environment-variables.md | `PI_CODING_AGENT_DIR`、`PI_CODING_AGENT_SESSION_DIR`、`PI_SKIP_VERSION_CHECK`、`PI_TELEMETRY`（模型凭据不经环境变量；运行期 `auth.json` 只含出口代理 token；两个目录都是每 run 独立） |
 | CLI 参数 | docs/cli.md、docs/sessions.md | `--provider`、`--model`、`--name`；追问用 `--session <path>` 打开上一轮会话的独立副本（`kernel/agent_env.py::build_pi_argv`、`runs/runner.py`、`kernel/e2b_env.py`） |
 | MCP（可选） | docs/mcp 相关 | 尚未使用；接入方式与 extensions 同级，属允许范围 |
 
@@ -35,7 +35,7 @@ pi 官方文档化的扩展点、环境变量与 headless 协议上。本文是�
 | vendor pi 包（复制 dist/src 进仓库） | 同上，并掩盖版本事实 | 仓库内不存在 pi 的构建产物 |
 | import pi 的内部模块/私有路径 | 未文档化接口随版本变化 | 宿主与前端不引用 node_modules 内的 pi 路径 |
 | 依赖未文档化行为 | 同上；实测结论必须来自官方文档或可复现实验（读私有落盘格式的有界例外见下「私有格式观察者例外」） | `docs/pi-integration-notes.md` 每条都标注来源 |
-| 修改用户全局 `~/.pi` | 会污染用户既有环境 | 宿主总是重定向 `PI_CODING_AGENT_DIR`；只**读**用户的 `web-search.json` |
+| 修改用户全局 `~/.pi` | 会污染用户既有环境 | 宿主总是重定向 `PI_CODING_AGENT_DIR`；不再读取用户的 `web-search.json`（ADR 0008） |
 | 把密钥写进仓库 | 安全事故 | `.gitignore` + 密钥扫描 |
 | 容器/沙箱依赖宿主运行时 | 隔离面会失去意义 | 镜像与模板自包含（`docker/Dockerfile.worker`、`docker/e2b/Dockerfile.e2b`） |
 | 前端解析终端输出 | 事件契约的基础前提 | `tests/web/run-stream.test.mjs` 的断言 |
@@ -115,7 +115,7 @@ grep -rn "earendil-works" host/ web/ harnesses/ --include="*.py" --include="*.mj
 # ④ 密钥不入库（应当是空输出）
 git grep -nE "(sk-|exa-)[A-Za-z0-9_-]{16,}" -- . ':!*.example' ':!*.txt'
 
-# ⑤ 运行期凭据文件权限为 600 且不在仓库内（每次 run 一个目录）
+# ⑤ 运行期 token 文件权限为 600 且不在仓库内（每次 run 一个目录；只含已吊销的出口代理 token）
 find ~/.pi-glink/runs -path '*/pi-agent/web-search.json' -maxdepth 4 -exec ls -l {} \;
 
 # ⑥ 前端无打包依赖树
@@ -155,5 +155,5 @@ GLINK-SUB-02（2026-09-24）复跑：
 | pi 会往配置目录写运行时状态（`auth.json` / `models-store.json`） | 仓库目录会被污染 | 仓库 `harnesses/pi/` 只作模板；每次 run 渲染到 `runs/<id>/pi-agent/`（先删再拷，凭据缺失则删除旧文件）；`.gitignore` 兜底 |
 | E2B 后台命令的流式接口是 `CommandHandle`，不是 `commands.run()` 上的回调 | 沿用旧结论会让该面退化为结束后回放 | `E2BSandbox.spawn` 以 `background=True, stdin=True` 启动 `pi --mode rpc`，handle 经 `SandboxCommandProcess` 注入共享 `PiRpcClient` 实时投递；断流即 `execution_error`、不补发（`sandbox.py` + `e2b_env.py`，见 architecture.md §5.2） |
 | E2B 会话文件不会自动留存 | 未回收则不能追问 | 销毁前回收单个有界 `.jsonl` 到本 run 专属目录并脱敏；失败时明确拒绝追问 |
-| 模型 key 以文件形式位于本 run 的运行期 `auth.json`（不在进程环境） | 工具可用 `read` 打开并回显 | `env` 类读取已不可行（三面实测 0）；回显被出站脱敏覆盖（含跨 delta 分割，见 architecture.md §3.3/§6.1）；更强隔离用 Docker / E2B 面 |
+| 本 run 的出口代理 token 位于运行期 `auth.json` / `web-search.json`（真实 key 不在执行环境） | 工具可在 run 期间读到 token 并在配额内调用代理或回显 | token 只通向宿主冻结的两个上游、受每 run 配额约束、终帧吊销；回显被出站脱敏覆盖（architecture.md §6/§6.1、ADR 0008） |
 | pi-subagents 的扩展命令（`/run --bg`、`/chain --bg`、`/subagents-detach` 等）由用户输入直接执行，且先于 pi 的 `input` 事件派发 | `tool_call` 钩子不可达；载入 pi-subagents 后，客户端可控的 prompt 一旦以 `/` 开头就会先执行这些命令，发起不随主 run 取消/超时收口的后台进程 | 模型工具面用 `harnesses/pi/extensions/subagent-foreground-guard.ts` 强制前台（pi-integration-notes.md §10）；客户端输入面由宿主在**准入层**加 `/` 命令门禁：只接受 `/<蓝图名> <题目>`（蓝图名从 `methodology/blueprints/` 推导），其余 `400 unsupported_command`（architecture.md §4，回归 `tests/test_runs_api.py` / `tests/test_runner.py`） |

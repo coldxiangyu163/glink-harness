@@ -30,7 +30,7 @@
 |---|---|---|
 | 本机进程 | `inproc` | pi 以子进程运行在宿主机器上，工作区在 `<数据根>/workspaces/<runId>` |
 | 容器 | `docker` | pi 与工作区都在一次性容器内，宿主只做编排与事件投影 |
-| 云沙箱 | `e2b` | pi 与工作区都在 E2B 沙箱内（沙箱后台命令 `stdin=True` 的 RPC 双向 stdio，与另两面同一套 `--mode rpc`）；模型凭据随运行期 `auth.json` 上传到沙箱（不进沙箱进程环境） |
+| 云沙箱 | `e2b` | pi 与工作区都在 E2B 沙箱内（沙箱后台命令 `stdin=True` 的 RPC 双向 stdio，与另两面同一套 `--mode rpc`）；真实模型/检索 key 不进沙箱，只上传本 run 的出口代理 token（须配置 `PI_GLINK_EGRESS_PUBLIC_URL`） |
 
 三面共享同一套输入/事件/收尾契约（`kernel/execution.py` 的 `ExecutionAdapter`）：每个 run 拥有
 自己的运行期配置（`runs/<id>/pi-agent/`）、session 目录（会话根基目录下的 `<id>/`，默认 `<数据根>/sessions/<id>/`）与工作区；
@@ -59,9 +59,10 @@ CLI 的 Node fetch 不认 socks5，构建走 Python SDK + `httpx[socks]`）。
 
 发布顺序是**镜像/模板先于宿主**：新宿主会要求容器/沙箱内有预装包守卫，旧模板不满足时直接失败（不静默降级）。模板自带 `/opt/pi-packages`（pi-web-access + pi-subagents）与守卫脚本；宿主把运行期 `settings.json` 的 `npm:` 声明渲染成该目录的本地包，run 内不再“先装包再干活”。证据：[docs/evidence/prebaked-packages.txt](docs/evidence/prebaked-packages.txt)。
 
-模型凭据写在运行期 `auth.json`（pi 官方凭据存储，0600，仓库外），随本 run 的运行期配置上传到沙箱
-`/home/user/config/`；不进沙箱进程环境（沙箱内 `env | grep -c OPENAI_API_KEY` 实测 0），随沙箱销毁
-而消失。pi-web-access 凭据随运行期 `web-search.json` 一并上传。交付内容不只几个 JSON：整个运行期目录
+真实模型 key 与检索 key 不进沙箱：运行期 `auth.json` / `web-search.json` 只含本 run 的凭据出口代理
+token，`baseUrl` 指向 `PI_GLINK_EGRESS_PUBLIC_URL`（E2B 面必须配置，否则宿主拒绝启动；见
+[ADR 0008](docs/adr/0008-egress-proxy.md)），随本 run 的运行期配置上传到沙箱 `/home/user/config/`，
+token 在 run 终帧时吊销。交付内容不只几个 JSON：整个运行期目录
 （含 `AGENTS.md`、`extensions/`、`skills/` 等模板条目）按同一路径语义上传，并记录
 `(相对路径, sha256)` 清单供核验；沙箱内 JSONL 按 LF 分帧（U+2028 不得拆帧）。沙箱命令以
 `background=True, stdin=True` 启动，宿主用共享 `PiRpcClient` 走同一条 stdio 通道收发帧（stdout 块
@@ -81,7 +82,7 @@ LOCAL_WEB_EXECUTOR=docker scripts/run-local-web.sh                     # 用容�
 
 镜像自包含（`node:24.21.0-bookworm-slim` + 固定版本 pi + `/opt/pi-packages` 预装 pi 包，`node -v`
 实测 v24.21.0）；宿主只挂载工作区（`/workspace`）、本 run 的运行期配置（`/config`）与 session 目录
-（`/sessions`）；模型凭据随 `/config/auth.json` 进容器（不经环境变量或 argv）。宿主把 `settings.json`
+（`/sessions`）；`/config/auth.json` 只含本 run 的出口代理 token，容器经 `host.docker.internal`（host-gateway）访问宿主代理，真实 key 不进容器。宿主把 `settings.json`
 的 `npm:` 声明渲染成 `/opt/pi-packages` 本地包，并以镜像内守卫脚本作为容器 `--entrypoint`：镜像早于
 宿主或包缺失时容器明确失败（exit 78 / 127），不会静默丢掉 `web_search`。镜像名在宿主启动时冻结，
 运行中的环境变量变化不会让已接收的 run 换镜像。容器内 pi 报告的会话路径（`/sessions/…`）由宿主映射
@@ -185,8 +186,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   追问（`parentRunId`）同样先过租户门禁：异租户/未知/无 owner 父 run 统一 `404 unknown_run`，在确认
   所有者之前不读取其 session、报告、状态或子 run 计数，也不会把它的会话或报告复制给新 run。
 - **凭据**：默认每 run 的模型 key（与可选搜索 key）来自该租户在 `tenants.json` 中的条目，缺
-  `modelApiKey` 直接拒绝准入；绝不回退宿主全局 `OPENAI_API_KEY`、操作员 `~/.pi/web-search.json`
-  或别的租户。显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时改用宿主冻结的共享凭据（见下文“模型
+  `modelApiKey` 直接拒绝准入；绝不回退宿主全局 `OPENAI_API_KEY` 或别的租户；真实 key 只进宿主出口代理。显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时改用宿主冻结的共享凭据（见下文“模型
   凭据策略”）。E2B 平台 key 属于宿主资源管理，不是租户模型 key。每 run 的脱敏边界只包含本 run
   凭据，不会把不同租户的秘密互相写入事件、日志或产物。
 - **并发**：仅本模式的 Docker/E2B 可并发，默认全局上限 4、单租户 2，超额立即返回
@@ -248,18 +248,15 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 多租户模型的“谁提供模型 key”是显式配置，不是隐式兜底：
 
 - **`tenant`（默认，现行为）**：每个租户在 `tenants.json` 里配置自己的 `modelApiKey`（可选
-  `webSearchKey`）；缺模型 key 的租户拒绝准入，绝不回退宿主 `OPENAI_API_KEY`、操作员
-  `~/.pi/web-search.json` 或别的租户。既有部署不需要改任何东西。
+  `webSearchKey`）；缺模型 key 的租户拒绝准入，绝不回退宿主 `OPENAI_API_KEY` 或别的租户。既有部署不需要改任何东西。
 - **`shared`（显式 SaaS 策略）**：宿主在启动时冻结一套 `OPENAI_API_KEY` / `OPENAI_BASE_URL` /
-  `OPENAI_MODEL` 供所有租户使用；可选搜索 key 只来自宿主级 `PI_GLINK_WEB_SEARCH_KEY`，不会
-  读取操作员 `~/.pi/web-search.json` 顶替。共享模式不读取任何租户配置：不得配置
+  `OPENAI_MODEL` 供所有租户使用；可选搜索 key 只来自宿主级 `PI_GLINK_WEB_SEARCH_KEY`。共享模式不读取任何租户配置：不得配置
   `PI_GLINK_TENANT_CONFIG_FILE`（不设置或留空即为无该入口），设置即拒绝启动，也不会构造或
   读取租户凭据存储。三件套缺任一、或把 `shared` 用在非多租户模式，宿主一律拒绝启动，绝不
   静默回退 `tenant` 或 `local`。
 - **执行隔离**：SaaS 部署首选 `LOCAL_WEB_EXECUTOR=e2b`（Docker 同样允许；`inproc` 在两种策略
-  下都被拒绝）。共享 key 仍只经每个 run 的运行期 `auth.json`（0600）交付：不进沙箱进程环境、
-  命令行、页面或事件/报告，E2B 面随沙箱销毁；宿主运行期目录内的 0600 副本与工具回显仍是既有
-  残留面。每 run 脱敏边界包含共享 key 与宿主已知秘密，`redactor_for_record` 在 `shared` 下走
+  下都被拒绝）。共享 key 只在宿主出口代理里：执行环境、命令行、页面、事件/报告与运行期文件都只见本 run
+  的 token（终帧吊销）；run 期间内核工具可读到 token 并在配额内调用代理，这是现存残留面。每 run 脱敏边界包含共享 key 与宿主已知秘密，`redactor_for_record` 在 `shared` 下走
   宿主/共享边界，不会因共享模式没有租户凭据条目而漏脱敏。这仍是回显保护 + 沙箱执行隔离，不承诺 key
   不可能被宿主可读、工具回显或网络外传。
 - **部署最小步骤（accounts + shared + e2b）**：配置 `E2B_API_KEY`、共享模型三件套与（可选）
@@ -279,14 +276,16 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 检索能力全部来自 [pi-web-access](https://github.com/nicobailon/pi-web-access) 扩展，声明在 `harnesses/pi/settings.json` 的 `packages` 里（`npm:pi-web-access@0.31.0`，精确 pin）。本机 inproc 面 pi 启动时把它安装到本 run 的运行期配置目录；Docker / E2B 面宿主把该声明改写成镜像内本地包 `/opt/pi-packages/node_modules/pi-web-access`（pi 官方 local package，"Loaded from the resolved path without copying"），run 内不再访问 registry、不再每 run 生成 `npm/`；镜像守卫在包缺失时明确失败（exit 78），不让 `web_search` 静默消失。实测对照与发布/回滚见 [docs/evidence/prebaked-packages.txt](docs/evidence/prebaked-packages.txt)。
 
-凭据由宿主渲染到**本 run 的**运行期配置目录的 `web-search.json`（权限 600）：
+真实检索 key 只在宿主凭据出口代理里（[ADR 0008](docs/adr/0008-egress-proxy.md)）：
 
-1. 有 `PI_GLINK_WEB_SEARCH_KEY` 时渲染为 `{"exaApiKey": …}`；
-2. 否则复制操作员本机的 `~/.pi/agent/web-search.json`（或 `~/.pi/web-search.json`）；
-3. 都没有也能工作：pi-web-access 会回退到无密钥的 Exa MCP 检索。
+1. 有检索 key 时，宿主在**本 run 的**运行期目录渲染 `web-search.json`（权限 600），内容是
+   `{"exaApiKey": <本 run token>, "exaBaseUrl": <代理>/search}`，代理再转发到
+   `PI_GLINK_WEB_SEARCH_UPSTREAM`（默认 `https://api.exa.ai`）并注入真实 key；
+2. 没有检索 key 也能工作：pi-web-access 会回退到无密钥的 Exa MCP 检索。
 
-多租户下不会读取操作员本机文件：默认 `tenant` 策略只渲染该租户条目的 `webSearchKey`（缺省则无
-key 检索）；显式 `shared` 策略只渲染宿主级 `PI_GLINK_WEB_SEARCH_KEY`。
+检索 key 来源：本机模式与 `shared` 策略为宿主级 `PI_GLINK_WEB_SEARCH_KEY`；默认 `tenant` 策略为该
+租户条目的 `webSearchKey`。操作员 `~/.pi/web-search.json` 与旧的 `PI_GLINK_WEB_SEARCH_CONFIG`
+不再读取（不迁移）。Docker 面带检索 key 时需要 https 的 `PI_GLINK_EGRESS_PUBLIC_URL`。
 
 本仓库不包含 Serper / Jina 链路。检索证据见 [docs/evidence/local-web-search.txt](docs/evidence/local-web-search.txt)。
 
@@ -322,10 +321,11 @@ key 检索）；显式 `shared` 策略只渲染宿主级 `PI_GLINK_WEB_SEARCH_KE
   打开后再复核，写入在已核对的目录内原子替换），因此祖先目录在校验与打开之间被替换也读不到、写不到
   外部文件；`report.md` 脱敏后复制到宿主拥有的 `runs/<id>/artifacts/report.md` 再服务，会话文件只允许
   写在本次 run 的会话子目录内，工作区清扫也绝不跟随链接。
-- **key 不进进程环境**：模型凭据写在 run 自己的运行期目录 `auth.json`（pi 官方凭据存储，权限 0600，
-  仓库外），环境变量按白名单过滤——内核的 shell 工具跑 `env` 读不到它（三面真实 run 实测为 0）。
-- **残留风险**：工具仍可能用 `read` 打开 `auth.json` 并回显；出站脱敏会把它替换为 `[REDACTED]`，
-  但脱敏只是回显保护，不是编码级/网络级隔离。需要更强隔离时用 Docker / E2B 执行面，并给内核配
+- **真实 key 不进执行环境**：pi 族的模型/检索 key 只在宿主凭据出口代理里，运行期 `auth.json`
+  只含本 run 的短期 token（终帧吊销）；环境变量按白名单过滤。代理按上游 usage 计量，作为权威用量。
+  ACP 族尚未接入代理，仍按注入凭据副本交付（见 docs/adr/0003）。
+- **残留风险**：工具仍可能在 run 期间读到 token 并回显或在配额内调用代理；出站脱敏会把 token
+  替换为 `[REDACTED]`，但脱敏只是回显保护，不是编码级/网络级隔离。需要更强隔离时用 Docker / E2B 执行面，并给内核配
   专用、限额的凭据（完整多租户方案见 [docs/multitenancy-plan.md](docs/multitenancy-plan.md)）。
 - **自检**：`scripts/check-no-secrets.py` 扫描运行态产物（真实命中即失败；文档占位符单独计数）。
 - **多租户信任边界**：多租户模式的身份只来自服务端：网关模式下是验签后的 HMAC 断言，账号模式下是

@@ -1733,8 +1733,8 @@ p4 方案（GLINK-SUB 可见性）遗留的未验证项：ACP 面是否暴露子
   扫描**——凭据形状值并入本 run 的脱敏边界，文件字节不改写（与 §10.2/§14.1 的「agent 会话
   存储不重写」同一义务）；缺失的根按「无可扫之物」处理。
 * 注入凭据副本（`PI_GLINK_ACP_CREDENTIAL_FILES` 的 dest，如 `.dsh/.credentials.yaml`）的
-  收尾处置已定：扫描之后删除（用户决定 C，见 §18.4；pi 面的 `auth.json` / `web-search.json`
-  同一口径，见 §18.5）。
+  收尾处置已定：扫描之后删除（用户决定 C，见 §18.4；pi 面曾按同一口径处理，见 §18.5，现已被
+  ADR 0008 出口代理取代）。
 * 回归：`tests/test_kernel_sweep.py`（旧机制直接变红、状态文件字节不变、pi 声明与行为不变）。
 
 ### 18.2 kernel_exit 报告带 agent stderr 尾部
@@ -1808,6 +1808,11 @@ p4 方案（GLINK-SUB 可见性）遗留的未验证项：ACP 面是否暴露子
   删除只由 fake SDK 面覆盖。
 
 ### 18.5 pi 运行期凭据文件收尾删除（决定 C 的 pi 面延伸，2026-09-27）
+
+> **已被取代（2026-09-28，[ADR 0008](adr/0008-egress-proxy.md)）**：pi 的运行期 `auth.json` /
+> `web-search.json` 只含本 run 的凭据出口代理 token（终帧提交时吊销），不再声明
+> `credential_copies`、收尾不再删除；`SessionSweep.scan` 字段随之删除。以下为历史记录。
+> ACP 族未接入出口代理，§18.4 的注入副本删除仍然有效。
 
 * 原义务：pi 的运行期 `auth.json`（模型凭据）与 `web-search.json`（检索凭据）随 run 目录
   生命周期保留，列为残留风险（架构 §6.2）。

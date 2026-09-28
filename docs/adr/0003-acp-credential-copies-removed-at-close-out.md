@@ -1,5 +1,8 @@
 # 0003 注入凭据副本在收尾时删除
 
+> pi 部分已被 [0008](0008-egress-proxy.md) 替代：pi 的运行期文件只含已吊销的出口代理 token，不再声明
+> `credential_copies`，收尾不再删除。ACP 部分仍然有效。
+
 - 状态：已接受（2026-09-27，GLINK-OBS-01 用户决定 C；详见 `docs/acp-integration-notes.md` §18.4、§18.5）
 - 范围：`kernel/sweep.py::SessionSweep`、`runs/runner.py::_sanitize_session`、`_remove_credential_copies`
 

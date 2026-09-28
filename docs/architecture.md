@@ -468,8 +468,8 @@ data_root 若是符号链接、不是目录或带组/其他人写权限，宿主
 | 运行期配置 | `runs/<id>/pi-agent`（本 run 独占） | 同目录挂到 `/config` | 同一目录整棵上传到沙箱 `/home/user/config` |
 | 工作区 | `<data>/workspaces/<runId>` | 同左（挂到 `/workspace`） | 沙箱内 `/home/user/workspace`，结束后拉回宿主 |
 | 会话文件 | 会话根下的 `<id>/`（宿主可查） | 该目录挂到 `/sessions`；宿主按挂载映射回本 run 目录后脱敏 | 销毁前按会话头判别回收主会话到本 run 目录（分支会话头部带 `parentSession`，主会话不带），供下一轮使用；主会话无法唯一确定或回收失败不可续接 |
-| 模型凭据 | 本 run 的 `auth.json`（0600，不进进程环境） | 随 `/config` 挂载 | 随运行期配置上传（不进沙箱进程环境） |
-| 搜索凭据 | 本 run 的 `web-search.json`（600） | 随 `/config` 挂载 | 上传到沙箱 `/config`（随沙箱消失） |
+| 模型凭据 | 真实 key 不进执行环境；本 run 的 `auth.json` 只含出口代理 token（§6），`baseUrl` 指向 `http://127.0.0.1:<port>/model` | 同一 token 随 `/config` 挂载；`baseUrl` 走 `host.docker.internal`（`--add-host …:host-gateway`）或 `PI_GLINK_EGRESS_PUBLIC_URL` | 同一 token 随运行期配置上传；必须配置 `PI_GLINK_EGRESS_PUBLIC_URL`，否则启动即拒绝 |
+| 搜索凭据 | 有检索 grant 时 `web-search.json`（600）只含 token 与代理 `/search` 地址 | 同左；Docker 带检索 key 需 https 的 public URL | 同左（随沙箱消失） |
 | 隔离强度 | 进程级 | 容器级 | 云端沙箱级 |
 
 ### 5.1 统一执行 Interface
@@ -527,7 +527,8 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 ```
 
 渲染每个模板条目都是「先删再拷」，并且每次渲染都会重建（或删除）`auth.json` /
-`web-search.json`；因此上一 run 的扩展、skill 或凭据不会因增量拷贝而残留。共享项只限于
+`web-search.json`；因此上一 run 的扩展、skill 或 token 不会因增量拷贝而残留（两者只含本 run 的出口代理
+token，run 收尾时 token 已吊销，文件保留也无害，见 §6）。共享项只限于
 仓库 `harnesses/<pack>/` 与 `methodology/` 模板目录（只读输入）和 `data_root` 本身。
 
 **多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。E2B 面的续接身份验证时点与另两面相同（GLINK-ARCH-3 起）：pi 以 `--session /home/user/sessions/continued.jsonl` 原地打开续接会话（保持原 session id），RPC `get_state` 在 `session_ready` 即知会话身份，追问身份不符在**回合前、第一次模型调用前**拒 `session_unavailable`；e2b 面 `session_ready` 也从回合后补发改为回合前发布（回收后 `recovered_session()` 仍会补发一帧带宿主 `session_file` 的 `session_ready`）。（决策史见 [ADR 0004](adr/0004-pi-e2b-rpc-convergence.md)。）ACP 追问的状态根继承按**父 run 记录的 `executor`** 推导：e2b 指向 `acp-agent/recovered`、其余执行面指向 `acp-agent/home`，宿主切换执行面后历史 e2b run 的合法追问仍可受理（[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)）。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
@@ -621,14 +622,39 @@ Dockerfile 的边界约束，缺 `pi-subagents` 只会退化成“没有子代�
 
 ## 6. 凭据流
 
-* 模型：`OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`（与 FrontierAgent 同名语义）。
-  宿主渲染 `models.json`（`baseUrl` 与模型 id 是字面量，pi 不支持它们的 `$VAR` 插值），
-  且**不含 `apiKey`**）与 `auth.json`（pi 自己的凭据存储，与 `/login` 写的同一个文件）。
-  **模型 key 不进进程环境**：内核的 bash 工具跑 `env` 读不到它（三面真实 run 实测均为 0，见
-  `docs/evidence/credential-boundary.txt`）。
-* 搜索：pi-web-access 只从 `PI_CODING_AGENT_DIR/web-search.json` 读凭据。宿主按
-  「`PI_GLINK_WEB_SEARCH_KEY` → 操作员本机文件」的顺序渲染该文件到运行期目录（权限 600）。
-  无凭据不是错误：插件会回退到无密钥的 Exa MCP 检索。
+真实模型 key 与检索 key **不进入执行环境**（决定 D4，[ADR 0008](adr/0008-egress-proxy.md)）。pi 族的
+run 只拿到宿主凭据出口代理（`host/pi_glink/egress.py::EgressProxy`）的地址和一个本 run 的短期 token：
+
+* **代理**：宿主进程内一个独立的 loopback 监听（`PI_GLINK_EGRESS_HOST`，默认 `127.0.0.1`；
+  `PI_GLINK_EGRESS_PORT`，默认 0 = 随机端口），与 Web 端口分开。首个 grant 签发时绑定，最后一个 grant
+  吊销后停止，空闲宿主没有打开的出口端口。路由只有两条：`/model/…` 转发到宿主冻结的
+  `OPENAI_BASE_URL`（替换为 `Authorization: Bearer <真实 key>`），`/search/…` 转发到宿主冻结的
+  `PI_GLINK_WEB_SEARCH_UPSTREAM`（默认 `https://api.exa.ai`，替换为 `x-api-key`）。内核送来的
+  `Authorization` / `x-api-key` / `Cookie` 与逐跳头不透传；上游重定向原样返回、不跟随（跟随会把真实
+  key 带去别处）；上游只接受 https，或 loopback 上的 http；loopback 上游不经操作员 `HTTP(S)_PROXY`。
+  拒绝码：未知路由 404 `unknown_route`（含 `..` 等路径穿越）、token 无效/已吊销 401 `invalid_token`、
+  无检索授权 403 `search_not_granted`、配额用尽 429 `quota_exceeded`、上游不可达 502。
+* **token**：每个 run 一个（`pge_` + 32 字节随机），绑定 `run_id` 与 tenant（以及该 run 解析出的真实
+  key），**只存宿主内存**（按 sha256 摘要索引）。runner 在终帧提交时吊销（此时内核已退出）；宿主重启
+  使全部 token 失效。token 是本 run 已知秘密，并入本 run 的脱敏边界。
+* **渲染**：`models.json` 的 `baseUrl` 为 `<egress origin>/model`（字面量；不含 `apiKey`）；`auth.json`
+  为 `{"frontier":{"type":"api_key","key":"<token>"}}`；有检索 grant 时 `web-search.json` 为
+  `{"exaApiKey":"<token>","exaBaseUrl":"<egress origin>/search"}`，否则删除该文件（插件回退到无密钥的
+  Exa MCP 检索，不是错误）。旧的 `PI_GLINK_WEB_SEARCH_CONFIG` 与操作员 `~/.pi/web-search.json`
+  **不再读取**。
+* **执行面地址**：inproc 为 `http://127.0.0.1:<port>`；Docker 为 `http://host.docker.internal:<port>`
+  并加 `--add-host host.docker.internal:host-gateway`；E2B 没有宿主可达路径，**必须**配置
+  `PI_GLINK_EGRESS_PUBLIC_URL`（由部署把该 URL 转发到固定的 `PI_GLINK_EGRESS_PORT`），缺失时启动即
+  `ConfigError`（fail closed，绝不退回渲染真实 key）。配置了 public URL 时任何执行面都优先使用它。
+  pi-web-access 拒绝非 loopback 的 http 检索地址，所以 Docker 面带 `PI_GLINK_WEB_SEARCH_KEY` 时同样需要
+  https 的 public URL。
+* **计量**：代理读取上游自己的 OpenAI 兼容 `usage`（JSON 整体或 SSE 最后一个带 `usage` 的块），按 run
+  累计。终帧与 run 记录里 pi 族的 `usage` 取代理计量（`source: "egress"`，含 `requests`、
+  `searchRequests`、`input`、`output`、`cacheRead`、`totalTokens`、`unmetered`、`refused`），内核自报的
+  用量另记 `kernelUsage`，不是权威。唯一的策略钩子是按租户的每 run 配额
+  （`PI_GLINK_EGRESS_MAX_REQUESTS_PER_RUN` / `PI_GLINK_EGRESS_MAX_TOKENS_PER_RUN`，0 = 不限）。
+* **ACP 族未覆盖**：ACP agent 仍按 [ADR 0003](adr/0003-acp-credential-copies-removed-at-close-out.md) /
+  acp-integration-notes §18 注入凭据副本并在收尾删除；把 ACP 接入出口代理是未决项。
 * 浏览器永远拿不到密钥：`/api/config` 只返回模型名与是否已配置。
 
 ### 6.1 出站脱敏边界
@@ -670,16 +696,17 @@ Dockerfile 的边界约束，缺 `pi-subagents` 只会退化成“没有子代�
 
 pi 子进程拿到的不是宿主 `os.environ` 的副本：`kernel/agent_env.py` 只放行
 PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置目录的 `PI_*`。宿主 shell 里其他
-凭据（例如 `ANTHROPIC_API_KEY`、`AWS_SECRET_ACCESS_KEY`）不会进入 pi 进程，模型 key 也不在
-环境里（回归：`tests/test_redaction.py::test_minimal_child_environment_does_not_inherit_host_credentials`、
-`tests/test_kernel_agent_env.py::test_model_credential_goes_to_auth_json_not_the_environment`）。
+凭据（例如 `ANTHROPIC_API_KEY`、`AWS_SECRET_ACCESS_KEY`）不会进入 pi 进程，模型 key 更不在
+环境或运行期文件里（回归：`tests/test_redaction.py::test_minimal_child_environment_does_not_inherit_host_credentials`、
+`tests/test_kernel_agent_env.py::test_only_the_egress_token_reaches_auth_json_not_the_environment`、
+`tests/test_egress.py`）。
 
-**残留风险（如实记录）**：run 进行中 key 仍以文件形式存在于运行期 `auth.json`（pi 官方凭据机制、
-权限 0600、仓库外；run 收尾时连同 `web-search.json` 一起删除，见 acp-integration-notes §18.5），
-理论上可被工具用 `read` 打开并回显——这正是 §6.1 出站脱敏覆盖的场景（回归：
-`tests/test_redaction.py::test_runner_redacts_a_tool_echo_before_the_log_and_the_bus`）。需要更强
-隔离时应使用 Docker / E2B 执行面，并为内核配专用、限额的凭据。三面的凭据交付方式与已知差异见
-`docs/evidence/{credential-boundary,docker-run,e2b-run}.txt`。
+**残留风险（如实记录）**：run 进行中出口代理 token 以文件形式存在于运行期 `auth.json` /
+`web-search.json`（0600、仓库外），内核工具可以读到并在 run 期间直接调用代理——它只能访问宿主冻结的
+两个上游、受本 run 配额约束、终帧提交时失效，且不暴露真实 key。token 回显仍由 §6.1 出站脱敏覆盖。
+执行面透传的 `HTTP(S)_PROXY` 若不排除代理地址，可能让内核到代理的请求绕行；越过 token 配额的那一次
+请求仍会完成（用量只在上游应答后可知）。三面的历史凭据交付证据见
+`docs/evidence/{credential-boundary,docker-run,e2b-run}.txt`（出口代理之前的形态，不证明本设计）。
 
 ## 7. 目录边界
 
@@ -789,21 +816,22 @@ owner/role 判定再受理：其他租户得到与未知 run 相同的 404 且�
 ### 10.3 凭据与脱敏边界
 
 租户凭据文件（仓库外、0600）在默认 `PI_GLINK_MODEL_CREDENTIALS=tenant` 策略下为每个租户提供
-`modelApiKey`（必需）与 `webSearchKey`（可选）。渲染时 `RunCredentials(origin="tenant")` 只允许本租户
-的值：缺模型 key 拒绝准入，绝不回退宿主 `.env`、操作员 `~/.pi/web-search.json` 或别的租户；缺搜索 key
-时按现有无 key 检索行为渲染（删除 `web-search.json`）。E2B 平台 key 属于宿主资源管理，不是租户模型 key。
+`modelApiKey`（必需）与 `webSearchKey`（可选）。解析时 `RunCredentials(origin="tenant")` 只允许本租户
+的值：缺模型 key 拒绝准入，绝不回退宿主 `.env` 或别的租户；解析出的真实 key 只进入本 run 的出口代理
+grant（绑定 `run_id` 与 tenant，§6），执行环境只拿到 token；缺搜索 key 时不签检索授权（删除
+`web-search.json`，无 key 检索）。E2B 平台 key 属于宿主资源管理，不是租户模型 key。
 每 run 构造一个只包含“宿主已知秘密 + 本 run 凭据”的 `SecretRedactor`，事件投影、提交、报告拷贝、
 工作区/会话清扫与报告下载都用它，因此不同租户的秘密不会互相写入对方的边界或产物。工具能读到自己
-本 run 的 `auth.json` 仍属于既有残留风险（§6.2），脱敏只做回显保护，不承诺阻止任意编码或网络外传。
+本 run 的 token（§6.2 残留风险），但读不到任何租户的真实 key；脱敏只做回显保护，不承诺阻止任意编码或网络外传。
+代理按 grant 计量用量并执行每租户每 run 配额钩子；多宿主进程之间不共享配额。
 
 显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 是 SaaS 部署的**显式放宽**，不是任何模式的默认兜底：
 
 * 宿主必须在启动时冻结 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`，任一缺失即拒绝启动；
-* 每个 run 渲染 `RunCredentials(origin="shared")`，即同一套宿主共享凭据；共享模式不读取任何
+* 每个 run 解析 `RunCredentials(origin="shared")`，即同一套宿主共享凭据（同样只进入出口代理 grant）；共享模式不读取任何
   租户配置：不得配置 `PI_GLINK_TENANT_CONFIG_FILE`（不设置或留空即为无该入口），设置即拒绝
   启动，也不会构造或读取 `TenantCredentialStore`；缺共享 key 时也不会回退到 `tenant` 或 local；
-* 可选搜索 key 只来自宿主级 `PI_GLINK_WEB_SEARCH_KEY`，不可能用操作员 `~/.pi/web-search.json`
-  顶替；
+* 可选搜索 key 只来自宿主级 `PI_GLINK_WEB_SEARCH_KEY`（操作员 `~/.pi/web-search.json` 不再被读取）；
 * 租户授权仍完全由身份入口决定（网关注入的断言或账号库会话）；共享模式没有租户凭据文件入口，
   也不存在一个可以准入或拒绝租户的文件名单；
 * 每 run 脱敏边界仍包含共享 key（它属于宿主已知秘密）；`redactor_for_record` 在 shared 下使用

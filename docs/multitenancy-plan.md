@@ -16,12 +16,13 @@
 | run 归属 | 受理时原子写 `tenant_id`/`creator_user_id`；`get_for`/`list_for` 按租户过滤；同租户 creator/admin 才能取消 | `store.py`、`runs/runner.py` |
 | 并发准入 | 仅多租户 Docker/E2B 并发，默认全局 4 / 单租户 2，原子检查与预留，超额 429，无队列；未确认释放的持有计入 owner 租户与全局槽位，并可由宿主在线自动对账释放 | `runs/runner.py::RunManager._check_admission`、`runs/resource_ledger.py::ResourceLedger._probe_resource`（_probe_resource 是台账在线对账探测，不在 runner） |
 | 租户凭据 | 默认每租户条目提供 `modelApiKey`（必需）/`webSearchKey`（可选）；显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时改为宿主冻结的一套模型凭据，且不得配置/读取租户凭据文件 | `tenancy.py`、`kernel/agent_env.py` |
+| 凭据出口代理（D4） | pi 族真实 key 只在宿主进程内的出口代理里；每 run 一个绑定 `run_id`+tenant 的内存 token，终帧提交时吊销；代理按上游 `usage` 计量（pi 族权威用量）并执行每租户每 run 配额钩子；E2B 必须配置 `PI_GLINK_EGRESS_PUBLIC_URL`；ACP 族未覆盖 | `egress.py`、`runs/runner.py`、`kernel/agent_env.py`（[ADR 0008](adr/0008-egress-proxy.md)） |
 | 脱敏边界 | 每 run 一个 redactor（宿主已知秘密 + 本 run 凭据），事件/日志/报告/工作区/会话/下载都经过它 | `runs/runner.py`、`redaction.py` |
 | 执行资源上限 | Docker 容器实例限 cpu/memory/pids 并降权；E2B 只限生命周期（SDK 不暴露 cpu/内存） | `kernel/docker_env.py`、`kernel/e2b_env.py` |
 | 历史数据 | 无 owner 的旧记录在多租户读面完全不可见、不迁移、不改写；本地模式按旧口径读取 | `store.py`、`web_routes.py` |
 
-**仍未实现**：多宿主租约与共享存储（SQLite/Postgres/outbox）、真实网关与密钥轮换、BYOK 与短期
-凭据代理、计费与上线运维；容器/沙箱的实际隔离强度不在本仓库的验证范围内。
+**仍未实现**：多宿主租约与共享存储（SQLite/Postgres/outbox）、真实网关与密钥轮换、BYOK、ACP 族接入
+出口代理、跨宿主共享配额、计费与上线运维；容器/沙箱的实际隔离强度不在本仓库的验证范围内。
 
 ## 2. 身份与授权（已实现的关键决定）
 
@@ -101,9 +102,10 @@ outbox 模式，事务内写 `events` 后投递到共享流供多宿主 SSE 与�
 
 默认 `PI_GLINK_MODEL_CREDENTIALS=tenant`：
 
-- 每租户从仓库外 0600 文件读取 `modelApiKey`（必需）与 `webSearchKey`（可选），渲染到本 run 的运行期
-  `auth.json` / `web-search.json`；缺模型 key 拒绝准入，缺搜索 key 走无 key 检索。
-- 无任何回退路径：宿主全局 `.env`、操作员 `~/.pi/web-search.json`、其他租户条目都不会被使用。
+- 每租户从仓库外 0600 文件读取 `modelApiKey`（必需）与 `webSearchKey`（可选），只放进本 run 的出口
+  代理 grant；运行期 `auth.json` / `web-search.json` 只含本 run token 与代理地址（architecture §6）；
+  缺模型 key 拒绝准入，缺搜索 key 不签检索授权、走无 key 检索。
+- 无任何回退路径：宿主全局 `.env`、其他租户条目都不会被使用；操作员 `~/.pi/web-search.json` 已不再被读取。
 
 显式 `PI_GLINK_MODEL_CREDENTIALS=shared`（SaaS 统一供模型，已实现）：
 
@@ -111,14 +113,15 @@ outbox 模式，事务内写 `events` 后投递到共享流供多宿主 SSE 与�
 - 每个 run 使用同一套宿主共享凭据（`RunCredentials(origin="shared")`）；共享模式不读取任何租户
   配置：不得配置 `PI_GLINK_TENANT_CONFIG_FILE`（不设置或留空即为无该入口），设置即拒绝启动，
   也不会构造或读取 `TenantCredentialStore`；
-- 可选搜索 key 只来自宿主级 `PI_GLINK_WEB_SEARCH_KEY`，不会用操作员本机文件顶替；
+- 可选搜索 key 只来自宿主级 `PI_GLINK_WEB_SEARCH_KEY`（同样只进出口代理 grant）；
 - 每 run 脱敏边界包含共享 key；报告下载的 `redactor_for_record` 在 shared 下走宿主/共享边界，
   不因租户条目无 key 而漏脱敏；owner、配额与审计语义与 tenant 模式完全一致；
 - 这是 SaaS 部署的显式选择，绝不做 tenant/local 的隐式兜底；回退时改回 tenant 并为各租户补回 key。
 
 两种策略共同保留的边界：E2B 平台 key 属于宿主资源管理，不是租户模型 key；每 run 的 redactor 只含
-本 run 实际使用的凭据；共享 key 仍是宿主可读、可被工具回显或经网络外传的资源秘密，只承诺现有脱敏
-回显保护与沙箱执行隔离，不宣称 key 不可能泄露。短期凭据代理/STS、轮换、额度与审计仍未实现。
+本 run 实际使用的凭据；pi 族执行环境不再持有真实 key（出口代理，ADR 0008），
+但 run 期间的 token 对内核工具可见、可在配额内调用代理；ACP 族仍把注入凭据副本交给执行环境。轮换、
+告警、审计与跨宿主配额仍未实现。
 
 ## 6. 历史数据归属
 
@@ -140,8 +143,10 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
 ## 8. 仍需裁决的问题
 
 - **D3 存储**：何时引入 SQLite/Postgres 与对象存储；是否允许历史导入写回。
-- **D4 凭据增强**：是否建设短期凭据代理/STS；轮换、吊销、额度与告警；是否支持 BYOK。SaaS 统一共享
-  模型凭据（`PI_GLINK_MODEL_CREDENTIALS=shared`）已按 GLINK-SAAS-01 落地，它不是短期代理也不是 BYOK。
+- **D4 凭据增强**：短期凭据代理已定并落地（宿主内出口代理、每 run 内存 token、终帧吊销、按上游
+  usage 计量与每租户每 run 配额钩子，[ADR 0008](adr/0008-egress-proxy.md)）。**仍未裁决**：ACP 族是否
+  接入代理、密钥轮换与告警、跨宿主共享配额与计费口径、是否支持 BYOK、宿主重启时在途 run 的 token
+  失效处置。SaaS 统一共享模型凭据（`PI_GLINK_MODEL_CREDENTIALS=shared`）已按 GLINK-SAAS-01 落地，它不是 BYOK。
 - **D6 开通流程**：首位管理员的离线签发与后续管理员邀请已经落地（`--create-invite` /
   `POST /api/admin/invitations`）；**仍未裁决**：租户本身的创建/停用运维入口（当前停用通过账号库
   状态位生效，没有 HTTP 管理接口）、停用后的事件流与运行中 run 处置口径、邮件交付与密码重置。
@@ -158,8 +163,9 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
    同一 404 口径且无副作用；无 owner 记录不可见。
 2. **并发与配额**：租户/全局上限、超额 429、九请求竞争填满且不超过上限、未确认释放的持有计入
    租户与全局槽位、SSE 连接额度按租户分离、已受理取消优先。
-3. **凭据隔离**：每租户只渲染自己的 key；缺模型 key 拒绝准入；缺搜索 key 回退无 key；每 run
-   redactor 只含本 run 凭据。
+3. **凭据隔离**：每租户 run 的出口代理 grant 只绑定自己的 key，执行环境只拿到 token（终帧后吊销）；
+   缺模型 key 拒绝准入；缺搜索 key 不签检索授权；每 run redactor 只含本 run 凭据与 token。代理本身的
+   转发、拒绝码、计量与配额由 `tests/test_egress.py` 用 fake 上游覆盖（无真实模型/检索调用）。
 4. **会话与 SSE**：异租户在响应头之前 404；断言过期在重放与实时两个阶段都终止流（含大量历史、
    无实时订阅与慢读取）；重启后重放仍按租户过滤。
 5. **认证边界**：伪造/篡改/过期/超长寿命/错误 audience/重复头 401；跨站 POST 拒绝；健康端点不
@@ -188,8 +194,8 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
 1. **配置门禁**：缺 `OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL`、非多租户模式、未知取值一律
    拒绝启动；shared 与 `PI_GLINK_TENANT_CONFIG_FILE` 同时存在即拒绝，shared 无该文件可用，
    且不构造/不读取 `TenantCredentialStore`；tenant 模式的逐租户 key 语义与文件入口不变。
-2. **凭据交付**：共享 key 只进每 run `auth.json`（0600）与（可选）宿主级 `web-search.json`；Docker
-   argv/环境、E2B `Sandbox.create` 环境与命令、沙箱命令环境均不含 key；沙箱 kill 后凭据随沙箱销毁；
+2. **凭据交付**：共享 key 只进宿主出口代理 grant，本 run `auth.json` 只含已吊销的 token；Docker
+   argv/环境、E2B `Sandbox.create` 环境与命令、沙箱命令环境、上传的运行期配置均不含 key；
    `sandbox_id` 对账与报告回收入 run 记录。
 3. **脱敏与回显**：事件日志、报告副本、下载内容均不含共享 key；`redactor_for_record` 在 shared 下
    包含共享 key；客户端提交 `modelApiKey`/`model`/`baseUrl`/`apiKey`/`webSearchKey` 字段返回 400，
