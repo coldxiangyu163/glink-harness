@@ -571,8 +571,13 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
   沙箱存活到收尾，**被取消的 run 也能回收 `report.md` 与主会话**——旧 `--mode json` 路径
   运行中不能 abort、cancel 只能直接销毁沙箱，报告与会话随沙箱即毁，该旧义务已随旧适配器删除。
 * **产物回收与关闭**：`recover_artifacts` 先把该面的产物放到宿主工作区（inproc/Docker 本来就是
-  宿主目录，是 no-op；E2B 从沙箱拉回，逐文件限幅并拒绝路径分隔符），然后 `close()` 才销毁
-  进程/容器/沙箱并报告 `CleanupReport(released, failures)`。清理失败会被记入 run 记录并继续占用容量（§4），不谎报已释放。
+  宿主目录，是 no-op；E2B 从沙箱拉回，工作区直系子项限额 `WORKSPACE_RECOVER_MAX_FILES` = 64 个文件、
+  总量 `WORKSPACE_RECOVER_MAX_TOTAL_BYTES` = 64 MiB、单文件 `ARTIFACT_MAX_BYTES` = 32 MiB，
+  逐文件限幅并拒绝路径分隔符），然后 `close()` 才销毁
+  进程/容器/沙箱并报告 `CleanupReport(released, failures)`——E2B 的销毁经 `kill_within_budget`
+  （`E2B_KILL_TIMEOUT_SECONDS` = 15s），超时记入 `failures` 并在重启对账时按不确定保持持有（hold）；
+  E2B 的文件类调用统一带 `request_timeout`（`E2B_REQUEST_TIMEOUT_SECONDS` = 15s），卡死的调用记为
+  产物失败而不拖长收尾。清理失败会被记入 run 记录并继续占用容量（§4），不谎报已释放。
   回收只取**普通文件**：沙箱条目按 SDK 报告的 `EntryInfo.type`（真实 SDK 是 `FileType` 枚举）跳过目录与
   符号链接——不跟随链接，与 §6.1 的 ArtifactTree 同一条边界——它们不记为失败；超限或不可读的普通文件
   才记为失败并写进终态 `artifactFailures`。回收后由 `recovered_session()` 回答「回收过程才得知、值得

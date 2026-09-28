@@ -126,3 +126,27 @@ def test_mode_json_argv_rule_flags_the_deleted_launch_form() -> None:
     assert mode_json_argv_violations("subprocess.run(['pi', '--mode', 'json'])") != []
     assert mode_json_argv_violations('argv = ["pi", "--mode", "rpc", prompt]') == []
     assert mode_json_argv_violations('PI_GLINK_PI_MODE = "json"  # 配置名不是 argv') == []
+
+
+def test_architecture_states_the_real_e2b_recovery_bounds() -> None:
+    """§5.1 的产物回收限额必须逐项等于 E2B 面的真实常量。
+
+    数字从 ``e2b_env`` 现读，文档写错或代码改值而文档没跟上都会变红——
+    避免「逐文件限幅」这类无数字表述再次掩盖真实边界。
+    """
+    from pi_glink.kernel import e2b_env
+
+    text = (ROOT / "docs/architecture.md").read_text(encoding="utf-8")
+    mib = 1024 * 1024
+    assert f"`WORKSPACE_RECOVER_MAX_FILES` = {e2b_env.WORKSPACE_RECOVER_MAX_FILES}" in text
+    assert (
+        f"`WORKSPACE_RECOVER_MAX_TOTAL_BYTES` = "
+        f"{e2b_env.WORKSPACE_RECOVER_MAX_TOTAL_BYTES // mib} MiB"
+    ) in text
+    assert f"`ARTIFACT_MAX_BYTES` = {e2b_env.ARTIFACT_MAX_BYTES // mib} MiB" in text
+    assert (
+        f"`E2B_REQUEST_TIMEOUT_SECONDS` = {e2b_env.E2B_REQUEST_TIMEOUT_SECONDS:g}s" in text
+    )
+    assert (
+        f"`E2B_KILL_TIMEOUT_SECONDS` = {e2b_env.E2B_KILL_TIMEOUT_SECONDS:g}s" in text
+    )
