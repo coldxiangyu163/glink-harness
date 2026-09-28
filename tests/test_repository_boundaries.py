@@ -6,6 +6,7 @@ import ast
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -96,41 +97,50 @@ def source_violations(root: Path) -> list[str]:
     return violations
 
 
-#: 导入方向：``host/pi_glink/kernel/`` 是接入层，位于编排层之下，不得反向导入编排层
-#: 或宿主编排模块。``pi_glink.runs`` 承接 run 生命周期与资源台账（编排层）。
-_FORBIDDEN_KERNEL_MODULES = (
-    "pi_glink.runs",
-    "pi_glink.tenancy",
-    "pi_glink.auth",
-    "pi_glink.accounts",
-    "pi_glink.ownership",
-    "pi_glink.blueprints",
-    "pi_glink.app",
-    "pi_glink.cli",
-)
-_FORBIDDEN_KERNEL_PREFIXES = ("pi_glink.web_",)
-
-#: ``store`` 是显式白名单：三个 harness 族模块读 ``RunRecord`` 与会话种子（族策略的
-#: 事实来源），其余 kernel 模块不得读宿主持久化。
-_KERNEL_STORE_WHITELIST = frozenset(
-    {
-        "host/pi_glink/kernel/harness.py",
-        "host/pi_glink/kernel/harness_pi.py",
-        "host/pi_glink/kernel/harness_acp.py",
-    }
-)
+# 每个 kernel 文件允许导入：标准库、kernel 内部，及下表列出的外部模块。
+# 下表是 pi_glink 宿主依赖的唯一许可真源；新增文件必须显式登记（即使暂无宿主依赖）。
+# config 提供运行期只读配置；artifacts 提供安全产物树；redaction 提供凭据清扫；
+# contracts 是共享的中性词汇；events/event_schema 提供结构化事件的词汇/模式；
+# 根包的 __version__ 用于 ACP 协议版本；store 仅三个 harness 族策略读取记录/会话种子。
+# 第三方 e2b SDK 只在 E2B 适配器延迟加载，不把所有第三方包视作标准库。
+_KERNEL_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
+    "__init__.py": frozenset(),
+    "acp_child_progress.py": frozenset({"zstandard"}),  # ACP 会话压缩格式的可选解码器
+    "acp_e2b_env.py": frozenset({"pi_glink.artifacts", "pi_glink.redaction"}),
+    "acp_env.py": frozenset({"pi_glink.artifacts", "pi_glink.config", "pi_glink.redaction"}),
+    "acp_execution.py": frozenset({"pi_glink.__version__", "pi_glink.config"}),
+    "acp_projection.py": frozenset({"pi_glink.events", "pi_glink.redaction"}),
+    "acp_rpc.py": frozenset(),
+    "agent_env.py": frozenset({"pi_glink.config"}),
+    "child_progress.py": frozenset(),
+    "docker_env.py": frozenset({"pi_glink.config"}),
+    "e2b_env.py": frozenset({"e2b", "pi_glink.artifacts", "pi_glink.config"}),
+    "execution.py": frozenset({"pi_glink.config"}),
+    "framing.py": frozenset(),
+    "harness.py": frozenset({"pi_glink.config", "pi_glink.contracts", "pi_glink.redaction", "pi_glink.store"}),
+    "harness_acp.py": frozenset({"pi_glink.config", "pi_glink.contracts", "pi_glink.events", "pi_glink.redaction", "pi_glink.store"}),
+    "harness_pi.py": frozenset({"pi_glink.artifacts", "pi_glink.config", "pi_glink.contracts", "pi_glink.redaction", "pi_glink.store"}),
+    "outcome.py": frozenset(),
+    "projection.py": frozenset({"pi_glink.event_schema", "pi_glink.events", "pi_glink.redaction"}),
+    "rpc.py": frozenset(),
+    "sandbox.py": frozenset({"pi_glink.config"}),
+    "subagent_artifacts.py": frozenset(),
+    "sweep.py": frozenset(),
+}
+# 反表不是许可来源：阻止通过修改上表重新放行原先明确禁止的编排模块。
+_KERNEL_MUST_REJECT = frozenset({
+    "pi_glink.runs", "pi_glink.tenancy", "pi_glink.auth", "pi_glink.accounts",
+    "pi_glink.ownership", "pi_glink.blueprints", "pi_glink.app", "pi_glink.cli",
+    "pi_glink.web_routes", "pi_glink.web_anything",
+})
 
 
 def kernel_forbidden_imports(relative: Path, text: str) -> list[str]:
-    """Imports of one kernel module that point back at the orchestration layer.
-
-    Relative imports are resolved against the module's own package, so
-    ``from ..store import RunRecord`` counts as ``pi_glink.store`` whether it is
-    written relative or absolute. Dynamic ``__import__``/``import_module``
-    string literals are inspected like the other import checks.
-    """
-    package = list(relative.with_suffix("").parts)[1:]  # drop the ``host/`` root
-    package = package[:-1]
+    """Resolve static and literal dynamic imports; deny anything outside this file's permissions."""
+    package = list(relative.with_suffix("").parts)[1:-1]  # drop host/ and the filename
+    allowed = _KERNEL_IMPORT_ALLOWLIST.get(relative.name)
+    if allowed is None:
+        return [f"{relative}: unlisted kernel module"]
     modules: list[str] = []
     for node in ast.walk(ast.parse(text, filename=str(relative))):
         if isinstance(node, ast.Import):
@@ -138,9 +148,14 @@ def kernel_forbidden_imports(relative: Path, text: str) -> list[str]:
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 base = package[: len(package) - node.level + 1]
-                modules.append(".".join([*base, node.module] if node.module else base))
+                module = ".".join([*base, node.module] if node.module else base)
             else:
-                modules.append(node.module or "")
+                module = node.module or ""
+            # `from .. import app` targets pi_glink.app, not the root package.
+            if module == "pi_glink":
+                modules.extend(f"pi_glink.{alias.name}" for alias in node.names)
+            else:
+                modules.append(module)
         elif isinstance(node, ast.Call) and node.args:
             function = node.func
             dynamic = isinstance(function, ast.Name) and function.id == "__import__"
@@ -154,14 +169,13 @@ def kernel_forbidden_imports(relative: Path, text: str) -> list[str]:
                 modules.append(node.args[0].value)
     violations = []
     for module in modules:
-        if module == "pi_glink.store" or module.startswith("pi_glink.store."):
-            if relative.as_posix() not in _KERNEL_STORE_WHITELIST:
-                violations.append(f"{relative}: forbidden import {module}")
+        if module.startswith("pi_glink.kernel.") or module == "pi_glink.kernel":
             continue
-        if any(module == item or module.startswith(item + ".") for item in _FORBIDDEN_KERNEL_MODULES):
-            violations.append(f"{relative}: forbidden import {module}")
-        elif any(module.startswith(prefix) for prefix in _FORBIDDEN_KERNEL_PREFIXES):
-            violations.append(f"{relative}: forbidden import {module}")
+        # Only a listed root-level host module may be used; submodules of an
+        # allowed host module are not implicitly allowed to widen the boundary.
+        if module in allowed or module.split(".")[0] in sys.stdlib_module_names and not module.startswith("pi_glink"):
+            continue
+        violations.append(f"{relative}: forbidden import {module}")
     return violations
 
 
@@ -298,13 +312,13 @@ def test_kernel_layer_does_not_import_the_orchestration_layer() -> None:
 
 def test_kernel_import_direction_rejects_orchestration_and_store() -> None:
     """反例：kernel 反向导入编排层/宿主模块或绕过白名单读 store 必须变红。"""
-    kernel_module = Path("host/pi_glink/kernel/new_module.py")
+    kernel_module = Path("host/pi_glink/kernel/acp_env.py")
     assert kernel_forbidden_imports(kernel_module, "from ..runs import RunManager") == [
-        "host/pi_glink/kernel/new_module.py: forbidden import pi_glink.runs"
+        "host/pi_glink/kernel/acp_env.py: forbidden import pi_glink.runs"
     ]
     assert kernel_forbidden_imports(kernel_module, "import pi_glink.runs.runner") != []
     assert kernel_forbidden_imports(kernel_module, "from ..store import RunRecord") == [
-        "host/pi_glink/kernel/new_module.py: forbidden import pi_glink.store"
+        "host/pi_glink/kernel/acp_env.py: forbidden import pi_glink.store"
     ]
     assert kernel_forbidden_imports(kernel_module, "from pi_glink.tenancy import TenantContext") != []
     assert kernel_forbidden_imports(kernel_module, "from ..web_routes import HostRequestHandler") != []
@@ -314,13 +328,34 @@ def test_kernel_import_direction_rejects_orchestration_and_store() -> None:
 
 
 def test_kernel_import_direction_allows_lower_layers_and_the_store_whitelist() -> None:
-    kernel_module = Path("host/pi_glink/kernel/new_module.py")
+    kernel_module = Path("host/pi_glink/kernel/harness_pi.py")
     assert kernel_forbidden_imports(kernel_module, "from ..config import HostConfig") == []
-    assert kernel_forbidden_imports(kernel_module, "from ..redaction import SecretRedactor") == []
+    assert kernel_forbidden_imports(Path("host/pi_glink/kernel/acp_env.py"), "from ..redaction import SecretRedactor") == []
     assert kernel_forbidden_imports(kernel_module, "from .harness import HarnessFamily") == []
     assert kernel_forbidden_imports(kernel_module, "from ..contracts import Verdict") == []
-    for relative in sorted(_KERNEL_STORE_WHITELIST):
-        assert kernel_forbidden_imports(Path(relative), "from ..store import RunRecord") == [], relative
+    assert kernel_forbidden_imports(kernel_module, "from pathlib import Path") == []
+    assert kernel_forbidden_imports(Path("host/pi_glink/kernel/e2b_env.py"), "from e2b import Sandbox") == []
+    for name in ("harness.py", "harness_pi.py", "harness_acp.py"):
+        relative = Path("host/pi_glink/kernel") / name
+        assert kernel_forbidden_imports(relative, "from ..store import RunRecord") == [], relative
+
+
+def test_kernel_rule_rejects_unlisted_parent_module_and_root_alias(tmp_path: Path) -> None:
+    """新增接入层模块不能借未列名的宿主模块绕过导入方向。"""
+    kernel_dir = tmp_path / "host" / "pi_glink" / "kernel"
+    kernel_dir.mkdir(parents=True)
+    source = kernel_dir / "acp_env.py"
+    for text, name in (
+        ("from ..accounts import AccountStore\n", "pi_glink.accounts"),
+        ("from ..app import main\n", "pi_glink.app"),
+        ("from .. import app\n", "pi_glink.app"),
+        ("from ..new_orchestrator import run\n", "pi_glink.new_orchestrator"),
+        ("importlib.import_module('pi_glink.new_orchestrator')\n", "pi_glink.new_orchestrator"),
+    ):
+        source.write_text(text)
+        assert kernel_import_violations(tmp_path) == [
+            f"host/pi_glink/kernel/acp_env.py: forbidden import {name}"
+        ]
 
 
 def test_kernel_import_direction_covers_new_modules(tmp_path: Path) -> None:
@@ -328,11 +363,24 @@ def test_kernel_import_direction_covers_new_modules(tmp_path: Path) -> None:
     kernel_dir.mkdir(parents=True)
     source = kernel_dir / "new.py"
     source.write_text("from ..runs import RunManager\n")
-    assert kernel_import_violations(tmp_path) == [
-        "host/pi_glink/kernel/new.py: forbidden import pi_glink.runs"
-    ]
+    assert kernel_import_violations(tmp_path) == ["host/pi_glink/kernel/new.py: unlisted kernel module"]
     source.write_text("from ..kernel.harness import HarnessFamily\n")
-    assert kernel_import_violations(tmp_path) == []
+    assert kernel_import_violations(tmp_path) == ["host/pi_glink/kernel/new.py: unlisted kernel module"]
+
+
+def test_kernel_allowlist_cannot_relicense_orchestration_modules() -> None:
+    assert set(_KERNEL_IMPORT_ALLOWLIST) == {p.name for p in (ROOT / "host/pi_glink/kernel").glob("*.py")}
+    for relative, allowed in _KERNEL_IMPORT_ALLOWLIST.items():
+        assert not any(
+            name == denied or name.startswith(denied + ".")
+            for name in allowed for denied in _KERNEL_MUST_REJECT
+        ), relative
+        assert not any(name.startswith("pi_glink.web_") for name in allowed), relative
+        assert not any(name == "pi_glink.store" or name.startswith("pi_glink.store.") for name in allowed) or relative in {
+            "harness.py", "harness_pi.py", "harness_acp.py"
+        }, relative
+    for name in _KERNEL_MUST_REJECT:
+        assert kernel_forbidden_imports(Path("host/pi_glink/kernel/harness.py"), f"__import__({name!r})")
 
 
 def host_module_imports(relative: Path, text: str) -> list[str]:
