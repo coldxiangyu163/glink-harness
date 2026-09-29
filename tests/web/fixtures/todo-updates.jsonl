@@ -1,0 +1,4 @@
+{"type":"tool_started","v":1,"runId":"todo-fixture","seq":1,"ts":1,"payload":{"toolCallId":"p1","toolName":"todo_write","kind":"other","presentation":"plan","args":{"todos":["{\"content\":\"核验资料\",\"status\":\"in_progress\"}","{\"content\":\"整理报告\",\"status\":\"pending\"}"]}}}
+{"type":"tool_finished","v":1,"runId":"todo-fixture","seq":2,"ts":2,"payload":{"toolCallId":"p1","toolName":"todo_write","isError":false,"result":"updated"}}
+{"type":"tool_started","v":1,"runId":"todo-fixture","seq":3,"ts":3,"payload":{"toolCallId":"p2","toolName":"todo_write","kind":"other","presentation":"plan","args":{"todos":["{\"content\":\"核验资料\",\"status\":\"completed\"}","{\"content\":\"查证来源\",\"status\":\"in_progress\"}","{\"content\":\"整理报告\",\"status\":\"in_progress\"}"]}}}
+{"type":"tool_finished","v":1,"runId":"todo-fixture","seq":4,"ts":4,"payload":{"toolCallId":"p2","toolName":"todo_write","isError":false,"result":"updated"}}
