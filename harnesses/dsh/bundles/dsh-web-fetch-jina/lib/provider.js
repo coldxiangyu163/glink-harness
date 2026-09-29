@@ -51,20 +51,17 @@ export class JinaFetchProvider {
    * @param options.resolveApiKey - resolves the credential reference to a key, per call.
    * @param options.fetchImpl - the fetch implementation (the real `fetch` by default).
    * @param options.lookup - `dns.lookup`-compatible resolver; omit to skip the egress check.
-   * @param options.recordRetrieval - audit hook called once per successful retrieval.
    */
   constructor({
     resolveOptions,
     resolveApiKey,
     fetchImpl = globalThis.fetch,
     lookup,
-    recordRetrieval,
   } = {}) {
     this.resolveOptions = resolveOptions
     this.resolveApiKey = resolveApiKey
     this.fetchImpl = fetchImpl
     this.lookup = lookup
-    this.recordRetrieval = recordRetrieval
   }
 
   /** Stable registration id. */
@@ -208,29 +205,11 @@ export class JinaFetchProvider {
     const mapped = classifyJinaPayload(payload, target.toString())
     const truncated = mapped.content.length > options.maxBodyChars
     const content = truncated ? mapped.content.slice(0, options.maxBodyChars) : mapped.content
-    const result = {
+    return {
       url: mapped.url,
       statusCode: mapped.statusCode,
       body: { kind: 'text', content },
       truncated,
-    }
-    this.record(result, endpoint)
-    return result
-  }
-
-  /** Audit one successful retrieval; the hook is advisory and never fails the fetch. */
-  record(result, endpoint) {
-    if (this.recordRetrieval === undefined) return
-    try {
-      this.recordRetrieval({
-        url: result.url,
-        endpoint,
-        statusCode: result.statusCode,
-        truncated: result.truncated,
-        chars: result.body.content.length,
-      })
-    } catch {
-      // Evidence-only: a failed audit append must not discard a retrieved page.
     }
   }
 }

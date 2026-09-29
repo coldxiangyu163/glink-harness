@@ -37,7 +37,7 @@ function jsonResponse(payload, { status = 200, headers = {} } = {}) {
   })
 }
 
-function makeProvider({ fetchImpl, lookup, resolveApiKey, resolveOptions, recordRetrieval } = {}) {
+function makeProvider({ fetchImpl, lookup, resolveApiKey, resolveOptions } = {}) {
   const calls = []
   const provider = new JinaFetchProvider({
     resolveOptions: resolveOptions ?? (() => options()),
@@ -47,7 +47,6 @@ function makeProvider({ fetchImpl, lookup, resolveApiKey, resolveOptions, record
       return jsonResponse(envelope())
     }),
     lookup,
-    recordRetrieval,
   })
   return { provider, calls }
 }
@@ -297,21 +296,4 @@ test('an invalid live configuration fails as WEB_PROVIDER_ERROR instead of throw
   const error = await rejection(provider.fetch({ url: 'https://example.com/' }))
   assert.equal(error.code, 'WEB_PROVIDER_ERROR')
   assert.match(error.message, /timeoutMs/)
-})
-
-test('one successful retrieval is recorded once, and a throwing audit hook cannot fail it', async () => {
-  const records = []
-  const { provider } = makeProvider({ recordRetrieval: record => records.push(record) })
-  await provider.fetch({ url: 'https://example.com/' })
-  assert.deepEqual(records, [{
-    url: 'https://example.com/',
-    endpoint: 'https://r.jina.ai/',
-    statusCode: 200,
-    truncated: false,
-    chars: '# Example Domain\n\nBody'.length,
-  }])
-
-  const { provider: throwing } = makeProvider({ recordRetrieval: () => { throw new Error('session append failed') } })
-  const result = await throwing.fetch({ url: 'https://example.com/' })
-  assert.equal(result.statusCode, 200)
 })

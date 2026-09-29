@@ -100,17 +100,14 @@ async function resolveApiKey(ctx, ref) {
 }
 
 /**
- * Record one successful retrieval as a durable session event, the same pattern
- * `dsh-web-search-deepseek` uses for its own provider dispatch. The record is secret-free
- * and audit-only: it is the evidence that a run's `web_fetch` was served by this provider.
- * @param ctx - plugin context.
- * @param record - the retrieval facts.
+ * Register the Jina fetch provider with `ctx.web`.
+ *
+ * The provider deliberately writes nothing into the durable session log. dsh 0.1.5-rc.3
+ * replays that log on `session/resume` against a frozen event vocabulary and refuses any
+ * out-of-tree type not marked `ignorable`, a marker `session.append()` cannot set, so one
+ * audit event made the whole conversation un-resumable. Per-run evidence is the `web_fetch`
+ * tool call/result pair plus this bundle's configured provider.
  */
-function recordRetrieval(ctx, record) {
-  ctx.get('agents')?.currentInitiator()?.session.append('web/jina-fetch-request', record)
-}
-
-/** Register the Jina fetch provider with `ctx.web`. */
 export function apply(ctx, config) {
   // Fail loudly at composition time on a nonsensical configuration, before any fetch.
   assertOptions(snapshot(config))
@@ -118,6 +115,5 @@ export function apply(ctx, config) {
     resolveOptions: () => snapshot(config),
     resolveApiKey: ref => resolveApiKey(ctx, ref),
     lookup,
-    recordRetrieval: record => recordRetrieval(ctx, record),
   }))
 }

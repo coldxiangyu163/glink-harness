@@ -69,16 +69,47 @@ class AcpProtocolError(AcpError):
 
 
 class AcpRequestError(AcpError):
-    """The agent answered a request with a JSON-RPC error object."""
+    """The agent answered a request with a JSON-RPC error object.
+
+    An agent may put the real cause in ``error.data`` and answer with a generic
+    ``-32603 Internal error`` (dsh does, for a refused ``session/resume``). The
+    message therefore carries :attr:`detail` — only a string ``data.details`` or
+    ``data.message``, whitespace-collapsed and clipped to
+    :data:`REQUEST_ERROR_DETAIL_CHARS` — never the raw ``data`` object. The text
+    is agent-controlled: whoever shows it applies the run's redaction boundary.
+    """
 
     def __init__(self, method: str, error: Mapping[str, Any]) -> None:
         code = error.get("code")
         message = error.get("message")
-        super().__init__(f"{method} failed: {code}: {message}")
+        data = error.get("data")
+        detail = _request_error_detail(data)
+        text = f"{method} failed: {code}: {message}"
+        super().__init__(f"{text} ({detail})" if detail else text)
         self.method = method
         self.code = code if isinstance(code, int) else None
         self.message = message if isinstance(message, str) else None
-        self.data = error.get("data")
+        self.data = data
+        self.detail = detail
+
+
+#: Upper bound on the ``error.data`` text one request error carries.
+REQUEST_ERROR_DETAIL_CHARS = 1000
+
+
+def _request_error_detail(data: Any) -> str | None:
+    """The bounded human-readable cause inside a JSON-RPC ``error.data``."""
+    if not isinstance(data, Mapping):
+        return None
+    for key in ("details", "message"):
+        value = data.get(key)
+        if isinstance(value, str):
+            text = " ".join(value.split())
+            if text:
+                if len(text) > REQUEST_ERROR_DETAIL_CHARS:
+                    text = text[: REQUEST_ERROR_DETAIL_CHARS - 1] + "…"
+                return text
+    return None
 
 
 class AcpMethodNotFound(AcpError):

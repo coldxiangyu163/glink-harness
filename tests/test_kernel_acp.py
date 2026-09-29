@@ -35,6 +35,7 @@ from pi_glink.kernel.acp_projection import AcpProjector
 from pi_glink.kernel.acp_rpc import (
     AcpClosed,
     AcpRequestError,
+    REQUEST_ERROR_DETAIL_CHARS,
     AcpRpcClient,
     AcpTimeout,
 )
@@ -195,6 +196,25 @@ def test_acp_client_surfaces_a_jsonrpc_error_response(tmp_path: Path) -> None:
         client.close()
     assert excinfo.value.code == -32000
     assert excinfo.value.method == "session/prompt"
+    assert excinfo.value.detail is None
+    assert str(excinfo.value) == "session/prompt failed: -32000: nope"
+
+
+def test_acp_request_error_carries_only_a_bounded_string_detail() -> None:
+    """``error.data`` enters the message only as a clipped string field."""
+    detailed = AcpRequestError(
+        "session/resume",
+        {"code": -32603, "message": "Internal error", "data": {"details": "a\n  b " + "y" * 3000}},
+    )
+    assert detailed.detail is not None and detailed.detail.startswith("a b ")
+    assert len(detailed.detail) == REQUEST_ERROR_DETAIL_CHARS
+    assert str(detailed).startswith("session/resume failed: -32603: Internal error (a b ")
+    fallback = AcpRequestError("x", {"code": 1, "message": "m", "data": {"message": "why"}})
+    assert fallback.detail == "why"
+    for data in ({"details": {"nested": "secret"}}, ["details"], "raw string", {"details": "  "}, None):
+        opaque = AcpRequestError("x", {"code": 1, "message": "m", "data": data})
+        assert opaque.detail is None
+        assert str(opaque) == "x failed: 1: m"
 
 
 def test_acp_client_times_out_and_reports_process_death(tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ verdict.
 from __future__ import annotations
 
 import logging
+import traceback
 from typing import TYPE_CHECKING, Any, Callable
 
 from ..config import HostConfig
@@ -156,7 +157,17 @@ class RunPipeline:
                 # that surfaces is the cancellation, not a failure.
                 logger.info("run cancelled run=%s (%s)", run_id, type(exc).__name__)
             else:
-                logger.exception("run failed run=%s", run_id)
+                # The exception text can carry agent- or provider-controlled
+                # content (an ACP ``error.data`` detail, a kernel message) that
+                # has not been through the run's redactor yet. Log the type and
+                # the stack frames only; the redacted, bounded text follows in
+                # the close-out's "run failed ... error=" line.
+                logger.error(
+                    "run failed run=%s: %s\n%s",
+                    run_id,
+                    type(exc).__name__,
+                    "".join(traceback.format_tb(exc.__traceback__)).rstrip(),
+                )
             facts.failure = f"{type(exc).__name__}: {exc}"
         finally:
             self.close_out(execution)

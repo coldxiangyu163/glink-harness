@@ -671,6 +671,18 @@ def handle_resume(request: dict, method: str) -> None:
     if flag("FAKE_ACP_RESUME_ERROR"):
         respond(request, error={"code": -32000, "message": "resume refused by fake agent"})
         return
+    resume_details = setting("FAKE_ACP_RESUME_ERROR_DETAILS")
+    if isinstance(resume_details, str):
+        # dsh's shape: a generic -32603 whose real cause is only in data.details.
+        respond(
+            request,
+            error={
+                "code": -32603,
+                "message": "Internal error",
+                "data": {"details": resume_details},
+            },
+        )
+        return
     if not flag("FAKE_ACP_RESUME_ALLOW_MISSING") and (
         not state or state.get("sessionId") != target
     ):

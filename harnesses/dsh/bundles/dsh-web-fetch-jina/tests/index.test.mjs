@@ -125,26 +125,25 @@ test('a missing credential fails the fetch explicitly with the configured refere
   }
 })
 
-test('one successful retrieval appends the audit event with the provider facts', async () => {
-  const initiator = { session: { append: () => {} } }
-  const events = []
-  initiator.session.append = (type, data) => events.push({ type, data })
-  await withFakeFetch(
-    async () => new Response(envelope('audited body'), { status: 200, headers: { 'content-type': 'application/json' } }),
+/**
+ * dsh 0.1.5-rc.3 refuses to resume a session whose log holds an event type outside its
+ * built-in vocabulary unless the envelope carries `ignorable: true`, and `session.append()`
+ * has no way to set that marker. One out-of-tree event therefore made every later
+ * `session/resume` of the conversation fail with -32603 (run 71779b32e35a). The bundle
+ * must leave the durable session log to dsh's own vocabulary.
+ */
+test('a successful retrieval writes nothing into the durable session log', async () => {
+  const appended = []
+  const initiator = { session: { append: (type, data) => appended.push({ type, data }) } }
+  const result = await withFakeFetch(
+    async () => new Response(envelope('page body'), { status: 200, headers: { 'content-type': 'application/json' } }),
     async () => {
       const { provider } = applyPlugin({ credentials: { async resolve() { return { value: 'key' } } }, initiator })
-      await provider.fetch({ url: 'https://93.184.216.34/' })
+      return provider.fetch({ url: 'https://93.184.216.34/' })
     },
   )
-  assert.equal(events.length, 1)
-  assert.equal(events[0].type, 'web/jina-fetch-request')
-  assert.deepEqual(events[0].data, {
-    url: 'https://93.184.216.34/',
-    endpoint: 'https://r.jina.ai/',
-    statusCode: 200,
-    truncated: false,
-    chars: 'audited body'.length,
-  })
+  assert.equal(result.statusCode, 200)
+  assert.deepEqual(appended, [])
 })
 
 test('an invalid configuration fails at apply time instead of at the first fetch', () => {

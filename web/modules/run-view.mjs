@@ -721,6 +721,19 @@ export function outcomeState(model, connection) {
       actions: [['重新开始', 'rerun']],
     };
   }
+  if (model.status === 'failed' && model.parentRunId && !model.sessionId) {
+    // A follow-up that never got a session: the agent refused to reattach to
+    // the parent's conversation (the host fails closed, never a fresh session).
+    // Rerunning cannot fix that — the action starts the question as a new
+    // research without the earlier context, and the text says so.
+    return {
+      key: `resume-failed:${model.error ?? ''}`, tone: 'failed', icon: 'alert-circle', live: 'alert',
+      title: '追问没能接上之前的研究',
+      text: '之前的研究和结果不受影响。重新开始会把这个问题作为一项新研究，不带之前的上下文。',
+      actions: [['作为新研究开始', 'rerun']],
+      detail: model.error ? displayPath(model.error) : '',
+    };
+  }
   if (model.status === 'failed') {
     return {
       key: `failed:${model.error ?? ''}`, tone: 'failed', icon: 'alert-circle', live: 'alert',

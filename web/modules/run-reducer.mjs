@@ -51,6 +51,8 @@ const STAGE_LABELS = {
 export function createRunState(run = {}) {
   return {
     runId: run.runId ?? null,
+    /** The run this one follows up (null for a first turn). */
+    parentRunId: run.parentRunId ?? null,
     status: run.status ?? RUNNING,
     prompt: run.prompt ?? '',
     createdAt: run.createdAt ?? null,

@@ -1876,6 +1876,8 @@ uncaught exception，dsh 进程 exit 1。0.1.5-rc.3 ~ 0.1.7-rc.2 未修复。本
   （`{url, endpoint, statusCode, truncated, chars}`，无密钥；与 web-search-deepseek 的
   `recordRequest` 同一模式）。这是「这次 `web_fetch` 走了哪个 provider」的权威证据，也是
   验收 #2 的判据。
+  **已撤销（见 §19.6）**：该事件让会话无法 `session/resume`，现已移除，下文 §19.3 的
+  事件计数是撤销前的历史证据。
 * **0.1.5-rc.3 的 API 差异（实测，覆盖 0.1.7 文档结论）**：镜像内 schemastery 3.18.2
   **没有 `volatile()`**（0.1.7 才引入），第一版插件在 `dsh --profile acp` 启动时直接
   `failed to import loader entry web-fetch-jina: ...volatile is not a function`。改为普通字段 +
@@ -1966,3 +1968,26 @@ uncaught exception，dsh 进程 exit 1。0.1.5-rc.3 ~ 0.1.7-rc.2 未修复。本
   解析不到的 bundle，`fetchProvider: jina` 因此 fail closed（工具级 `WEB_PROVIDER_CONFIGURED_MISSING`），
   不会静默走 http provider。
 * **容器内 DNS 私网预检**与 E2B 网络策略的具体差异未单独测量；容器探针只验证了真实抓取链。
+
+### 19.6 修订：撤销 `web/jina-fetch-request` 会话事件
+
+* **失败机制**：dsh 0.1.5-rc.3 的 `dsh-session-persistence` 在 `session/resume` 回放 durable
+  log 时按冻结的 `KNOWN_SESSION_EVENT_TYPES` 校验；树外类型只有 envelope 顶层带
+  `ignorable: true` 才跳过，否则抛「unknown to this harness and not marked ignorable」。
+  `session.append(type, data, …)` 只透传 `sourceEventSeqs`/`surfaceOp`，无法设置该标记，dsh
+  也不提供事件名注册。于是首轮只要成功抓取一次，追问的 `session/resume` 就以 JSON-RPC
+  `-32603 Internal error` 失败（run `71779b32e35a`，事件位于 seq 43），真实原因只在
+  `error.data.details`。续接按设计 fail closed，不退回新会话。
+  `web-search-deepseek` 的 `recordRequest` 能用，是因为它的事件类型在 dsh 内置词表里。
+* **修正**：bundle 不再写 durable session（`lib/index.js` 删除 `recordRetrieval` 及 provider
+  的审计钩子）；`tests/index.test.mjs` 断言成功抓取后 `session.append` 调用 0 次，该断言在旧
+  实现上变红。
+* **新的每 run 取证判据**：`web_fetch` 的 `tool/call` 与 `tool/result`（结果正文即抓取文本），
+  加上本次 run 渲染出的 `web.fetchProvider: jina` 与 `web-fetch-http disabled`；两者共同说明
+  抓取走了 Jina 且无 http 回退面。失去的是 `endpoint`/`chars` 的独立记录，自建 Reader 的
+  endpoint 以渲染配置为准。
+* **宿主侧可诊断性**：ACP `session/resume` 被拒时，宿主把 `error.data.details`（或
+  `error.data.message`）的有界字符串附到失败原因，经 run 终帧的既有脱敏链呈现；UI 对「追问
+  未接上原会话」给出单独文案，不再暗示重试会续接。
+* **既有会话**：已含该事件的旧会话在 0.1.5-rc.3 上仍无法续接；是否离线剔除这类事件属于修改
+  运行数据，需另行决定，本修订不做。

@@ -347,6 +347,54 @@ def test_acp_followup_resume_error_fails_closed_without_falling_back(tmp_path: P
     assert sum(1 for entry in entries if entry["event"] == "session_new") == 1
 
 
+def test_acp_followup_resume_internal_error_surfaces_bounded_redacted_details(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A generic ``-32603`` resume refusal shows its ``error.data.details``.
+
+    dsh answers a resume it cannot replay (an out-of-tree session event, run
+    71779b32e35a) with ``-32603 Internal error`` and puts the cause only in
+    ``data.details``. Red→green: the old client dropped ``data``, so the run's
+    error read just "Internal error" and the details assertion fails. The detail
+    is agent-controlled, so it is bounded and passes the run's redaction
+    boundary — both in the terminal record and in the host log.
+    """
+    secret = "sk-resume-details-secret-0001"
+    details = (
+        "session event web/jina-fetch-request at seq 43 is unknown to this harness"
+        f" and not marked ignorable; key={secret} " + "x" * 5000
+    )
+    log = tmp_path / "agent.jsonl"
+    settings = {
+        "FAKE_ACP_LOG": str(log),
+        "FAKE_ACP_WRITE_REPORT": True,
+        "FAKE_ACP_RESUME_ERROR_DETAILS": details,
+    }
+    _config, store, manager = build_manager(tmp_path, settings, OPENAI_API_KEY=secret)
+    parent = run_first_turn(manager, "第一轮")
+
+    with caplog.at_level("DEBUG"):
+        child = manager.start("追问", parent_run_id=parent.run_id)
+        child_final = manager.wait(child.run_id, timeout=30)
+    assert child_final is not None
+    assert child_final.status == FAILED
+    error = child_final.error or ""
+    assert "Internal error" in error
+    assert "web/jina-fetch-request at seq 43 is unknown to this harness" in error
+    assert secret not in error, "error.data 是 agent 控制的文本，必须过 run 脱敏边界"
+    # Bounded: the 5000-char tail is clipped, not carried whole.
+    assert "x" * 1100 not in error
+    assert len(error) < 1500
+    assert secret not in events_text(store, child.run_id)
+    assert secret not in caplog.text, "宿主日志不得写出未脱敏的异常文本"
+    assert "is unknown to this harness" in caplog.text
+
+    # Still fail-closed: no fresh session answered the follow-up.
+    assert child_final.session_id is None
+    entries = read_log(log)
+    assert sum(1 for entry in entries if entry["event"] == "session_new") == 1
+
+
 # -- state inheritance failures ----------------------------------------------
 
 

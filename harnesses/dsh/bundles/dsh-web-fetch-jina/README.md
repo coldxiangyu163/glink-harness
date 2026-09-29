@@ -46,8 +46,11 @@ provider（id `http`）。替代动机是 GLINK-DSH-01 的根因：`dsh-web-fetc
   - `WEB_PROVIDER_ERROR`：Jina 401/402/403/422/429/5xx、非 JSON 响应、信封缺 `data.content`、
     传输失败、凭据解析失败、配置在运行期变为非法值。
 * **PDF / Office / JS 页面**：由 Jina 转文本，本 provider 不区分内容类型。
-* **审计**：每次成功抓取向当前 session 追加 `web/jina-fetch-request`
-  （`{url, endpoint, statusCode, truncated, chars}`，不含密钥）；失败不追加。
+* **不写会话日志**：provider 不向 durable session 追加任何事件。dsh 0.1.5-rc.3 在
+  `session/resume` 时按冻结词表回放日志，树外事件必须带 envelope 级 `ignorable: true`，
+  而 `session.append()` 无法设置它；早先的 `web/jina-fetch-request` 审计事件因此让整条会话
+  无法续接（`-32603 Internal error`）。每 run 取证改用 `web_fetch` 的 tool call/result
+  与本 bundle 的 provider 配置。
 * **数据外发**：被抓取的 URL 与 `JINA_API_KEY` 发给 `r.jina.ai`（可配置自建 Reader）；
   目标页面内容经 Jina 返回本进程。调用方（研究 Agent）接受该外发面。
 
