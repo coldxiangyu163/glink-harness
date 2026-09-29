@@ -275,9 +275,20 @@ export function planSummary(entries) {
   return `${oneLine(active[0]?.content ?? entries[0].content, 56)}${extra} · ${done}/${entries.length} 项`;
 }
 
+export function planStatusLabel(status) {
+  return { in_progress: '进行中', pending: '待开始', done: '已完成', completed: '已完成' }[status] ?? '';
+}
+
 export function planEntryLabel(entry) {
-  const status = { in_progress: '进行中', pending: '待开始', done: '已完成', completed: '已完成' }[entry.status] ?? '';
+  const status = planStatusLabel(entry.status);
   return `${status ? `${status} · ` : ''}${oneLine(entry.content, 120)}`;
+}
+
+export function planUpdateLabel(item) {
+  if (item.isError || item.status === 'error') return '计划更新失败';
+  if (item.status === 'cancelled') return '计划更新已停止';
+  if (item.status === 'interrupted') return '计划更新已中断';
+  return '计划更新';
 }
 
 /** A page title is only shown when the fetch result itself supplies one. */

@@ -887,6 +887,36 @@ h1, h2, h3, h4, p { margin: 0; }
 }
 #run-question:empty { display: none; }
 
+/* 当前轮任务停靠在对话滚动区上方；旧轮快照留在原位置，不遮挡过程控件。 */
+.pi-todo-panel {
+  flex-shrink: 0;
+  width: 100%;
+  max-width: var(--conversation-width);
+  min-width: 0;
+  margin-inline: auto;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--corner-lg);
+  background: var(--card);
+  box-shadow: var(--elev-hairline), var(--elev-surface);
+}
+#chat-view > .pi-todo-panel { margin-top: var(--space-3); }
+.pi-todo-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
+.pi-todo-head h3 { margin: 0; font-size: var(--text-caption); line-height: var(--text-caption--line-height); font-weight: 600; }
+.pi-todo-count, .pi-todo-state { color: var(--muted-foreground); font-size: var(--text-mini); line-height: var(--text-mini--line-height); }
+.pi-todo-list { display: flex; flex-direction: column; gap: var(--space-1); max-height: min(36vh, 320px); margin: var(--space-2) 0 0; padding: 0; overflow-y: auto; list-style: none; }
+.pi-todo-item { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; font-size: var(--text-caption); line-height: var(--text-caption--line-height); }
+.pi-todo-mark { flex: 0 0 8px; width: 8px; height: 8px; border: 1px solid var(--border-strong); border-radius: var(--corner-full); }
+.pi-todo-item[data-status="in_progress"] .pi-todo-mark { border-color: var(--primary-link); background: var(--primary-link); }
+.pi-todo-item[data-status="in_progress"] .pi-todo-content { color: var(--foreground); font-weight: 500; }
+.pi-todo-item[data-status="done"] .pi-todo-mark,
+.pi-todo-item[data-status="completed"] .pi-todo-mark { border-color: var(--muted-foreground); background: var(--muted-foreground); }
+.pi-todo-item[data-status="done"], .pi-todo-item[data-status="completed"] { color: var(--muted-foreground); }
+.pi-todo-item[data-status="done"] .pi-todo-content,
+.pi-todo-item[data-status="completed"] .pi-todo-content { text-decoration: line-through; }
+.pi-todo-state { flex: 0 0 auto; }
+.pi-todo-content { min-width: 0; overflow-wrap: anywhere; }
+.pi-plan-update[data-status="error"] { color: var(--destructive-text); }
+
 /* ── 研究过程（标准库 Thinking · steps + ToolChips）── */
 .pi-run { display: flex; flex-direction: column; gap: var(--space-4); }
 .pi-process { display: flex; flex-direction: column; width: 100%; max-width: var(--conversation-width); min-width: 0; margin-inline: auto; }
