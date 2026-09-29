@@ -23,6 +23,11 @@ test('ACP fixture: search, fetch title, todos, dispatch, thinking and usage surv
     { content: '整理证据', status: 'pending' },
   ]);
   assert.equal(describeTool(plan.name, plan.args, plan.presentation).object, '核验临床试验 · 0/2 项');
+  assert.equal(describeTool('todo_write', { todos: [
+    '{"content":"核验临床试验","status":"in_progress"}',
+    '{"content":"对照药监局资料","status":"in_progress"}',
+    '{"content":"整理证据","status":"completed"}',
+  ] }, 'plan').object, '核验临床试验（另 1 项进行中） · 1/3 项');
   const stage = model.items.find((item) => item.kind === 'stage');
   assert.deepEqual(stage.entries, [{ content: '资料核验', status: 'in_progress', priority: 'high' }]);
   assert.match(stageText(stage), /资料核验/);
@@ -30,6 +35,27 @@ test('ACP fixture: search, fetch title, todos, dispatch, thinking and usage surv
     'AI 制药市场规模与产业格局');
   assert.equal(model.items.find((item) => item.kind === 'thinking').text, '先核对一手来源');
   assert.equal(model.usage.totalTokens, 1200);
+});
+
+test('search result title matches a fetched URL ignoring tracking parameters', () => {
+  const fromSearch = reduceAll(createRunState(), [
+    { ...frames[2], seq: 1 },
+    { ...frames[3], seq: 2, payload: { ...frames[3].payload,
+      result: 'Sources:\n- [Clinical trial results - Nature Medicine](https://example.org/research/clinical?tracking=1#lead)\n- [Other page](https://example.org/other)' } },
+    { ...frames[4], seq: 3 },
+    { ...frames[5], seq: 4, payload: { ...frames[5].payload,
+      result: 'Fetched https://example.org/research/clinical (HTTP 200)\n\nExternal web content follows.' } },
+  ]);
+  assert.equal(collectSources(fromSearch.items).pages[0].title, 'Clinical trial results - Nature Medicine');
+  const denied = reduceAll(createRunState(), [
+    { ...frames[2], seq: 1 },
+    { ...frames[3], seq: 2, payload: { ...frames[3].payload,
+      result: 'Sources:\n- [No permission](https://example.org/research/clinical)' } },
+    { ...frames[4], seq: 3 },
+    { ...frames[5], seq: 4, payload: { ...frames[5].payload,
+      result: 'Fetched https://example.org/research/clinical (HTTP 401)\nAccess denied' } },
+  ]);
+  assert.equal(collectSources(denied.items).pages[0].title, undefined);
 });
 
 test('old frames and adjacent malformed inputs degrade without invented sources or plans', () => {
