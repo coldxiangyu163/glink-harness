@@ -32,6 +32,7 @@ from .harnesses import (
 #: 只能命名这些取值，避免拼写错误静默失效。见 ``HarnessCapabilities.permission_allow``。
 __all__ = ["ACP_PERMISSION_OPTION_KINDS", "ACP_PERMISSION_TOOL_KINDS"]
 _ACP_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 EXECUTORS = ("inproc", "docker", "e2b")
 #: Kernel adapter families a run record can name; the pack manifest's ``family``
@@ -126,6 +127,22 @@ class HostConfig:
     #: per-agent injection point; values never enter the host environment.
     #: Each entry's credential values are added to the run's redaction boundary.
     acp_credential_files: tuple[tuple[str, str], ...] = ()
+    #: Credential values to render into each run's exclusive ``HOME``
+    #: (``PI_GLINK_ACP_CREDENTIAL_ENV``): a comma-separated list of environment
+    #: key *names*. At run preparation the host renders one dsh-format
+    #: ``.dsh/.credentials.yaml`` (``version: 1`` + a flat ``refs`` mapping) from
+    #: the configured values, so credentials live in a single source (``.env``,
+    #: 0600, git-ignored) instead of a parallel local file. Rendered values join
+    #: the run's redaction boundary and the rendered copy is deleted at close-out
+    #: (decision C), exactly like an injected file. Mutually exclusive with
+    #: ``acp_credential_files`` (both render into ``HOME``; one source per host).
+    acp_credential_env: tuple[str, ...] = ()
+    #: The values paired with :attr:`acp_credential_env` (same order). Never in
+    #: ``repr`` and never logged: the rendered copy inside a run's ``HOME`` is
+    #: the only materialization.
+    acp_credential_env_values: tuple[tuple[str, str], ...] = field(
+        repr=False, default=()
+    )
     #: Extra ``NAME=value`` entries for the ACP agent process
     #: (``PI_GLINK_ACP_ENV``, ``;``-separated). ``HOME`` may not be overridden:
     #: the per-run state root stays the isolation boundary. A value whose name
@@ -333,6 +350,13 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     harnesses_dir = _path(values, "PI_GLINK_HARNESSES_DIR", repo_root / "harnesses")
     pack = _select_harness_pack(values, harnesses_dir)
     acp_credential_files = _acp_credential_files(values)
+    acp_credential_env_values = _acp_credential_env(values)
+    acp_credential_env = tuple(name for name, _value in acp_credential_env_values)
+    if acp_credential_files and acp_credential_env:
+        raise ConfigError(
+            "PI_GLINK_ACP_CREDENTIAL_FILES 与 PI_GLINK_ACP_CREDENTIAL_ENV 互斥："
+            "两者都会往 run HOME 投递凭据，一次部署只选一个来源"
+        )
     acp_env = _acp_env_entries(values)
     tenancy_mode = _text(values, "PI_GLINK_TENANCY", "local").lower()
     auth_mode = _text(values, "PI_GLINK_AUTH_MODE", "gateway").lower()
@@ -429,6 +453,8 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         pack=pack,
         harnesses_dir=harnesses_dir,
         acp_credential_files=acp_credential_files,
+        acp_credential_env=acp_credential_env,
+        acp_credential_env_values=acp_credential_env_values,
         acp_env=acp_env,
         # The pi pack's entry names the kernel binary; the local override stays
         # an inproc debugging knob (isolated faces always run the image's entry).
@@ -704,6 +730,35 @@ def _acp_credential_files(values: Mapping[str, str]) -> tuple[tuple[str, str], .
     return tuple(entries)
 
 
+def _acp_credential_env(values: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """Parse ``PI_GLINK_ACP_CREDENTIAL_ENV``: a comma-separated list of key names.
+
+    Each name must be a plain upper-case environment key and its value must
+    already be configured (``.env`` or the process environment): a declared key
+    without a value refuses startup, never renders an empty credential. Returns
+    ``(name, value)`` pairs; the caller keeps values out of repr and logs.
+    """
+    raw = _text(values, "PI_GLINK_ACP_CREDENTIAL_ENV", "")
+    if not raw:
+        return ()
+    pairs: list[tuple[str, str]] = []
+    for chunk in raw.split(","):
+        name = chunk.strip()
+        if not name:
+            continue
+        if not _ENV_KEY_RE.fullmatch(name):
+            raise ConfigError(
+                f"PI_GLINK_ACP_CREDENTIAL_ENV 的键名必须是环境变量名（大写字母/数字/下划线）；当前 {name!r}"
+            )
+        value = _text(values, name, "")
+        if not value:
+            raise ConfigError(
+                f"PI_GLINK_ACP_CREDENTIAL_ENV 声明了 {name}，但它没有配置值（.env 或环境变量）"
+            )
+        pairs.append((name, value))
+    return tuple(pairs)
+
+
 def _acp_env_entries(values: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
     """Parse ``PI_GLINK_ACP_ENV``: ``NAME=value`` entries.
 
@@ -755,9 +810,10 @@ def _acp_knobs_are_acp_only(config: HostConfig) -> None:
 def _acp_credentials_follow_policy(config: HostConfig) -> None:
     """The ACP credential channels are model credentials under the policy.
 
-    ``PI_GLINK_ACP_ENV`` / ``PI_GLINK_ACP_CREDENTIAL_FILES`` hand the operator's
-    credential to every ACP run, so they may not bypass the model-credential
-    policy (docs/adr/0015):
+    ``PI_GLINK_ACP_ENV`` / ``PI_GLINK_ACP_CREDENTIAL_FILES`` /
+    ``PI_GLINK_ACP_CREDENTIAL_ENV`` hand the operator's credential to every ACP
+    run, so they may not bypass the model-credential policy (docs/adr/0015,
+    docs/adr/0016 for the env-rendering channel):
 
     * multitenant + ``tenant``: the policy is per-tenant credentials and the
       ACP per-tenant injection points do not exist yet (M2); the operator's
@@ -770,26 +826,30 @@ def _acp_credentials_follow_policy(config: HostConfig) -> None:
       (:func:`load_config`): a shared ACP host that cannot name its source
       must not boot and fail later per run.
 
-    The single-user mode keeps both channels as-is: the operator's own
+    The single-user mode keeps the channels as-is: the operator's own
     credential for the operator's own runs is the documented local entry.
     """
     if config.harness != "acp" or not config.multi_tenant:
         return
-    has_channel = bool(config.acp_env or config.acp_credential_files)
+    has_channel = bool(
+        config.acp_env or config.acp_credential_files or config.acp_credential_env
+    )
     if config.shared_model_credentials:
         if not has_channel:
             raise ConfigError(
                 "PI_GLINK_MODEL_CREDENTIALS=shared 且 harness 为 ACP 族时需要 "
-                "PI_GLINK_ACP_ENV 或 PI_GLINK_ACP_CREDENTIAL_FILES 之一："
-                "shared 部署必须能指出共享凭据来源，缺源不启动（ADR 0015）"
+                "PI_GLINK_ACP_ENV / PI_GLINK_ACP_CREDENTIAL_FILES / "
+                "PI_GLINK_ACP_CREDENTIAL_ENV 之一："
+                "shared 部署必须能指出共享凭据来源，缺源不启动（ADR 0015/0016）"
             )
         return
     if has_channel:
         raise ConfigError(
             "多租户 tenant 政策下不允许配置 PI_GLINK_ACP_ENV / "
-            "PI_GLINK_ACP_CREDENTIAL_FILES：ACP 通道是运营方共享凭据，而租户级"
+            "PI_GLINK_ACP_CREDENTIAL_FILES / PI_GLINK_ACP_CREDENTIAL_ENV："
+            "ACP 通道是运营方共享凭据，而租户级"
             "注入点未实现（M2）；共享请显式配置 PI_GLINK_MODEL_CREDENTIALS=shared"
-            "（ADR 0015）"
+            "（ADR 0015/0016）"
         )
 
 

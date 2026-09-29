@@ -133,7 +133,8 @@ def test_profile_overlay_lists_the_shipped_bundles_plus_the_jina_bundle() -> Non
         "@pi-glink/dsh-web-fetch-jina",
     ]
     assert manifest["dsh"]["profile"]["patchReload"] == "startup"
-    # 覆盖层只带清单与用户层，不带 bundle 代码：代码由镜像安装，重建即更新。
+    # 覆盖层只带清单、用户层与默认 settings（部署偏好版本化，ADR 0016；
+    # 不含 key——apiKeyEnv 只是引用名）：bundle 代码由镜像安装，重建即更新。
     patch_text = (PROFILE_DIR / "cordis.patch.yml").read_text(encoding="utf-8")
     assert patch_text.strip().endswith("[]"), "profile 用户层必须保持空列表"
     overlay_files = sorted(
@@ -144,7 +145,10 @@ def test_profile_overlay_lists_the_shipped_bundles_plus_the_jina_bundle() -> Non
     assert overlay_files == [
         "harnesses/dsh/home/.dsh/profiles/acp/cordis.patch.yml",
         "harnesses/dsh/home/.dsh/profiles/acp/package.json",
+        "harnesses/dsh/home/.dsh/settings.yaml",
     ]
+    settings_text = (REPO_ROOT / "harnesses" / "dsh" / "home" / ".dsh" / "settings.yaml").read_text(encoding="utf-8")
+    assert "apiKeyEnv" in settings_text and "sk-" not in settings_text, "overlay settings 只能携带引用名，不能携带 key 值"
 
 
 def test_both_acp_images_install_the_same_bundle_and_self_check_it() -> None:

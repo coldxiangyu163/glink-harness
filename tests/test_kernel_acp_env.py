@@ -261,3 +261,74 @@ def test_oauth_fields_in_scalar_lines_join_the_redaction_boundary() -> None:
     found = credential_secrets_from_text(material)
     assert "opaque-oauth-access-0005" in found
     assert "opaque-oauth-refresh-0006" in found
+
+
+def test_credential_env_renders_a_private_dsh_credentials_file(
+    tmp_path: Path,
+) -> None:
+    """PI_GLINK_ACP_CREDENTIAL_ENV：.env 单源渲染沙箱凭据（M 系列收尾）。
+
+    凭据值只存 ``.env``（0600、git-ignored）；run 准备时宿主渲染一份 dsh 格式的
+    ``.dsh/.credentials.yaml`` 进 run HOME：0600、refs 平面映射、值进该 run 的
+    脱敏边界，渲染副本作为 credential destination 在收尾删除（决定 C）——与注入
+    文件同一条生命周期。
+    """
+    result = runtime(
+        tmp_path,
+        {
+            "PI_GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY,JINA_API_KEY",
+            "OPENROUTER_API_KEY": "sk-or-secret-value-0001",
+            "JINA_API_KEY": "jina's-secret-0002",
+        },
+    )
+    rendered = result.home / ".dsh" / ".credentials.yaml"
+    assert rendered.is_file(), "env 凭据必须渲染为沙箱 HOME 内的 dsh credentials 文件"
+    assert stat.S_IMODE(rendered.stat().st_mode) == 0o600
+    text = rendered.read_text(encoding="utf-8")
+    assert text.startswith("version: 1\nrefs:\n")
+    # 单引号标量：内部单引号以双写转义，dsh 的 YAML 解析还原原值。
+    assert "  OPENROUTER_API_KEY: 'sk-or-secret-value-0001'" in text
+    assert "  JINA_API_KEY: 'jina''s-secret-0002'" in text
+    assert ".dsh/.credentials.yaml" in result.credential_dests
+    for sweep in result.session_sweeps():
+        assert ".dsh/.credentials.yaml" in sweep.credential_copies
+    assert "sk-or-secret-value-0001" in result.secrets
+    assert "jina's-secret-0002" in result.secrets
+
+
+def test_credential_env_and_credential_files_are_mutually_exclusive() -> None:
+    """两个来源都往 run HOME 投递凭据，一次部署必须二选一，启动即拒绝。"""
+    source = Path(tempfile.mkdtemp(prefix="glink-mutex-")) / "creds.yaml"
+    source.write_text("version: 1\nrefs: {}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="互斥"):
+        config(
+            {
+                "PI_GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY",
+                "OPENROUTER_API_KEY": "sk-or-value",
+                "PI_GLINK_ACP_CREDENTIAL_FILES": f"{source}=.dsh/creds.yaml",
+            }
+        )
+
+
+def test_credential_env_requires_the_declared_values_to_exist() -> None:
+    """声明了键但没有值 → 启动拒绝，绝不渲染空凭据。"""
+    with pytest.raises(ConfigError, match="MISSING_PROVIDER_KEY"):
+        config({"PI_GLINK_ACP_CREDENTIAL_ENV": "MISSING_PROVIDER_KEY"})
+    with pytest.raises(ConfigError, match="环境变量名"):
+        config(
+            {
+                "PI_GLINK_ACP_CREDENTIAL_ENV": "bad-name",
+                "bad-name": "v",
+            }
+        )
+
+
+def test_credential_env_values_never_reach_the_config_repr() -> None:
+    cfg = config(
+        {
+            "PI_GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY",
+            "OPENROUTER_API_KEY": "sk-or-repr-leak-0003",
+        }
+    )
+    assert cfg.acp_credential_env == ("OPENROUTER_API_KEY",)
+    assert "sk-or-repr-leak-0003" not in repr(cfg)

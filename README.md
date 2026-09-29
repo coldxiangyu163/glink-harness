@@ -1,6 +1,6 @@
 # pi-glink
 
-以 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 为执行内核的研究工作台：本机 / Docker / E2B 三种执行面共享同一套 run 生命周期。默认 `local` 模式仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用**单宿主多租户**—— 身份入口二选一：本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`PI_GLINK_AUTH_MODE=accounts`）；两者都只在可信服务端生成租户上下文，Docker/E2B 可并发（默认全局 4 / 单租户 2）。模型凭据默认仍是每租户自备（`PI_GLINK_MODEL_CREDENTIALS=tenant`）；SaaS 部署可显式选择 `shared`，由宿主冻结一套模型凭据统一提供，共享模式不读取任何租户配置（配置 `PI_GLINK_TENANT_CONFIG_FILE` 即拒绝启动）；ACP 族的注入通道（`PI_GLINK_ACP_ENV` / `PI_GLINK_ACP_CREDENTIAL_FILES`）视同模型凭据服从同一政策——tenant 政策下拒绝、shared 下为 ACP 宿主的具名凭据源（[ADR 0015](docs/adr/0015-acp-credential-channels-under-model-credential-policy.md)）。多租户目前只经过**合成验证**（临时密钥文件、自签断言、fake 执行面、临时数据根），没有真实网关、Docker/E2B live 或生产数据验收，不能把“合成矩阵通过”当作多租户已经安全上线。方向、当前实现与尚未覆盖的边界见 [架构](docs/architecture.md) 与 [多租户方案](docs/multitenancy-plan.md)；前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按 pi 的原生事件语义重写。
+以 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 为执行内核的研究工作台：本机 / Docker / E2B 三种执行面共享同一套 run 生命周期。默认 `local` 模式仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用**单宿主多租户**—— 身份入口二选一：本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`PI_GLINK_AUTH_MODE=accounts`）；两者都只在可信服务端生成租户上下文，Docker/E2B 可并发（默认全局 4 / 单租户 2）。模型凭据默认仍是每租户自备（`PI_GLINK_MODEL_CREDENTIALS=tenant`）；SaaS 部署可显式选择 `shared`，由宿主冻结一套模型凭据统一提供，共享模式不读取任何租户配置（配置 `PI_GLINK_TENANT_CONFIG_FILE` 即拒绝启动）；ACP 族的注入通道（`PI_GLINK_ACP_ENV` / `PI_GLINK_ACP_CREDENTIAL_FILES` / `PI_GLINK_ACP_CREDENTIAL_ENV`）视同模型凭据服从同一政策——tenant 政策下拒绝、shared 下为 ACP 宿主的具名凭据源（[ADR 0015](docs/adr/0015-acp-credential-channels-under-model-credential-policy.md)、[ADR 0016](docs/adr/0016-acp-credential-env-single-source.md)）。多租户目前只经过**合成验证**（临时密钥文件、自签断言、fake 执行面、临时数据根），没有真实网关、Docker/E2B live 或生产数据验收，不能把“合成矩阵通过”当作多租户已经安全上线。方向、当前实现与尚未覆盖的边界见 [架构](docs/architecture.md) 与 [多租户方案](docs/multitenancy-plan.md)；前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按 pi 的原生事件语义重写。
 
 **当前状态：本机 / Docker / E2B 三种执行面均已跑通真实 run**，验收记录见 [docs/acceptance.md](docs/acceptance.md)，证据在 `docs/evidence/`。除前端静态资源源自 Glink 工作台外，本仓库不引用 FrontierAgent 的任何运行模块。
 
@@ -383,6 +383,7 @@ node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 26 个角�
 | `PI_GLINK_HARNESS` | `pi` | 选择 harness 包（`pi` / `dsh` / `codex` / `opencode`）；一次部署只跑一个，启动冻结 |
 | `PI_GLINK_HARNESSES_DIR` | `<repo>/harnesses` | 包根目录放在别处时；选中包缺失或清单不合法即拒绝启动 |
 | `PI_GLINK_ACP_CREDENTIAL_FILES` | 空 | ACP agent 需要宿主只读凭据时，按 `source=dest`（`;` 分隔）注入每 run `HOME`；非 ACP 包下设置即拒绝启动 |
+| `PI_GLINK_ACP_CREDENTIAL_ENV` | 空 | ACP 凭据的 `.env` 单源通道：逗号分隔键名，每 run 渲染 dsh 格式 `.dsh/.credentials.yaml` 进沙箱 `HOME`（0600、收尾删除）；与上面 FILES 互斥；声明的键缺值拒绝启动（[ADR 0016](docs/adr/0016-acp-credential-env-single-source.md)） |
 | `PI_GLINK_ACP_ENV` | 空 | 给 ACP agent 进程传环境变量时；`HOME` 不可覆盖（每 run 状态根是隔离边界） |
 | `LOCAL_WEB_ACP_WORKER_IMAGE` | `pi-glink-acp-worker:latest` | ACP + `docker` 面换镜像时（与 pi 面镜像分开，二者装的 agent 不同） |
 | `LOCAL_WEB_E2B_ACP_TEMPLATE` | `glink-acp-worker` | ACP + `e2b` 面换模板时（与 pi 面模板分开，同上） |

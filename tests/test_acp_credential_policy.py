@@ -223,3 +223,27 @@ def test_acp_family_validate_credentials_refused_under_tenant(tmp_path: Path) ->
     message = str(excinfo.value)
     assert "tenant 政策下 ACP 族不可用" in message
     assert "PI_GLINK_MODEL_CREDENTIALS=shared" in message
+
+
+def test_multitenant_tenant_refuses_credential_env(tmp_path: Path) -> None:
+    """PI_GLINK_ACP_CREDENTIAL_ENV 同样是运营方凭据通道，tenant 政策下整通道拒绝（ADR 0015/0016）。"""
+    values = _acp_values(tmp_path, tenancy="multitenant", policy="tenant")
+    values["PI_GLINK_ACP_CREDENTIAL_ENV"] = "OPENROUTER_API_KEY"
+    values["OPENROUTER_API_KEY"] = "sk-or-shared-0001"
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(values, REPO_ROOT)
+    assert "tenant 政策下不允许" in str(excinfo.value)
+    assert "PI_GLINK_ACP_CREDENTIAL_ENV" in str(excinfo.value)
+
+
+def test_multitenant_shared_accepts_credential_env_as_named_source(
+    tmp_path: Path,
+) -> None:
+    """shared 部署可把 env 渲染通道作为具名共享凭据源（镜像 FILES 分支）。"""
+    values = _acp_values(
+        tmp_path, tenancy="multitenant", policy="shared", openai_trio=False
+    )
+    values["PI_GLINK_ACP_CREDENTIAL_ENV"] = "OPENROUTER_API_KEY"
+    values["OPENROUTER_API_KEY"] = "sk-or-shared-0002"
+    config = build_config(values, REPO_ROOT)
+    assert config.acp_credential_env == ("OPENROUTER_API_KEY",)

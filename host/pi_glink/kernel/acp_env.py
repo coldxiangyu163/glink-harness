@@ -58,6 +58,12 @@ from .sweep import SessionSweep
 ACP_RUNTIME_DIRNAME = "acp-agent"
 #: The run's agent state root (``HOME``) below :data:`ACP_RUNTIME_DIRNAME`.
 ACP_HOME_DIRNAME = "home"
+#: Where ``PI_GLINK_ACP_CREDENTIAL_ENV`` renders its dsh-format credentials
+#: file, relative to the run HOME. The dsh credentials service reads exactly
+#: this path; other ACP packs that need a different file shape use
+#: ``PI_GLINK_ACP_CREDENTIAL_FILES`` instead (the two sources are mutually
+#: exclusive at startup).
+DSH_CREDENTIALS_RELATIVE = ".dsh/.credentials.yaml"
 #: A state root recovered from an E2B sandbox, below
 #: :data:`ACP_RUNTIME_DIRNAME`. Only the E2B face writes it, and only after the
 #: whole bounded recovery succeeded (see
@@ -202,6 +208,7 @@ def prepare_acp_runtime(
     # :func:`_apply_home_overlay`).
     _apply_home_overlay(config, home)
     secrets = list(_inject_credential_files(config, home, base_home))
+    secrets.extend(_render_credential_env(config, home))
     # ``PI_GLINK_ACP_ENV`` is the explicit env channel (an API-key style
     # credential that an agent reads from the environment). Its values join the
     # run's redaction boundary by the same rule the credential files use: only
@@ -209,6 +216,8 @@ def prepare_acp_runtime(
     # (``ACME_MODE=workspace``) never becomes a redaction target.
     secrets.extend(_env_credential_values(config))
     credential_dests = tuple(dest for _source, dest in config.acp_credential_files)
+    if config.acp_credential_env:
+        credential_dests = (DSH_CREDENTIALS_RELATIVE,) + credential_dests
     if inherit_from is not None:
         # After the injection above, so the fresh credential files win; the
         # destinations are excluded from the copy for the same reason.
@@ -394,6 +403,48 @@ def _apply_home_overlay(config: HostConfig, home: Path) -> None:
         finally:
             os.close(handle)
         _chmod_file_private(target)
+
+
+def _render_credential_env(config: HostConfig, home: Path) -> tuple[str, ...]:
+    """Render ``PI_GLINK_ACP_CREDENTIAL_ENV`` into the run HOME, 0600.
+
+    One dsh-format ``.dsh/.credentials.yaml`` (``version: 1`` + a flat ``refs``
+    mapping) is written from the configured values, so the credential lives in
+    a single source — ``.env``, git-ignored — instead of a parallel local file
+    the operator must keep in sync. The write follows the injection rules
+    (``O_NOFOLLOW``, 0600, parent directories owner-only) and the rendered
+    values are returned so they join the run's redaction boundary; the rendered
+    file is registered as a credential destination and deleted at close-out
+    (decision C) exactly like an injected file.
+    """
+    if not config.acp_credential_env_values:
+        return ()
+    lines = ["version: 1", "refs:"]
+    values: list[str] = []
+    for name, value in config.acp_credential_env_values:
+        # YAML single-quoted scalar: the only escape is doubling ' itself.
+        lines.append(f"  {name}: '{value.replace(chr(39), chr(39) * 2)}'")
+        values.append(value)
+    target = home / DSH_CREDENTIALS_RELATIVE
+    parent = target.parent
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    current = parent
+    while current != home and home in current.parents:
+        _chmod_private(current)
+        current = current.parent
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(target, flags, 0o600)
+    except OSError as exc:
+        raise ConfigError(
+            f"ACP 凭据渲染目标不可安全写入：{target}（{exc}）"
+        ) from exc
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.write(descriptor, "\n".join(lines).encode("utf-8") + b"\n")
+    finally:
+        os.close(descriptor)
+    return tuple(values)
 
 
 def _inject_credential_files(
