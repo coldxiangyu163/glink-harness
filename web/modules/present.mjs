@@ -192,6 +192,8 @@ function subagentObject(args) {
  * names never appear on screen.
  */
 const TOOL_RULES = [
+  { test: /^present$/i, icon: 'file-text', action: '交付', active: '正在整理交付文件',
+    object: (args) => Array.isArray(args.files) ? `${args.files.length} 个文件` : '' },
   { test: /^(web_?search|search_web|websearch)$/i, icon: 'search', action: '检索', active: '正在检索',
     object: (args) => firstText([args.query, args.queries, args.q]) },
   { test: /^get_search_content$/i, icon: 'file-text', action: '读取检索结果', active: '正在读取检索结果',
@@ -218,10 +220,10 @@ const TOOL_RULES = [
 // reader-facing words and object formatting. The name rules below are read
 // solely for old persisted frames without a hint (including child progress).
 const PRESENTATION_RULES = {
-  search_web: TOOL_RULES[0], read_search: TOOL_RULES[1], fetch_page: TOOL_RULES[2],
-  execute: TOOL_RULES[3], read_file: TOOL_RULES[4], write_file: TOOL_RULES[5],
-  edit_file: TOOL_RULES[6], delegate: TOOL_RULES[7], find: TOOL_RULES[8],
-  plan: TOOL_RULES[9],
+  deliver: TOOL_RULES[0], search_web: TOOL_RULES[1], read_search: TOOL_RULES[2],
+  fetch_page: TOOL_RULES[3], execute: TOOL_RULES[4], read_file: TOOL_RULES[5],
+  write_file: TOOL_RULES[6], edit_file: TOOL_RULES[7], delegate: TOOL_RULES[8],
+  find: TOOL_RULES[9], plan: TOOL_RULES[10],
   manage_children: { icon: 'agent', action: '查看子代理', active: '正在查看子代理', object: () => '' },
   stop_child: { icon: 'agent', action: '停止子代理', active: '正在停止子代理', object: () => '' },
   message_child: { icon: 'agent', action: '联系子代理', active: '正在联系子代理', object: () => '' },

@@ -38,6 +38,28 @@ function replay(name, run = {}) {
   return { frames, state: reduceAll(createRunState({ runId: frames[0].runId, ...run }), frames) };
 }
 
+test('declarations appear live; terminal results and REST records settle the same cards', () => {
+  const frame = (seq, type, payload) => ({ seq, type, payload, v: 1, ts: 10 + seq });
+  const declared = reduce(createRunState({ runId: 'r' }), frame(1, 'deliverables_declared', {
+    files: [{ path: 'district/brief.md', description: '辖区备忘录' }],
+  }));
+  assert.deepEqual(declared.deliverables, [{ path: 'district/brief.md',
+    description: '辖区备忘录', status: 'declared', available: false }]);
+  const terminal = reduce(declared, frame(2, 'run_finished', {
+    status: 'finished', reportPath: '/private/artifacts/report.md', reportStatus: 'ok',
+    stopReason: null, error: null, cleanup: { released: true }, children: [],
+    deliverables: [{ path: 'district/brief.md', description: '辖区备忘录', status: 'ok' }],
+  }));
+  assert.equal(terminal.hasReport, true);
+  assert.equal(terminal.deliverables[0].available, true);
+  assert.deepEqual(createRunState({ deliverables: terminal.deliverables }).deliverables, terminal.deliverables);
+  assert.deepEqual(createRunState().deliverables, [], 'old pi runs show no delivery section');
+  const old = reduce(declared, frame(2, 'unknown_v2', { files: [] }));
+  assert.equal(old.lastSeq, 2);
+  assert.equal(old.rejectedFrames, 1);
+  assert.equal(old.deliverables[0].status, 'declared');
+});
+
 test('the generated schema module is the reducer vocabulary', () => {
   assert.deepEqual(Object.keys(EVENT_SCHEMA), [...EVENT_TYPES]);
   for (const type of EVENT_TYPES) {
