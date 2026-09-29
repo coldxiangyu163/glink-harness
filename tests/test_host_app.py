@@ -363,3 +363,41 @@ def test_the_cli_revalidates_host_and_port_overrides(
     assert app_main(["--port", "70000"]) == 2
     assert "LOCAL_WEB_PORT" in capsys.readouterr().err
     assert config.host == "127.0.0.1" and config.port == 0, "配置对象不得被就地改写"
+
+
+def test_health_on_a_sandbox_face_does_not_probe_the_local_path(
+    tmp_path: Path,
+) -> None:
+    """docker/e2b 面的引擎在镜像/沙箱里，health 不得用本机 PATH 误判不可用。
+
+    回归场景：harness=dsh + executor=e2b（内核在 E2B 模板内、本机无 dsh CLI）被
+    ``shutil.which`` 报为 available=false，前端据此拦截一切研究发起——修复后沙箱面
+    恒可用（配置完整性已由启动校验把关），只有 inproc 才看本机 PATH。
+    """
+    config = build_config(
+        {
+            "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
+            "LOCAL_WEB_PORT": "0",
+            "OPENAI_MODEL": "test-model",
+            "PI_GLINK_HARNESS": "dsh",
+            "LOCAL_WEB_EXECUTOR": "e2b",
+            "E2B_API_KEY": "test-e2b-key",
+            "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
+        },
+        REPO_ROOT,
+    )
+    instance = create_server(config)
+    thread = threading.Thread(target=instance.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, _, body = _get(instance, "/api/health")
+        payload = json.loads(body)
+        assert status == 200
+        assert payload["executor"] == "e2b"
+        assert payload["pi"]["bin"] == "dsh"
+        assert payload["pi"]["available"] is True, (
+            "沙箱面的执行体在镜像/模板内，本机没有 dsh 不代表引擎不可用"
+        )
+    finally:
+        instance.shutdown()
+        instance.server_close()

@@ -334,11 +334,20 @@ class RoutesMixin:
 
     def _health_payload(self) -> dict[str, Any]:
         config = self.server.config
-        pi_path = shutil.which(config.pi_bin)
+        # ``available`` answers "can this host start runs on its configured
+        # face", not "is the kernel on this machine's PATH": only ``inproc``
+        # runs the kernel locally, so only it is judged by ``shutil.which``.
+        # Docker/E2B run it inside the image/template (whose configuration the
+        # startup checks already validated), where a local lookup would report
+        # a harness that works fine as unavailable (e.g. dsh + e2b).
+        if config.executor == "inproc":
+            pi_available = shutil.which(config.pi_bin) is not None
+        else:
+            pi_available = True
         payload: dict[str, Any] = {
             "status": "ok",
             "executor": config.executor,
-            "pi": {"bin": config.pi_bin, "available": pi_path is not None},
+            "pi": {"bin": config.pi_bin, "available": pi_available},
             "configured": config.public_view()["configured"],
         }
         # An unauthenticated probe must not disclose whether (or which) runs are
