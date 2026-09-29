@@ -1,0 +1,14 @@
+GLINK-ARCH-E2BLIVE-20260928 — 真实 E2B 单 id 不存在核验
+执行命令形状：主 checkout `.venv/bin/python`，从主 checkout `.env` 只在内存中取 E2B_API_KEY；对已记录 sandbox_id 调用 `e2b.Sandbox.get_info(sandbox_id, api_key=key)`；捕获 `SandboxNotFoundException`（SDK 对 HTTP 404 的异常）。脚本 exit 0；不调用 list，不 kill 其他资源。
+
+失败尝试：
+a4c2a41d8cb1 sandbox=iij7ukkuyd6yljducbhmn -> HTTP 404
+0c05a572e116 sandbox=iuskfafxbvqi2zz3mhxyx -> HTTP 404
+c0ee196a93c2 sandbox=ithzapzj7f6q94ian9vyn -> HTTP 404
+
+成功 run：
+10b065830440 sandbox=i3xs76gvwij919qvr78j5 -> HTTP 404
+f2a66107ec40 sandbox=i33w5zld939dsqolj5230 -> HTTP 404
+e2323dc13294 sandbox=iv40n4s1b98kcfid4qwsr -> HTTP 404
+
+SDK 参数直测：sandbox=ij6qukru7k0y31xb674bm -> kill() 返回 true，随后 get_info HTTP 404（参见 sdk-probe.json）。

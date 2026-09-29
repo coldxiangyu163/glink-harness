@@ -1,0 +1,20 @@
+# 独占 PID 台账（本任务创建；停止使用 kill <记录的PID>，未使用 pkill）
+temporary_root=/tmp/glink-e2blive.bigMby5W
+web_port=54051
+egress_port=54052
+
+host: pid=30616 final_state=EXITED
+host-local: pid=31058 final_state=EXITED
+host-live: pid=35275 final_state=EXITED
+host-final: pid=37763 final_state=EXITED
+host-pinggy: pid=55573 final_state=EXITED
+tunnel: pid=30150 final_state=EXITED
+ssh-tunnel: pid=34485 final_state=EXITED
+pinggy: pid=54814 final_state=EXITED
+probe: pid=33510 final_state=EXITED
+probe2: pid=34895 final_state=EXITED
+probe-pinggy: pid=55190 final_state=EXITED
+web_listener_after_stop=none (lsof_exit=1)
+egress_listener_after_stop=none (lsof_exit=1)
+
+temporary_root_removed=yes

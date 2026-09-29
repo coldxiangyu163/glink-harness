@@ -322,3 +322,17 @@ inproc `a6f67fde8e51` / docker `03be2909302e` / e2b `db6a9e83c0b7` 均为 **0**�
 证据：`docs/evidence/ui-features.txt` / `ui-features.json`、`ui-parity.txt` / `ui-parity.json`、
 `browser-run.png`，以及并排对照截图（`sbs-ref-home.png` / `sbs-mine-home.png` 等，按需重跑
 `node tests/browser/ui-parity.mjs` 与 `ui-features.mjs` 复现）。
+
+## 2026-09-28 UTC / 2026-09-29 本机：E2B H2 live 复验（GLINK-ARCH-E2BLIVE-20260928）
+
+证据入口：[e2b-live-2026-09-28/README.md](evidence/e2b-live-2026-09-28/README.md)。被测主 checkout 与写 worktree 均为 `6c73023`；宿主从主 checkout 启动，`e2b` SDK 2.51.0、现有 `pi-glink-worker:default` 模板，未改产品代码/模板。本次是 `local` 单用户 + E2B 真实模型/出口代理调用，**不是**多租户上线验收。
+
+| 验收点 | 实测结果（原始退出状态） | 证据 |
+|---|---|---|
+| 全生命周期 | `smoke-local-run.py` exit 0；run `10b065830440` `finished`、55 帧、172 B 报告与主会话回收到宿主；终帧/SQLite 同状态、同序号，`cleanup.released=true`，目标沙箱 DELETE 204、后续 SDK 404 | [run-excerpts.json](evidence/e2b-live-2026-09-28/run-excerpts.json)、[host-excerpts.txt](evidence/e2b-live-2026-09-28/host-excerpts.txt) |
+| H2 真实 SDK 参数 | 直接对现有模板新建临时沙箱，`files.get_info(..., request_timeout=15)` 获得 18 B 元信息，`files.read(..., format='stream', request_timeout=15)` 返回同一字节序列；销毁 0.278s 且之后 404。宿主真实 run 文件回收正常，日志无 `request_timeout` TypeError | [sdk-probe.json](evidence/e2b-live-2026-09-28/sdk-probe.json) |
+| 64 文件上限不阻终态 | `smoke-local-run.py` exit 0；run `f2a66107ec40` 的 bash 工具证实写 70 个 `z*.txt`，宿主只回收 64 个普通文件（含 `report.md`）；终帧有精确 `工作区产物超过文件数上限（64）`，仍 `finished`、报告可下载、cleanup released | [run-excerpts.json](evidence/e2b-live-2026-09-28/run-excerpts.json) |
+| 销毁预算 | 三条成功 run 回收会话帧至终帧的剩余收尾窗口分别 ≤1.568/1.511/1.313s；目标沙箱 DELETE 204、SDK 后续 404，正常路径落在 15s 预算内。**不声称验证挂起 kill 分支** | [host-excerpts.txt](evidence/e2b-live-2026-09-28/host-excerpts.txt)、[sandbox-absence.txt](evidence/e2b-live-2026-09-28/sandbox-absence.txt) |
+| 真实续接 | `POST /api/runs` HTTP 201；`e2323dc13294` 以 `f2a66107ec40` 为父轮，`continued.jsonl` 与父报告重上传；`--session`、回合前 `session_ready` 同一 session id，报告据上一轮答 70 文件；旧父记录字节 SHA-256 不变，终态 `finished`、136 帧 | [run-excerpts.json](evidence/e2b-live-2026-09-28/run-excerpts.json)、[host-excerpts.txt](evidence/e2b-live-2026-09-28/host-excerpts.txt) |
+
+异常：临时 Cloudflare tunnel 对外 404、短时 SSH tunnel 到期 503、`HTTPS_PROXY=socks5h://…` 不被宿主 `urllib` 接受导致上游 502，各产生一个已清理的失败 run；换为可达的本任务 HTTPS 隧道并让宿主模型上游直连后成功。另一个**产品观察**：三条成功 run 即使未使用子代理，`artifactFailures` 都带缺失 `sessions/subagent-artifacts` 的 `FileNotFoundException`；没有掩盖或修复，需另行裁决。资源处置：全部七个本任务沙箱（六个宿主 run + SDK 直测）按 id 复核 404；自起服务/隧道按记录 PID 退出，随机 loopback 端口无监听，临时数据根删除（[processes.txt](evidence/e2b-live-2026-09-28/processes.txt)）。未覆盖挂起 kill、64 MiB 上限、Docker、真实多租户及浏览器；不复用本次结果证明生产隔离。

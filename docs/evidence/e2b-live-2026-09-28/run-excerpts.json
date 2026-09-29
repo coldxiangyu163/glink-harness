@@ -1,0 +1,220 @@
+{
+  "baseline": "6c730234a10cc0e3ac5777eac3998b4a01174a7f",
+  "sdk_version": "2.51.0",
+  "executor": "e2b",
+  "data_root": "temporary outside repository (removed after evidence)",
+  "runs": {
+    "final": {
+      "run_id": "10b065830440",
+      "parent_run_id": null,
+      "sandbox_id": "i3xs76gvwij919qvr78j5",
+      "status": "finished",
+      "stop_reason": null,
+      "event_count": 55,
+      "terminal_seq": 55,
+      "terminal_type": "run_finished",
+      "terminal_status": "finished",
+      "terminal_ts": 1790639882.257067,
+      "cleanup": {
+        "released": true,
+        "failures": [],
+        "external": {
+          "sandbox": "i3xs76gvwij919qvr78j5"
+        }
+      },
+      "artifact_failures": [
+        "无法列出子代理产物目录: FileNotFoundException: path not found: lstat /home/user/sessions/subagent-artifacts: no such file or directory"
+      ],
+      "report_status": "ok",
+      "report_bytes": 172,
+      "report_sha256": "bcd88e7d11a53187309d0a6f2d998a19c8458d8fd73274510308ee5ff6e1dd4a",
+      "session_id": "01a0ea73-d155-7702-bdef-887bcf74e08d",
+      "session_file_exists": true,
+      "session_ready": [
+        {
+          "seq": 2,
+          "ts": 1790639861.850647,
+          "session_id": "01a0ea73-d155-7702-bdef-887bcf74e08d",
+          "has_host_session_file": false
+        },
+        {
+          "seq": 54,
+          "ts": 1790639880.689356,
+          "session_id": "01a0ea73-d155-7702-bdef-887bcf74e08d",
+          "has_host_session_file": true
+        }
+      ],
+      "stages": [
+        {
+          "seq": 3,
+          "ts": 1790639862.10977,
+          "stage": "agent_start"
+        },
+        {
+          "seq": 53,
+          "ts": 1790639877.504912,
+          "stage": "agent_end"
+        }
+      ],
+      "workspace_recovered_file_count": 2,
+      "cleanup_upper_bound_seconds_from_recovered_session_ready": 1.568,
+      "usage": {
+        "source": "egress",
+        "requests": 3,
+        "searchRequests": 0,
+        "input": 30014,
+        "output": 167,
+        "cacheRead": 19919,
+        "totalTokens": 30181,
+        "unmetered": 0,
+        "refused": 0
+      }
+    },
+    "limit": {
+      "run_id": "f2a66107ec40",
+      "parent_run_id": null,
+      "sandbox_id": "i33w5zld939dsqolj5230",
+      "status": "finished",
+      "stop_reason": null,
+      "event_count": 65,
+      "terminal_seq": 65,
+      "terminal_type": "run_finished",
+      "terminal_status": "finished",
+      "terminal_ts": 1790639945.6943371,
+      "cleanup": {
+        "released": true,
+        "failures": [],
+        "external": {
+          "sandbox": "i33w5zld939dsqolj5230"
+        }
+      },
+      "artifact_failures": [
+        "工作区产物超过文件数上限（64）",
+        "无法列出子代理产物目录: FileNotFoundException: path not found: lstat /home/user/sessions/subagent-artifacts: no such file or directory"
+      ],
+      "report_status": "ok",
+      "report_bytes": 390,
+      "report_sha256": "b7933f03d69b9984fe6fb3ae6b87389a42b596ecd2540ec1d4c83aff70410706",
+      "session_id": "01a0ea74-84ea-700e-9d99-79a727ec932f",
+      "session_file_exists": true,
+      "session_ready": [
+        {
+          "seq": 2,
+          "ts": 1790639907.654222,
+          "session_id": "01a0ea74-84ea-700e-9d99-79a727ec932f",
+          "has_host_session_file": false
+        },
+        {
+          "seq": 64,
+          "ts": 1790639944.183051,
+          "session_id": "01a0ea74-84ea-700e-9d99-79a727ec932f",
+          "has_host_session_file": true
+        }
+      ],
+      "stages": [
+        {
+          "seq": 3,
+          "ts": 1790639907.926267,
+          "stage": "agent_start"
+        },
+        {
+          "seq": 63,
+          "ts": 1790639926.433541,
+          "stage": "agent_end"
+        }
+      ],
+      "workspace_recovered_file_count": 64,
+      "cleanup_upper_bound_seconds_from_recovered_session_ready": 1.511,
+      "usage": {
+        "source": "egress",
+        "requests": 3,
+        "searchRequests": 0,
+        "input": 30492,
+        "output": 375,
+        "cacheRead": 30006,
+        "totalTokens": 30867,
+        "unmetered": 0,
+        "refused": 0
+      },
+      "file_generation_tool_result_excerpt": "70\n./z01.txt\n./z02.txt\n./z03.txt\n./z68.txt\n./z69.txt\n./z70.txt\n",
+      "workspace_recovered_names_head": [
+        "report.md",
+        "z01.txt",
+        "z02.txt"
+      ],
+      "workspace_recovered_names_tail": [
+        "z61.txt",
+        "z62.txt",
+        "z63.txt"
+      ]
+    },
+    "resume-limit": {
+      "run_id": "e2323dc13294",
+      "parent_run_id": "f2a66107ec40",
+      "sandbox_id": "iv40n4s1b98kcfid4qwsr",
+      "status": "finished",
+      "stop_reason": null,
+      "event_count": 136,
+      "terminal_seq": 136,
+      "terminal_type": "run_finished",
+      "terminal_status": "finished",
+      "terminal_ts": 1790640545.304786,
+      "cleanup": {
+        "released": true,
+        "failures": [],
+        "external": {
+          "sandbox": "iv40n4s1b98kcfid4qwsr"
+        }
+      },
+      "artifact_failures": [
+        "无法列出子代理产物目录: FileNotFoundException: path not found: lstat /home/user/sessions/subagent-artifacts: no such file or directory"
+      ],
+      "report_status": "ok",
+      "report_bytes": 456,
+      "report_sha256": "9af00ff6fa0aaab0055b687779b6c9cfa8e14c61fbf203a44079b00c9fa75352",
+      "session_id": "01a0ea74-84ea-700e-9d99-79a727ec932f",
+      "session_file_exists": true,
+      "session_ready": [
+        {
+          "seq": 2,
+          "ts": 1790640519.336173,
+          "session_id": "01a0ea74-84ea-700e-9d99-79a727ec932f",
+          "has_host_session_file": false
+        },
+        {
+          "seq": 135,
+          "ts": 1790640543.9920409,
+          "session_id": "01a0ea74-84ea-700e-9d99-79a727ec932f",
+          "has_host_session_file": true
+        }
+      ],
+      "stages": [
+        {
+          "seq": 3,
+          "ts": 1790640519.583479,
+          "stage": "agent_start"
+        },
+        {
+          "seq": 134,
+          "ts": 1790640541.435223,
+          "stage": "agent_end"
+        }
+      ],
+      "workspace_recovered_file_count": 1,
+      "cleanup_upper_bound_seconds_from_recovered_session_ready": 1.313,
+      "usage": {
+        "source": "egress",
+        "requests": 3,
+        "searchRequests": 0,
+        "input": 31981,
+        "output": 269,
+        "cacheRead": 31475,
+        "totalTokens": 32250,
+        "unmetered": 0,
+        "refused": 0
+      },
+      "parent_record_sha256_unchanged": true,
+      "report_mentions_70_and_continuation": true
+    }
+  }
+}
