@@ -67,14 +67,32 @@ COMMAND_NAME_LIMIT = 120
 COMMAND_DESCRIPTION_LIMIT = 200
 DETAIL_LIMIT = 500
 
-# ACP's protocol categories describe *its* actions. Do not infer pi tool-name
-# semantics from ACP titles (dsh reports kind=other even for named tools).
+# dsh reports kind=other even for named tools. Its programmatic tool names
+# (name, or title when name is absent) are the stable ACP-pack contract; this
+# mapping is owned by the ACP projector, not borrowed from the pi family.
+_ACP_TOOL_PRESENTATION = {
+    "web_search": "search_web", "web_fetch": "fetch_page",
+    "todo_write": "plan", "write": "write_file", "read": "read_file",
+    "edit": "edit_file", "bash": "execute",
+    "list_agents": "manage_children", "job_list": "manage_children",
+    "send_message": "message_child", "interrupt_agent": "stop_child",
+}
+
+# Other ACP agents may supply a meaningful protocol category; preserve that
+# fallback without letting dsh's `other` override a known tool name.
 _ACP_KIND_PRESENTATION = {
     "read": "read", "edit": "edit_file", "delete": "delete",
     "move": "move", "search": "find", "execute": "execute",
     "think": "think", "fetch": "fetch_page",
     "switch_mode": "switch_mode", "other": "generic",
 }
+
+
+def _acp_tool_presentation(name: str, kind: Any) -> str:
+    hint = _ACP_TOOL_PRESENTATION.get(name)
+    if hint:
+        return hint
+    return _ACP_KIND_PRESENTATION.get(kind, "generic") if isinstance(kind, str) else "generic"
 
 
 class AcpProjector:
@@ -323,8 +341,7 @@ def _agent_tool_call(
         "toolCallId": tool_call_id,
         "toolName": name,
         "args": project_args(update.get("rawInput")),
-        "presentation": _ACP_KIND_PRESENTATION.get(kind, "generic")
-        if isinstance(kind, str) else "generic",
+        "presentation": _acp_tool_presentation(name, kind),
     }
     if isinstance(kind, str) and kind:
         # The ACP tool category is card content (plan §4.1): keep it in the
