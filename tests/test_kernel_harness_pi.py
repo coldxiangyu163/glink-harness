@@ -63,8 +63,12 @@ def test_pi_validate_credentials_accepts_a_model_key(tmp_path: Path) -> None:
     family.validate_credentials(RunCredentials(model_api_key="sk-test"))
 
 
-def test_acp_validate_credentials_is_a_noop(tmp_path: Path) -> None:
-    """ACP agent 自带模型配置：无宿主 key 也通过准入。"""
+def test_acp_validate_credentials_is_a_noop_for_single_user(tmp_path: Path) -> None:
+    """单用户下 ACP agent 自带模型配置：无宿主 key 也通过准入。
+
+    多租户下的政策分流（tenant 拒绝 / shared no-op）见
+    tests/test_acp_credential_policy.py（ADR 0015）。
+    """
     _config, _store, family = make_family(tmp_path, "acp")
     family.validate_credentials(RunCredentials(model_api_key=""))
 

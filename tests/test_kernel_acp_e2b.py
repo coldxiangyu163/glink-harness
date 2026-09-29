@@ -48,7 +48,7 @@ from pi_glink.kernel.execution import ExecutionSpec
 from pi_glink.kernel.sandbox import E2BSandbox, open_sandbox
 from pi_glink.runs.runner import RunManager
 from pi_glink.store import FAILED, FINISHED, RunStore
-from pi_glink.tenancy import TenantContext, TenantCredentialStore
+from pi_glink.tenancy import TenantContext
 from store_helpers import events_text, stored_record
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1164,43 +1164,31 @@ def test_acp_followup_refuses_a_parent_owned_by_another_tenant_on_the_sandbox_fa
     """The owner gate runs before anything else on the e2b face too.
 
     A parent owned by another tenant is invisible: no session, no state root,
-    no existence leak, and no second sandbox is created.
+    no existence leak, and no second sandbox is created. shared 政策环境：ADR 0015
+    后 multitenant tenant 政策下 ACP run 在准入即拒；本测试关注 owner 边界，
+    与凭据政策正交，故用 shared + ACP 通道搭建环境。
     """
     secret_file = tmp_path / "gateway.key"
     secret_file.write_bytes(SECRET)
     secret_file.chmod(0o600)
-    tenants_file = tmp_path / "tenants.json"
-    tenants_file.write_text(
-        json.dumps(
-            {
-                "tenants": {
-                    "tenant-alpha": {"modelApiKey": "sk-alpha-0000000000000000"},
-                    "tenant-beta": {"modelApiKey": "sk-beta-0000000000000000"},
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    tenants_file.chmod(0o600)
     config = make_config(
         tmp_path,
         TEST_ACP_COMMAND=fake_agent_command(
             tmp_path, {"FAKE_ACP_WRITE_REPORT": True}, name="tenant-settings.json"
         ),
         PI_GLINK_TENANCY="multitenant",
+        PI_GLINK_MODEL_CREDENTIALS="shared",
+        PI_GLINK_ACP_ENV="FAKE_ACP_KEY=sk-acp-shared-000000000000",
         PI_GLINK_GATEWAY_SECRET_FILE=str(secret_file),
-        PI_GLINK_TENANT_CONFIG_FILE=str(tenants_file),
         PI_GLINK_TENANCY_AUDIENCE=AUDIENCE,
         LOCAL_WEB_TASK_TIMEOUT_SECONDS="60",
     )
     sandboxes: list[FakeSandbox] = []
     store = RunStore(config.data_root / "runs")
-    credentials = TenantCredentialStore.from_file(tenants_file, repo_root=REPO_ROOT)
     manager = RunManager(
         config,
         EventBus(),
         store,
-        credential_store=credentials,
         sandbox_factory=_sandbox_sequence(tmp_path, sandboxes, report=None),
     )
     alpha = TenantContext(

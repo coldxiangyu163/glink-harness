@@ -55,10 +55,22 @@ class AcpHarnessFamily(HarnessFamily):
     # -- (a) 准入 --------------------------------------------------------------
 
     def validate_credentials(self, credentials: "RunCredentials") -> None:
-        """空实现：agent 自带模型配置，宿主凭据不是准入条件。"""
-        # The ACP family does not use the host's model credential: the agent
-        # brings its own model configuration (injection points are M2 work).
-        return None
+        """按模型凭据政策分流（docs/adr/0015）。
+
+        单用户与显式 ``shared``：agent 用运营方配置的 ACP 凭据通道
+        （``PI_GLINK_ACP_ENV`` / ``PI_GLINK_ACP_CREDENTIAL_FILES``，宿主显式
+        声明的共享凭据），宿主模型凭据不是准入条件。多租户 ``tenant`` 政策：
+        每租户应自备凭据，而 ACP 的租户级注入点未实现（M2），受理 run 只会
+        静默落到运营方通道，所以在准入就拒绝，并指出显式出路；启动期的
+        通道配置矛盾由 ``_acp_credentials_follow_policy`` 拒绝，这里拒绝的是
+        通道未配置但政策不可满足的组合，两层互为纵深。
+        """
+        if self._config.multi_tenant and not self._config.shared_model_credentials:
+            raise ConfigError(
+                "多租户 tenant 政策下 ACP 族不可用：租户级凭据注入未实现（M2）；"
+                "SaaS 统一供模型请显式配置 PI_GLINK_MODEL_CREDENTIALS=shared"
+                "（ADR 0015）"
+            )
 
     # -- (b) 追问门禁与续接种子 -------------------------------------------------
 

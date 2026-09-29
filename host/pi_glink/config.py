@@ -382,10 +382,12 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
     api_key = _text(values, "OPENAI_API_KEY", "")
     base_url = _text(values, "OPENAI_BASE_URL", "")
     model = _text(values, "OPENAI_MODEL", "")
-    if model_credentials == "shared":
+    if model_credentials == "shared" and pack.family == "pi":
         # Fail closed at startup: a "shared" deployment that cannot name its
         # credential source must not boot and later fall back to a tenant entry
-        # or to the single-user local configuration.
+        # or to the single-user local configuration. The pi family's source is
+        # the frozen ``OPENAI_*`` trio; an ACP host names its source through the
+        # ACP channels instead (:func:`_acp_credentials_follow_policy`).
         missing = [
             name
             for name, value in (
@@ -574,6 +576,7 @@ def validate_host_config(config: HostConfig) -> None:
             "PI_GLINK_TENANCY=multitenant 要求 Docker/E2B 执行面；inproc 仅用于本地单用户调试"
         )
     _acp_knobs_are_acp_only(config)
+    _acp_credentials_follow_policy(config)
     _egress_is_reachable(config)
 
 
@@ -746,6 +749,47 @@ def _acp_knobs_are_acp_only(config: HostConfig) -> None:
             "PI_GLINK_ACP_CREDENTIAL_FILES / PI_GLINK_ACP_ENV 只在 ACP 族"
             "（PI_GLINK_HARNESS=dsh|codex|opencode）下生效；当前 harness_pack="
             f"{config.harness_pack!r}"
+        )
+
+
+def _acp_credentials_follow_policy(config: HostConfig) -> None:
+    """The ACP credential channels are model credentials under the policy.
+
+    ``PI_GLINK_ACP_ENV`` / ``PI_GLINK_ACP_CREDENTIAL_FILES`` hand the operator's
+    credential to every ACP run, so they may not bypass the model-credential
+    policy (docs/adr/0015):
+
+    * multitenant + ``tenant``: the policy is per-tenant credentials and the
+      ACP per-tenant injection points do not exist yet (M2); the operator's
+      channel would be an undeclared shared credential, so a host that
+      configures it refuses to boot. The **whole channel** is treated as
+      credentials — never by variable name — because a boundary that depends
+      on naming conventions can be renamed past.
+    * multitenant + ``shared``: the channels are the ACP host's named shared
+      credential source, mirroring the pi family's frozen ``OPENAI_*`` trio
+      (:func:`load_config`): a shared ACP host that cannot name its source
+      must not boot and fail later per run.
+
+    The single-user mode keeps both channels as-is: the operator's own
+    credential for the operator's own runs is the documented local entry.
+    """
+    if config.harness != "acp" or not config.multi_tenant:
+        return
+    has_channel = bool(config.acp_env or config.acp_credential_files)
+    if config.shared_model_credentials:
+        if not has_channel:
+            raise ConfigError(
+                "PI_GLINK_MODEL_CREDENTIALS=shared 且 harness 为 ACP 族时需要 "
+                "PI_GLINK_ACP_ENV 或 PI_GLINK_ACP_CREDENTIAL_FILES 之一："
+                "shared 部署必须能指出共享凭据来源，缺源不启动（ADR 0015）"
+            )
+        return
+    if has_channel:
+        raise ConfigError(
+            "多租户 tenant 政策下不允许配置 PI_GLINK_ACP_ENV / "
+            "PI_GLINK_ACP_CREDENTIAL_FILES：ACP 通道是运营方共享凭据，而租户级"
+            "注入点未实现（M2）；共享请显式配置 PI_GLINK_MODEL_CREDENTIALS=shared"
+            "（ADR 0015）"
         )
 
 

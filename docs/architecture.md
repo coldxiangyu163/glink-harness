@@ -7,7 +7,7 @@
 
 ## 产品方向与当前实现
 
-产品的既定方向是多租户研究工作台：通过 Docker / E2B 为研究 run 提供独立执行环境，本地 `inproc` 保留为单 Agent 开发与调试入口。默认 `PI_GLINK_TENANCY=local` 仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用单宿主多租户实现（§10）：身份入口二选一——本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`PI_GLINK_AUTH_MODE=accounts`，§10.6）；两者都只在服务端生成 `TenantContext`，run 带租户归属，模型凭据默认每租户自备（显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时由宿主统一提供），Docker/E2B 可并发。该实现目前只有**合成验证**（临时密钥/账号库、自签断言、fake 执行面、临时数据根）；真实网关、真实 HTTPS 终止、邮件交付、Docker/E2B live 与生产数据验收未覆盖，不能由单 run smoke 替代。
+产品的既定方向是多租户研究工作台：通过 Docker / E2B 为研究 run 提供独立执行环境，本地 `inproc` 保留为单 Agent 开发与调试入口。默认 `PI_GLINK_TENANCY=local` 仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用单宿主多租户实现（§10）：身份入口二选一——本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`PI_GLINK_AUTH_MODE=accounts`，§10.6）；两者都只在服务端生成 `TenantContext`，run 带租户归属，模型凭据默认每租户自备（显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时由宿主统一提供；ACP 族的注入通道视同模型凭据服从同一政策——tenant 政策下拒绝、shared 下为具名凭据源，[ADR 0015](adr/0015-acp-credential-channels-under-model-credential-policy.md)），Docker/E2B 可并发。该实现目前只有**合成验证**（临时密钥/账号库、自签断言、fake 执行面、临时数据根）；真实网关、真实 HTTPS 终止、邮件交付、Docker/E2B live 与生产数据验收未覆盖，不能由单 run smoke 替代。
 
 多租户实现已覆盖服务端可信身份、run/事件/报告/取消的归属过滤、每 run 凭据交付与脱敏边界、显式并发准入与 fail-closed 资源台账（未确认释放的持有计入 owner 租户与全局槽位，可由在线自动对账或离线人工裁决释放）；仍未覆盖多宿主租约、共享存储、真实网关与云环境的资源上限执行。单独容器/沙箱提供执行隔离，但不自动解决宿主 API 授权、存储隔离或凭据访问，也不构成本仓库对容器/沙箱实际隔离强度的保证。
 
@@ -732,7 +732,10 @@ run 只拿到宿主凭据出口代理（`host/pi_glink/egress.py::EgressProxy`�
   用量另记 `kernelUsage`，不是权威。唯一的策略钩子是按租户的每 run 配额
   （`PI_GLINK_EGRESS_MAX_REQUESTS_PER_RUN` / `PI_GLINK_EGRESS_MAX_TOKENS_PER_RUN`，0 = 不限）。
 * **ACP 族未覆盖**：ACP agent 仍按 [ADR 0003](adr/0003-acp-credential-copies-removed-at-close-out.md) /
-  acp-integration-notes §18 注入凭据副本并在收尾删除；把 ACP 接入出口代理是未决项。
+  acp-integration-notes §18 注入凭据副本并在收尾删除；把 ACP 接入出口代理是未决项。注入通道自
+  [ADR 0015](adr/0015-acp-credential-channels-under-model-credential-policy.md) 起服从模型凭据政策：
+  多租户 tenant 政策下配置通道即拒绝启动、ACP run 在准入拒绝（租户级注入点是 M2 未实现）；shared
+  下通道是 ACP 宿主的具名凭据源，缺源不启动。
 * 浏览器永远拿不到密钥：`/api/config` 只返回模型名与是否已配置。
 
 ### 6.1 出站脱敏边界

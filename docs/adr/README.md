@@ -20,3 +20,4 @@
 | [0012](0012-pack-manifest-v2-single-source.md) | harness 包清单 v2 为唯一真源，镜像/模板参数由清单生成；v1 与旧 ACP 变量不再读取 |
 | [0013](0013-run-lifecycle-pipeline.md) | run 收尾是显式的八阶段管线，秘密边界与子代理插件独立 |
 | [0014](0014-delivery-gate-lint-types-coverage.md) | 交付门禁加入 ruff 静态检查、mypy 类型检查与覆盖率总量 ratchet（dev-only 依赖） |
+| [0015](0015-acp-credential-channels-under-model-credential-policy.md) | ACP 凭据通道视同模型凭据，服从 tenant/shared 政策；shared 按族分流冻结清单 |

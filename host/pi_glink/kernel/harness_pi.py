@@ -68,8 +68,8 @@ class PiHarnessFamily(HarnessFamily):
     # -- (a) 准入 --------------------------------------------------------------
 
     def validate_credentials(self, credentials: "RunCredentials") -> None:
-        # The ACP family does not use the host's model credential: the agent
-        # brings its own model configuration (injection points are M2 work).
+        # The pi family runs on the host's model credential (the egress proxy's
+        # upstream key, ADR 0008): a run without a named key must not start.
         if not credentials.model_api_key:
             raise ConfigError(
                 "OPENAI_API_KEY is not configured; set it in .env before starting a run"
