@@ -15,6 +15,10 @@
 `report_path` 不是下载能力；工作区报告、外部路径与链接一律视为无报告（404）。旧布局的报告不再可下载，
 不迁移。
 
+## 后续演进（0017）
+
+[ADR 0017](0017-declared-deliverables.md) 新增通过 `present` 声明的**补充**文件回收与下载；主报告 `report.md` 的固定宿主副本规则原样保留，声明或工作区路径不能变成报告下载能力。
+
 ## 后果
 
 回归：`tests/test_runs_api.py::test_only_the_host_artifact_copy_is_served_as_the_report`、

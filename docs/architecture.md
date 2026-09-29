@@ -100,6 +100,7 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 | `assistant_delta` | `message_update.text_delta` | 正文流 |
 | `assistant_message` | `message_end`（权威全文） | 收口后的 Markdown |
 | `tool_started` / `tool_updated` / `tool_finished` | `tool_execution_*` | 工具卡片（含流式输出/错误态） |
+| `deliverables_declared` | ACP `present` 的 `tool_call.rawInput.files`（pi 族无源） | 未封存的文件声明卡片，终帧/详情再裁决 |
 | `subagent_started` / `subagent_finished` | `tool_execution_*`（工具名 `subagent`） | 子代理（ChildRun）的类型化生命周期事件，替代该 toolCallId 的通用工具卡片（§3.5） |
 | `usage_reported` | `turn_end.message.usage` | token 统计（`usage` 为 run 累计，`requestUsage` 为本次请求快照） |
 | `kernel_status` | `extension_error` 等 | 警告提示 |
@@ -396,7 +397,9 @@ child 在前端显示为普通「进行中」，不伪造进度。
    2. **产物事实**：先向执行面回收产物（E2B 从沙箱拉到工作区），再 `close()` 执行面；随后经
       目录句柄安全读取 `report.md`（见 §6.1），脱敏后写入宿主拥有的
       `runs/<id>/artifacts/report.md`。拒绝的产物记为 `report_rejected` 并发出 `kernel_status`
-      警告，缺失记为 `no_report`；工作区与会话文件各过一遍脱敏；
+      警告，缺失记为 `no_report`；工作区与会话文件各过一遍脱敏。ACP 声明的补充交付文件
+      （最多 8 个）单独安全读取、脱敏并封存到 `artifacts/<相对路径>`；终帧与记录包含逐件
+      成功/失败原因，回收失败不阻终态（[ADR 0017](adr/0017-declared-deliverables.md)）；
    3. **结论（verdict）**：在 run 锁内**一次性**由全部事实与取消标志判定，并立即以同步追加
       终帧提交（§3.1，`fsync` 成功才可见）。这是 run 的**线性化点**：之前受理的取消必然体现为 `cancelled`；之后的
       取消被拒绝并返回已提交状态；之后到达的内核帧被丢弃，终帧之后不再有任何帧；
@@ -579,6 +582,8 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
   （`E2B_KILL_TIMEOUT_SECONDS` = 15s），超时记入 `failures` 并在重启对账时按不确定保持持有（hold）；
   E2B 的文件类调用统一带 `request_timeout`（`E2B_REQUEST_TIMEOUT_SECONDS` = 15s），卡死的调用记为
   产物失败而不拖长收尾。清理失败会被记入 run 记录并继续占用容量（§4），不谎报已释放。
+  回收先取 `report.md` 与合法声明的交付文件（嵌套相对路径逐级列目录确认无链接），再取普通
+  直系子文件；三项上限不放大，优先级只决定谁占配额，超限记入 `artifactFailures`。
   回收只取**普通文件**：沙箱条目按 SDK 报告的 `EntryInfo.type`（真实 SDK 是 `FileType` 枚举）跳过目录与
   符号链接——不跟随链接，与 §6.1 的 ArtifactTree 同一条边界——它们不记为失败；超限或不可读的普通文件
   才记为失败并写进终态 `artifactFailures`。回收后由 `recovered_session()` 回答「回收过程才得知、值得
@@ -598,7 +603,7 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 <data_root>/runs/<runId>/
 ├── pi-agent/                     PI_CODING_AGENT_DIR（models.json、auth.json、模板副本）
 ├── sessions/                     PI_CODING_AGENT_SESSION_DIR（每 run 一个，随 run 目录创建）
-└── artifacts/report.md           宿主拥有的脱敏产物副本
+└── artifacts/report.md           宿主拥有的主报告副本；声明的补充文件在 artifacts/<相对路径>
 <data_root>/runs/runs.db          run 记录与持久事件（SQLite，§3.1）
 <data_root>/workspaces/<runId>/   内核工作目录
 ```
@@ -750,11 +755,13 @@ run 只拿到宿主凭据出口代理（`host/pi_glink/egress.py::EgressProxy`�
 | 事件投影 | 载荷里每个字符串递归脱敏；delta 走尾部暂存（§3.3） | `kernel/projection.py::project_event(frame, redactor)`、`redaction.py::StreamRedactor` |
 | 事件总线 / `events` 表 | 提交（先落盘）前再脱敏一次 | `runs/channel.py::RunChannel.emit` |
 | 报告文件 | 经工作区目录句柄读取、脱敏、在 run 目录句柄内原子写入 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `runs/stages.py::SealStage.report` |
+| 声明交付文件 | ACP `present` → `deliverables_declared`（声明≠交付）；封存最多 8 个工作区相对路径，逐件校验/脱敏，终帧与记录携带逐件结果。E2B 优先取主报告与声明文件再取其他直系子文件，64 MiB 总量不变 | `kernel/acp_projection.py`、`runs/channel.py`、`runs/stages.py`、`kernel/e2b_env.py` |
 | 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源；子代理分支会话与 `subagent-artifacts/` 同目录被同一边界清扫 | `runs/secrets.py::RunSecretBoundary.sanitize_session_file`、`sandbox.DockerSandbox.host_path`（`docker_env.translate_container_path`） |
 | ACP 状态根 | 收尾扫描范围与处置由运行时契约声明：agent 自己的会话存储（`acp-agent/home`，E2B 回收后 `acp-agent/recovered`）**只读扫描**——凭据形状值并入本 run 边界，文件字节不改写（改写会破坏追问要续接的会话，与 §10.2 继承口径同一义务）；**注入凭据副本**（`PI_GLINK_ACP_CREDENTIAL_FILES` 的 dest）在扫描之后逐个删除（只删已知相对路径：不按模式匹配、不跟随链接、必须在根内；追问会从源重新注入，继承已 skip 这些目标）；删除失败记入终帧 `artifactFailures` 并告警，不改变终态；缺失的根按「无可扫之物」处理 | `kernel/sweep.py::SessionSweep`、`kernel/acp_env.py::AcpRuntime.session_sweeps`、`runs/secrets.py::RunSecretBoundary.seal_sessions`、`absorb`、`remove_credential_copies`、`artifacts.py::ArtifactTree.remove` |
 | 子代理镜像 | E2B 面回收的 `runs/<id>/subagents/`（分支会话 + 产物）收尾时经目录句柄清扫，与 §5.2 同一条边界 | `runs/secrets.py::RunSecretBoundary.sweep_tree`（`seal_trees`）、`kernel/e2b_env.py::recover_subagent_files` |
 | 子代理文档 | `runs/<id>/children/<n>/child.json` 只由已过两道脱敏的事件载荷构造（投影 → 提交前再脱敏），`GET /api/runs/{id}/children` 按存储原样下发，不引入新秘密；`children/<n>/<file>` 产物下载按报告下载同一套规则（服务前再脱敏、`X-Redacted`） | `runs/channel.py::RunChannel.emit`、`runs/plugins.py::ChildDocumentsPlugin`、`store.py::read_children`、`web_routes.py` |
 | 报告下载 | `report_path` 不是下载能力：只认一个固定位置——宿主产物副本 `runs/<id>/artifacts/report.md`；工作区 `workspaces/<id>/report.md` 及其他路径一律视为无报告（[ADR 0007](adr/0007-report-served-only-from-host-artifact.md)）。服务前再脱敏，响应头 `X-Redacted` 标明是否发生；`hasReport` 用同一位置规则与同一拒绝条件计算 | `store.py::report_location`、`web_routes.py::_send_report`、`artifacts.py` |
+| 补充交付文件下载 | `GET /api/runs/{id}` 的 `deliverables` 给逐件状态/可用性；`GET /api/runs/{id}/deliverables/{index}` 只认成功封存的宿主产物副本，不把路径当能力。owner 门禁→位置/大小校验→本 run 再脱敏，同形 404 与 `X-Redacted`，见 [ADR 0017](adr/0017-declared-deliverables.md) | `runs/read_model.py`、`store.py::deliverable_location`、`web_routes.py` |
 
 **产物路径安全**（`artifacts.py::ArtifactTree`）：宿主从不「先 realpath 校验、再按路径打开」。
 每次操作持有 run 根目录的目录句柄（根的父目录是宿主配置，可信；根本身及其下每一级都以
