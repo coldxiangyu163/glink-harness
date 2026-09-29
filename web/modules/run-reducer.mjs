@@ -62,6 +62,7 @@ export function createRunState(run = {}) {
     model: null,
     thinkingLevel: null,
     hasReport: Boolean(run.hasReport),
+    deliverables: Array.isArray(run.deliverables) ? run.deliverables : [],
     stopReason: run.stopReason ?? null,
     error: run.error ?? null,
     usage: run.usage ?? null,
@@ -126,6 +127,13 @@ export function reduce(state, event) {
       return appendDelta(next, 'text', payload.text);
     case 'assistant_message':
       return applyFinalMessage(next, payload);
+    case 'deliverables_declared': {
+      const known = new Set(next.deliverables.map((file) => file.path));
+      const files = Array.isArray(payload.files) ? payload.files.filter((file) =>
+        file && typeof file.path === 'string' && !known.has(file.path) && known.add(file.path)) : [];
+      return { ...next, deliverables: [...next.deliverables, ...files.map((file) =>
+        ({ ...file, status: 'declared', available: false }))].slice(0, 8) };
+    }
     case 'tool_started':
       return startTool(next, payload);
     case 'tool_updated':
@@ -466,6 +474,9 @@ function finishRun(model, status, payload, ts) {
     finishedAt: Number.isFinite(ts) ? ts : settled.finishedAt,
     durationSeconds: payload.durationSeconds ?? settled.durationSeconds,
     hasReport: Boolean(payload.reportPath) || settled.hasReport,
+    deliverables: Array.isArray(payload.deliverables)
+      ? payload.deliverables.map((file) => ({ ...file, available: file.status === 'ok' }))
+      : settled.deliverables,
     sessionId: payload.sessionId ?? settled.sessionId,
     stopReason: payload.stopReason ?? settled.stopReason,
     error: payload.error ?? settled.error,

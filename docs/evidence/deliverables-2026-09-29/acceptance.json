@@ -1,0 +1,37 @@
+{
+  "taskId": "GLINK-ARCH-DELIVERABLES-20260929",
+  "runId": "de7fe3d982a9",
+  "executor": "e2b",
+  "family": "acp",
+  "pack": "dsh",
+  "status": "finished",
+  "hasReport": true,
+  "presentToolObserved": true,
+  "toolCount": 10,
+  "declarationCount": 1,
+  "declarationPaths": [
+    "memo/govern.md",
+    "memo/measure.md"
+  ],
+  "cardCount": 2,
+  "cards": [
+    {
+      "path": "memo/govern.md",
+      "description": "Govern 函数速查备忘录：跨切面定位、文化与治理作用、6 个官方类别及代表性子类，附 NIST 官方来源链接。",
+      "status": "ok",
+      "available": true
+    },
+    {
+      "path": "memo/measure.md",
+      "description": "Measure 函数速查备忘录：定量/定性/混合方法、TEVV 要求、4 个官方类别及代表性子类，附 NIST 官方来源链接。",
+      "status": "ok",
+      "available": true
+    }
+  ],
+  "terminalMatchesRecord": true,
+  "cleanupReleased": true,
+  "cleanupFailureCount": 0,
+  "artifactFailures": [],
+  "eventCount": 41,
+  "downloadHash": "a64e22bdbc975b39c365212c6f3e3356199cbc5c674f4600820a5fb069d110ea"
+}

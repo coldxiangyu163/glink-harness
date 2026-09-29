@@ -14,11 +14,15 @@ import logging
 import shlex
 import sys
 import time
+import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Mapping
 
 import pytest
 
+from pi_glink.app import create_server
 from pi_glink.config import ConfigError, HostConfig, build_config
 
 from acp_pack import apply_acp_pack
@@ -32,6 +36,7 @@ from pi_glink.kernel.harness_pi import PiExecutionAdapter
 from pi_glink.kernel.sandbox import SANDBOXES, open_sandbox
 from pi_glink.redaction import REPLACEMENT
 from pi_glink.runs.stages import DecideStage
+from pi_glink.runs import limits
 from pi_glink.contracts import FollowupUnavailable
 from pi_glink.runs.runner import (
     RunManager,
@@ -107,6 +112,89 @@ def payloads(events: list[Mapping[str, Any]], event_type: str) -> list[Mapping[s
 
 
 # -- the complete lifecycle ---------------------------------------------------
+
+
+def test_ninth_declaration_and_oversized_file_fail_without_blocking_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(limits, "REPORT_MAX_BYTES", 4096)
+    declared = [{"path": f"memo-{index}.md", "text": "x" * (8192 if index == 0 else 2)}
+                for index in range(9)]
+    _config, store, manager = build_manager(tmp_path, {
+        "FAKE_ACP_WRITE_REPORT": True, "FAKE_ACP_PRESENT_FILES": declared,
+    })
+    record = manager.start("写九份小备忘录及一份超大备忘录")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FINISHED
+    assert len(final.deliverables) == 8
+    assert final.deliverables[0]["status"] == "rejected"
+    assert "上限" in final.deliverables[0]["reason"]
+    assert all(item["status"] == "ok" for item in final.deliverables[1:])
+    assert any("超过 8" in failure for failure in read_events(store, record.run_id)[-1]["payload"]["artifactFailures"])
+    assert final.report_path is not None
+
+
+def test_present_declarations_reach_the_terminal_store_and_owner_gated_download(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.md"
+    outside.write_text("OUTSIDE", encoding="utf-8")
+    secret = "sk-synthetic-private-key-abc123xyz"
+    files = [
+        {"path": "district/brief.md", "description": "辖区备忘录", "text": f"# 辖区备忘录\n{secret}\n"},
+        {"path": "linked.md", "description": "链接", "link": str(outside)},
+        {"path": "../outside.md", "description": "越界"},
+        {"path": "missing.md", "description": "不存在"},
+    ]
+    config = make_config(tmp_path, {"FAKE_ACP_WRITE_REPORT": True,
+                                     "FAKE_ACP_PRESENT_FILES": files}, LOCAL_WEB_PORT="0",
+                         OPENAI_API_KEY=secret)
+    server = create_server(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        record = server.manager.start("写主报告和辖区备忘录")
+        final = server.manager.wait(record.run_id, timeout=30)
+        assert final is not None and final.status == FINISHED
+        assert [file["status"] for file in final.deliverables] == ["ok", "rejected", "rejected", "rejected"]
+        assert final.report_path is not None
+        assert (Path(final.report_path).parent / "district/brief.md").read_text() == "# 辖区备忘录\n[REDACTED]\n"
+        assert outside.read_text(encoding="utf-8") == "OUTSIDE"
+        events = read_events(server.store, record.run_id)
+        declaration = payloads(events, "deliverables_declared")
+        assert len(declaration) == 1 and len(declaration[0]["files"]) == 4
+        assert events[-1]["payload"]["deliverables"] == list(final.deliverables)
+        origin = f"http://127.0.0.1:{server.server_address[1]}/api/runs/{record.run_id}"
+        with urllib.request.urlopen(origin, timeout=10) as response:
+            public = json.load(response)["run"]
+        assert public["hasReport"] is True
+        assert [file["available"] for file in public["deliverables"]] == [True, False, False, False]
+        with urllib.request.urlopen(origin + "/deliverables/0", timeout=10) as response:
+            assert response.read() == "# 辖区备忘录\n[REDACTED]\n".encode()
+        # Even a later tampered binary copy goes through the same read-side
+        # redactor without altering unrelated bytes.
+        sealed = Path(final.report_path).parent / "district/brief.md"
+        sealed.write_bytes(b"\xff" + secret.encode())
+        with urllib.request.urlopen(origin + "/deliverables/0", timeout=10) as response:
+            assert response.read() == b"\xff[REDACTED]"
+            assert response.headers["X-Redacted"] == "true"
+        with urllib.request.urlopen(origin + "/report", timeout=10) as response:
+            assert b"fake acp" in response.read()
+        for index in (1, 2, 3):
+            with pytest.raises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(origin + f"/deliverables/{index}", timeout=10)
+            assert error.value.code == 404
+        sealed.unlink()
+        sealed.symlink_to(outside)
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(origin + "/deliverables/0", timeout=10)
+        assert error.value.code == 404
+        with urllib.request.urlopen(origin, timeout=10) as response:
+            assert json.load(response)["run"]["deliverables"][0]["available"] is False
+        assert outside.read_text(encoding="utf-8") == "OUTSIDE"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
 
 
 def test_acp_run_projects_the_whole_lifecycle_and_the_report(tmp_path: Path) -> None:

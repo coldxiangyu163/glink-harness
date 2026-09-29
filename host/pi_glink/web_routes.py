@@ -38,6 +38,9 @@ logger = logging.getLogger("pi_glink.host")
 _RUN_EVENTS_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/events$")
 _RUN_STOP_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/stop$")
 _RUN_REPORT_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/report$")
+_RUN_DELIVERABLE_RE = re.compile(
+    r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/deliverables/(?P<index>[0-7])$"
+)
 _RUN_CHILDREN_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/children$")
 _RUN_CHILD_FILE_RE = re.compile(
     r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})/children/(?P<n>\d{1,4})"
@@ -102,7 +105,8 @@ FORBIDDEN_RUN_BODY_FIELDS = frozenset(
 
 
 def run_view(
-    record: RunRecord, *, live_event_count: int | None = None, has_report: bool = False
+    record: RunRecord, *, live_event_count: int | None = None, has_report: bool = False,
+    deliverables: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Public projection of a run: no host paths, no credentials."""
     duration = None
@@ -118,6 +122,7 @@ def run_view(
         "durationSeconds": duration,
         "sessionId": record.session_id,
         "hasReport": has_report,
+        "deliverables": deliverables if deliverables is not None else [],
         "stopReason": record.stop_reason,
         "error": record.error,
         "eventCount": record.event_count if live_event_count is None else live_event_count,
@@ -306,6 +311,13 @@ class RoutesMixin:
         report_match = _RUN_REPORT_RE.match(path)
         if report_match is not None:
             self._send_report(report_match.group("run_id"), context, head_only=head_only)
+            return
+        deliverable_match = _RUN_DELIVERABLE_RE.match(path)
+        if deliverable_match is not None:
+            self._send_deliverable(
+                deliverable_match.group("run_id"), int(deliverable_match.group("index")),
+                context, head_only=head_only,
+            )
             return
         children_match = _RUN_CHILDREN_RE.match(path)
         if children_match is not None:
@@ -626,7 +638,8 @@ class RoutesMixin:
             else None
         )
         return run_view(
-            record, live_event_count=live, has_report=self._report_available(record)
+            record, live_event_count=live, has_report=self._report_available(record),
+            deliverables=read_model.available_deliverables(self.server.store, record),
         )
 
     def _report_available(self, record: RunRecord) -> bool:
@@ -718,6 +731,25 @@ class RoutesMixin:
             artifact.content_type,
             "no-cache",
             head_only=head_only,
+            extra_headers={"X-Redacted": "true" if artifact.redacted else "false"},
+        )
+
+    def _send_deliverable(
+        self, run_id: str, index: int, context: TenantContext | None, *, head_only: bool
+    ) -> None:
+        record = read_model.visible_record(self.server.store, run_id, context)
+        not_found = {"error": "no_artifact", "runId": run_id}
+        if record is None:
+            self._send_json(HTTPStatus.NOT_FOUND, not_found, head_only=head_only)
+            return
+        artifact = read_model.read_deliverable(
+            self.server.store, record, index, self.server.manager.redactor_for_record
+        )
+        if artifact is None:
+            self._send_json(HTTPStatus.NOT_FOUND, not_found, head_only=head_only)
+            return
+        self._send_bytes(
+            artifact.content, artifact.content_type, "no-cache", head_only=head_only,
             extra_headers={"X-Redacted": "true" if artifact.redacted else "false"},
         )
 

@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from .. import events
-from ..artifacts import ArtifactError, ArtifactMissing, ArtifactTree
+from ..artifacts import ArtifactError, ArtifactMissing, ArtifactTree, deliverable_path
 from ..config import ConfigError, HostConfig
 from ..contracts import FollowupUnavailable, Verdict
 from ..egress import MODEL_ROUTE, SEARCH_ROUTE, EgressProxy
@@ -427,7 +427,17 @@ class RecoverStage:
         # Recover work products before the face is torn down: the sandbox
         # cannot be read after it is destroyed.
         try:
-            recovery = adapter.recover_artifacts(execution.workspace)
+            declared = []
+            for item in execution.declared_files:
+                try:
+                    deliverable_path(item["path"])
+                except ArtifactError:
+                    continue  # Seal records the per-file rejection; never send to the sandbox.
+                declared.append(item["path"])
+            recovery = (
+                adapter.recover_artifacts(execution.workspace, declared=tuple(declared))
+                if declared else adapter.recover_artifacts(execution.workspace)
+            )
             failures.extend(recovery.failures)
             # Values the host only learned from recovered material (the E2B
             # face's state root) join this run's boundary exactly like an
@@ -497,11 +507,13 @@ class SealStage:
         except Exception:  # noqa: BLE001 - reported as a rejected artifact
             logger.exception("report recovery failed run=%s", execution.record.run_id)
             report = ReportFacts(status="rejected", path=None)
+        deliverables, delivery_redacted = self.deliverables(execution, report, failures)
         return ArtifactFacts(
-            redacted=redacted or report.redacted,
+            redacted=redacted or report.redacted or delivery_redacted,
             report_path=report.path,
             report_status=report.status,
             artifact_failures=tuple(failures),
+            deliverables=tuple(deliverables),
         )
 
     def sweep(self, execution: RunExecution, failures: list[str]) -> bool:
@@ -570,6 +582,47 @@ class SealStage:
         return ReportFacts(
             status="ok", path=self.s.store.report_artifact_path(run_id), redacted=changed
         )
+
+    def deliverables(
+        self, execution: RunExecution, report: ReportFacts, failures: list[str]
+    ) -> tuple[list[dict[str, str]], bool]:
+        """Seal only declared workspace files into the run-owned artifact tree."""
+        results: list[dict[str, str]] = []
+        any_redacted = False
+        if execution.declaration_overflow:
+            failures.append("交付声明超过 8 个不同文件，超出的文件未回收")
+        for item in execution.declared_files:
+            path = item["path"]
+            result = {**item, "status": "rejected"}
+            try:
+                deliverable_path(path)
+                if path == REPORT_FILENAME:
+                    if report.path is None:
+                        raise ArtifactError("主报告未能回收")
+                    result["status"] = "ok"
+                else:
+                    with ArtifactTree(execution.workspace) as workspace:
+                        data = workspace.read(path, max_bytes=limits.REPORT_MAX_BYTES)
+                    original = data.decode("utf-8", errors="surrogateescape")
+                    masked = self.s.secrets(execution).redact(original)
+                    safe = masked.encode("utf-8", errors="surrogateescape")
+                    with ArtifactTree(self.s.store.run_dir(execution.record.run_id)) as run_tree:
+                        run_tree.replace(
+                            f"{ARTIFACTS_DIRNAME}/{path}", safe,
+                            max_bytes=limits.REPORT_MAX_BYTES, create_parents=True,
+                        )
+                    any_redacted = any_redacted or safe != data
+                    result["status"] = "ok"
+            except (ArtifactError, OSError, UnicodeError) as exc:
+                reason = (str(exc) if isinstance(exc, ArtifactError)
+                          else f"文件读写失败（{type(exc).__name__}）")
+                reason = reason.replace(str(execution.workspace), "工作区").replace(
+                    str(self.s.store.run_dir(execution.record.run_id)), "产物目录"
+                )[:300]
+                result["reason"] = reason
+                failures.append(f"交付文件拒绝 {path}: {reason}")
+            results.append(result)
+        return results, any_redacted
 
     def _warn(self, execution: RunExecution, detail: str) -> None:
         self.s.channel.warn(execution, "report_rejected", detail, label="report")
@@ -735,6 +788,7 @@ class CommitStage:
             "error": secrets.redact(verdict.error) if verdict.error else None,
             "reportPath": str(artifacts.report_path) if artifacts.report_path else None,
             "reportStatus": artifacts.report_status,
+            "deliverables": [dict(item) for item in artifacts.deliverables],
             "modelStopReason": facts.model_stop_reason,
             "sessionId": current.session_id,
             "sessionFile": current.session_file,

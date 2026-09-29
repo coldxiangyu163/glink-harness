@@ -22,3 +22,4 @@
 | [0014](0014-delivery-gate-lint-types-coverage.md) | 交付门禁加入 ruff 静态检查、mypy 类型检查与覆盖率总量 ratchet（dev-only 依赖） |
 | [0015](0015-acp-credential-channels-under-model-credential-policy.md) | ACP 凭据通道视同模型凭据，服从 tenant/shared 政策；shared 按族分流冻结清单 |
 | [0016](0016-acp-credential-env-single-source.md) | ACP 凭据新增 `.env` 单源渲染通道（每 run 渲染 dsh 凭据、收尾删除）；与文件注入互斥；dsh 默认模型经仓库 overlay 版本化 |
+| [0017](0017-declared-deliverables.md) | ACP `present` 声明 → 安全回收多文件 → 宿主副本下载与交付卡片；主报告仍遵循 0007 |

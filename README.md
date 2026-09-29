@@ -154,6 +154,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 | GET | `/api/runs/{id}/events` | 事件流（SSE，支持 `Last-Event-ID` 重放；重放事实源是持久事件日志） |
 | POST | `/api/runs/{id}/stop` | 请求取消：受理 `200 {"requested": true}`（终态必为 `cancelled`）；已结束 `409 run_not_cancellable`（带已提交 `status`）；未知 `404` |
 | GET | `/api/runs/{id}/report` | 下载 `report.md`（只认宿主产物副本 `runs/<id>/artifacts/report.md`） |
+| GET | `/api/runs/{id}/deliverables/{index}` | 下载本 run 成功封存的第 0–7 项声明交付文件；`GET /api/runs/{id}` 的 `deliverables` 给逐件状态、原因和可用性（[ADR 0017](docs/adr/0017-declared-deliverables.md)） |
 | GET | `/api/me` | 当前身份：local 报 `{"mode":"local","authenticated":false}`；gateway/accounts 回展示字段与角色（accounts 另回 `csrfToken`），未认证 `401` 且带 `mode` |
 | POST | `/api/auth/login` | accounts 模式登录：邮箱+密码，成功设置 `HttpOnly` 会话 cookie 并回身份 |
 | POST | `/api/auth/register` | accounts 模式邀请注册：只接受绑定到邀请的邮箱，创建账号后回到登录（不静默授予会话） |
@@ -323,7 +324,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   报告下载响应带 `X-Redacted` 头标明是否发生脱敏。
 - **产物路径不被链接利用**：内核可达的文件只经 run 根目录的目录句柄逐级打开（任何一级是链接都拒绝，
   打开后再复核，写入在已核对的目录内原子替换），因此祖先目录在校验与打开之间被替换也读不到、写不到
-  外部文件；`report.md` 脱敏后复制到宿主拥有的 `runs/<id>/artifacts/report.md` 再服务，会话文件只允许
+  外部文件；`report.md` 脱敏后复制到宿主拥有的 `runs/<id>/artifacts/report.md` 再服务，ACP `present` 声明的补充文件也经宿主安全回收、脱敏后在交付卡片中呈现（pi 族不伪造该声明）；会话文件只允许
   写在本次 run 的会话子目录内，工作区清扫也绝不跟随链接。
 - **真实 key 不进执行环境**：pi 族的模型/检索 key 只在宿主凭据出口代理里，运行期 `auth.json`
   只含本 run 的短期 token（终帧吊销）；环境变量按白名单过滤。代理按上游 usage 计量，作为权威用量。

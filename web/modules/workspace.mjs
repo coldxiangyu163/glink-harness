@@ -595,6 +595,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       reportHref: (id) => api.reportUrl(id),
       reportDownloadName: (value) => reportFileName(value.prompt),
       childFileHref: (id, n, name) => api.childFileUrl(id, n, name),
+      deliverableHref: (id, index) => api.deliverableUrl(id, index),
     });
     current = { runId, model, feed: null, view,
       prompt: ancestors[0]?.prompt ?? run.prompt, history: [] };
@@ -629,6 +630,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       const past = { runId: ancestor.runId, model: createRunState(ancestor), feed: null,
         view: createRunView({ root: pastRoot, renderMarkdown, onOpenReport: openReport,
           onCopy: copyText, reportHref: api.reportUrl,
+          deliverableHref: api.deliverableUrl,
           reportDownloadName: (value) => reportFileName(value.prompt) }) };
       current.history.push(past);
       past.view.render(past.model);

@@ -174,7 +174,9 @@ class Sandbox(ABC):
         """The live remote resource (E2B SDK sandbox), ``None`` elsewhere."""
         return None
 
-    def recover_workspace(self, destination: Path) -> tuple[list[Path], list[str]]:
+    def recover_workspace(
+        self, destination: Path, *, declared: tuple[str, ...] = ()
+    ) -> tuple[list[Path], list[str]]:
         """Pull the remote workspace back (a no-op where it already is the host's)."""
         return [], []
 
@@ -421,11 +423,13 @@ class E2BSandbox(Sandbox):
         # process, which this face never does.
         return Spawn(argv=list(launch.argv), env={}, cwd=None, process=lambda *a, **k: process)
 
-    def recover_workspace(self, destination: Path) -> tuple[list[Path], list[str]]:
-        """Pull the sandbox workspace back (bounded, direct children only)."""
+    def recover_workspace(
+        self, destination: Path, *, declared: tuple[str, ...] = ()
+    ) -> tuple[list[Path], list[str]]:
+        """Pull declared files first, then ordinary direct children within shared limits."""
         if self._handle is None:
             return [], []
-        return _recover_workspace(self._handle, destination)
+        return _recover_workspace(self._handle, destination, declared=declared)
 
     def session_facts(self) -> dict[str, Any]:
         return {"sandboxId": self.sandbox_id, "template": self.template}

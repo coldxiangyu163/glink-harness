@@ -62,7 +62,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
-from ..artifacts import ArtifactError, ArtifactTree
+from ..artifacts import ArtifactError, ArtifactTree, deliverable_path
 from ..config import ConfigError, HostConfig
 from .agent_env import IMAGE_PACKAGE_GUARD, AgentRuntime
 
@@ -489,14 +489,13 @@ def _create_sandbox(
         raise SandboxError(f"sandbox 创建失败: {type(exc).__name__}: {exc}") from exc
 
 
-def _recover_workspace(sandbox: Any, destination: Path) -> tuple[list[Path], list[str]]:
-    """Copy the sandbox workspace's direct file children into ``destination``.
+def _recover_workspace(
+    sandbox: Any, destination: Path, *, declared: tuple[str, ...] = ()
+) -> tuple[list[Path], list[str]]:
+    """Copy direct files plus declared nested files within one shared budget.
 
-    Only direct children with simple names are recovered, each one bounded;
-    anything unreadable (a directory), oversized, or named with a path
-    separator is recorded as a failure instead of being guessed at. Shared by
-    the pi and ACP faces (both write their deliverable into the same sandbox
-    workspace).
+    Main report and declarations get priority; every nested ancestor is listed
+    and checked before the bounded read. Shared by both harness families.
     """
     destination.mkdir(parents=True, exist_ok=True)
     try:
@@ -512,16 +511,34 @@ def _recover_workspace(sandbox: Any, destination: Path) -> tuple[list[Path], lis
     files: list[Path] = []
     failures: list[str] = []
     total = 0
+    direct = {str(getattr(item, "name", "")): item for item in entries}
+    # report and declarations consume the existing shared count/byte budget first;
+    # an unrelated pile of workspace files cannot crowd out a declared delivery.
+    names = list(dict.fromkeys((REPORT_FILENAME, *declared, *direct)))
     with tree:
-        for entry in entries:
-            name = str(getattr(entry, "name", None) or "")
-            path = str(getattr(entry, "path", None) or f"{SANDBOX_WORKSPACE}/{name}")
-            if not name:
+        for name in names:
+            # Reject malformed SDK listing names even when no usable EntryInfo
+            # could be resolved. Never let the missing-entry branch hide them.
+            if (name in direct and "/" in name and name not in declared) or (
+                name in direct and ("\\" in name or name in {".", ".."})
+            ):
+                failures.append(f"跳过非法产物名: {name!r}")
                 continue
+            entry = direct.get(name) if "/" not in name else None
+            if entry is None and "/" in name and name in declared:
+                entry, failure = _declared_entry(sandbox, name, direct)
+                if failure:
+                    failures.append(f"交付文件不可回收: {name}: {failure}")
+                    continue
+            if entry is None:
+                if name in declared:
+                    failures.append(f"交付文件不存在: {name}")
+                continue
+            path = f"{SANDBOX_WORKSPACE}/{name}"
             # Path semantics are checked before the hidden-file skip: a name
             # that tries to escape ("../x") starts with a dot and must be
             # reported, not silently ignored.
-            if "/" in name or "\\" in name or name in {".", ".."}:
+            if ("/" in name and name not in declared) or "\\" in name or name in {".", ".."}:
                 failures.append(f"跳过非法产物名: {name!r}")
                 continue
             kind = _entry_kind(entry)
@@ -530,16 +547,22 @@ def _recover_workspace(sandbox: Any, destination: Path) -> tuple[list[Path], lis
                 # recovered (and an unreadable regular entry is reported).
                 continue
             if kind == "symlink":
-                # The host never follows links — the same rule ArtifactTree
-                # enforces on every read and write. A linked artifact is
-                # skipped rather than resolved and is not a run failure.
+                # A declared link must produce a visible failure, not a phantom card.
+                if name in declared:
+                    failures.append(f"交付文件是符号链接: {name}")
                 continue
-            if name.startswith("."):
+            if name.startswith(".") and name not in declared:
                 continue
             # Same triple bound as the subagent mirror: the file count is
             # checked before reading, the total after reading and before
             # writing. A breach is a recorded failure and stops the copy; the
             # verdict is never blocked by a runaway workspace.
+            if name in declared:
+                try:
+                    deliverable_path(name)
+                except ArtifactError as exc:
+                    failures.append(f"交付文件路径拒绝: {name}: {exc}")
+                    continue
             if len(files) >= WORKSPACE_RECOVER_MAX_FILES:
                 failures.append(
                     f"工作区产物超过文件数上限（{WORKSPACE_RECOVER_MAX_FILES}）"
@@ -565,12 +588,40 @@ def _recover_workspace(sandbox: Any, destination: Path) -> tuple[list[Path], lis
                 )
                 break
             try:
-                tree.replace(name, data, max_bytes=ARTIFACT_MAX_BYTES)
+                tree.replace(name, data, max_bytes=ARTIFACT_MAX_BYTES, create_parents=True)
             except (ArtifactError, OSError) as exc:
                 failures.append(f"产物写入失败: {name}: {exc}")
                 continue
             files.append(destination / name)
     return files, failures
+
+
+def _declared_entry(
+    sandbox: Any, name: str, direct: dict[str, Any]
+) -> tuple[Any | None, str | None]:
+    """Walk remote list metadata one directory at a time; never list through a link."""
+    try:
+        deliverable_path(name)
+    except ArtifactError as exc:
+        return None, str(exc)
+    parts = name.split("/")
+    entries = direct
+    for index, part in enumerate(parts):
+        entry = entries.get(part)
+        if entry is None:
+            return None, "路径不存在"
+        kind = _entry_kind(entry)
+        if index == len(parts) - 1:
+            return (entry, None) if kind == "file" else (None, "非普通文件或符号链接")
+        if kind != "dir":
+            return None, "祖先不是普通目录或是符号链接"
+        parent = f"{SANDBOX_WORKSPACE}/{'/'.join(parts[:index + 1])}"
+        try:
+            children = sandbox.files.list(parent, request_timeout=E2B_REQUEST_TIMEOUT_SECONDS)
+        except Exception as exc:  # noqa: BLE001 - bounded remote request, report the failure
+            return None, f"目录不可读取: {type(exc).__name__}"
+        entries = {str(getattr(child, "name", "")): child for child in children}
+    return None, "路径不存在"
 
 
 def _runtime_manifest(runtime_dir: Path) -> list[tuple[str, bool]]:

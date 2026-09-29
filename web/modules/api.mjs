@@ -121,6 +121,8 @@ export function createApi({ fetchImpl = globalThis.fetch, onCsrfInvalid = null }
     }),
     eventsUrl: (runId) => `/api/runs/${encodeURIComponent(runId)}/events`,
     reportUrl: (runId) => `/api/runs/${encodeURIComponent(runId)}/report`,
+    deliverableUrl: (runId, index) =>
+      `/api/runs/${encodeURIComponent(runId)}/deliverables/${index}`,
     childFileUrl: (runId, n, name) =>
       `/api/runs/${encodeURIComponent(runId)}/children/${encodeURIComponent(String(n))}/${encodeURIComponent(name)}`,
   };

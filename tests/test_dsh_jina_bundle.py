@@ -136,7 +136,13 @@ def test_profile_overlay_lists_the_shipped_bundles_plus_the_jina_bundle() -> Non
     # 覆盖层只带清单、用户层与默认 settings（部署偏好版本化，ADR 0016；
     # 不含 key——apiKeyEnv 只是引用名）：bundle 代码由镜像安装，重建即更新。
     patch_text = (PROFILE_DIR / "cordis.patch.yml").read_text(encoding="utf-8")
-    assert patch_text.strip().endswith("[]"), "profile 用户层必须保持空列表"
+    # base bundle ships the native present package but leaves it unmounted;
+    # the ACP profile mounts the tool explicitly without disturbing Jina's bundle.
+    assert re.search(
+        r"- insert:\n    - id: tool-present\n"
+        r"      name: '@deepseek-ai/dsh-tool-present'\n"
+        r"      config:\n        maxFiles: 8\s*$", patch_text
+    )
     overlay_files = sorted(
         path.relative_to(REPO_ROOT).as_posix()
         for path in (REPO_ROOT / "harnesses" / "dsh" / "home").rglob("*")

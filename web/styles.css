@@ -1143,6 +1143,10 @@ details[open] > summary .pi-row-chevron { transform: rotate(180deg); }
 .pi-output-text { display: flex; flex-direction: column; min-width: 0; }
 .pi-output-name { overflow: hidden; color: var(--foreground); font-size: var(--text-body-lg); line-height: var(--text-body-lg--line-height); text-overflow: ellipsis; white-space: nowrap; }
 .pi-output-meta { color: var(--muted-foreground); font-size: var(--text-caption); line-height: var(--text-caption--line-height); }
+.pi-deliverables-list { display: grid; gap: var(--space-4); }
+.pi-deliverables .pi-output-text { flex: 1; }
+.pi-deliverables .pi-output-name { display: block; }
+.pi-deliverables .pi-output-name[aria-disabled="true"] { color: var(--muted-foreground); }
 
 /* 回答底部动作条：一排纯图标（复制 / 下载 / 重新研究）。
  * 带文件产出的回答照 Demo .demo-output-actions：上距 16、键距 16、键高 24。 */

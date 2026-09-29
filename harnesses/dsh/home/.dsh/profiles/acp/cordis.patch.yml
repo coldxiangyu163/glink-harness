@@ -1,8 +1,12 @@
 # Per-run ACP profile user layer (harnesses/dsh/home/ overlay).
 #
-# The Jina fetch bundle carries its own configuration in
-# harnesses/dsh/bundles/dsh-web-fetch-jina/cordis.patch.yml, and this file stays an
-# empty list so per-run choices keep one home. It exists because the profile
-# directory is seeded from this overlay before dsh boots: the launcher writes its
-# root config beside it and never overwrites the manifest.
-[]
+# Jina fetch is configured in its own bundle. This user layer mounts the native
+# present tool left unmounted by dsh-base; the host enforces the same maxFiles
+# bound when it recovers files. The launcher preserves this seeded profile.
+# dsh-base installs but deliberately does not mount present. ACP runs need the
+# native declaration tool; the host still validates/copies each named file.
+- insert:
+    - id: tool-present
+      name: '@deepseek-ai/dsh-tool-present'
+      config:
+        maxFiles: 8

@@ -1068,7 +1068,9 @@ def test_artifacts_are_bounded_by_listing_metadata_before_reading(tmp_path: Path
     assert "/home/user/workspace/huge.bin" not in sandbox.reads
 
 
-def _recover_from(sandbox: FakeSandbox, tmp_path: Path):
+def _recover_from(
+    sandbox: FakeSandbox, tmp_path: Path, *, declared: tuple[str, ...] = ()
+):
     config = make_config(tmp_path)
     client = _Face(
         config,
@@ -1079,7 +1081,7 @@ def _recover_from(sandbox: FakeSandbox, tmp_path: Path):
     )
     client.open()
     try:
-        return client.sandbox.recover_workspace(tmp_path / "ws")
+        return client.sandbox.recover_workspace(tmp_path / "ws", declared=declared)
     finally:
         client.sandbox.close()
 
@@ -1138,6 +1140,33 @@ def test_recovery_calls_carry_the_host_request_timeout(tmp_path: Path) -> None:
     assert all(timeout is not None for timeout in sandbox.info_timeouts)
     # 与子代理回收/进度轮询同一有界口径（单一真源），不是 SDK 默认 60s。
     assert set(sandbox.list_timeouts) == {e2b_env.E2B_REQUEST_TIMEOUT_SECONDS}
+
+
+def test_declared_nested_file_and_report_win_the_shared_e2b_quota(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(e2b_env, "WORKSPACE_RECOVER_MAX_FILES", 2)
+    sandbox = FakeSandbox(workspace_files=("a.md", "report.md"))
+    sandbox.readable["/home/user/workspace/report.md"] = b"main"
+    sandbox.readable["/home/user/workspace/a.md"] = b"extra"
+    sandbox.files.write("/home/user/workspace/region/brief.md", b"nested")
+    files, failures = _recover_from(sandbox, tmp_path, declared=("region/brief.md",))
+    assert {path.relative_to(tmp_path / "ws").as_posix() for path in files} == {
+        "report.md", "region/brief.md",
+    }
+    assert (tmp_path / "ws/region/brief.md").read_bytes() == b"nested"
+    assert any("文件数上限" in failure for failure in failures)
+    assert "/home/user/workspace/a.md" not in sandbox.reads
+
+
+def test_nested_declared_symlink_is_not_followed(tmp_path: Path) -> None:
+    sandbox = FakeSandbox()
+    sandbox.files.write("/home/user/workspace/region/brief.md", b"private")
+    sandbox.entry_types["/home/user/workspace/region"] = "symlink"
+    files, failures = _recover_from(sandbox, tmp_path, declared=("region/brief.md",))
+    assert not any(path.name == "brief.md" for path in files)
+    assert any("链接" in failure for failure in failures)
+    assert "/home/user/workspace/region/brief.md" not in sandbox.reads
 
 
 def test_workspace_recovery_stops_at_the_file_count_bound(

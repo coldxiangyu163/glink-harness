@@ -73,7 +73,7 @@ DETAIL_LIMIT = 500
 _ACP_TOOL_PRESENTATION = {
     "web_search": "search_web", "web_fetch": "fetch_page",
     "todo_write": "plan", "write": "write_file", "read": "read_file",
-    "edit": "edit_file", "bash": "execute",
+    "edit": "edit_file", "bash": "execute", "present": "deliver",
     "list_agents": "manage_children", "job_list": "manage_children",
     "send_message": "message_child", "interrupt_agent": "stop_child",
 }
@@ -348,6 +348,20 @@ def _agent_tool_call(
         # record without forwarding the raw frame.
         payload["kind"] = kind
     produced = [(events.TOOL_STARTED, payload)]
+    if name == "present":
+        files = update.get("rawInput")
+        files = files.get("files") if isinstance(files, Mapping) else None
+        if isinstance(files, list) and 0 < len(files) <= 8 and all(
+            isinstance(item, Mapping) and isinstance(item.get("path"), str)
+            and len(item["path"]) <= 512
+            for item in files
+        ):
+            declared = [
+                {"path": item["path"], **({"description": _clip(item["description"], DETAIL_LIMIT)}
+                 if isinstance(item.get("description"), str) else {})}
+                for item in files
+            ]
+            produced.append((events.DELIVERABLES_DECLARED, {"files": declared}))
     if update.get("status") in _TERMINAL_TOOL_STATUS:
         produced.append((events.TOOL_FINISHED, _tool_finished_payload(update, projector)))
     return produced

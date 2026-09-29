@@ -150,6 +150,7 @@ class ArtifactFacts:
     report_path: Path | None = None
     report_status: str = "none"
     artifact_failures: tuple[str, ...] = ()
+    deliverables: tuple[Mapping[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +197,9 @@ class RunExecution:
     blueprint: Blueprint | None = None
     blueprint_prompt: str = ""
     seeded_report_digest: str | None = None
+    #: Committed ACP declarations only; never synthesize a pi-family declaration.
+    declared_files: list[dict[str, str]] = field(default_factory=list)
+    declaration_overflow: bool = False
     #: Guards the phase, the cancellation flag and every frame commit.
     lock: threading.RLock = field(default_factory=threading.RLock)
     phase: str = OPEN

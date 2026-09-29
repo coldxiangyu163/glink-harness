@@ -802,13 +802,18 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         except AcpError as exc:
             logger.debug("session/cancel could not be sent: %s", exc)
 
-    def recover_artifacts(self, destination: Path) -> ArtifactRecovery:
+    def recover_artifacts(
+        self, destination: Path, *, declared: tuple[str, ...] = ()
+    ) -> ArtifactRecovery:
         transfer = self._transfer
         if transfer is None or self.sandbox.handle is None:
             # The workspace already is the host directory (in-process, the
             # Docker mount), or the remote sandbox never came up.
             return ArtifactRecovery()
-        files, failures = self.sandbox.recover_workspace(destination)
+        files, failures = (
+            self.sandbox.recover_workspace(destination, declared=declared)
+            if declared else self.sandbox.recover_workspace(destination)
+        )
         # The sandbox destroys the agent state with it, so the state root is
         # recovered in the same pre-teardown window as the workspace. A failed
         # recovery publishes no recovered root, which is exactly the

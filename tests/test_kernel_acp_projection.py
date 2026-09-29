@@ -402,6 +402,21 @@ def test_notice_payloads_pass_through_the_run_redactor() -> None:
 # -- tool call projection ----------------------------------------------------------
 
 
+def test_present_declares_files_without_displacing_ordinary_tool_events() -> None:
+    projector = AcpProjector(SecretRedactor(["secret-value"]))
+    produced = _project(projector, {
+        "sessionUpdate": "tool_call", "toolCallId": "present-1", "name": "present",
+        "kind": "other", "status": "pending",
+        "rawInput": {"files": [{"path": "memo.md", "description": "secret-value 摘要"}]},
+    })
+    assert [kind for kind, _ in produced] == [events.TOOL_STARTED, events.DELIVERABLES_DECLARED]
+    assert produced[0][1]["presentation"] == "deliver"
+    assert produced[1][1] == {"files": [{"path": "memo.md", "description": "[REDACTED] 摘要"}]}
+    assert _project(projector, {"sessionUpdate": "tool_call", "toolCallId": "x",
+                                 "name": "present", "rawInput": {"files": "bad"}})[0][0] == events.TOOL_STARTED
+
+
+
 def test_a_tool_call_arriving_terminal_emits_started_and_finished() -> None:
     projector = AcpProjector(SecretRedactor())
     produced = _project(

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from ..artifacts import ArtifactError, ArtifactTree
 from ..redaction import SecretRedactor
@@ -112,6 +112,44 @@ def read_report(
     # tenant credentials, so one tenant's report is never compared against
     # another tenant's secrets.
     return _redacted(data, redactor_for(record), "text/markdown; charset=utf-8")
+
+
+def available_deliverables(store: RunStore, record: RunRecord) -> list[dict[str, Any]]:
+    """Detail read: keep failures visible, but mark vanished/linked copies unavailable."""
+    result = []
+    for index, item in enumerate(record.deliverables[:8]):
+        public: dict[str, Any] = dict(item)
+        location = store.deliverable_location(record, index)
+        public["available"] = False
+        if location is not None:
+            try:
+                with ArtifactTree(location.root) as tree:
+                    tree.size(location.relative, max_bytes=REPORT_MAX_BYTES)
+                public["available"] = True
+            except (ArtifactError, OSError):
+                pass
+        result.append(public)
+    return result
+
+
+def read_deliverable(
+    store: RunStore, record: RunRecord, index: int, redactor_for: RedactorFor
+) -> ReadArtifact | None:
+    location = store.deliverable_location(record, index)
+    if location is None:
+        return None
+    try:
+        with ArtifactTree(location.root) as tree:
+            data = tree.read(location.relative, max_bytes=REPORT_MAX_BYTES)
+    except (ArtifactError, OSError) as exc:
+        logger.warning("deliverable refused run=%s index=%s: %s", record.run_id, index, exc)
+        return None
+    path = record.deliverables[index]["path"]
+    suffix = "." + path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    content_type = CHILD_FILE_TYPES.get(suffix, _DEFAULT_CONTENT_TYPE)
+    original = data.decode("utf-8", errors="surrogateescape")
+    redacted = redactor_for(record).redact(original).encode("utf-8", errors="surrogateescape")
+    return ReadArtifact(redacted, content_type, redacted != data)
 
 
 def read_child_documents(store: RunStore, record: RunRecord) -> ChildDocuments:

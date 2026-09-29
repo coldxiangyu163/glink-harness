@@ -71,6 +71,7 @@ export function createRunView({
   reportHref = () => '#',
   reportDownloadName = () => 'report.md',
   childFileHref = () => '#',
+  deliverableHref = () => '#',
 }) {
   const uid = `run-view-${(viewCounter += 1)}`;
 
@@ -147,6 +148,13 @@ export function createRunView({
   outputRow.append(outputOpen, outputDownload);
   output.append(outputTitle, outputRow);
 
+  const deliveries = el('section', 'pi-output pi-deliverables');
+  deliveries.setAttribute('aria-label', '交付文件');
+  deliveries.hidden = true;
+  const deliveryTitle = el('p', 'pi-output-title');
+  const deliveryList = el('div', 'pi-deliverables-list');
+  deliveries.append(deliveryTitle, deliveryList);
+
   // ── children panel (ChildRun, §3.5) ────────────────────────────────────────
   // A run with dispatched subagents lists them in the detail area; a run
   // without any never renders an empty panel. The rows reuse the process-row
@@ -183,7 +191,7 @@ export function createRunView({
   rerunButton.addEventListener('click', () => onRerun?.(latest?.prompt ?? ''));
   actions.append(copyButton, downloadButton, rerunButton);
 
-  answer.append(answerHead, answerBody, childrenSection, output, outcome, actions);
+  answer.append(answerHead, answerBody, childrenSection, output, deliveries, outcome, actions);
   root.replaceChildren(process, answer);
 
   // Answers often point at the report by its relative name ("见 report.md"); the
@@ -594,6 +602,41 @@ export function createRunView({
     answerHead.hidden = !(terminal && (hasAnswer || model.hasReport)) || unavailable;
 
     output.hidden = !model.hasReport;
+    const files = Array.isArray(model.deliverables) ? model.deliverables : [];
+    deliveries.hidden = files.length === 0;
+    if (files.length) {
+      deliveryTitle.textContent = `交付文件 · ${files.length}`;
+      deliveryList.replaceChildren();
+      files.forEach((file, index) => {
+        const row = el('div', 'pi-output-row');
+        const name = String(file.path || '').split('/').pop() || '文件';
+        const available = file.available === true && file.status === 'ok';
+        const href = deliverableHref(model.runId, index);
+        const open = el('a', 'pi-output-name');
+        open.textContent = name;
+        open.setAttribute('aria-label', `打开 ${name}`);
+        if (available) { open.href = href; open.target = '_blank'; open.rel = 'noopener'; }
+        else { open.removeAttribute('href'); open.setAttribute('aria-disabled', 'true'); }
+        const text = el('span', 'pi-output-text');
+        text.append(open);
+        const status = file.status === 'rejected' ? `未能保存：${file.reason || '安全校验未通过'}`
+          : available ? '已保存' : '整理中';
+        text.append(el('span', 'pi-output-meta', [file.description, status].filter(Boolean).join(' · ')));
+        const tile = document.createElement('img');
+        tile.className = 'pi-file-tile'; tile.src = '/icons/markdown-32.png'; tile.alt = '';
+        tile.width = 32; tile.height = 32;
+        row.append(tile, text);
+        if (available) {
+          const download = el('a', 'icon-key');
+          download.href = href;
+          download.setAttribute('download', name);
+          download.setAttribute('aria-label', `下载 ${name}`);
+          download.append(icon('download', 16));
+          row.append(download);
+        }
+        deliveryList.append(row);
+      });
+    }
     if (model.hasReport) {
       const href = reportHref(model.runId);
       outputDownload.href = href;
