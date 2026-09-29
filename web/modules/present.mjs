@@ -267,9 +267,10 @@ export function planEntries(args = {}) {
 
 export function planSummary(entries) {
   if (!entries.length) return '';
-  const active = entries.find((entry) => entry.status === 'in_progress');
+  const active = entries.filter((entry) => entry.status === 'in_progress');
   const done = entries.filter((entry) => ['done', 'completed'].includes(entry.status)).length;
-  return `${oneLine(active?.content ?? entries[0].content, 56)} · ${done}/${entries.length} 项`;
+  const extra = active.length > 1 ? `（另 ${active.length - 1} 项进行中）` : '';
+  return `${oneLine(active[0]?.content ?? entries[0].content, 56)}${extra} · ${done}/${entries.length} 项`;
 }
 
 export function planEntryLabel(entry) {

@@ -47,6 +47,19 @@ export function collectSources(items) {
   const queries = [];
   const pages = [];
   const seen = new Set();
+  // The search result already names its sources. Match on origin + pathname:
+  // fetch URLs often omit the search provider's tracking query/fragment.
+  const titles = new Map();
+  for (const item of items) {
+    if (item.kind !== 'tool' || !(item.presentation === 'search_web' ||
+        (!item.presentation && WEB_SEARCH_RE.test(item.name)))) continue;
+    for (const match of String(item.result ?? '').matchAll(/^- \[([^\]\n]{3,140})\]\((https?:\/\/[^\s)]+)\)/gm)) {
+      try {
+        const url = new URL(match[2]);
+        titles.set(`${url.origin}${url.pathname}`, match[1].trim());
+      } catch { /* malformed link is not a source */ }
+    }
+  }
   for (const item of items) {
     if (item.kind !== 'tool') continue;
     const args = item.args && typeof item.args === 'object' ? item.args : {};
@@ -66,7 +79,8 @@ export function collectSources(items) {
           if (url.protocol !== 'http:' && url.protocol !== 'https:') continue;
           seen.add(`u:${value}`);
           const page = { href: url.href, host: url.hostname, path: url.pathname === '/' ? '' : url.pathname };
-          const title = fetchedTitle(item.result);
+          const fetched = /^Fetched https?:\/\/[^\n]+ \(HTTP 2\d\d\)/.test(String(item.result ?? ''));
+          const title = fetched ? fetchedTitle(item.result) || titles.get(`${url.origin}${url.pathname}`) : '';
           pages.push(title ? { ...page, title } : page);
         } catch {
           /* not a URL — nothing to link to */
