@@ -1,0 +1,2 @@
+{"intercepted":["http://127.0.0.1:59079/api/runs?limit=50"],"empty":{"role":"status","variant":"no-data","image":"/empty-state/no-data.svg","title":"还没有研究记录","homeEmpty":2,"rows":0},"ok":true}
+EXIT_CODE=0

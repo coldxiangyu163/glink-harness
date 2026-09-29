@@ -1,0 +1,2 @@
+{"status":"finished","count":3,"actions":["执行","写入"],"outputVisible":true}
+EXIT_CODE=0

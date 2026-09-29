@@ -1,0 +1,5 @@
+[fail] page.click: Timeout 30000ms exceeded.
+Call log:
+[2m  - waiting for locator('#run-list [data-run-id="a33241f3a6f4"]')[22m
+
+EXIT_CODE=1

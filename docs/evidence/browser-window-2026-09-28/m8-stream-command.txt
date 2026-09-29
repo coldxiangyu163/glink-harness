@@ -1,0 +1,2 @@
+{"exchanges":4,"currentStatus":"finished","openCount":5,"closeCount":5,"peak":2,"active":0}
+EXIT_CODE=0

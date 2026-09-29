@@ -1,0 +1,9 @@
+{"temporaryStateRemoved":true,"hostPid":59715,"port":58644}
+page.waitForSelector: Timeout 30000ms exceeded.
+Call log:
+[2m  - waiting for locator('#toast:not([hidden])') to be visible[22m
+
+    at /Users/coldxiangyu/AI/git/pi-glink-browserwin/docs/evidence/browser-window-2026-09-28/m10-csrf.mjs:73:11 {
+  name: 'TimeoutError'
+}
+EXIT_CODE=1

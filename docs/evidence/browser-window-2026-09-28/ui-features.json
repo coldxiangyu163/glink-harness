@@ -1,0 +1,557 @@
+{
+  "baseUrl": "http://127.0.0.1:59079",
+  "viewport": {
+    "width": 1512,
+    "height": 900
+  },
+  "breakpoints": [
+    1512,
+    1250,
+    1050,
+    1049,
+    900,
+    721,
+    720,
+    600
+  ],
+  "checks": [
+    {
+      "name": "外壳几何（8px 沟槽 / 240 导航 / 52 栏头）",
+      "ok": true,
+      "detail": {
+        "sidebar": {
+          "w": 240,
+          "h": 884,
+          "x": 8
+        },
+        "header": {
+          "w": 1248,
+          "h": 52,
+          "x": 256
+        },
+        "gap": "8px",
+        "padding": "8px",
+        "brand": "/logo-icon.svg",
+        "alertHidden": true,
+        "font": "\"Noto Sans SC\", \"PingFang SC\", \"SF Pro Text\", \"Helvetica Neue\", \"Hiragino Sans GB\", \"Microsoft YaHei\", \"Noto Sans SC\", sans-serif",
+        "title": "研究工作台"
+      }
+    },
+    {
+      "name": "品牌标识取自标准库资产",
+      "ok": true,
+      "detail": "/logo-icon.svg"
+    },
+    {
+      "name": "服务正常时侧栏页脚不出现状态牌",
+      "ok": true,
+      "detail": true
+    },
+    {
+      "name": "页面作用域字体与标准库 Demo 同族（Noto Sans SC 优先）",
+      "ok": true,
+      "detail": "\"Noto Sans SC\", \"PingFang SC\", \"SF Pro Text\", \"Helvetica Neue\", \"Hiragino Sans GB\", \"Microsoft YaHei\", \"Noto Sans SC\", sans-serif"
+    },
+    {
+      "name": "首页（标题 / 两卡 / 无选中 / 无右簇）",
+      "ok": true,
+      "detail": {
+        "title": "今天要研究什么？",
+        "cards": 2,
+        "rows": 1,
+        "reports": 1,
+        "path": "新研究",
+        "pathColor": "rgb(23, 23, 23)",
+        "current": 0,
+        "headerActions": 0
+      }
+    },
+    {
+      "name": "栏头对象段走 --foreground（PH-03）",
+      "ok": true,
+      "detail": "rgb(23, 23, 23)"
+    },
+    {
+      "name": "首页可见文字不暴露内核 / 执行面 / 会话信息",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "name": "输入器：普通长度不显示计数、发送键启用、120 高",
+      "ok": true,
+      "detail": {
+        "countHidden": true,
+        "sendDisabled": false,
+        "composerH": 120
+      }
+    },
+    {
+      "name": "输入器：多行自增到 240 上限",
+      "ok": true,
+      "detail": {
+        "inputH": 240,
+        "overflow": "auto"
+      }
+    },
+    {
+      "name": "输入器：接近上限才显示计数",
+      "ok": true,
+      "detail": {
+        "hidden": false,
+        "text": "30010 / 32000"
+      }
+    },
+    {
+      "name": "输入器：清空后回落并禁用发送",
+      "ok": true,
+      "detail": {
+        "sendDisabled": true,
+        "inputH": 68
+      }
+    },
+    {
+      "name": "输入器：激活态 1px 近黑描边 + 内层认领焦点（UC-03/04）",
+      "ok": true,
+      "detail": {
+        "border": "rgb(23, 23, 23)",
+        "managed": true
+      }
+    },
+    {
+      "name": "输入器：输入法组字中的回车不提交",
+      "ok": true,
+      "detail": {
+        "value": "组字保护",
+        "view": "home"
+      }
+    },
+    {
+      "name": "输入器：Shift+Enter 换行不提交",
+      "ok": true,
+      "detail": {
+        "value": "换行\n",
+        "view": "home"
+      }
+    },
+    {
+      "name": "运行中：停止键原位替换发送键 + 输入只读",
+      "ok": true,
+      "detail": {
+        "status": "running",
+        "stopVisible": true,
+        "sendHidden": true,
+        "readOnly": true,
+        "placeholder": "研究进行中，完成或停止后可以继续追问",
+        "foldOpen": "true",
+        "label": "正在准备研究",
+        "path": "先列出三条本地工作台的观察",
+        "marked": 1,
+        "dock": "132px"
+      }
+    },
+    {
+      "name": "运行中：过程折叠展开并写具体动作",
+      "ok": true,
+      "detail": "正在准备研究"
+    },
+    {
+      "name": "运行中：侧栏标记当前研究（且只标记一个）",
+      "ok": true,
+      "detail": 1
+    },
+    {
+      "name": "运行中：输入器实测高度写回留白变量",
+      "ok": true,
+      "detail": "132px"
+    },
+    {
+      "name": "停止：终态中性（虚线圆、不是 ×）+ 可重新开始",
+      "ok": true,
+      "detail": {
+        "status": "cancelled",
+        "stopHidden": true,
+        "outcome": "已停止研究",
+        "tone": "stopped",
+        "icon": "dashed-circle",
+        "toast": "正在停止，已完成的内容会保留。"
+      }
+    },
+    {
+      "name": "历史重放：时间线完整、贴底、过程已收起",
+      "ok": true,
+      "detail": {
+        "id": "e40e095e387c",
+        "score": 7,
+        "thinking": 3,
+        "tools": 3,
+        "answer": 1,
+        "status": "finished",
+        "folded": true,
+        "draft": "待核验草稿",
+        "output": true,
+        "actions": [
+          "复制回答",
+          "下载报告",
+          "用同一个问题重新研究"
+        ],
+        "unavailable": false,
+        "distance": 0
+      }
+    },
+    {
+      "name": "回答外壳：待核验草稿 + 文件卡 + 动作条（规范 6.1）",
+      "ok": true,
+      "detail": {
+        "draft": "待核验草稿",
+        "actions": [
+          "复制回答",
+          "下载报告",
+          "用同一个问题重新研究"
+        ]
+      }
+    },
+    {
+      "name": "对话界面不暴露工具内部名 / 会话 / 轮次记账",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "name": "过程折叠可再展开；思考行可展开看正文再收起",
+      "ok": true,
+      "detail": {
+        "process": "true",
+        "after": {
+          "open": true,
+          "chars": 420
+        },
+        "closedAgain": false
+      }
+    },
+    {
+      "name": "工具行：写动作不写工具名；可展开看细节、不露宿主路径",
+      "ok": true,
+      "detail": {
+        "label": "执行",
+        "open": true,
+        "openedHeight": 184,
+        "closedHeight": 28,
+        "closedAgain": false,
+        "hostPath": false
+      }
+    },
+    {
+      "name": "进度与上下文：340 浮层 / 开关两态 / 步骤与运行信息",
+      "ok": true,
+      "detail": {
+        "open": "true",
+        "expanded": "true",
+        "label": "收起进度与上下文",
+        "on": true,
+        "steps": 6,
+        "facts": "状态\n已完成\n用时\n36 秒\n用量\n约 6 万 token\n模型\ngpt-6-sol",
+        "width": 340,
+        "inset": "356px"
+      }
+    },
+    {
+      "name": "进度与上下文：来源页签可切换",
+      "ok": true,
+      "detail": {
+        "selected": "true",
+        "shown": true
+      }
+    },
+    {
+      "name": "进度与上下文：Esc 收起并把焦点还给开关",
+      "ok": true,
+      "detail": {
+        "open": "false",
+        "focus": "progress-toggle"
+      }
+    },
+    {
+      "name": "报告右槽：两栏一线、默认对半、无横向溢出",
+      "ok": true,
+      "detail": {
+        "open": true,
+        "columns": 3,
+        "paneW": 624,
+        "drawerW": 624,
+        "title": "report.md",
+        "titleColor": "rgb(23, 23, 23)",
+        "badge": "待核验草稿",
+        "bodyScrollable": true,
+        "dockInsidePane": true,
+        "toggleHidden": true,
+        "collapseVisible": true,
+        "closeIcon": "chevrons-left",
+        "duplicateNames": [],
+        "overflow": false
+      }
+    },
+    {
+      "name": "报告右槽：名字档写文件名（近黑）+ 待核验草稿",
+      "ok": true,
+      "detail": {
+        "open": true,
+        "columns": 3,
+        "paneW": 624,
+        "drawerW": 624,
+        "title": "report.md",
+        "titleColor": "rgb(23, 23, 23)",
+        "badge": "待核验草稿",
+        "bodyScrollable": true,
+        "dockInsidePane": true,
+        "toggleHidden": true,
+        "collapseVisible": true,
+        "closeIcon": "chevrons-left",
+        "duplicateNames": [],
+        "overflow": false
+      }
+    },
+    {
+      "name": "报告右槽：开合键双箭头、左栏选择键让位、同屏无重名（UC-12 / S-04）",
+      "ok": true,
+      "detail": {
+        "open": true,
+        "columns": 3,
+        "paneW": 624,
+        "drawerW": 624,
+        "title": "report.md",
+        "titleColor": "rgb(23, 23, 23)",
+        "badge": "待核验草稿",
+        "bodyScrollable": true,
+        "dockInsidePane": true,
+        "toggleHidden": true,
+        "collapseVisible": true,
+        "closeIcon": "chevrons-left",
+        "duplicateNames": [],
+        "overflow": false
+      }
+    },
+    {
+      "name": "报告右槽：正文能滚动、输入器只占左栏",
+      "ok": true,
+      "detail": {
+        "open": true,
+        "columns": 3,
+        "paneW": 624,
+        "drawerW": 624,
+        "title": "report.md",
+        "titleColor": "rgb(23, 23, 23)",
+        "badge": "待核验草稿",
+        "bodyScrollable": true,
+        "dockInsidePane": true,
+        "toggleHidden": true,
+        "collapseVisible": true,
+        "closeIcon": "chevrons-left",
+        "duplicateNames": [],
+        "overflow": false
+      }
+    },
+    {
+      "name": "分割线：可拖改宽并记住",
+      "ok": true,
+      "detail": {
+        "paneW": 744,
+        "stored": "744"
+      }
+    },
+    {
+      "name": "分割线：对话列不窄于 560、报告不窄于 360",
+      "ok": true,
+      "detail": {
+        "paneW": 560,
+        "drawerW": 687
+      }
+    },
+    {
+      "name": "分割线：双击复位",
+      "ok": true,
+      "detail": {
+        "paneW": 624,
+        "stored": null
+      }
+    },
+    {
+      "name": "对话栏可收起让报告占满，展开键落在报告栏头最左",
+      "ok": true,
+      "detail": {
+        "paneHidden": true,
+        "expandVisible": true,
+        "drawerW": 1248,
+        "focus": "conversation-expand"
+      }
+    },
+    {
+      "name": "窄主区：报告改覆盖浮层、不溢出、竖线隐藏",
+      "ok": true,
+      "detail": {
+        "overlay": true,
+        "surfaceW": 764,
+        "drawerInside": true,
+        "handleHidden": true,
+        "overflow": false
+      }
+    },
+    {
+      "name": "报告下载：落盘成功、文件名可读",
+      "ok": true,
+      "detail": {
+        "file": "研究报告-浏览器全层复验预置：先使用 bash 执行 py.md",
+        "bytes": 363
+      }
+    },
+    {
+      "name": "报告右槽：收起后开关回到左栏栏头并接住焦点",
+      "ok": true,
+      "detail": {
+        "open": false,
+        "toggleVisible": true,
+        "expanded": "false",
+        "focus": "pane-preview-toggle"
+      }
+    },
+    {
+      "name": "侧栏：折叠到 64 图标条 + aria 两态 + 标签降为 sr-only",
+      "ok": true,
+      "detail": {
+        "width": 64,
+        "expanded": "false",
+        "label": "展开侧栏",
+        "itemW": 36,
+        "titleClipped": true,
+        "newBorder": "rgba(0, 0, 0, 0)",
+        "overflowingText": false
+      }
+    },
+    {
+      "name": "侧栏：收起态「新建」去掉描边",
+      "ok": true,
+      "detail": "rgba(0, 0, 0, 0)"
+    },
+    {
+      "name": "侧栏：收起态悬停给出名字（Tooltip 圆角 8 / 12px / 近黑）",
+      "ok": true,
+      "detail": {
+        "text": "先列出三条本地工作台的观察",
+        "radius": "8px",
+        "size": "12px",
+        "bg": "rgb(23, 23, 23)"
+      }
+    },
+    {
+      "name": "侧栏：折叠状态刷新后保持",
+      "ok": true,
+      "detail": {
+        "width": 64,
+        "expanded": "false"
+      }
+    },
+    {
+      "name": "侧栏：可再展开",
+      "ok": true
+    },
+    {
+      "name": "断点：侧栏 240 / 212 / 64，边界与标准库同为 width < N",
+      "ok": true,
+      "detail": "1512:240 1250:240 1050:240 1049:212 900:212 721:212 720:64 600:64"
+    },
+    {
+      "name": "断点：各档均无横向溢出",
+      "ok": true
+    },
+    {
+      "name": "断点：首页双列 → 单列",
+      "ok": true
+    },
+    {
+      "name": "跳转链接：Tab 首个焦点且滑入可见",
+      "ok": true,
+      "detail": {
+        "active": "skip-link",
+        "visible": true
+      }
+    },
+    {
+      "name": "键盘焦点可见：侧栏按钮与导航行都画 2px --ring（不再透明）",
+      "ok": true,
+      "detail": [
+        {
+          "id": "brand-home",
+          "outline": "solid 2px rgb(104, 104, 104)"
+        },
+        {
+          "id": "sidebar-toggle",
+          "outline": "solid 2px rgb(104, 104, 104)"
+        },
+        {
+          "id": "new-research",
+          "outline": "solid 2px rgb(104, 104, 104)"
+        },
+        {
+          "id": "nav-item",
+          "outline": "solid 2px rgb(104, 104, 104)"
+        }
+      ]
+    },
+    {
+      "name": "浏览器控制台无错误（注入失败前）",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "name": "空列表：EmptyState（插画 + 标题 + role=status，UC-05）",
+      "ok": false,
+      "detail": {
+        "homeEmpty": 0,
+        "rows": 2
+      }
+    },
+    {
+      "name": "过程记录读不到：给出说明与下一步（重试 / 打开报告），不再无限「重连中」",
+      "ok": true,
+      "detail": {
+        "shown": true,
+        "title": "过程记录暂时读不到",
+        "actions": [
+          "重试",
+          "打开报告"
+        ]
+      }
+    },
+    {
+      "name": "模块加载失败：恢复面 + 重试键（标准库样式）",
+      "ok": true,
+      "detail": {
+        "role": "alert",
+        "title": "页面没有加载完整",
+        "buttonH": "40px",
+        "buttonBg": "rgb(23, 23, 23)"
+      }
+    },
+    {
+      "name": "恢复后工作台可再次加载",
+      "ok": true
+    },
+    {
+      "name": "注入失败只产生预期内的报错（不静默、不额外扩散）",
+      "ok": true,
+      "detail": {
+        "before": 0,
+        "after": 6
+      }
+    }
+  ],
+  "failures": [
+    "空列表：EmptyState（插画 + 标题 + role=status，UC-05）: {\"homeEmpty\":0,\"rows\":2}"
+  ],
+  "consoleErrors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: net::ERR_FAILED",
+    "[workbench] bootstrap failed TypeError: Failed to fetch dynamically imported module: http://127.0.0.1:59079/modules/workspace.mjs"
+  ]
+}

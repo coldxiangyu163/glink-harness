@@ -1,0 +1,16 @@
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+page.waitForSelector: Timeout 30000ms exceeded.
+Call log:
+[2m  - waiting for locator('#run-view[data-status="finished"] .pi-tool-name') to be visible[22m
+[2m    - locator resolved to hidden <span class="pi-tool-name">执行</span>[22m
+[2m    62 × locator resolved to 3 elements. Proceeding with the first one: <span class="pi-tool-name">执行</span>[22m
+
+    at /Users/coldxiangyu/AI/git/pi-glink-browserwin/docs/evidence/browser-window-2026-09-28/m11-real-tools.mjs:13:14 {
+  name: 'TimeoutError'
+}
+
+Node.js v24.16.0
+EXIT_CODE=1

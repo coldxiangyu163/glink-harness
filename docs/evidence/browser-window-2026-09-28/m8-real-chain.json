@@ -1,0 +1,60 @@
+{
+  "baseUrl": "http://127.0.0.1:54790",
+  "turns": [
+    {
+      "runId": "a33241f3a6f4",
+      "parentRunId": null,
+      "status": "finished",
+      "eventCount": 67,
+      "hasReport": true,
+      "stopReason": null,
+      "cleanup": null,
+      "reportStatus": null,
+      "turn": 1
+    },
+    {
+      "runId": "7e10e49d210f",
+      "parentRunId": "a33241f3a6f4",
+      "status": "finished",
+      "eventCount": 51,
+      "hasReport": false,
+      "stopReason": "no_report",
+      "cleanup": null,
+      "reportStatus": null,
+      "turn": 2
+    },
+    {
+      "runId": "4272e5a9c051",
+      "parentRunId": "7e10e49d210f",
+      "status": "finished",
+      "eventCount": 130,
+      "hasReport": false,
+      "stopReason": "no_report",
+      "cleanup": null,
+      "reportStatus": null,
+      "turn": 3
+    },
+    {
+      "runId": "0e8a5c53d38c",
+      "parentRunId": "4272e5a9c051",
+      "status": "finished",
+      "eventCount": 60,
+      "hasReport": false,
+      "stopReason": "no_report",
+      "cleanup": null,
+      "reportStatus": null,
+      "turn": 4
+    },
+    {
+      "runId": "67a2a853507c",
+      "parentRunId": "0e8a5c53d38c",
+      "status": "finished",
+      "eventCount": 61,
+      "hasReport": false,
+      "stopReason": "no_report",
+      "cleanup": null,
+      "reportStatus": null,
+      "turn": 5
+    }
+  ]
+}

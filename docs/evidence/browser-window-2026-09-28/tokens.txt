@@ -1,0 +1,3 @@
+[ok] 173 项 token 与标准库逐值一致（/Users/coldxiangyu/work/BR/glink-ui-library/src/styles/globals.css）
+
+EXIT_CODE=0

@@ -1,0 +1,32 @@
+[ok]   外壳几何（8px 沟槽 / 240 导航 / 52 栏头） · {"sidebar":{"w":240,"h":884,"x":8},"header":{"w":1248,"h":52,"x":256},"gap":"8px","padding":"8px","brand":"/logo-icon.svg","alertHidden":true,"font":"\"Noto Sans SC\", \"PingFang SC\", \"SF Pro Text\", \"Helvetica Neue\", \"Hiragino Sans GB\", \"Microsoft YaHei\", \"Noto Sans SC\", sans-serif","title":"研究工作台"}
+[ok]   品牌标识取自标准库资产 · /logo-icon.svg
+[ok]   服务正常时侧栏页脚不出现状态牌 · true
+[ok]   页面作用域字体与标准库 Demo 同族（Noto Sans SC 优先） · "Noto Sans SC", "PingFang SC", "SF Pro Text", "Helvetica Neue", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif
+[ok]   首页（标题 / 两卡 / 无选中 / 无右簇） · {"title":"今天要研究什么？","cards":2,"rows":1,"reports":1,"path":"新研究","pathColor":"rgb(23, 23, 23)","current":0,"headerActions":0}
+[ok]   栏头对象段走 --foreground（PH-03） · rgb(23, 23, 23)
+[ok]   首页可见文字不暴露内核 / 执行面 / 会话信息 · []
+[ok]   输入器：普通长度不显示计数、发送键启用、120 高 · {"countHidden":true,"sendDisabled":false,"composerH":120}
+[ok]   输入器：多行自增到 240 上限 · {"inputH":240,"overflow":"auto"}
+[ok]   输入器：接近上限才显示计数 · {"hidden":false,"text":"30010 / 32000"}
+[ok]   输入器：清空后回落并禁用发送 · {"sendDisabled":true,"inputH":68}
+[ok]   输入器：激活态 1px 近黑描边 + 内层认领焦点（UC-03/04） · {"border":"rgb(23, 23, 23)","managed":true}
+[ok]   输入器：输入法组字中的回车不提交 · {"value":"组字保护","view":"home"}
+[ok]   输入器：Shift+Enter 换行不提交 · {"value":"换行\n","view":"home"}
+[ok]   运行中：停止键原位替换发送键 + 输入只读 · {"status":"running","stopVisible":true,"sendHidden":true,"readOnly":true,"placeholder":"研究进行中，完成或停止后可以继续追问","foldOpen":"true","label":"正在准备研究","path":"先列出三条本地工作台的观察","marked":1,"dock":"132px"}
+[ok]   运行中：过程折叠展开并写具体动作 · 正在准备研究
+[ok]   运行中：侧栏标记当前研究（且只标记一个） · 1
+[ok]   运行中：输入器实测高度写回留白变量 · 132px
+[ok]   停止：终态中性（虚线圆、不是 ×）+ 可重新开始 · {"status":"cancelled","stopHidden":true,"outcome":"已停止研究","tone":"stopped","icon":"dashed-circle","toast":"正在停止，已完成的内容会保留。"}
+[fail] 运行异常 · page.click: Timeout 30000ms exceeded.
+Call log:
+[2m  - waiting for locator('#run-list [data-run-id="a33241f3a6f4"]')[22m
+
+
+19/20 通过
+失败项:
+  - 运行异常: page.click: Timeout 30000ms exceeded.
+Call log:
+[2m  - waiting for locator('#run-list [data-run-id="a33241f3a6f4"]')[22m
+
+[ok] 证据：docs/evidence/ui-features.txt / ui-features.json
+EXIT_CODE=1

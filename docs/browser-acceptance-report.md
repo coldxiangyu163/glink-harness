@@ -1,5 +1,33 @@
 # 浏览器全量验收报告
 
+## 2026-09-28 晚间：B2 浏览器行为闭环与全层复验（`6c73023`）
+
+任务 `GLINK-ARCH-BROWSERWIN-20260928`。被测源码为主 checkout `6c73023`；验证 worktree 同 commit，未改产品或测试源码。Node 24.16.0、Python 3.12.10、project-local Playwright 1.58.2 / Chromium；真实宿主为主 checkout 的 local / inproc + 真实模型，参考站为已有 `dist/` 静态产物。隔离 acceptance 使用脚本化执行面。证据与可复现脚本均在 [`docs/evidence/browser-window-2026-09-28/`](evidence/browser-window-2026-09-28/)；各命令退出码留在对应 `*-command.txt`、`tokens.txt` 与 `acceptance-lifecycle.txt`。
+
+| 层 | 本次结果 | 退出码 / 对照 09-28 uifix |
+|---|---|---|
+| token | 173/173 | 0，持平 |
+| acceptance accounts | **102 通过 / 0 失败**；F-1 Esc 焦点转绿 | 0，原 101/102（预期红） |
+| acceptance local | 78 通过 / 0 失败 / 3 跳过 | 0，持平 |
+| acceptance gateway | 7/7 | 0，持平 |
+| ui-parity | 29 OK / 0 mismatch / 1 SKIPPED（30 个角色） | 0，持平 |
+| 原版 ui-features | **53/54**，唯一失败为空列表桩未命中分页 URL | **1**，低于原 54/54；定向空列表实测另为 0 |
+
+三面 acceptance 合计 **187 通过 / 0 失败 / 3 跳过（190 项）**；不是 brief 中“189 通过/3 跳过”的算术值。`ui-features` 并未声称 54/54：原版第 K 节仅拦截 `**/api/runs`，B2 后首次列表请求为 `/api/runs?limit=50`，返回真实数据而非空列表，失败 detail 是 `rows:2, homeEmpty:0`。同一真实宿主的**独立定向**检查改为对该 URL 注入合成空列表，测得 `rows:0, homeEmpty:2, role:status, variant:no-data`，退出 0（`ui-empty-targeted.json/png`）。因此这条是历史脚本测量前置过期，**脚本未修、未将定向结果冒充原版绿测**；原版余 53 项均通过。需由后续测试 owner 修正历史脚本后才可称全层脚本全绿。
+
+### B2 四项行为
+
+- **M8 单流回放**：`m8-real-chain.py` 在独立临时数据根创建真实模型 5 轮（初轮 + 4 次连续追问，均 `finished`），再从侧栏点最深一轮。页面注入的 `EventSource` 包装器逐次记构造和 `close`：4 段前史全部显示，5 次 open / 5 次 close、**并发峰值 2、最终活跃 0**；`m8-stream-count.json`、`m8-history.png`、运行命令退出 0。5 轮中只有首轮生成报告，后续 `no_report` 不影响回放与计数。
+- **M9 >100 条分页**：停止 M8 宿主后，在**新**临时数据根开机前用 `m9-inject.py` 经 `RunStore.create/commit_terminal` 写入 SQLite 的 110 条合成已完成记录与 110 条终帧（不调用模型）；链条 4 轮横跨分页边界。真实宿主首批 50 条，点「显示更多」2 次后分页载荷 50/50/10、110 个唯一 ID 均取得；侧栏为 **107 条顶层**、3 个中间轮不重复列为顶层，最老独立记录可见，点链尾显示 3 段前史。`m9-injected.json`、`m9-pages.json`、三张截图与命令退出 0；链尾打开后还触发一次正常的首批 50 条刷新，不计作加载更多。
+- **M10 双标签 CSRF**：隔离 accounts 真实宿主 + 同 cookie context 的两个独立 page JS realm。A 登录，B 注销并重新登录使 cookie / csrfToken 轮换；A 不刷新直接提交真实 UI POST，网络顺序为 `403 csrf_invalid → GET /api/me 200 → POST /api/runs 201`，运行收口为 finished，未出现失败 toast。负例通过 Playwright 转发 UI 发出的请求到同一真实宿主、仅把 `Origin` 换为异站，**服务端返回非 CSRF 的 `403 forbidden`**；A 不重试，首页出现“研究没能开始，请稍后重试。”失败通知。`m10-sequence.json`、前后截图和命令退出 0；一开始尝试浏览器 `route.continue` 改 Origin 未生效（记录为诊断失败，已改用 `route.fetch` 真实请求）。两个 page 共用 cookie 是复现轮换所必需，并非两个互不共享登录状态的 browser context。
+- **M11 呈现**：独立真实 pi run 完成、3 张工具卡动词为“执行 / 写入”、文件卡可见；`m11-real-tools.json/png`、命令退出 0。ACP 真实 run 未执行（可选，成本较高）；本证据不证明 ACP kind 的浏览器真实呈现。
+
+### 资源、限制与安全
+
+三面 fixture PID 30161 / 32469 / 34805 均由 acceptance 按记录 PID 结束（exit 0）。真实宿主、参考站、M9/UI 临时宿主和 M10 fixture 的完整 PID、随机 loopback 端口、起止与监听复核在 `service-lifecycle.txt` / `m10-sequence.json`：**全部已停止、全部端口无监听**；M8、M9、UI 临时 data root 与 M10 state 均删除；acceptance 的仓库外临时 `--out` 删除后仅将验收 JSON/TXT/PNG/host-exit/requests 复制回来，排除 `state/`、`fixture.log`。凭据扫描覆盖 90 个保留文件（含 PNG 字节），对照主 `.env` 中 2 个真实密钥值、3 个 fixture 合成凭据值及通用模式，未命中，`credential-scan.txt` 退出 0。未碰主 checkout 文件、用户已有服务、Docker/E2B、模板或真实网关；未做默认 `scripts/check.sh`（本次仅验证浏览器窗口、未修改源码）。真实 run 的临时数据已清理，故不保留逐 run 的 cleanup/resource_adjudication 原始存储；本报告只断言主机 PID/端口和临时目录清理，不把未存档的外部资源结论写成已证实。
+
+---
+
 ## 2026-09-28：重构线 `afa9b26` 全套复验
 
 - 任务：`GLINK-ARCH-UIALIGN-20260928`

@@ -1,0 +1,83 @@
+{
+  "host": {
+    "pid": 70923,
+    "port": 61315,
+    "mode": "accounts"
+  },
+  "timeline": [
+    {
+      "event": "host_ready",
+      "pid": 70923,
+      "port": 61315
+    },
+    {
+      "event": "A_logged_in",
+      "mode": "accounts"
+    },
+    {
+      "event": "B_relogin_cookie_rotated",
+      "cookieShared": true
+    },
+    {
+      "event": "A_POST_recovered",
+      "requests": [
+        {
+          "path": "/api/runs",
+          "method": "POST",
+          "status": 403,
+          "error": "csrf_invalid"
+        },
+        {
+          "path": "/api/me",
+          "method": "GET",
+          "status": 200,
+          "error": null
+        },
+        {
+          "path": "/api/runs",
+          "method": "POST",
+          "status": 201,
+          "error": null
+        },
+        {
+          "path": "/api/runs",
+          "method": "GET",
+          "status": 200,
+          "error": null
+        },
+        {
+          "path": "/api/runs",
+          "method": "GET",
+          "status": 200,
+          "error": null
+        }
+      ],
+      "successFace": {
+        "status": "finished",
+        "toastVisible": false,
+        "bootFailureVisible": false
+      },
+      "recovered": true
+    },
+    {
+      "event": "non_csrf_403",
+      "requests": [
+        {
+          "status": 403,
+          "error": "forbidden"
+        }
+      ],
+      "failFace": {
+        "toast": "研究没能开始，请稍后重试。",
+        "toastHidden": false,
+        "view": "home"
+      }
+    },
+    {
+      "event": "host_stopped",
+      "pid": 70923,
+      "code": 0,
+      "signal": null
+    }
+  ]
+}

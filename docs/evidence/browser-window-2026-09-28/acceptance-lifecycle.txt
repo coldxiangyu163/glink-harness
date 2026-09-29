@@ -1,0 +1,12 @@
+temp_out=/tmp/glink-browserwin-acceptance.Ntt2uM
+accounts exit=1
+MISSING host-exit; inspect before cleanup
+temp_out_removed=yes
+retry_temp_out=/tmp/glink-browserwin-acceptance.tBaKaL
+accounts exit=0
+{'pid': 30161, 'code': 0, 'signal': None}
+local exit=0
+{'pid': 32469, 'code': 0, 'signal': None}
+gateway exit=0
+{'pid': 34805, 'code': 0, 'signal': None}
+retry_temp_out_removed=yes

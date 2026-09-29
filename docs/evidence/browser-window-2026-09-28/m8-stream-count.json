@@ -1,0 +1,75 @@
+{
+  "exchanges": 4,
+  "currentStatus": "finished",
+  "openCount": 5,
+  "closeCount": 5,
+  "peak": 2,
+  "active": 0,
+  "timeline": [
+    {
+      "event": "open",
+      "id": 1,
+      "url": "/api/runs/a33241f3a6f4/events",
+      "active": 1,
+      "at": 168.30000007152557
+    },
+    {
+      "event": "open",
+      "id": 2,
+      "url": "/api/runs/67a2a853507c/events",
+      "active": 2,
+      "at": 168.39999997615814
+    },
+    {
+      "event": "close",
+      "id": 1,
+      "active": 1,
+      "at": 182.5
+    },
+    {
+      "event": "open",
+      "id": 3,
+      "url": "/api/runs/7e10e49d210f/events",
+      "active": 2,
+      "at": 182.60000002384186
+    },
+    {
+      "event": "close",
+      "id": 2,
+      "active": 1,
+      "at": 183.10000002384186
+    },
+    {
+      "event": "close",
+      "id": 3,
+      "active": 0,
+      "at": 203.39999997615814
+    },
+    {
+      "event": "open",
+      "id": 4,
+      "url": "/api/runs/4272e5a9c051/events",
+      "active": 1,
+      "at": 203.5
+    },
+    {
+      "event": "close",
+      "id": 4,
+      "active": 0,
+      "at": 206.80000007152557
+    },
+    {
+      "event": "open",
+      "id": 5,
+      "url": "/api/runs/0e8a5c53d38c/events",
+      "active": 1,
+      "at": 206.80000007152557
+    },
+    {
+      "event": "close",
+      "id": 5,
+      "active": 0,
+      "at": 209.5
+    }
+  ]
+}
