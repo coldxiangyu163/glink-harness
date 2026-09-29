@@ -11,7 +11,6 @@ another harness.
 
 from __future__ import annotations
 
-import json
 import os
 import stat
 import tomllib
@@ -19,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.config import ConfigError, build_config
+from pi_glink.config import build_config
 from pi_glink.events import EventBus
 from pi_glink.harnesses import (
     HarnessPackError,

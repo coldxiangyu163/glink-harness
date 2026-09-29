@@ -19,3 +19,4 @@
 | [0011](0011-versioned-event-schema.md) | 产品事件为单一来源、带版本的 schema；无 `v` 的旧事件不渲染 |
 | [0012](0012-pack-manifest-v2-single-source.md) | harness 包清单 v2 为唯一真源，镜像/模板参数由清单生成；v1 与旧 ACP 变量不再读取 |
 | [0013](0013-run-lifecycle-pipeline.md) | run 收尾是显式的八阶段管线，秘密边界与子代理插件独立 |
+| [0014](0014-delivery-gate-lint-types-coverage.md) | 交付门禁加入 ruff 静态检查、mypy 类型检查与覆盖率总量 ratchet（dev-only 依赖） |

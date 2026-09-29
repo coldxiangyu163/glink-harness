@@ -465,7 +465,7 @@ def test_credentials_are_uploaded_into_the_run_home_and_hardened(tmp_path: Path)
 
     target = f"{SANDBOX_ACP_HOME}/.dsh/.credentials.yaml"
     assert sandbox.written[target] == source.read_bytes()
-    assert (f".dsh/.credentials.yaml",) == tuple(rel for rel, _digest in client.transfer.upload_manifest)
+    assert (".dsh/.credentials.yaml",) == tuple(rel for rel, _digest in client.transfer.upload_manifest)
     # The boundary is re-applied inside the sandbox: the state root is 0700
     # *before* the upload (nothing lands in a traversable directory), then the
     # directories 0700 and the files 0600 — and only this run's paths appear.

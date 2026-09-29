@@ -103,7 +103,7 @@ def project_event(
     typed; this helper stays generic so single-frame checks and old-format log
     replay keep working.
     """
-    frame_type = frame.get("type")
+    frame_type = frame.get("type") or ""
     handler = _HANDLERS.get(frame_type)
     if handler is None:
         return []
@@ -174,7 +174,7 @@ class Projector:
         produced: list[tuple[str, dict[str, Any]]] = []
         if frame.get("type") in STREAM_BOUNDARY_FRAMES:
             produced.extend(self.flush())
-        frame_type = frame.get("type")
+        frame_type = frame.get("type") or ""
         if frame_type in _TOOL_EXECUTION_FRAMES:
             handled = self._project_tool_execution(frame_type, frame)
         else:

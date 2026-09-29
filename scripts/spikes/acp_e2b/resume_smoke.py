@@ -347,7 +347,6 @@ def main(argv: list[str] | None = None) -> int:
                 exit_code = process.wait(timeout=10)
             print(f"宿主按 PID {process.pid} 终止: exit={exit_code}")
 
-    verdicts: list[str] = []
     if "child" not in results or results["child"].get("created") != 201:
         print()
         print("[FAIL] 追问未被受理（见上方 POST 返回）")

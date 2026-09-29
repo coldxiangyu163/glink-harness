@@ -113,7 +113,7 @@ def main() -> int:
     os.environ["E2B_API_KEY"] = resolve_e2b_key(values)
 
     started = datetime.datetime.now().astimezone()
-    info(f"pi E2B RPC 通道实测（GLINK-ARCH-3 spike）")
+    info("pi E2B RPC 通道实测（GLINK-ARCH-3 spike）")
     info(f"日期: {started:%Y-%m-%d %H:%M:%S}")
 
     sandbox_id = ""

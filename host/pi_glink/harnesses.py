@@ -408,7 +408,7 @@ def _parse_image(document: dict, family: str, manifest: Path) -> ImageRequiremen
     table = _table(document, "image", manifest)
     _refuse_unknown(table, _IMAGE_KEYS, "image", manifest)
     target = table.get("target")
-    if IMAGE_TARGETS.get(target) != family:
+    if not isinstance(target, str) or IMAGE_TARGETS.get(target) != family:
         choices = "、".join(key for key, value in IMAGE_TARGETS.items() if value == family)
         raise HarnessPackError(
             f"harness 清单 image.target 必须是本族的镜像（{choices}）：{manifest}（{target!r}）"

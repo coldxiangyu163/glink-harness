@@ -40,6 +40,7 @@ clean_env=(env -i
   'PYTHONUTF8=1'
   'PYTHONDONTWRITEBYTECODE=1'
   'PYTEST_DISABLE_PLUGIN_AUTOLOAD=1'
+  "COVERAGE_FILE=$scratch/coverage-data"
   'GIT_CONFIG_NOSYSTEM=1'
   'GIT_CONFIG_GLOBAL=/dev/null'
 )
@@ -89,6 +90,40 @@ if ! check_optional_deps; then
   exit 2
 fi
 
+# 静态检查/类型检查/覆盖率 ratchet 依赖 .[dev] 里的工具；同样 fail-closed，不自动安装。
+check_dev_tools() {
+  "${clean_env[@]}" "$python" - <<'PY'
+import importlib
+import sys
+
+# 交付门禁使用的开发工具；全部来自 .[dev]，不属于运行期依赖。
+DEV_TOOLS = ("ruff", "mypy", "pytest_cov", "coverage")
+
+
+def missing_dev_tools(import_module=importlib.import_module):
+    missing = []
+    for module in DEV_TOOLS:
+        try:
+            import_module(module)
+        except ImportError:
+            missing.append(module)
+    return missing
+
+
+if __name__ == "__main__":
+    missing = missing_dev_tools()
+    for module in missing:
+        print(f'[FAIL] 缺少 {module}（uv pip install -e ".[dev]"）', file=sys.stderr)
+    if missing:
+        sys.exit(2)
+    print("[PASS] 开发工具预检：ruff、mypy、pytest-cov、coverage 可导入")
+PY
+}
+if ! check_dev_tools; then
+  echo '[FAIL] 开发工具预检失败；请在运行门禁的 Python 环境安装 .[dev]（静态检查、类型检查与覆盖率 ratchet 需要）。' >&2
+  exit 2
+fi
+
 shopt -s nullglob
 # 前端事件模型（tests/web）与 agent 扩展的纯逻辑单元测试（tests/extensions；
 # GLINK-SUB-02 强制前台守卫）。两者都不启动真实 pi、模型或浏览器。
@@ -125,10 +160,20 @@ run_check() {
 printf '\n[SKIP] 外部标准库逐值对齐：不读取个人标准库，不计入本次通过范围。\n'
 # 前端事件常量由 host/pi_glink/event_schema.py 生成；生成物落后于 schema 即失败。
 run_check '事件 schema 生成物是最新的' "$python" scripts/gen-event-schema.py --check
+# 静态检查：规则集见 pyproject.toml [tool.ruff.lint]；缓存写隔离目录，不污染仓库。
+run_check '静态检查（ruff）' \
+  "$python" -m ruff check --cache-dir "$scratch/ruff-cache" host scripts tests
+# 类型检查：范围与显式豁免见 pyproject.toml [tool.mypy]；缓存同样隔离。
+run_check '类型检查（mypy）' \
+  "$python" -m mypy --cache-dir "$scratch/mypy-cache" host/pi_glink
 run_check 'Python（含仓库边界和检查入口回归）' \
-  "$python" -m pytest tests -ra -p no:cacheprovider \
+  "$python" -m pytest tests -ra -p no:cacheprovider -p pytest_cov \
+  --cov=host/pi_glink --cov-report= \
   --basetemp="$scratch/pytest" \
   --deselect=tests/test_ui_tokens.py::test_ui_tokens_match_standard_library
+# 覆盖率总量 ratchet：实测总覆盖率不得低于 scripts/coverage-baseline.json 的基线。
+# 升基线流程（重测后提交新值）见 scripts/check-coverage.py 的模块说明。
+run_check '覆盖率 ratchet（不低于基线）' "$python" scripts/check-coverage.py
 run_check 'Node（前端回归 + 扩展单元测试）' "$node" --test "${node_tests[@]}"
 run_check 'Node（dsh fetch bundle 单元测试）' "$node" --import "./$node_fetch_stubs" --test "${node_fetch_tests[@]}"
 printf '\n[PASS] 无模型必需检查完成；不包含浏览器、UI 对齐、真实 pi、Docker/E2B 或多租户验收。\n'

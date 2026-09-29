@@ -26,7 +26,7 @@ from typing import Any, Callable
 
 from .accounts import AccountsStore
 from .auth import AccountsAuth
-from .config import ConfigError, HostConfig, load_config
+from .config import ConfigError, HostConfig
 from .events import EventBus
 from .runs import RunManager
 from .ownership import DataRootOwnership
@@ -41,10 +41,11 @@ from .web_sse import SseMixin, StreamLimits
 # Re-exported so ``python -m pi_glink.app``, the ``pi-glink`` script and the
 # existing import paths keep working after the split.
 from .cli import (  # noqa: E402 - re-export after the composition imports
-    create_invite_command as _create_invite_command,
+    # 这四项都是再导出（public seam），不是本模块内部使用，所以逐个豁免 F401。
+    create_invite_command as _create_invite_command,  # noqa: F401 - re-export
     load_config as load_config,  # noqa: F401 - the one patched configuration seam
     main as main,
-    resource_command as _resource_command,
+    resource_command as _resource_command,  # noqa: F401 - re-export
 )
 
 logger = logging.getLogger("pi_glink.host")
@@ -172,7 +173,11 @@ def create_server(
             raise ConfigError("PI_GLINK_AUTH_MODE=accounts 账号库初始化失败")
         # Accounts mode gets its session backend here; gateway and local mode
         # have no in-app login at all.
-        auth = AccountsAuth(config, tenancy.accounts) if config.accounts_enabled else None
+        accounts_store = tenancy.accounts if tenancy is not None else None
+        auth = None
+        if config.accounts_enabled:
+            assert accounts_store is not None  # 上面的守卫已挡住缺库的情形
+            auth = AccountsAuth(config, accounts_store)
         bus = EventBus()
         store = RunStore(config.data_root / "runs")
         manager = RunManager(

@@ -571,7 +571,7 @@ def test_a_terminal_frame_is_only_published_once_every_reader_sees_it(tmp_path: 
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        run_id = _post(bus.port, "/api/runs", {"prompt": "终帧与读面一致"})[1]["run"]["runId"]
+        _post(bus.port, "/api/runs", {"prompt": "终帧与读面一致"})
         assert wait_for(lambda: bool(bus.seen))
         (seen,) = bus.seen
         assert seen["frame"] == "run_finished"

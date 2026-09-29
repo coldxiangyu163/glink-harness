@@ -299,14 +299,14 @@ class RunManager:
             if active:
                 raise RunBusy(active[0].record.run_id)
             return
-        holds = [record for record in holding if record.run_id not in in_flight]
-        global_total = len(active) + len(holds)
+        held_records = [record for record in holding if record.run_id not in in_flight]
+        global_total = len(active) + len(held_records)
         # Refuse on the most specific ceiling first: a tenant already at its own
         # limit should be told about its own quota, not about the host total.
         tenant_id = context.tenant_id if context is not None else None
         tenant_total = sum(
             1 for execution in active if execution.record.tenant_id == tenant_id
-        ) + sum(1 for record in holds if record.tenant_id == tenant_id)
+        ) + sum(1 for record in held_records if record.tenant_id == tenant_id)
         if tenant_total >= self.config.max_tenant_runs:
             raise RunQuotaExceeded("tenant", self.config.max_tenant_runs)
         if global_total >= self.config.max_global_runs:

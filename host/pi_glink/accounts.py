@@ -791,7 +791,6 @@ class AccountsStore:
         user_agent: str = "",
     ) -> tuple[str, str, SessionRecord]:
         absolute = max(60, int(absolute_seconds))
-        idle = max(30, int(idle_seconds))
         with self._lock:
             user = self.get_user(user_id)
             if user is None:

@@ -22,7 +22,12 @@ from dataclasses import replace
 from typing import Callable
 
 from .accounts import AccountsError
-from .config import ConfigError, HostConfig, load_config, validate_host_config
+from .config import (
+    ConfigError,
+    HostConfig,
+    load_config,  # noqa: F401 - 经本模块再导出给 pi_glink.app
+    validate_host_config,
+)
 from .events import EventBus
 from .runs import RunBusy, RunManager
 from .ownership import DataRootBusy, DataRootOwnership

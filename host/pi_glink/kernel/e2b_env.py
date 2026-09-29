@@ -356,7 +356,7 @@ class SandboxCommandProcess:
 
     def wait(self, timeout: float | None = None) -> int:
         if not self._exited.wait(timeout):
-            raise subprocess.TimeoutExpired("e2b sandbox command", timeout)
+            raise subprocess.TimeoutExpired("e2b sandbox command", timeout or 0.0)
         if self._exit_code is None:
             raise OSError(
                 "sandbox command ended without an exit code"
@@ -704,7 +704,7 @@ def _read_file_bounded(
         content = sandbox.files.read(path, request_timeout=E2B_REQUEST_TIMEOUT_SECONDS)
     except Exception as exc:  # noqa: BLE001 - surfaced as a failure reason
         return None, f"{type(exc).__name__}: {exc}"
-    data = content if isinstance(content, (bytes, bytearray)) else str(content).encode("utf-8")
+    data = bytes(content) if isinstance(content, (bytes, bytearray)) else str(content).encode("utf-8")
     if len(data) > max_bytes:
         return None, f"文件超过上限（{len(data)} > {max_bytes} 字节）"
     return bytes(data), None
@@ -749,10 +749,10 @@ def _session_header(sandbox: Any, path: str) -> tuple[Mapping[str, Any] | None, 
                 except Exception:  # noqa: BLE001 - cleanup must not mask the result
                     pass
     else:
-        data, read_failure = _read_file_bounded(sandbox, path, ARTIFACT_MAX_BYTES)
+        loaded, read_failure = _read_file_bounded(sandbox, path, ARTIFACT_MAX_BYTES)
         if read_failure is not None:
             return None, read_failure
-        prefix = data or b""
+        prefix = loaded if loaded is not None else b""
     line = prefix.split(b"\n", 1)[0]
     try:
         header = json.loads(line.decode("utf-8"))

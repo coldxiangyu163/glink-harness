@@ -390,7 +390,6 @@ def main(argv: list[str] | None = None) -> int:
         residual = [pid for pid in leftovers if base.alive(pid)]
         print(f"  清理后仍存活: {residual or '无'}")
 
-    verdicts: list[str] = []
     if "child" not in results or results["child"].get("created") != 201:
         print()
         print("[FAIL] 追问未被受理（见上方 POST 返回）")

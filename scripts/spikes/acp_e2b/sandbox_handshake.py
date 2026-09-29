@@ -21,7 +21,6 @@ import argparse
 import hashlib
 import json
 import os
-import shlex
 import sys
 import tempfile
 import time

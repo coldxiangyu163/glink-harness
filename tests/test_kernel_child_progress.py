@@ -242,7 +242,7 @@ def test_read_cap_freezes_content_but_reports_size(tmp_path: Path) -> None:
     directory = tmp_path / "subagent-artifacts"
     directory.mkdir()
     transcript = directory / "p1r2i3_researcher_0_transcript.jsonl"
-    size = _write(transcript, [_tool_start("read", "a.md"), _tool_start("write", "b.md")])
+    _write(transcript, [_tool_start("read", "a.md"), _tool_start("write", "b.md")])
     # 上限卡在两条记录之间：只数到第一条，bytes 仍是文件大小快照。
     first_len = len(_tool_start("read", "a.md"))
     source = PiChildProgressSource(directory, max_file_bytes=first_len)

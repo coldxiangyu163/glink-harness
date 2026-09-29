@@ -198,11 +198,12 @@ class RunChannel:
                 return
             for event_type, payload in execution.projector.project(frame):
                 if event_type == events.USAGE_REPORTED:
-                    payload = accumulate_usage(
+                    updated_payload = accumulate_usage(
                         self._family_of(execution), execution.execution_facts, frame, payload
                     )
-                    if payload is None:
+                    if updated_payload is None:
                         continue
+                    payload = updated_payload
                 if not self.emit_frame(execution, event_type, payload):
                     # The durable log is the fact source: a frame that cannot
                     # be committed is not shown either.

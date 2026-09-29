@@ -1407,7 +1407,7 @@ def test_cross_tenant_matrix_for_two_logged_in_tenants(
     server: PiGlinkServer, adapters: AdapterBehavior
 ) -> None:
     adapters.write_report = True
-    alpha_user = bootstrap_user(server, email="alice@example.test", name="爱丽丝", role="admin")
+    bootstrap_user(server, email="alice@example.test", name="爱丽丝", role="admin")
     bootstrap_user(
         server, tenant="tenant-beta", tenant_name="组织乙", email="bob@example.test", name="鲍勃"
     )

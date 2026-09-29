@@ -14,7 +14,7 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/check.sh"
 
 
-def check_fixture(tmp_path: Path, *, python_status: int = 0, node_status: int = 0, preflight_status: int = 0, optional_status: int = 0):
+def check_fixture(tmp_path: Path, *, python_status: int = 0, node_status: int = 0, preflight_status: int = 0, optional_status: int = 0, dev_status: int = 0):
     repo = tmp_path / "checkout with spaces"
     for directory in (
         "scripts",
@@ -41,7 +41,12 @@ def check_fixture(tmp_path: Path, *, python_status: int = 0, node_status: int = 
     python.write_text(
         "#!/bin/sh\n"
         f'if [ "$1" = "-c" ]; then exit {preflight_status}; fi\n'
-        f'if [ "$1" = "-" ]; then exit {optional_status}; fi\n'
+        # 两次内联脚本调用：先可选依赖预检，再开发工具预检（用标记文件区分）。
+        'if [ "$1" = "-" ]; then\n'
+        f'  if [ -e {quote(str(repo / "dev-precheck.marker"))} ]; then exit {dev_status}; fi\n'
+        f'  : > {quote(str(repo / "dev-precheck.marker"))}\n'
+        f'  exit {optional_status};\n'
+        'fi\n'
         f'/usr/bin/env > {quote(str(repo / "python-env.txt"))}\n'
         f'printf "%s\\n" "$@" > {quote(str(repo / "python-args.txt"))}\n'
         f'printf "%s " "$@" >> {quote(str(repo / "python-calls.txt"))}\n'
@@ -140,15 +145,24 @@ def test_checks_use_disposable_environment_and_report_optional_scope(tmp_path: P
         assert not home.exists(), "temporary HOME must be removed after success"
         assert actual["PYTHONPATH"] == str(repo / "host")
         assert actual["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
-    # 先校验前端事件常量生成物（schema 单一来源），再跑 pytest。
-    calls = (repo / "python-calls.txt").read_text().splitlines()
-    assert calls[0].split() == ["scripts/gen-event-schema.py", "--check"]
-    assert calls[1].split()[:3] == ["-m", "pytest", "tests"]
-    assert len(calls) == 2
-    args = (repo / "python-args.txt").read_text().splitlines()
-    assert args[:3] == ["-m", "pytest", "tests"]
-    assert "--deselect=tests/test_ui_tokens.py::test_ui_tokens_match_standard_library" in args
-    assert "no:cacheprovider" in args
+    # Python 调用顺序：schema 生成物 → ruff → mypy → pytest（带覆盖率采集）→ 覆盖率 ratchet。
+    calls = [line.split() for line in (repo / "python-calls.txt").read_text().splitlines()]
+    assert calls[0] == ["scripts/gen-event-schema.py", "--check"]
+    assert calls[1][:4] == ["-m", "ruff", "check", "--cache-dir"]
+    assert calls[1][4].endswith("ruff-cache")
+    assert calls[1][5:] == ["host", "scripts", "tests"]
+    assert calls[2][:3] == ["-m", "mypy", "--cache-dir"]
+    assert calls[2][3].endswith("mypy-cache")
+    assert calls[2][4:] == ["host/pi_glink"]
+    assert len(calls) == 5
+    assert calls[4] == ["scripts/check-coverage.py"]
+    pytest_args = calls[3]
+    assert pytest_args[:3] == ["-m", "pytest", "tests"]
+    assert "pytest_cov" in pytest_args
+    assert "--cov=host/pi_glink" in pytest_args
+    assert "--cov-report=" in pytest_args
+    assert "--deselect=tests/test_ui_tokens.py::test_ui_tokens_match_standard_library" in pytest_args
+    assert "no:cacheprovider" in pytest_args
     # 两个 node 收集/执行范围：前端事件模型（tests/web）与 agent 扩展单元测试
     # （tests/extensions，GLINK-SUB-02 强制前台守卫），再加 dsh bundle 单测
     # （GLINK-DSH-02，--import 注册 dsh seam 替身）；stub 以追加方式记录两次调用。
@@ -199,6 +213,16 @@ def test_missing_optional_deps_fail_before_suites_without_installation(tmp_path:
     result = invoke(repo, env)
     assert result.returncode == 2
     assert "可选依赖预检失败" in result.stderr
+    assert not (repo / "python-env.txt").exists()
+    assert not (repo / "node-env.txt").exists()
+    assert list(temp.iterdir()) == []
+
+
+def test_missing_dev_tools_fail_before_suites_without_installation(tmp_path: Path) -> None:
+    repo, env, temp = check_fixture(tmp_path, dev_status=2)
+    result = invoke(repo, env)
+    assert result.returncode == 2
+    assert "开发工具预检失败" in result.stderr
     assert not (repo / "python-env.txt").exists()
     assert not (repo / "node-env.txt").exists()
     assert list(temp.iterdir()) == []

@@ -561,7 +561,7 @@ class RoutesMixin:
         """
         values = parse_qs(query, keep_blank_values=True)
         limit = _RUNS_PAGE_DEFAULT
-        raw_limit = (values.get("limit") or [None])[0]
+        raw_limit = (values.get("limit") or [""])[0]
         if raw_limit:
             try:
                 limit = int(raw_limit)
@@ -578,7 +578,7 @@ class RoutesMixin:
                 )
                 return None
         cursor = None
-        raw_cursor = (values.get("cursor") or [None])[0]
+        raw_cursor = (values.get("cursor") or [""])[0]
         if raw_cursor:
             cursor = _decode_run_cursor(raw_cursor)
             if cursor is None:

@@ -43,6 +43,10 @@ are not read: there is no migration.
 
 from __future__ import annotations
 
+# ``RunStore.list`` 在类体内遮蔽了内置 ``list``：方法定义之后书写的 ``list[...]``
+# 注解会被类型检查器解析成那个方法而不是内置类型，并连带污染调用方的类型。
+# 这里显式用 ``builtins.list`` 写这些注解，行为不变，只把注解指向内置类型。
+import builtins
 import json
 import logging
 import os
@@ -555,7 +559,7 @@ class RunStore:
         *,
         limit: int,
         before: tuple[float, str] | None = None,
-    ) -> list[RunRecord]:
+    ) -> builtins.list[RunRecord]:
         """One keyset page of runs, newest first (M9).
 
         ``before`` is the ``(created_at, run_id)`` of the last row the caller
@@ -574,7 +578,7 @@ class RunStore:
             parameters.extend((created_at, created_at, run_id))
         return self._select(where, tuple(parameters), limit)
 
-    def holding_records(self, tenant_id: str | None = None) -> list[RunRecord]:
+    def holding_records(self, tenant_id: str | None = None) -> builtins.list[RunRecord]:
         """Records whose execution resources are not confirmed released.
 
         ``tenant_id`` selects one tenant's holds; ``None`` returns every hold,
@@ -584,7 +588,7 @@ class RunStore:
         with self._lock:
             return self._holding(self._connection, tenant_id)
 
-    def running_ids(self) -> list[str]:
+    def running_ids(self) -> builtins.list[str]:
         """Run ids whose row is still ``running`` (no terminal frame committed)."""
         rows = self._query("SELECT run_id FROM runs WHERE status = ? ORDER BY run_id", (RUNNING,))
         return [row[0] for row in rows]
@@ -605,14 +609,14 @@ class RunStore:
 
     def _select(
         self, where: str, parameters: Sequence[Any], limit: int | None
-    ) -> list[RunRecord]:
+    ) -> builtins.list[RunRecord]:
         sql = f"SELECT record FROM runs {where} ORDER BY created_at DESC, run_id ASC"
         if limit is not None:
             sql += " LIMIT ?"
             parameters = (*parameters, max(0, int(limit)))
         return [_decode(row[0]) for row in self._query(sql, parameters)]
 
-    def _holding(self, connection: sqlite3.Connection, tenant_id: str | None) -> list[RunRecord]:
+    def _holding(self, connection: sqlite3.Connection, tenant_id: str | None) -> builtins.list[RunRecord]:
         sql = "SELECT record FROM runs WHERE holds = 1"
         parameters: tuple[Any, ...] = ()
         if tenant_id is not None:
@@ -823,7 +827,7 @@ class RunStore:
                 failures += 1
         return failures
 
-    def children_summary(self, run_id: str) -> list[dict[str, Any]]:
+    def children_summary(self, run_id: str) -> builtins.list[dict[str, Any]]:
         """The ``children`` summary of a terminal frame, built from documents."""
         try:
             page = self.read_children(run_id)

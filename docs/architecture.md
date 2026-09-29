@@ -832,7 +832,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 ## 8. 可重复验证入口
 
 ```bash
-bash scripts/check.sh                                  # 默认无模型交付检查（Python + Node）
+bash scripts/check.sh                                  # 默认无模型交付检查（schema + ruff + mypy + Python/覆盖率 + Node）
 scripts/run-tests.sh                                   # 仅 Python 的低层入口
 node --test tests/web/*.test.mjs                       # 前端事件模型 + 导航生命周期回归
 scripts/check-ui-tokens.py                             # token 层与百鉴标准库逐值比对

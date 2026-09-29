@@ -252,7 +252,8 @@ class PiHarnessFamily(HarnessFamily):
         self,
         run_id: str,
         *,
-        runtime: AgentRuntime | None,
+        # pi 族只接受本族 AgentRuntime（要读 session_dir）；基类声明的是共同协议。
+        runtime: AgentRuntime | None,  # type: ignore[override]
         artifact_failures: list[str],
         sweep: Callable[[Path], bool],
         warn: Callable[[str], None],
@@ -341,10 +342,10 @@ class PiHarnessFamily(HarnessFamily):
             except (ArtifactError, OSError, ValueError) as exc:
                 warn(f"子代理增强落文档失败 n={n}: {exc}")
         for n in association.unmatched_children:
-            document = self._store.read_child(run_id, n)
-            if document and document.get("enrichment") in (None, "none"):
+            child_document = self._store.read_child(run_id, n)
+            if child_document and child_document.get("enrichment") in (None, "none"):
                 try:
-                    self._store.write_child(run_id, {**document, "enrichment": "unmatched"})
+                    self._store.write_child(run_id, {**child_document, "enrichment": "unmatched"})
                 except (ArtifactError, OSError, ValueError) as exc:
                     warn(f"子代理关联标记失败 n={n}: {exc}")
         if association.unmatched_files:

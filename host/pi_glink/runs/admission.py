@@ -239,6 +239,7 @@ class RunAdmission:
         """Every run the caller may see (all runs in local mode)."""
         if not self.config.multi_tenant:
             return self.store.list(limit=None)
+        assert context is not None  # 多租户下必须带租户上下文
         return self.store.list_for(context.tenant_id, limit=None)
 
     def resumable_parent(

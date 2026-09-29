@@ -8,7 +8,9 @@ dependencies = []
 
 [project.optional-dependencies]
 # 宿主与内核本身只用标准库；以下按执行面/开发需要选装。
-dev = ["pytest>=8.0"]
+# dev 覆盖交付门禁（scripts/check.sh）：pytest 回归、ruff 静态检查、mypy 类型检查、
+# pytest-cov/coverage 覆盖率 ratchet。仅开发用，绝不进入运行期 dependencies。
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "coverage>=7.0", "ruff>=0.6", "mypy>=1.11"]
 # E2B 执行面（LOCAL_WEB_EXECUTOR=e2b）。代理网络下 httpx 需要 socks 支持。
 e2b = ["e2b>=2.0", "httpx[socks]>=0.27"]
 # ACP 子代理运行中进度观察者（docs/architecture.md §3.5「运行中进度（R3a）」）：
@@ -35,3 +37,40 @@ include = ["pi_glink*"]
 testpaths = ["tests"]
 pythonpath = ["host"]
 addopts = "-q"
+
+# 静态检查：规则集显式收窄到 ruff 的核心集（pycodestyle E4/E7/E9 + Pyflakes F）。
+# 实测依据（ruff 0.16.9，`ruff check host scripts tests`）：默认集 593 条（多为 noqa
+# 清理、导入排序等风格面），E,F,W 1809 条（E501 独占 1781，而本仓库未约定行长）。
+# E4/E7/E9/F 只覆盖语法/导入/未使用一类的真问题，存量 28 条已全部修掉。放宽 select
+# 或新增 ignore 必须说明被替代的义务（docs/engineering.md「需要先取得决定的变更」）。
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+# 类型检查：范围是 host/pi_glink。当前（除下方显式豁免外）零错误。
+[tool.mypy]
+python_version = "3.12"
+files = ["host/pi_glink"]
+# e2b 等可选执行面的第三方包不必在门禁环境全部安装；缺包不算类型错误。
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# 组合式 mixin：HttpPlumbingMixin / RequestSecurityMixin / SseMixin / RoutesMixin 的
+# 方法依赖 PiGlinkServer 组合后的属性（wfile、server、headers、_send_json 等）。mypy
+# 看不到那个组合类，逐行 type: ignore 反而会埋没真实错误，因此只关掉 attr-defined；
+# 这几个文件的 arg-type/assignment/override 等类别仍受检。残留风险：这 4 个文件里跨
+# mixin 的属性拼写错误不会被类型检查发现，由 pytest 全量回归兜底。
+module = [
+    "pi_glink.web_http",
+    "pi_glink.web_security",
+    "pi_glink.web_sse",
+    "pi_glink.web_routes",
+]
+disable_error_code = ["attr-defined"]
+
+[tool.coverage.report]
+# 覆盖率总量 ratchet 的基线在 scripts/coverage-baseline.json，比较逻辑在
+# scripts/check-coverage.py，由 scripts/check.sh 的 pytest --cov 步骤驱动。
+# 这里不设 fail_under，避免出现两处口径，也不额外排除语句。

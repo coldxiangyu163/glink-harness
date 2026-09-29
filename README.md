@@ -19,7 +19,7 @@
 | Node.js | 宿主开发 **v24.16.0**（nvm 固定，本机实测）；Docker / E2B 镜像 **v24.21.0**（`node:24.21.0-bookworm-slim` 精确 tag，实测） | 前端与 pi 的运行时；宿主用 nvm：`nvm install 24.16.0 && nvm use 24.16.0`；镜像/模板的 Node 版本在各自 Dockerfile 里 pin 到精确 tag（不用浮动 `node:24-bookworm-slim`） |
 | pi | 0.86.1（已实测） | `npm install -g @earendil-works/pi-coding-agent@0.86.1`；Docker / E2B 面的版本声明在 `harnesses/pi/harness.toml` 的 `[[image.packages]]`，Dockerfile 的 `ARG PI_VERSION` 由 `scripts/generate-pack-artifacts.py` 生成 |
 | pi 包 | `pi-web-access@0.31.0`（检索，三面）；`pi-subagents@0.40.0`（委派，三面；前台强制，见「委派与子代理」） | `harnesses/pi/settings.json` 是包声明真源（两个精确 pin）；Docker / E2B 从镜像内 `/opt/pi-packages` 本地加载，不在 run 里 `npm install`；一致性由 `tests/test_repository_boundaries.py` 卡住 |
-| pytest | ≥ 8（仅开发） | `uv pip install -e ".[dev]"` |
+| pytest / ruff / mypy / pytest-cov | pytest ≥ 8、ruff ≥ 0.6、mypy ≥ 1.11、pytest-cov ≥ 5（均仅开发；coverage 随 pytest-cov） | `uv pip install -e ".[dev]"`；交付门禁要求 pytest、ruff、mypy、pytest-cov 可导入（静态检查、类型检查、覆盖率 ratchet） |
 | e2b SDK | ≥ 2（E2B 执行面；交付门禁要求可导入） | `uv pip install -e ".[e2b]"`（含代理网络需要的 `httpx[socks]`） |
 | zstandard | ≥ 0.22（`acp-progress` extra；交付门禁要求可导入） | `uv pip install -e ".[acp-progress]"`；单独运行 ACP 进度测试时缺失仍可 skip |
 
@@ -105,7 +105,7 @@ scripts/run-local-web.sh     # 默认 http://127.0.0.1:7860
 
 ```bash
 uv venv --python 3.12 .venv       # 首次
-uv pip install -e ".[dev]"        # 首次：让 pi_glink 可导入并装上 pytest
+uv pip install -e ".[dev]"        # 首次：让 pi_glink 可导入，并装上 pytest、ruff、mypy、pytest-cov
 .venv/bin/python -m pi_glink.app
 ```
 
@@ -397,13 +397,13 @@ ACP 族的送达通道、凭据注入与体积边界见 [ACP 集成笔记](docs/
 
 ## 验证
 
-默认无模型交付检查（预先准备 Python ≥3.12、pytest、Node ≥24，以及 `.[e2b]` 和 `.[acp-progress]` 中的 e2b、zstandard；缺任一 extra 时失败并给出安装命令，不自动安装依赖）：
+默认无模型交付检查（预先准备 Python ≥3.12、Node ≥24，以及 `.[dev]` 中的 pytest、ruff、mypy、pytest-cov 和 `.[e2b]`、`.[acp-progress]` 中的 e2b、zstandard；缺任一依赖时 exit 2 并给出安装命令，不自动安装依赖）：
 
 ```bash
 bash scripts/check.sh
 ```
 
-该入口在临时 HOME 和清空继承环境的子进程中运行 Python（含仓库边界检查）和 Node 回归，原退出码决定成败；外部标准库逐值对齐明确记为 `SKIP`。不启动真实 pi、浏览器、Docker 或 E2B，也不读取真实 `.env` 或个人 pi 配置。它不是 OS 安全沙箱。定向命令和覆盖边界见 [验证矩阵](docs/engineering.md#验证矩阵)；`scripts/run-tests.sh` 保留为仅 Python 的低层入口，不代表全部交付检查。
+该入口在临时 HOME 和清空继承环境的子进程中依次执行：事件 schema 生成物校验 → ruff 静态检查（规则集见 `pyproject.toml`）→ mypy 类型检查（`host/pi_glink`）→ Python 回归（同时用 pytest-cov 采集覆盖率）→ 覆盖率总量 ratchet（低于 `scripts/coverage-baseline.json` 的总量基线即失败）→ Node 回归与 dsh bundle 单测；任一步非零退出即按原退出码失败。外部标准库逐值对齐明确记为 `SKIP`。覆盖率基线只降不升，升基线需重测并提交新值，语义见 [ADR 0014](docs/adr/0014-delivery-gate-lint-types-coverage.md)。不启动真实 pi、浏览器、Docker 或 E2B，也不读取真实 `.env` 或个人 pi 配置。它不是 OS 安全沙箱。定向命令和覆盖边界见 [验证矩阵](docs/engineering.md#验证矩阵)；`scripts/run-tests.sh` 保留为仅 Python 的低层入口，不代表全部交付检查。
 
 以下为**单独授权的浏览器/live 验收**：需要明确归属的目标宿主；`ui-features` 和 `run-smoke` 会提交真实研究、读取服务历史，以下脚本都会更新仓库证据文件。它们不接入默认检查，也不证明多租户已完成。
 

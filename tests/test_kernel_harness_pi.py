@@ -16,8 +16,6 @@ from acp_pack import write_acp_pack
 from pi_glink.config import ConfigError, HostConfig, build_config
 from pi_glink.kernel.agent_env import RunCredentials
 from pi_glink.kernel.harness import select_family
-from pi_glink.kernel.harness_acp import AcpHarnessFamily
-from pi_glink.kernel.harness_pi import PiHarnessFamily
 from pi_glink.store import CANCELLED, FAILED, FINISHED, RunStore, RunSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

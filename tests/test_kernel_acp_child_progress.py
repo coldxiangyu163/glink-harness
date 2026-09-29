@@ -16,10 +16,11 @@ import pytest
 
 # zstandard 是可选依赖（pyproject acp-progress extra）：未装它的环境下整个
 # 模块跳过，而不是收集期 ImportError（与契约「缺失时如实无进度」一致）。
+# 下面的导入必须晚于 importorskip，因此显式豁免 E402。
 zstandard = pytest.importorskip("zstandard")
 
-from pi_glink.kernel import acp_child_progress as progress
-from pi_glink.kernel.acp_child_progress import (
+from pi_glink.kernel import acp_child_progress as progress  # noqa: E402
+from pi_glink.kernel.acp_child_progress import (  # noqa: E402
     MAX_SESSION_FILE_BYTES,
     MAX_TARGET_CHARS,
     AcpChildProgressSource,
@@ -136,7 +137,7 @@ def test_multiple_dispatches_keep_frame_order(tmp_path: Path) -> None:
         ],
     )
     links = parse_main_session(path)
-    assert [(l.call_id, l.child_id, l.label) for l in links] == [
+    assert [(link.call_id, link.child_id, link.label) for link in links] == [
         ("call_a", "child-a", "甲"),
         ("call_b", "child-b", "乙"),
     ]
@@ -153,7 +154,7 @@ def test_second_catalog_for_same_call_is_not_paired(tmp_path: Path) -> None:
         ],
     )
     links = parse_main_session(path)
-    assert [(l.call_id, l.child_id) for l in links] == [("call_a", "child-a")]
+    assert [(link.call_id, link.child_id) for link in links] == [("call_a", "child-a")]
 
 
 # -- 子会话进度提取 ---------------------------------------------------------------

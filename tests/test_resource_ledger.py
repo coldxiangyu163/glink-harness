@@ -10,7 +10,6 @@ or the real E2B SDK: the probes and the sandbox factory are injected fakes.
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 import sys

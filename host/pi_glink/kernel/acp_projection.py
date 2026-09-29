@@ -318,14 +318,14 @@ def _agent_tool_call(
             return produced
         # A subagent-named call whose args do not match the dispatch shape
         # falls back to a generic card: no typed event is fabricated (§3.5).
+    kind = update.get("kind")
     payload: dict[str, Any] = {
         "toolCallId": tool_call_id,
         "toolName": name,
         "args": project_args(update.get("rawInput")),
-        "presentation": _ACP_KIND_PRESENTATION.get(update.get("kind"), "generic")
-        if isinstance(update.get("kind"), str) else "generic",
+        "presentation": _ACP_KIND_PRESENTATION.get(kind, "generic")
+        if isinstance(kind, str) else "generic",
     }
-    kind = update.get("kind")
     if isinstance(kind, str) and kind:
         # The ACP tool category is card content (plan §4.1): keep it in the
         # record without forwarding the raw frame.

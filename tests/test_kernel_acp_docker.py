@@ -18,14 +18,13 @@ A real container run is covered separately by the task's live evidence.
 from __future__ import annotations
 
 import re
-import shlex
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from pi_glink.config import ConfigError, build_config
+from pi_glink.config import build_config
 
 from acp_pack import apply_acp_pack
 from pi_glink.events import EventBus

@@ -367,7 +367,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"日期: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"模板: {args.template}（dev 模板，未重建）")
     print(f"e2b SDK: {sdk_version}")
-    print(f"回收函数: pi_glink.kernel.acp_e2b_env.AcpSandboxTransfer.recover_state()（生产路径）")
+    print("回收函数: pi_glink.kernel.acp_e2b_env.AcpSandboxTransfer.recover_state()（生产路径）")
     print(
         f"上限: 文件数 {INHERIT_MAX_FILES} / 单文件 {INHERIT_MAX_FILE_BYTES} B / "
         f"总量 {INHERIT_MAX_TOTAL_BYTES} B / 深度 {ACP_STATE_MAX_DEPTH}"
