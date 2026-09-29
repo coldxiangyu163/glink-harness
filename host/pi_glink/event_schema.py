@@ -108,6 +108,7 @@ def _terminal(event_type: str, status: str) -> EventSpec:
             _f("reportStatus", "string"),
             _f("cleanup", "object", doc="{released, failures, external}"),
             _f("children", "array", items="object", doc="子代理终态摘要（权威）"),
+            _opt("deliverables", "array", items="object", doc="声明路径及逐文件回收结果"),
             _opt("modelStopReason", "string", "null"),
             _opt("sessionId", "string", "null"),
             _opt("sessionFile", "string", "null"),
@@ -167,6 +168,11 @@ SPECS: tuple[EventSpec, ...] = (
             _opt("usage", "object"),
         ),
         doc="权威正文；truncated 时不覆盖更长的流式正文",
+    ),
+    EventSpec(
+        "deliverables_declared", 1,
+        (_f("files", "array", items="object", doc="工作区相对路径与可选说明的声明列表"),),
+        doc="ACP present 的声明，不等于文件已安全回收；终帧和 run 详情给出逐文件结果",
     ),
     EventSpec(
         "tool_started",

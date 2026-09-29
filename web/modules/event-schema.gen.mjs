@@ -27,6 +27,7 @@
  * @property {string} reportStatus
  * @property {Record<string, unknown>} cleanup {released, failures, external}
  * @property {Array<Record<string, unknown>>} children 子代理终态摘要（权威）
+ * @property {Array<Record<string, unknown>>} [deliverables] 声明路径及逐文件回收结果
  * @property {string | null} [modelStopReason]
  * @property {string | null} [sessionId]
  * @property {string | null} [sessionFile]
@@ -47,6 +48,7 @@
  * @property {string} reportStatus
  * @property {Record<string, unknown>} cleanup {released, failures, external}
  * @property {Array<Record<string, unknown>>} children 子代理终态摘要（权威）
+ * @property {Array<Record<string, unknown>>} [deliverables] 声明路径及逐文件回收结果
  * @property {string | null} [modelStopReason]
  * @property {string | null} [sessionId]
  * @property {string | null} [sessionFile]
@@ -67,6 +69,7 @@
  * @property {string} reportStatus
  * @property {Record<string, unknown>} cleanup {released, failures, external}
  * @property {Array<Record<string, unknown>>} children 子代理终态摘要（权威）
+ * @property {Array<Record<string, unknown>>} [deliverables] 声明路径及逐文件回收结果
  * @property {string | null} [modelStopReason]
  * @property {string | null} [sessionId]
  * @property {string | null} [sessionFile]
@@ -110,6 +113,11 @@
  * @property {boolean} [truncated]
  * @property {string} [stopReason]
  * @property {Record<string, unknown>} [usage]
+ */
+/**
+ * deliverables_declared（v1）：ACP present 的声明，不等于文件已安全回收；终帧和 run 详情给出逐文件结果
+ * @typedef {object} DeliverablesDeclaredPayload
+ * @property {Array<Record<string, unknown>>} files 工作区相对路径与可选说明的声明列表
  */
 /**
  * tool_started（v1）
@@ -336,6 +344,15 @@ export const EVENT_SCHEMA = Object.freeze({
         "doc": "子代理终态摘要（权威）"
       },
       {
+        "name": "deliverables",
+        "types": [
+          "array"
+        ],
+        "required": false,
+        "items": "object",
+        "doc": "声明路径及逐文件回收结果"
+      },
+      {
         "name": "modelStopReason",
         "types": [
           "string",
@@ -470,6 +487,15 @@ export const EVENT_SCHEMA = Object.freeze({
         "doc": "子代理终态摘要（权威）"
       },
       {
+        "name": "deliverables",
+        "types": [
+          "array"
+        ],
+        "required": false,
+        "items": "object",
+        "doc": "声明路径及逐文件回收结果"
+      },
+      {
         "name": "modelStopReason",
         "types": [
           "string",
@@ -602,6 +628,15 @@ export const EVENT_SCHEMA = Object.freeze({
         "required": true,
         "items": "object",
         "doc": "子代理终态摘要（权威）"
+      },
+      {
+        "name": "deliverables",
+        "types": [
+          "array"
+        ],
+        "required": false,
+        "items": "object",
+        "doc": "声明路径及逐文件回收结果"
       },
       {
         "name": "modelStopReason",
@@ -785,6 +820,22 @@ export const EVENT_SCHEMA = Object.freeze({
           "object"
         ],
         "required": false
+      }
+    ]
+  },
+  "deliverables_declared": {
+    "v": 1,
+    "terminal": false,
+    "open": false,
+    "fields": [
+      {
+        "name": "files",
+        "types": [
+          "array"
+        ],
+        "required": true,
+        "items": "object",
+        "doc": "工作区相对路径与可选说明的声明列表"
       }
     ]
   },
@@ -1168,10 +1219,10 @@ export const EVENT_SCHEMA = Object.freeze({
 });
 
 /** 全部产品事件类型（SSE 具名帧）。 */
-export const EVENT_TYPES = Object.freeze(["run_started", "run_stage", "run_finished", "run_failed", "run_cancelled", "session_ready", "turn_started", "turn_finished", "assistant_delta", "thinking_delta", "assistant_message", "tool_started", "tool_updated", "tool_finished", "subagent_started", "subagent_finished", "subagent_updated", "usage_reported", "kernel_status"]);
+export const EVENT_TYPES = Object.freeze(["run_started", "run_stage", "run_finished", "run_failed", "run_cancelled", "session_ready", "turn_started", "turn_finished", "assistant_delta", "thinking_delta", "assistant_message", "deliverables_declared", "tool_started", "tool_updated", "tool_finished", "subagent_started", "subagent_finished", "subagent_updated", "usage_reported", "kernel_status"]);
 
 /** 每个事件类型的 payload 版本；reducer 只应用 v 与此一致的帧。 */
-export const EVENT_VERSIONS = Object.freeze({"run_started": 1, "run_stage": 1, "run_finished": 1, "run_failed": 1, "run_cancelled": 1, "session_ready": 1, "turn_started": 1, "turn_finished": 1, "assistant_delta": 1, "thinking_delta": 1, "assistant_message": 1, "tool_started": 1, "tool_updated": 1, "tool_finished": 1, "subagent_started": 1, "subagent_finished": 1, "subagent_updated": 1, "usage_reported": 1, "kernel_status": 1});
+export const EVENT_VERSIONS = Object.freeze({"run_started": 1, "run_stage": 1, "run_finished": 1, "run_failed": 1, "run_cancelled": 1, "session_ready": 1, "turn_started": 1, "turn_finished": 1, "assistant_delta": 1, "thinking_delta": 1, "assistant_message": 1, "deliverables_declared": 1, "tool_started": 1, "tool_updated": 1, "tool_finished": 1, "subagent_started": 1, "subagent_finished": 1, "subagent_updated": 1, "usage_reported": 1, "kernel_status": 1});
 
 /** 权威终帧类型。 */
 export const TERMINAL_EVENT_TYPES = new Set(["run_finished", "run_failed", "run_cancelled"]);
