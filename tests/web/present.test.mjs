@@ -139,7 +139,7 @@ test('lifecycle stages stay hidden; stages that change expectations are shown', 
   assert.equal(stageText({ stage: 'finished' }), null);
   assert.match(stageText({ stage: 'auto_retry_start', attempt: 2 }), /第 2 次/);
   assert.match(stageText({ stage: 'compaction_start' }), /整理上下文/);
-  assert.equal(stageText({ stage: 'plan', entries: [{ content: '查询资料', status: 'in_progress' }] }), '正在整理研究计划');
+  assert.equal(stageText({ stage: 'plan', entries: [{ content: '查询资料', status: 'in_progress' }] }), '正在整理研究计划 · 查询资料');
   assert.equal(stageText({ stage: 'plan', entries: [] }), '正在整理研究计划');
   assert.equal(stageText({ stage: 'plan', entries: [{ content: '完成', status: 'completed' }] }), '研究计划已更新');
 });

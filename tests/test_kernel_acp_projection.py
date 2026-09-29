@@ -419,7 +419,7 @@ def test_a_tool_call_arriving_terminal_emits_started_and_finished() -> None:
         "toolCallId": "call_1",
         "toolName": "bash",
         "args": {},
-        "presentation": "generic",
+        "presentation": "execute",
     }
     assert produced[1][1] == {
         "toolCallId": "call_1",
@@ -427,6 +427,26 @@ def test_a_tool_call_arriving_terminal_emits_started_and_finished() -> None:
         "isError": False,
         "result": "done",
     }
+
+
+def test_dsh_tool_names_override_other_kind_without_guessing_unknown_tools() -> None:
+    projector = AcpProjector(SecretRedactor())
+    hints = {
+        "web_search": "search_web", "web_fetch": "fetch_page",
+        "todo_write": "plan", "write": "write_file", "read": "read_file",
+        "edit": "edit_file", "bash": "execute",
+        "list_agents": "manage_children", "job_list": "manage_children",
+        "send_message": "message_child", "interrupt_agent": "stop_child",
+        "unknown_dsh_tool": "generic",
+    }
+    for index, (name, hint) in enumerate(hints.items()):
+        started = _project(projector, {
+            "sessionUpdate": "tool_call", "toolCallId": f"c{index}",
+            "title": name, "kind": "other", "rawInput": {},
+        })
+        assert started[0][1]["presentation"] == hint
+        assert started[0][1]["toolName"] == name
+        assert started[0][1]["kind"] == "other"
 
 
 def test_the_tool_name_is_remembered_for_later_updates() -> None:

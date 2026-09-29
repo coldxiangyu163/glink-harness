@@ -118,21 +118,21 @@ def craft_parent(store: RunStore, run_id: str, **kwargs: Any) -> Any:
         ("unknown", "generic"),
     ],
 )
-def test_acp_tool_kind_projects_its_own_presentation(
+def test_unknown_acp_tool_name_falls_back_to_its_protocol_kind(
     acp_kind: str, expected: str
 ) -> None:
     projector = AcpProjector(SecretRedactor())
     produced = projector.project({
         "method": "session/update", "params": {"update": {
-            "sessionUpdate": "tool_call", "toolCallId": "c1", "name": "bash",
+            "sessionUpdate": "tool_call", "toolCallId": "c1", "name": "unmapped_acp_tool",
             "kind": acp_kind, "status": "pending", "rawInput": {"command": "pwd"},
         }}
     })
     assert produced[0][1]["kind"] == acp_kind
     assert produced[0][1]["presentation"] == expected
-    # A generic ACP kind never gets pi's bash/command label by name.
-    if acp_kind == "other":
-        assert produced[0][1]["presentation"] != "execute"
+    # An unknown tool with other/unknown kind is never guessed from its args.
+    if acp_kind in {"other", "unknown"}:
+        assert produced[0][1]["presentation"] == "generic"
 
 
 # -- (e) 终态词汇归一化 ----------------------------------------------------------
