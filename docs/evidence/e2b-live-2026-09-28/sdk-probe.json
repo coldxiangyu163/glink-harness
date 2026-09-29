@@ -1,0 +1,12 @@
+{
+  "sdk": "e2b 2.51.0",
+  "template": "pi-glink-worker:default",
+  "request_timeout_seconds": 15,
+  "sandbox_id": "ij6qukru7k0y31xb674bm",
+  "get_info_size": 18,
+  "stream_equals_written": true,
+  "stream_bytes": 18,
+  "kill_returned": true,
+  "kill_seconds": 0.278,
+  "post_kill": "not_found_404"
+}

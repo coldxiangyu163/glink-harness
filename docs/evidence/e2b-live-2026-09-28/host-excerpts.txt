@@ -1,0 +1,25 @@
+[host-final.log]
+2026-09-29 07:57:58,983 GET workspace/report.md HTTP 200
+2026-09-29 07:58:02,225 DELETE sandbox=i3xs76gvwij919qvr78j5 HTTP 204
+2026-09-29 07:58:02,287 INFO pi_glink.runs.runner: run finalized run=10b065830440 status=finished stop=None committed=True
+2026-09-29 07:58:46,981 GET workspace/report.md HTTP 200
+2026-09-29 07:59:05,552 DELETE sandbox=i33w5zld939dsqolj5230 HTTP 204
+2026-09-29 07:59:05,707 INFO pi_glink.runs.runner: run finalized run=f2a66107ec40 status=finished stop=None committed=True
+2026-09-29 07:59:50,541 POST session/continued.jsonl HTTP 200
+2026-09-29 07:59:56,385 POST workspace/report.md HTTP 200
+2026-09-29 08:01:21,556 GET workspace/report.md HTTP 200
+2026-09-29 08:01:22,065 GET session/continued.jsonl HTTP 200
+2026-09-29 08:01:22,777 GET session/continued.jsonl HTTP 200
+2026-09-29 08:01:23,756 GET session/continued.jsonl HTTP 200
+2026-09-29 08:01:24,794 DELETE sandbox=ithzapzj7f6q94ian9vyn HTTP 204
+2026-09-29 08:01:24,841 INFO pi_glink.runs.runner: run finalized run=c0ee196a93c2 status=failed stop=model_error committed=True
+[host-pinggy.log]
+2026-09-29 08:08:31,026 POST session/continued.jsonl HTTP 200
+2026-09-29 08:08:31,263 POST workspace/report.md HTTP 200
+2026-09-29 08:09:02,572 GET workspace/report.md HTTP 200
+2026-09-29 08:09:03,052 GET session/continued.jsonl HTTP 200
+2026-09-29 08:09:03,711 GET session/continued.jsonl HTTP 200
+2026-09-29 08:09:04,463 GET session/continued.jsonl HTTP 200
+2026-09-29 08:09:05,264 DELETE sandbox=iv40n4s1b98kcfid4qwsr HTTP 204
+2026-09-29 08:09:05,397 INFO pi_glink.runs.runner: run finalized run=e2323dc13294 status=finished stop=None committed=True
+log_check: TypeError/request_timeout exception matches = 0
