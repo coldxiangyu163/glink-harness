@@ -158,10 +158,21 @@ def main(
         print(f"配置错误 / configuration error: {exc}", file=sys.stderr)
         return 2
     url = f"http://{config.host}:{server.server_address[1]}/"
-    pi_path = shutil.which(config.pi_bin)
     print(f"pi-glink 宿主已启动 / host listening: {url}")
     print(f"执行面 executor: {config.executor}")
-    print(f"内核 pi: {pi_path or f'未找到 ({config.pi_bin}) / not found'}")
+    # The banner answers "where does the kernel run", not "is it on this
+    # machine's PATH": only inproc runs it locally, so only inproc reports a
+    # local lookup. Docker/E2B run it inside the image/template, where
+    # "not found" would mislead (the same face-split semantics as
+    # /api/health after its fix).
+    if config.executor == "inproc":
+        pi_path = shutil.which(config.pi_bin)
+        print(f"内核 pi: {pi_path or f'未找到 ({config.pi_bin}) / not found'}")
+    else:
+        print(
+            f"内核 kernel: {config.pi_bin}（在镜像/沙箱内执行，本机无需安装 / "
+            f"runs inside the {config.executor} image, no local install needed）"
+        )
     print(
         "模型 model: "
         + (config.openai_model or "未配置 / unset")
