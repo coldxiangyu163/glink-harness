@@ -280,12 +280,13 @@ def test_the_probe_face_follows_the_persisted_identity(tmp_path: Path) -> None:
         record_hold(store, "no-identity")
         docker_calls: list[str] = []
         sandbox_calls: list[str] = []
+        # 默认参数绑定循环体内的列表：闭包不再经过循环变量间接访问（B023）。
         manager = RunManager(
             config,
             EventBus(),
             store,
-            docker_probe=lambda name: (docker_calls.append(name) or True, "确认不存在"),
-            sandbox_probe=lambda sid: (sandbox_calls.append(sid) or True, "确认不存在"),
+            docker_probe=lambda name, _calls=docker_calls: (_calls.append(name) or True, "确认不存在"),
+            sandbox_probe=lambda sid, _calls=sandbox_calls: (_calls.append(sid) or True, "确认不存在"),
         )
         assert sorted(manager.reconcile_resources()) == [
             "both-hold",

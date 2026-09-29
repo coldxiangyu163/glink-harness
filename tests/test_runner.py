@@ -1817,3 +1817,60 @@ def test_close_out_guard_finalizes_even_when_the_commit_itself_fails(
     assert execution.finalized.is_set()
     assert execution.verdict is None, "提交失败时不得伪造终态"
     assert "store down" in (execution.execution_facts.event_log_error or "")
+
+
+def test_close_out_crash_before_recover_keeps_the_resource_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """收尾崩溃在 Recover 之前时，资源状态必须如实记未知（fail-closed）。
+
+    对基线红：``commit_terminal`` 在 ``resource_facts`` 缺失时默认记
+    ``released: true``，一个从未执行清理的 run 因此立刻退出资源台账，
+    违背「未确认释放的持有计入 owner 租户与全局槽位」。修复后终帧记
+    ``released: null``（未知），持有保持到对账或人工裁决，同重启对账
+    的中断收口口径。
+    """
+    manager, store = build_manager(tmp_path)
+    execution = open_execution(manager, store, tmp_path / "ws", "holdcrash1")
+
+    def explode(execution_):
+        raise RuntimeError("observe exploded before recover")
+
+    monkeypatch.setattr(manager._pipeline.observe, "finish", explode)  # noqa: SLF001
+
+    manager._pipeline.close_out(execution)  # noqa: SLF001 - must not raise
+
+    terminal = store.committed_terminal("holdcrash1")
+    assert terminal["type"] == "run_failed"
+    cleanup = terminal["payload"]["cleanup"]
+    assert cleanup["released"] is None, "从未清理不得记已释放"
+    assert cleanup["failures"], "未知状态必须带说明"
+    record = store.get("holdcrash1")
+    assert record is not None and record.is_terminal
+    assert record.holds_resources, "未确认释放的 run 必须继续持有容量"
+    assert [hold.run_id for hold in store.holding_records()] == ["holdcrash1"]
+
+
+def test_a_committed_run_is_forgotten_from_the_bus(tmp_path: Path) -> None:
+    """终态提交后，总线按 run 的状态必须被清理，不能随 run 数无界累积。
+
+    对基线红：``EventBus.forget`` 无生产调用者，每个已结束 run 的计数器、
+    关闭标记与提交锁在进程存活期内永久累积。修复后提交回调里清理它们，
+    且读面语义不变：run 不再 ``is_open``，事件计数回退到持久化终态。
+    """
+    manager, store = build_manager(tmp_path, write_report=True)
+    record = manager.start("结束后清理总线状态")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final is not None and final.status == FINISHED
+    bus = manager.bus
+    run_id = record.run_id
+    assert not bus.is_open(run_id), "终态后 run 不得再处于打开状态"
+    assert bus.last_seq(run_id) == 0, "终态后计数器必须清零（回退持久化计数）"
+    with bus._lock:  # noqa: SLF001 - 证明按 run 状态确被清理，而非仅关闭
+        assert run_id not in bus._counters
+        assert run_id not in bus._closed
+        assert run_id not in bus._commit_locks
+        assert run_id not in bus._subscribers
+    persisted = store.get(run_id)
+    assert persisted is not None and persisted.event_count > 0, "持久化计数仍是权威"

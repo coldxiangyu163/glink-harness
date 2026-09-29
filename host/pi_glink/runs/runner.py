@@ -313,7 +313,15 @@ class RunManager:
             raise RunQuotaExceeded("global", self.config.max_global_runs)
 
     def _forget(self, run_id: str) -> None:
-        """Drop a committed run from the in-flight table (the commit's callback)."""
+        """Drop a committed run from the in-flight table and the live bus.
+
+        The commit's callback. Besides the execution slot this is where the
+        run's per-run bus state (counters, closed marker, commit lock) is
+        dropped: the stream was already closed by the commit stage, so no
+        reader depends on it and an unbounded pile of finished runs would
+        otherwise accumulate for the process's lifetime.
+        """
+        self.bus.forget(run_id)
         with self._lock:
             self._executions.pop(run_id, None)
 

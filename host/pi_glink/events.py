@@ -331,7 +331,14 @@ class EventBus:
             return run_id in self._counters and run_id not in self._closed
 
     def forget(self, run_id: str) -> None:
-        """Drop a finished run's counters, history and closed marker."""
+        """Drop a finished run's counters, history, closed marker and lock.
+
+        Called by the run manager once a run's terminal frame is committed:
+        without it every finished run would leave per-run state (the seq
+        counter, the closed marker and the commit lock) behind for the
+        process's lifetime. Readers that reach a forgotten run see it as not
+        open and fall back to the durable log.
+        """
         with self._lock:
             self._counters.pop(run_id, None)
             self._history.pop(run_id, None)

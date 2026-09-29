@@ -135,7 +135,9 @@ def associate_children(
             result.unmatched_children.extend(c["n"] for c in group)
             result.unmatched_files.extend(files)
             continue
-        for child, file_group in zip(group, file_groups):
+        # strict：配对只在上方判等后发生；若该不变量被破坏，宁司 ValueError
+        # 也不静默截断错配（序数启发式的诚实口径）。
+        for child, file_group in zip(group, file_groups, strict=True):
             result.by_n[child["n"]] = list(file_group)
     for leftovers in files_by_agent.values():
         result.unmatched_files.extend(leftovers)

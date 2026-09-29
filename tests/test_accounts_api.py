@@ -1586,7 +1586,7 @@ def test_accounts_mode_does_not_require_a_gateway_secret(tmp_path: Path) -> None
     )
     assert config.accounts_db is not None
     # Gateway mode still requires the secret file.
-    with pytest.raises(Exception):
+    with pytest.raises(ConfigError):
         build_config(
             {
                 "LOCAL_WEB_EXECUTOR": "docker",

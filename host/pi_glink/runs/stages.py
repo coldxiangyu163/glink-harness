@@ -698,7 +698,32 @@ class CommitStage:
         facts = execution.execution_facts
         artifacts = execution.artifact_facts or ArtifactFacts()
         resources = execution.resource_facts
-        cleanup = resources.cleanup if resources is not None else CleanupReport(released=True)
+        if resources is not None:
+            cleanup = resources.cleanup
+            cleanup_payload = {
+                "released": cleanup.released,
+                "failures": list(cleanup.failures),
+                "external": dict(cleanup.external),
+            }
+        else:
+            # The Recover stage never ran (a close-out crash before it): no
+            # cleanup was attempted, so the truth is "unknown", not
+            # "released". Recording ``null`` keeps the hold in the ledger
+            # (fail-closed: it still counts against the owner tenant and the
+            # global slots) until reconciliation or adjudication confirms it,
+            # exactly like an interrupted run the restart reconciles.
+            cleanup_payload = {
+                "released": None,
+                "failures": ["收尾未执行资源清理，执行资源状态未知，未自动回收"],
+                "external": {
+                    key: value
+                    for key, value in (
+                        ("container", current.container_name),
+                        ("sandbox", current.sandbox_id),
+                    )
+                    if value
+                },
+            }
         grant = secrets.egress_grant
         terminal_type = {
             FAILED: events.RUN_FAILED,
@@ -720,11 +745,7 @@ class CommitStage:
             "kernelUsage": (facts.usage_total or None) if grant is not None else None,
             "redacted": artifacts.redacted,
             "durationSeconds": round(time.time() - current.created_at, 3),
-            "cleanup": {
-                "released": cleanup.released,
-                "failures": list(cleanup.failures),
-                "external": dict(cleanup.external),
-            },
+            "cleanup": cleanup_payload,
             "artifactFailures": list(artifacts.artifact_failures),
             # The committed documents are the fact source for replay rendering
             # (§3.5); a read failure degrades to an empty summary (with a log

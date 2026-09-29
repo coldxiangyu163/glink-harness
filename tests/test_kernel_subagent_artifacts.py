@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from pi_glink.kernel.subagent_artifacts import (
     associate_children,
     parse_artifact_filename,
@@ -137,3 +139,33 @@ def test_children_without_an_agent_never_pair() -> None:
     result = associate_children(children, artifacts)
     assert result.unmatched_children == [0]
     assert result.by_n == {}
+
+
+def test_pairing_zip_is_strict_so_a_broken_length_invariant_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """配对循环的 zip 必须是 strict 的（B905 语义锚定）。
+
+    ``associate_children`` 只在 ``len(file_groups) == len(group)`` 判等后配对。
+    若该不变量将来被破坏（例如分组逻辑改动后谎报长度），strict zip 会当场
+    抛 ``ValueError``，而不是静默截断、把文件配到错误的 child 上——序数
+    启发式的义务是宁可不关联也不错配。
+    """
+
+    class _LyingGroups:
+        """``__len__`` 谎报为 1（骗过判等），实际产出 2 组。"""
+
+        def __len__(self) -> int:
+            return 1
+
+        def __iter__(self):
+            real = _files([("researcher", 0, "meta"), ("researcher", 1, "meta")])
+            return iter([[real[0]], [real[1]]])
+
+    monkeypatch.setattr(
+        "pi_glink.kernel.subagent_artifacts._group_by_index", lambda _files: _LyingGroups()
+    )
+    children = [_child(0, "researcher")]
+    artifacts = _files([("researcher", 0, "meta"), ("researcher", 1, "meta")])
+    with pytest.raises(ValueError):
+        associate_children(children, artifacts)

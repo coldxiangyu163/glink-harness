@@ -38,21 +38,29 @@ testpaths = ["tests"]
 pythonpath = ["host"]
 addopts = "-q"
 
-# 静态检查：规则集显式收窄到 ruff 的核心集（pycodestyle E4/E7/E9 + Pyflakes F）。
+# 静态检查：规则集显式收窄到 ruff 的核心集（pycodestyle E4/E7/E9 + Pyflakes F）
+# 加 bugbear（B）。
 # 实测依据（ruff 0.16.9，`ruff check host scripts tests`）：默认集 593 条（多为 noqa
 # 清理、导入排序等风格面），E,F,W 1809 条（E501 独占 1781，而本仓库未约定行长）。
 # E4/E7/E9/F 只覆盖语法/导入/未使用一类的真问题，存量 28 条已全部修掉。放宽 select
 # 或新增 ignore 必须说明被替代的义务（docs/engineering.md「需要先取得决定的变更」）。
+# bugbear 取舍（`ruff check --select B` 存量 14 条已全部清零，未用 ignore 压噪）：
+# B027 的两处 hook 空实现（HarnessFamily.check_continuation、Sandbox.open）是
+# 有意的默认空实现（子类可选覆写，不是强制），用显式 `return None` 声明意图而非
+# @abstractmethod（后者会改变契约：强制所有族/face 实现）。
 [tool.ruff]
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F"]
+select = ["E4", "E7", "E9", "F", "B"]
 
 # 类型检查：范围是 host/pi_glink。当前（除下方显式豁免外）零错误。
+# check_untyped_defs：无类型注解的函数体也检查（cc 实测开启前后均 0 错误；
+# 只拦真问题，不把注解变成强制义务）。
 [tool.mypy]
 python_version = "3.12"
 files = ["host/pi_glink"]
+check_untyped_defs = true
 # e2b 等可选执行面的第三方包不必在门禁环境全部安装；缺包不算类型错误。
 ignore_missing_imports = true
 

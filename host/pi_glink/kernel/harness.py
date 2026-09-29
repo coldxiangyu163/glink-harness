@@ -115,6 +115,9 @@ class HarnessFamily(ABC):
         session_id、``acp_resume_method``、状态根目录存在性；拒绝一律
         ``pi_glink.contracts.FollowupUnavailable("session_unavailable")``。
         """
+        # Hook 默认空实现：pi 族没有额外门禁（显式 return None，区别于被
+        # 遗忘的空 body；B027 语义：要么覆写，要么明确什么都不做）。
+        return None
 
     def continuation_workspace(self, parent: RunRecord) -> Path | None:
         """The workspace a follow-up reuses.

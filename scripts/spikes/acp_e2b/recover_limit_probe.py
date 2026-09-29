@@ -418,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print("汇总")
     print("----")
-    for facts, ok in zip(results, verdicts):
+    for facts, ok in zip(results, verdicts, strict=True):
         print(
             f"  {facts['axis']}: ok={facts.get('ok')} files={facts.get('recoveredFiles')} "
             f"bytes={facts.get('recoveredBytes')} published={facts.get('publishedDirExists')} "

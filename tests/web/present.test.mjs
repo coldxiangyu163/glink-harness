@@ -24,6 +24,7 @@ import {
   toolStateLabel,
 } from '../../web/modules/present.mjs';
 import { collectSources } from '../../web/modules/progress-panel.mjs';
+import { createRunState, reduce } from '../../web/modules/run-reducer.mjs';
 
 test('durations read as minutes and seconds, never raw floats', () => {
   assert.equal(formatDuration(537.838), '8 分 58 秒');
@@ -133,15 +134,35 @@ test('only unusual tool states get a word', () => {
   assert.equal(toolStateLabel({ status: 'cancelled' }), '已停止');
 });
 
+//: 一帧宿主会真实提交的 run_stage(plan)（投影与字段裁剪见
+//: host/pi_glink/kernel/acp_projection.py `_agent_plan`），按持久化 envelope
+//: `{type, v, runId, seq, ts, payload}` 经 reducer 施加。计划文案断言必须
+//: 走这条事件 → 状态 → 文案链路：手工构造 stage item 测不出 reducer 丢
+//: entries 的回归（「研究计划已更新」曾在真实链路上永不出现）。
+function planStage(entries) {
+  const state = reduce(createRunState({ runId: 'present-plan' }), {
+    type: 'run_stage',
+    v: 1,
+    runId: 'present-plan',
+    seq: 1,
+    ts: 1,
+    payload: { stage: 'plan', entries },
+  });
+  assert.equal(state.rejectedFrames, 0);
+  const item = state.items[state.items.length - 1];
+  assert.ok(item && item.kind === 'stage' && item.stage === 'plan');
+  return item;
+}
+
 test('lifecycle stages stay hidden; stages that change expectations are shown', () => {
   assert.equal(stageText({ stage: 'agent_start' }), null);
   assert.equal(stageText({ stage: 'agent_end' }), null);
   assert.equal(stageText({ stage: 'finished' }), null);
   assert.match(stageText({ stage: 'auto_retry_start', attempt: 2 }), /第 2 次/);
   assert.match(stageText({ stage: 'compaction_start' }), /整理上下文/);
-  assert.equal(stageText({ stage: 'plan', entries: [{ content: '查询资料', status: 'in_progress' }] }), '正在整理研究计划 · 查询资料');
-  assert.equal(stageText({ stage: 'plan', entries: [] }), '正在整理研究计划');
-  assert.equal(stageText({ stage: 'plan', entries: [{ content: '完成', status: 'completed' }] }), '研究计划已更新');
+  assert.equal(stageText(planStage([{ content: '查询资料', status: 'in_progress', priority: 'high' }])), '正在整理研究计划 · 查询资料');
+  assert.equal(stageText(planStage([])), '正在整理研究计划');
+  assert.equal(stageText(planStage([{ content: '完成', status: 'completed', priority: 'high' }])), '研究计划已更新');
 });
 
 test('warnings use reader vocabulary instead of exposing protocol or failure codes', () => {

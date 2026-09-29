@@ -216,7 +216,7 @@ def check_ordering(bridge: Bridge, report: Report, *, count: int, label: str, bu
         replies = bridge.drain(count=count, timeout=120.0)
         ok = len(replies) == count and all(
             reply.get("id") == ident and reply.get("pad") == pad and reply.get("raw_sha256") == sha256(frame[:-1])
-            for reply, (ident, pad, frame) in zip(replies, expected)
+            for reply, (ident, pad, frame) in zip(replies, expected, strict=True)
         )
         seq = [reply.get("n") for reply in replies]
         report.check(
@@ -284,7 +284,7 @@ def check_corpus(bridge: Bridge, report: Report) -> None:
     replies = bridge.drain(count=len(frames), timeout=120.0)
     ok = len(replies) == len(frames) and all(
         reply.get("value") == value and reply.get("raw_sha256") == sha256(frame[:-1])
-        for reply, value, frame in zip(replies, frames, sent)
+        for reply, value, frame in zip(replies, frames, sent, strict=True)
     )
     # 共享语料里的 U+2028/U+2029 必须是内容：回包正文包含真实的分隔符字符。
     has_separators = any("\u2028" in json.dumps(reply.get("value"), ensure_ascii=False) for reply in replies)

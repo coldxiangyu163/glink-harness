@@ -258,7 +258,11 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   下都被拒绝）。共享 key 只在宿主出口代理里：执行环境、命令行、页面、事件/报告与运行期文件都只见本 run
   的 token（终帧吊销）；run 期间内核工具可读到 token 并在配额内调用代理，这是现存残留面。每 run 脱敏边界包含共享 key 与宿主已知秘密，`redactor_for_record` 在 `shared` 下走
   宿主/共享边界，不会因共享模式没有租户凭据条目而漏脱敏。这仍是回显保护 + 沙箱执行隔离，不承诺 key
-  不可能被宿主可读、工具回显或网络外传。
+  不可能被宿主可读、工具回显或网络外传。**例外是 ACP 族**：shared 下运营方经注入通道
+  （`PI_GLINK_ACP_CREDENTIAL_ENV` / `PI_GLINK_ACP_CREDENTIAL_FILES`）投递的凭据**副本**会进入执行环境
+  （沙箱内 agent 工具可读，收尾删除），不像 pi 族真实 key 只留在宿主出口代理——这是
+  [ADR 0015](docs/adr/0015-acp-credential-channels-under-model-credential-policy.md) /
+  [ADR 0016](docs/adr/0016-acp-credential-env-single-source.md) 已声明的例外，把 ACP 接入出口代理是未决项。
 - **部署最小步骤（accounts + shared + e2b）**：配置 `E2B_API_KEY`、共享模型三件套与（可选）
   `PI_GLINK_WEB_SEARCH_KEY`；开启 `PI_GLINK_TENANCY=multitenant`、`PI_GLINK_AUTH_MODE=accounts`、
   `PI_GLINK_MODEL_CREDENTIALS=shared`、`LOCAL_WEB_EXECUTOR=e2b`，并指定仓库外的 0700 账号库目录；

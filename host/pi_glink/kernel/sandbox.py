@@ -162,6 +162,9 @@ class Sandbox(ABC):
 
     def open(self, launch: Launch, *, timeout_seconds: int) -> None:
         """Create the resource. Raises when the face is unavailable."""
+        # Hook 默认空实现：本地 face 无资源可建（inproc 不覆写）；显式 return None
+        # 而非留空 body，避免被当成遗漏的 @abstractmethod（B027）。
+        return None
 
     @abstractmethod
     def spawn(self, launch: Launch) -> Spawn: ...

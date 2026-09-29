@@ -104,8 +104,9 @@ def test_optional_preflight_fails_closed_on_missing_extras() -> None:
 
     assert check(fake_import) == ["zstandard", "e2b"]
     for absent in ("zstandard", "e2b"):
-        def import_one_missing(name: str):
-            if name == absent:
+        # 默认参数绑定循环变量：闭包只往回看一次，B023 不再把它当逃生管。
+        def import_one_missing(name: str, _absent: str = absent):
+            if name == _absent:
                 raise ModuleNotFoundError(name)
             return object()
         assert check(import_one_missing) == [absent]

@@ -1048,7 +1048,7 @@ def test_two_acp_runs_get_their_own_agent_state_root(tmp_path: Path) -> None:
         runs.append(record)
     homes = [entry["home"] for entry in read_log(log) if entry["event"] == "home"]
     assert len(homes) == 2 and homes[0] != homes[1]
-    for record, home in zip(runs, homes):
+    for record, home in zip(runs, homes, strict=True):
         expected = store.run_dir(record.run_id) / "acp-agent" / "home"
         assert Path(home) == expected
         assert (expected / "fake-acp-state.json").is_file()

@@ -963,21 +963,28 @@ def test_state_recovery_bounds_refuse_the_whole_mirror(
             ``upload_home`` only writes the host-rendered files, so entries
             that exist before the run are exactly extra sandbox state the
             recovery has to judge — the same shape a long agent session has.
+
+            ``seed`` / ``sandboxes`` are bound at construction, so the loop
+            variable is not captured through the call (B023).
             """
+
+            def __init__(self, seed: dict[str, bytes], sandboxes: list[FakeSandbox]):
+                self._seed = seed
+                self._sandboxes = sandboxes
 
             def __call__(self, **_kwargs: Any) -> FakeSandbox:
                 sandbox = FakeSandbox(
-                    tmp_path, report=None, sandbox_id=f"fake-sandbox-{len(sandboxes) + 1}"
+                    tmp_path, report=None, sandbox_id=f"fake-sandbox-{len(self._sandboxes) + 1}"
                 )
-                for name, data in seed.items():
+                for name, data in self._seed.items():
                     target = translate(f"{SANDBOX_ACP_HOME}/{name}", sandbox.root)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(data)
-                sandboxes.append(sandbox)
+                self._sandboxes.append(sandbox)
                 return sandbox
 
         store = RunStore(config.data_root / f"runs-{constant}")
-        manager = RunManager(config, EventBus(), store=store, sandbox_factory=SeedingFactory())
+        manager = RunManager(config, EventBus(), store=store, sandbox_factory=SeedingFactory(seed, sandboxes))
         record = manager.start(f"第一轮-{constant}")
         final = manager.wait(record.run_id, timeout=120)
         assert final is not None and final.status == FINISHED
