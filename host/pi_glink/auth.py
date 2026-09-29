@@ -160,7 +160,6 @@ class AccountsAuth:
         token, csrf, _record = self.store.create_session(
             user_id=user.user_id,
             absolute_seconds=self.config.session_absolute_seconds,
-            idle_seconds=self.config.session_idle_seconds,
             user_agent=user_agent,
         )
         self.login_limiter.reset(key)

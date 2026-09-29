@@ -401,7 +401,7 @@ def test_invitation_requires_a_known_tenant_and_known_role(store: AccountsStore)
 def test_session_token_is_stored_only_as_a_digest(store: AccountsStore) -> None:
     user = seed_user(store)
     token, csrf, record = store.create_session(
-        user_id=user.user_id, absolute_seconds=3600, idle_seconds=600
+        user_id=user.user_id, absolute_seconds=3600
     )
     document = json.dumps(raw_rows(store, "sessions"))
     assert token not in document
@@ -418,7 +418,7 @@ def test_session_authenticates_and_resolves_identity(store: AccountsStore) -> No
     seed_user(store, name="成员", role="member")
     user = store.find_user_by_email("member@example.test")
     token, _csrf, _record = store.create_session(
-        user_id=user.user_id, absolute_seconds=3600, idle_seconds=600
+        user_id=user.user_id, absolute_seconds=3600
     )
     context = store.authenticate_session(token, idle_seconds=600)
     assert context is not None
@@ -431,13 +431,13 @@ def test_session_authenticates_and_resolves_identity(store: AccountsStore) -> No
 def test_session_idle_and_absolute_expiry(store: AccountsStore, clock: Clock) -> None:
     user = seed_user(store)
     token, _csrf, _record = store.create_session(
-        user_id=user.user_id, absolute_seconds=3600, idle_seconds=600
+        user_id=user.user_id, absolute_seconds=3600
     )
     clock.advance(601)
     assert store.authenticate_session(token, idle_seconds=600) is None
 
     token2, _csrf2, _record2 = store.create_session(
-        user_id=user.user_id, absolute_seconds=3600, idle_seconds=600
+        user_id=user.user_id, absolute_seconds=3600
     )
     for _ in range(6):
         clock.advance(500)
@@ -449,7 +449,7 @@ def test_session_idle_and_absolute_expiry(store: AccountsStore, clock: Clock) ->
 def test_session_revocation_and_disabled_identities(store: AccountsStore) -> None:
     user = seed_user(store)
     token, _csrf, record = store.create_session(
-        user_id=user.user_id, absolute_seconds=3600, idle_seconds=600
+        user_id=user.user_id, absolute_seconds=3600
     )
     assert store.session_active(record.session_digest, idle_seconds=600) is True
     assert store.revoke_session(token) is True
@@ -458,7 +458,7 @@ def test_session_revocation_and_disabled_identities(store: AccountsStore) -> Non
     assert store.revoke_session(token) is False
 
     token2, _csrf2, record2 = store.create_session(
-        user_id=user.user_id, absolute_seconds=3600, idle_seconds=600
+        user_id=user.user_id, absolute_seconds=3600
     )
     store.set_user_status(user.user_id, USER_DISABLED)
     assert store.session_active(record2.session_digest, idle_seconds=600) is False
@@ -466,7 +466,7 @@ def test_session_revocation_and_disabled_identities(store: AccountsStore) -> Non
     store.set_user_status(user.user_id, USER_ACTIVE)
 
     token3, _csrf3, record3 = store.create_session(
-        user_id=user.user_id, absolute_seconds=3600, idle_seconds=600
+        user_id=user.user_id, absolute_seconds=3600
     )
     store.set_tenant_status("tenant-alpha", TENANT_DISABLED)
     assert store.session_active(record3.session_digest, idle_seconds=600) is False
@@ -487,7 +487,7 @@ def test_session_writes_are_thread_safe(store: AccountsStore) -> None:
 
     def create(_index: int) -> str:
         token, _csrf, _record = store.create_session(
-            user_id=user.user_id, absolute_seconds=3600, idle_seconds=600
+            user_id=user.user_id, absolute_seconds=3600
         )
         return token
 

@@ -838,7 +838,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 bash scripts/check.sh                                  # 默认无模型交付检查（schema + ruff + mypy + Python/覆盖率 + Node）
 scripts/run-tests.sh                                   # 仅 Python 的低层入口
 node --test tests/web/*.test.mjs                       # 前端事件模型 + 导航生命周期回归
-scripts/check-ui-tokens.py                             # token 层与百鉴标准库逐值比对
+scripts/check-ui-tokens.py                             # token 层与百鉴标准库逐值比对（个人标准库不进仓库：`--library <repo>` 或 `GLINK_UI_LIBRARY=<repo>` 显式指定，缺省 skip）
 node tests/browser/ui-parity.mjs --base-url …          # 26 个角色的计算样式与标准库逐值比对
 node tests/browser/run-smoke.mjs --base-url …          # 真实浏览器 run（截图 + DOM 断言）
 .venv/bin/python scripts/smoke-local-run.py --base-url … --prompt "…"   # 真实 run 冒烟

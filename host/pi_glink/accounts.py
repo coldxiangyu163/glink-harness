@@ -787,9 +787,11 @@ class AccountsStore:
         *,
         user_id: str,
         absolute_seconds: int,
-        idle_seconds: int,
         user_agent: str = "",
     ) -> tuple[str, str, SessionRecord]:
+        # No idle window at creation: ``last_seen_at`` starts at ``now`` and the
+        # idle width is applied by the reader (``authenticate_session`` /
+        # ``refresh_session``), so the old ``idle_seconds`` parameter was dead.
         absolute = max(60, int(absolute_seconds))
         with self._lock:
             user = self.get_user(user_id)

@@ -8,21 +8,25 @@ fails on any value that drifted.
 
 Usage:
 
-    scripts/check-ui-tokens.py                        # default library path
     scripts/check-ui-tokens.py --library <repo>       # explicit path
+    GLINK_UI_LIBRARY=<repo> scripts/check-ui-tokens.py
     scripts/check-ui-tokens.py --print-diff           # show every comparison
 
-Exit codes: 0 = aligned, 1 = drift, 2 = library stylesheet not found.
+The library checkout is a personal, out-of-repo asset the delivery gate never
+reads (``scripts/check.sh`` prints SKIP for this reason); name it explicitly
+per run instead of hardcoding one operator's home directory.
+
+Exit codes: 0 = aligned, 1 = drift, 2 = library not named or not found.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
 
-DEFAULT_LIBRARY = Path("/Users/coldxiangyu/work/BR/glink-ui-library")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKBENCH_CSS = REPO_ROOT / "web" / "styles.css"
 LIBRARY_CSS = Path("src/styles/globals.css")
@@ -222,12 +226,31 @@ def compare(workbench: dict[str, str], library: dict[str, str]) -> tuple[list[st
     return mismatches, missing, checked
 
 
+def _default_library() -> Path | None:
+    """The library checkout named by ``GLINK_UI_LIBRARY``, if any.
+
+    There is no hardcoded default: the library is one operator's personal
+    checkout outside this repository, and the delivery gate deliberately does
+    not read it. Naming it through the environment keeps ``--library`` free for
+    one-off overrides while ``check.sh`` stays machine-independent.
+    """
+    env = os.environ.get("GLINK_UI_LIBRARY", "").strip()
+    return Path(env) if env else None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--library", type=Path, default=DEFAULT_LIBRARY)
+    parser.add_argument("--library", type=Path, default=_default_library())
     parser.add_argument("--print-diff", action="store_true", help="print the full comparison")
     args = parser.parse_args(argv)
 
+    if args.library is None:
+        print(
+            "[skip] 未指定标准库路径（--library <repo> 或 GLINK_UI_LIBRARY=<repo>）；"
+            "交付门禁默认不读个人标准库",
+            file=sys.stderr,
+        )
+        return 2
     library_path = args.library / LIBRARY_CSS if args.library.is_dir() else args.library
     if not library_path.is_file():
         print(f"[skip] 标准库 token 文件不存在：{library_path}", file=sys.stderr)
