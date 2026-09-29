@@ -66,6 +66,16 @@ class ArtifactMissing(ArtifactError):
     """The file (or the tree root) does not exist — absent, not refused."""
 
 
+def deliverable_path(path: str) -> str:
+    """Accept only bounded workspace-relative POSIX file paths (never normalize escapes)."""
+    if (not isinstance(path, str) or not path or len(path.encode("utf-8")) > 512
+            or "\\" in path or "\x00" in path or path.startswith("/")
+            or len(path.split("/")) > 8
+            or any(part in {"", ".", ".."} for part in path.split("/"))):
+        raise ArtifactError("交付文件必须是工作区相对路径（不得包含空分量、链接逃逸或 ..）")
+    return path
+
+
 class ArtifactTree:
     """A verified handle on one run-owned directory tree.
 

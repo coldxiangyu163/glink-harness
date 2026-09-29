@@ -400,6 +400,29 @@ def prompt_updates(text: str) -> list[dict]:
             ],
         },
     ]
+    declared = structured("FAKE_ACP_PRESENT_FILES", [])
+    if declared:
+        for item in declared:
+            if "text" in item:
+                target = Path(item["path"])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(item["text"], encoding="utf-8")
+            if "link" in item:
+                target = Path(item["path"])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.symlink_to(item["link"])
+        for offset in range(0, len(declared), 8):
+            call_id = f"deliver_{offset}"
+            updates.append({
+                "sessionUpdate": "tool_call", "toolCallId": call_id, "name": "present",
+                "kind": "other", "status": "pending",
+                "rawInput": {"files": [
+                    {"path": item["path"], "description": item.get("description", "")}
+                    for item in declared[offset:offset + 8]
+                ]},
+            })
+            updates.append({"sessionUpdate": "tool_call_update", "toolCallId": call_id,
+                            "status": "completed", "content": []})
     if "SUBAGENT" in text:
         updates[0:0] = _subagent_ack_updates()
     if "USAGE_TWICE" in text:

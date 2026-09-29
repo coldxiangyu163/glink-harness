@@ -115,7 +115,7 @@ _REQUIRED_SPEC_FIELDS = ("family", "pack", "executor", "credential_origin")
 #: while the caller consumes a page).
 _EVENT_PAGE = 500
 #: Record fields only :meth:`RunStore.commit_terminal` may change.
-_TERMINAL_FIELDS = frozenset({"status", "finished_at", "cleanup", "event_count"})
+_TERMINAL_FIELDS = frozenset({"status", "finished_at", "cleanup", "event_count", "deliverables"})
 _STATUS_BY_EVENT = {
     "run_finished": FINISHED,
     "run_failed": FAILED,
@@ -223,6 +223,8 @@ class RunRecord:
     model_stop_reason: str | None = None
     #: ``none`` | ``missing`` | ``ok`` | ``rejected`` — what happened to report.md.
     report_status: str = "none"
+    #: Host-sealed ACP declarations with per-file status/reason, not paths to trust.
+    deliverables: tuple[Mapping[str, str], ...] = ()
     #: ``{"released": true|false|null, "failures": [...], "external": {...}}`` —
     #: whether the process/container/sandbox is confirmed released (``null`` means
     #: unknown). ``None`` while the run has not committed a terminal frame.
@@ -264,6 +266,7 @@ class RunRecord:
             "blueprint_stages",
             tuple(dict(stage) for stage in (self.blueprint_stages or ())),
         )
+        object.__setattr__(self, "deliverables", tuple(dict(item) for item in self.deliverables))
 
     @property
     def is_terminal(self) -> bool:
@@ -592,6 +595,23 @@ class RunStore:
         """Run ids whose row is still ``running`` (no terminal frame committed)."""
         rows = self._query("SELECT run_id FROM runs WHERE status = ? ORDER BY run_id", (RUNNING,))
         return [row[0] for row in rows]
+
+    def deliverable_location(self, record: RunRecord, index: int) -> ReportLocation | None:
+        """Only the host-owned copy of a successfully sealed declaration is readable."""
+        from .artifacts import ArtifactError, deliverable_path
+
+        if not 0 <= index < min(len(record.deliverables), 8):
+            return None
+        item = record.deliverables[index]
+        if item.get("status") != "ok":
+            return None
+        try:
+            path = deliverable_path(item["path"])
+        except (ArtifactError, KeyError, TypeError):
+            return None
+        if path == REPORT_FILENAME and self.report_location(record) is None:
+            return None
+        return ReportLocation(self.run_dir(record.run_id), f"{ARTIFACTS_DIRNAME}/{path}")
 
     def report_location(self, record: RunRecord) -> ReportLocation | None:
         """The only place a record's ``report_path`` may point to.
@@ -998,6 +1018,8 @@ def _apply_terminal(record: RunRecord, event: Mapping[str, Any]) -> RunRecord:
         error=payload.get("error"),
         report_path=report_path if isinstance(report_path, str) and report_path else None,
         report_status=str(payload.get("reportStatus") or record.report_status),
+        deliverables=tuple(item for item in payload.get("deliverables", ())
+                           if isinstance(item, Mapping)),
         model_stop_reason=payload.get("modelStopReason"),
         usage=payload.get("usage") if isinstance(payload.get("usage"), Mapping) else None,
         redacted=bool(payload.get("redacted", record.redacted)),

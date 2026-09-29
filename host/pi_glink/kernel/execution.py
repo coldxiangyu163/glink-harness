@@ -196,7 +196,9 @@ class ExecutionAdapter(ABC):
     def cancel(self) -> None: ...
 
     @abstractmethod
-    def recover_artifacts(self, destination: Path) -> ArtifactRecovery: ...
+    def recover_artifacts(
+        self, destination: Path, *, declared: tuple[str, ...] = ()
+    ) -> ArtifactRecovery: ...
 
     @abstractmethod
     def close(self) -> CleanupReport: ...
@@ -469,13 +471,18 @@ class PiExecutionAdapter(ExecutionAdapter):
     def cancel(self) -> None:
         self._abort()
 
-    def recover_artifacts(self, destination: Path) -> ArtifactRecovery:
+    def recover_artifacts(
+        self, destination: Path, *, declared: tuple[str, ...] = ()
+    ) -> ArtifactRecovery:
         transfer = self._transfer
         if transfer is None or self.sandbox.handle is None:
             # 本地面：工作区即宿主目录；远端面未启动（start 失败即毁）：没有
             # 可回收之物，也不伪造失败。
             return ArtifactRecovery()
-        files, failures = self.sandbox.recover_workspace(destination)
+        files, failures = (
+            self.sandbox.recover_workspace(destination, declared=declared)
+            if declared else self.sandbox.recover_workspace(destination)
+        )
         session_file, session_failure = transfer.recover_session()
         self._recovered_session_file = session_file
         if session_failure:

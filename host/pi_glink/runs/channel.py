@@ -120,6 +120,15 @@ class RunChannel:
         except OSError as exc:
             raise EventLogError(f"事件日志写入失败: {type(exc).__name__}: {exc}") from exc
         if not terminal:
+            if event_type == events.DELIVERABLES_DECLARED:
+                for item in (safe_payload or {}).get("files", []):
+                    path = item.get("path")
+                    if any(file["path"] == path for file in execution.declared_files):
+                        continue
+                    if len(execution.declared_files) >= 8:
+                        execution.declaration_overflow = True
+                        continue
+                    execution.declared_files.append(dict(item))
             # The typed event is committed; the plugins now land what they
             # derive from it on the same commit path (the run lock is held).
             for plugin in self._plugins_of(execution):
