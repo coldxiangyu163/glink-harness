@@ -541,8 +541,8 @@ try {
   record('浏览器控制台无错误（注入失败前）', cleanConsoleErrors === 0, consoleErrors.slice(0, 3));
 
   // ── K. empty state (stubbed API) ──────────────────────────────────────────
-  await page.route('**/api/runs', (route) => {
-    if (route.request().method() !== 'GET') return route.continue();
+  await page.route('**/api/runs*', (route) => {
+    if (route.request().method() !== 'GET' || new URL(route.request().url()).pathname !== '/api/runs') return route.continue();
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ runs: [] }) });
   });
   await boot();
@@ -558,7 +558,7 @@ try {
     };
   });
   record('空列表：EmptyState（插画 + 标题 + role=status，UC-05）', empty.rows === 0 && empty.role === 'status' && empty.variant === 'no-data' && /no-data\.svg$/.test(empty.image || '') && empty.title === '还没有研究记录' && empty.homeEmpty === 2, empty);
-  await page.unroute('**/api/runs');
+  await page.unroute('**/api/runs*');
 
   // ── L. unreadable history (stubbed 404 stream) ───────────────────────────
   if (replayRun?.id) {
