@@ -15,6 +15,9 @@
 
 import {
   describeTool,
+  describeChild,
+  stageText,
+  fetchedTitle,
   formatDuration,
   formatTokens,
   modelLabel,
@@ -47,14 +50,14 @@ export function collectSources(items) {
   for (const item of items) {
     if (item.kind !== 'tool') continue;
     const args = item.args && typeof item.args === 'object' ? item.args : {};
-    if (WEB_SEARCH_RE.test(item.name)) {
+    if (item.presentation === 'search_web' || (!item.presentation && WEB_SEARCH_RE.test(item.name))) {
       const values = [args.query, ...(Array.isArray(args.queries) ? args.queries : [args.queries])];
       for (const value of values) {
         if (typeof value !== 'string' || !value.trim() || seen.has(`q:${value}`)) continue;
         seen.add(`q:${value}`);
         queries.push(value.trim());
       }
-    } else if (WEB_READ_RE.test(item.name)) {
+    } else if (item.presentation === 'fetch_page' || (!item.presentation && WEB_READ_RE.test(item.name))) {
       const values = Array.isArray(args.urls) ? args.urls : [args.url];
       for (const value of values) {
         if (typeof value !== 'string' || seen.has(`u:${value}`)) continue;
@@ -62,7 +65,9 @@ export function collectSources(items) {
           const url = new URL(value);
           if (url.protocol !== 'http:' && url.protocol !== 'https:') continue;
           seen.add(`u:${value}`);
-          pages.push({ href: url.href, host: url.hostname, path: url.pathname === '/' ? '' : url.pathname });
+          const page = { href: url.href, host: url.hostname, path: url.pathname === '/' ? '' : url.pathname };
+          const title = fetchedTitle(item.result);
+          pages.push(title ? { ...page, title } : page);
         } catch {
           /* not a URL — nothing to link to */
         }
@@ -159,7 +164,8 @@ export function createProgressPanel({ root, onOpenReport = null }) {
   }
 
   function drawSteps(model) {
-    const rows = model.items.filter((item) => item.kind === 'tool' || item.kind === 'thinking');
+    const rows = model.items.filter((item) => item.kind === 'tool' || item.kind === 'thinking' ||
+      item.kind === 'subagent' || (item.kind === 'stage' && item.stage === 'plan'));
     const running = model.status === 'running';
     stepsMeta.textContent = rows.length
       ? running ? `第 ${rows.length} 步` : `共 ${rows.length} 步`
@@ -169,11 +175,11 @@ export function createProgressPanel({ root, onOpenReport = null }) {
       ...rows.map((item) => {
         const li = el('li', 'progress-step');
         let status = 'done';
-        if (item.kind === 'tool') {
+        if (item.kind === 'tool' || item.kind === 'subagent') {
           if (item.status === 'running') status = 'running';
           else if (item.status === 'error' || item.isError) status = 'failed';
           else if (item.status === 'interrupted' || item.status === 'cancelled') status = 'stopped';
-        } else if (!item.closed) {
+        } else if (item.kind === 'thinking' && !item.closed) {
           status = 'running';
         }
         li.dataset.status = status;
@@ -184,8 +190,13 @@ export function createProgressPanel({ root, onOpenReport = null }) {
         let label;
         if (item.kind === 'thinking') {
           label = status === 'running' ? '正在思考' : '思考';
+        } else if (item.kind === 'subagent') {
+          const described = describeChild(item);
+          label = `${described.action} · ${described.object}`;
+        } else if (item.kind === 'stage') {
+          label = stageText(item);
         } else {
-          const described = describeTool(item.name, item.args);
+          const described = describeTool(item.name, item.args, item.presentation);
           label = described.object ? `${described.action} · ${described.object}` : described.action;
         }
         const text = el('span', 'progress-step-text', label);
@@ -255,7 +266,8 @@ export function createProgressPanel({ root, onOpenReport = null }) {
         link.href = page.href;
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
-        link.append(icon('globe', 14), el('span', 'progress-source-text', `${page.host}${page.path}`));
+        link.append(icon('globe', 14), el('span', 'progress-source-text',
+          page.title ? `${page.title} · ${page.host}${page.path}` : `${page.host}${page.path}`));
         li.append(link);
         list.append(li);
       }

@@ -33,6 +33,9 @@ import {
   describeChild,
   describeTool,
   displayPath,
+  fetchedTitle,
+  planEntries,
+  planEntryLabel,
   formatDuration,
   noticeText,
   stageText,
@@ -392,7 +395,8 @@ export function createRunView({
         });
         const detail = el('div', 'pi-tool-detail');
         const wrap = el('div', 'pi-tool-detail-wrap');
-        wrap.append(el('pre', 'pi-tool-output scroll-area'), el('div', 'pi-tool-result'));
+        wrap.append(el('div', 'pi-tool-result pi-tool-structured'),
+          el('pre', 'pi-tool-output scroll-area'), el('div', 'pi-tool-result'));
         detail.append(wrap);
         card.append(head, detail);
         return card;
@@ -473,20 +477,30 @@ export function createRunView({
         const nameNode = node.querySelector('.pi-tool-name');
         if (nameNode.textContent !== described.action) nameNode.textContent = described.action;
         const argsNode = node.querySelector('.pi-tool-args');
-        if (argsNode.textContent !== described.object) argsNode.textContent = described.object;
+        const title = item.presentation === 'fetch_page' ? fetchedTitle(item.result) : '';
+        const objectText = title ? `${title} · ${described.object}` : described.object;
+        if (argsNode.textContent !== objectText) argsNode.textContent = objectText;
         argsNode.classList.toggle('is-mono', described.mono);
+        const structured = node.querySelector('.pi-tool-structured');
+        const queries = item.presentation === 'search_web' && Array.isArray(item.args?.queries)
+          ? item.args.queries.filter((query) => typeof query === 'string' && query.trim()) : [];
+        const plans = item.presentation === 'plan' ? planEntries(item.args) : [];
+        const structuredText = queries.length ? queries.map((query) => `检索 · ${query}`).join('\n')
+          : plans.map(planEntryLabel).join('\n');
+        if (structured.textContent !== structuredText) structured.textContent = structuredText;
+        structured.hidden = !structuredText;
         node.querySelector('.pi-tool-state').textContent = toolStateLabel(item);
         const outputNode = node.querySelector('.pi-tool-output');
         const outputText = displayPath(item.output);
         if (outputNode.textContent !== outputText) outputNode.textContent = outputText;
         outputNode.hidden = outputText === '';
-        const resultNode = node.querySelector('.pi-tool-result');
+        const resultNode = node.querySelector('.pi-tool-detail-wrap > .pi-tool-result:not(.pi-tool-structured)');
         const resultText = displayPath(item.result || '');
         resultNode.hidden = resultText === '';
         if (resultNode.textContent !== resultText) resultNode.textContent = resultText;
         // Live output is the point while a call runs; once it settles the row goes
         // back to a chip — unless the reader opened it themselves.
-        const hasDetail = outputText !== '' || resultText !== '';
+        const hasDetail = structuredText !== '' || outputText !== '' || resultText !== '';
         node.dataset.hasDetail = String(hasDetail);
         node.querySelector('.pi-tool-chevron').hidden = !hasDetail;
         if (!hasDetail) node.open = false;

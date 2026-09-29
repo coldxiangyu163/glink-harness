@@ -141,6 +141,7 @@ export function reduce(state, event) {
         kind: 'stage',
         stage: payload.stage,
         attempt: payload.attempt ?? null,
+        entries: payload.entries ?? [],
         label: stageLabel(payload),
       });
     case 'kernel_status':

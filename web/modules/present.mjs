@@ -211,7 +211,7 @@ const TOOL_RULES = [
   { test: /^(grep|find|glob|ls|list|search)$/i, icon: 'search', action: '查找', active: '正在查找',
     object: (args) => oneLine(args.pattern ?? args.query ?? pathObject(args.path ?? '')), mono: true },
   { test: /todo|plan/i, icon: 'checklist', action: '更新计划', active: '正在更新计划',
-    object: () => '' },
+    object: (args) => planSummary(planEntries(args)) },
 ];
 
 // The projector chooses a semantic hint per family; these are only the
@@ -222,6 +222,9 @@ const PRESENTATION_RULES = {
   execute: TOOL_RULES[3], read_file: TOOL_RULES[4], write_file: TOOL_RULES[5],
   edit_file: TOOL_RULES[6], delegate: TOOL_RULES[7], find: TOOL_RULES[8],
   plan: TOOL_RULES[9],
+  manage_children: { icon: 'agent', action: '查看子代理', active: '正在查看子代理', object: () => '' },
+  stop_child: { icon: 'agent', action: '停止子代理', active: '正在停止子代理', object: () => '' },
+  message_child: { icon: 'agent', action: '联系子代理', active: '正在联系子代理', object: () => '' },
   read: { icon: 'file-text', action: '读取', active: '正在读取',
     object: (args) => firstText([args.path, args.url, args.query]) },
   delete: { icon: 'new-chat', action: '删除', active: '正在删除',
@@ -248,6 +251,44 @@ export function describeTool(name, args = {}, presentation) {
   }
   const fallback = Object.values(safeArgs).find((value) => typeof value === 'string' && value.trim());
   return { icon: 'wrench', action: '调用工具', active: '正在调用工具', object: displayPath(oneLine(fallback ?? '')), mono: false };
+}
+
+/** Bounded, reader-facing plan facts from an ACP todo_write (array items are JSON text). */
+export function planEntries(args = {}) {
+  const todos = Array.isArray(args?.todos) ? args.todos : [];
+  return todos.slice(0, 20).flatMap((raw) => {
+    try {
+      const item = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (!item || typeof item !== 'object' || typeof item.content !== 'string' || !item.content.trim()) return [];
+      return [{ content: oneLine(item.content, 120), status: String(item.status ?? '') }];
+    } catch { return []; }
+  });
+}
+
+export function planSummary(entries) {
+  if (!entries.length) return '';
+  const active = entries.find((entry) => entry.status === 'in_progress');
+  const done = entries.filter((entry) => ['done', 'completed'].includes(entry.status)).length;
+  return `${oneLine(active?.content ?? entries[0].content, 56)} · ${done}/${entries.length} 项`;
+}
+
+export function planEntryLabel(entry) {
+  const status = { in_progress: '进行中', pending: '待开始', done: '已完成', completed: '已完成' }[entry.status] ?? '';
+  return `${status ? `${status} · ` : ''}${oneLine(entry.content, 120)}`;
+}
+
+/** A page title is only shown when the fetch result itself supplies one. */
+export function fetchedTitle(result) {
+  const text = String(result ?? '');
+  if (!/^Fetched https?:\/\/[^\n]+ \(HTTP 2\d\d\)/.test(text)) return '';
+  const body = text.slice(0, 4000);
+  const explicit = /(?:^|\n)(?:Title:\s*|<title>)([^\n<]{3,120})(?:<\/title>)?/i.exec(body);
+  if (explicit) return oneLine(explicit[1], 120);
+  for (const match of body.matchAll(/^#{1,2}\s+(.+)$/gm)) {
+    const title = match[1].replace(/\[[^\]]+\]\([^)]*\)/g, '').trim();
+    if (title && !/^(main|content|正文)$/i.test(title)) return oneLine(title, 120);
+  }
+  return '';
 }
 
 /** Tool row states that deserve words; a finished call says nothing (the row itself is the record). */
@@ -364,8 +405,11 @@ export function stageText(item) {
   const base = VISIBLE_STAGES[item.stage];
   if (!base) return null;
   if (item.stage === 'auto_retry_start' && item.attempt) return `${base}（第 ${item.attempt} 次）`;
-  if (item.stage === 'plan' && Array.isArray(item.entries) && item.entries.length > 0 &&
-      item.entries.every((entry) => entry?.status === 'completed')) return '研究计划已更新';
+  if (item.stage === 'plan' && Array.isArray(item.entries) && item.entries.length > 0) {
+    if (item.entries.every((entry) => ['done', 'completed'].includes(entry?.status))) return '研究计划已更新';
+    const active = item.entries.find((entry) => entry?.status === 'in_progress');
+    if (active?.content) return `${base} · ${oneLine(active.content, 56)}`;
+  }
   return base;
 }
 
