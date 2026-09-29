@@ -867,12 +867,18 @@ def _mirror_subagent_data(
                 return files, failures
 
     artifacts_root = f"{SANDBOX_SESSIONS}/{SUBAGENT_ARTIFACTS_DIRNAME}"
+    from e2b import FileNotFoundException
+
     try:
         entries = sandbox.files.list(
             artifacts_root,
             depth=SUBAGENT_RECOVER_MAX_DEPTH,
             request_timeout=E2B_REQUEST_TIMEOUT_SECONDS,
         )
+    except FileNotFoundException:
+        # pi-subagents never creates this directory when no child wrote an
+        # artifact. The SDK reports its absence as an error, not an empty list.
+        return files, failures
     except Exception as exc:  # noqa: BLE001 - surfaced as a failure reason
         failures.append(f"无法列出子代理产物目录: {type(exc).__name__}: {exc}")
         return files, failures

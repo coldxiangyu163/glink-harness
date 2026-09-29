@@ -34,6 +34,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 
 import pytest
+from e2b import FileNotFoundException
 
 from e2b_fake import BrokenHandle, FakeSandbox, IdleHandle
 from pi_glink.config import build_config
@@ -351,6 +352,57 @@ def test_read_file_bounded_refuses_a_full_load_without_size_or_stream() -> None:
 
 
 # -- subagent mirror -----------------------------------------------------------
+
+
+def test_missing_subagent_artifacts_directory_is_not_a_run_artifact_failure(
+    tmp_path: Path,
+) -> None:
+    """真实 SDK 在无子代理 run 上 list(缺失目录) 会抛 FileNotFoundException。"""
+    config = make_config(tmp_path)
+    sandbox = FakeSandbox(
+        tmp_path / "sandbox", report=None, fake_pi_env={"FAKE_PI_WRITE_REPORT": "1"}
+    )
+    sandbox.session_files = ("research.jsonl",)
+    sandbox.readable["/home/user/sessions/research.jsonl"] = _session_bytes("main")
+    original_list = sandbox.files.list
+
+    def list_with_missing_subagent_dir(path: str, **kwargs: Any) -> list[Any]:
+        if path == "/home/user/sessions/subagent-artifacts":
+            raise FileNotFoundException(f"path not found: lstat {path}: no such file or directory")
+        return original_list(path, **kwargs)
+
+    sandbox.files.list = list_with_missing_subagent_dir
+    manager, storage = _manager(config, sandbox, tmp_path)
+
+    record = manager.start("把结果写成 report.md")
+    final = manager.wait(record.run_id, timeout=30)
+
+    assert final.status == "finished" and final.report_status == "ok"
+    terminal = json.loads(events_text(storage, record.run_id).strip().splitlines()[-1])
+    assert terminal["type"] == "run_finished"
+    assert terminal["payload"].get("artifactFailures", []) == []
+
+
+def test_subagent_artifact_listing_error_is_not_mistaken_for_an_absent_directory(
+    tmp_path: Path,
+) -> None:
+    config = make_config(tmp_path)
+    runtime = _prepare(config, tmp_path)
+    sandbox = FakeSandbox()
+    original_list = sandbox.files.list
+
+    def list_with_error(path: str, **kwargs: Any) -> list[Any]:
+        if path == "/home/user/sessions/subagent-artifacts":
+            raise RuntimeError("path not found: gateway unavailable")
+        return original_list(path, **kwargs)
+
+    sandbox.files.list = list_with_error
+    client = _recovery_client(config, runtime, sandbox, tmp_path)
+
+    files, failures = client.transfer.recover_subagent_files(tmp_path / "run" / "subagents")
+
+    assert files == []
+    assert len(failures) == 1 and "RuntimeError" in failures[0]
 
 
 def test_recover_subagent_files_mirrors_branches_and_artifacts(tmp_path: Path) -> None:
