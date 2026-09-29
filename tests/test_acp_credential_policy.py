@@ -247,3 +247,34 @@ def test_multitenant_shared_accepts_credential_env_as_named_source(
     values["OPENROUTER_API_KEY"] = "sk-or-shared-0002"
     config = build_config(values, REPO_ROOT)
     assert config.acp_credential_env == ("OPENROUTER_API_KEY",)
+
+
+# -- knob 生效面：ENV 渲染通道不得在 pi 包与非 dsh 包上静默忽略 ------------------
+
+
+def test_pi_pack_refuses_the_credential_env_knob(tmp_path: Path) -> None:
+    """pi 包配置 CREDENTIAL_ENV 拒绝启动，与 FILES/ENV 通道同一 fail-closed 口径。"""
+    values = _acp_values(tmp_path)
+    values["PI_GLINK_HARNESS"] = "pi"
+    values["PI_GLINK_HARNESSES_DIR"] = str(REPO_ROOT / "harnesses")
+    values["PI_GLINK_ACP_CREDENTIAL_ENV"] = "OPENROUTER_API_KEY"
+    values["OPENROUTER_API_KEY"] = "sk-or-knob-00000000000000000"
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(values, REPO_ROOT)
+    assert "只在 ACP 族" in str(excinfo.value)
+    assert "PI_GLINK_ACP_CREDENTIAL_ENV" in str(excinfo.value)
+
+
+def test_nondsh_acp_pack_refuses_the_credential_env_knob(tmp_path: Path) -> None:
+    """ENV 渲染通道输出 dsh 格式凭据文件：非 dsh 的 ACP 包配置即拒绝，不写没人读的凭据。"""
+    packs = write_acp_pack(
+        tmp_path, [sys.executable, "-c", "pass"], name="codex"
+    )
+    values = _acp_values(tmp_path)
+    values["PI_GLINK_HARNESSES_DIR"] = str(packs)
+    values["PI_GLINK_HARNESS"] = "codex"
+    values["PI_GLINK_ACP_CREDENTIAL_ENV"] = "OPENROUTER_API_KEY"
+    values["OPENROUTER_API_KEY"] = "sk-or-knob-00000000000000000"
+    with pytest.raises(ConfigError) as excinfo:
+        build_config(values, REPO_ROOT)
+    assert "只在 dsh 包" in str(excinfo.value)

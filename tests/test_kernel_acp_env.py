@@ -21,7 +21,7 @@ import pytest
 from acp_pack import apply_acp_pack
 from pi_glink.config import ConfigError, build_config
 from harness_helpers import compose_launch, execution_spec
-from pi_glink.kernel.acp_env import prepare_acp_runtime
+from pi_glink.kernel.acp_env import AcpStateInheritError, prepare_acp_runtime
 from pi_glink.redaction import credential_secrets_from_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -332,3 +332,73 @@ def test_credential_env_values_never_reach_the_config_repr() -> None:
     )
     assert cfg.acp_credential_env == ("OPENROUTER_API_KEY",)
     assert "sk-or-repr-leak-0003" not in repr(cfg)
+
+
+# -- 失败准备不留明文副本（ADR 0016 的删除义务覆盖 prepare 失败路径） ------------
+
+
+def test_failed_inherit_deletes_the_rendered_env_credentials(tmp_path: Path) -> None:
+    """继承失败发生在渲染之后：明文 .credentials.yaml 就地删除，不留给没有收尾管线的 run 目录。"""
+    cfg = config(
+        {
+            "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
+            "PI_GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY",
+            "OPENROUTER_API_KEY": "sk-or-failed-prepare-0000000",
+        }
+    )
+    runtime_dir = tmp_path / "acp-agent"
+    with pytest.raises(AcpStateInheritError):
+        prepare_acp_runtime(
+            cfg, runtime_dir=runtime_dir, inherit_from=tmp_path / "missing-parent"
+        )
+    assert not (runtime_dir / "home" / ".dsh" / ".credentials.yaml").exists()
+
+
+def test_failed_inherit_deletes_the_injected_file_copies(tmp_path: Path) -> None:
+    """FILES 通道同义务：注入后准备失败，副本就地删除。"""
+    source = tmp_path / "operator" / "auth.json"
+    source.parent.mkdir()
+    source.write_text(
+        '{"tokens": {"access_token": "opaque-access-token-value-1"}}', encoding="utf-8"
+    )
+    os.chmod(source, 0o600)
+    cfg = config(
+        {
+            "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
+            "PI_GLINK_ACP_CREDENTIAL_FILES": f"{source}=.codex/auth.json",
+        }
+    )
+    runtime_dir = tmp_path / "acp-agent"
+    with pytest.raises(AcpStateInheritError):
+        prepare_acp_runtime(
+            cfg, runtime_dir=runtime_dir, inherit_from=tmp_path / "missing-parent"
+        )
+    assert not (runtime_dir / "home" / ".codex" / "auth.json").exists()
+
+
+def test_pi_session_seed_branch_deletes_rendered_copies(tmp_path: Path) -> None:
+    """族级 session_seed 拒绝同样发生在渲染之后：副本删除后再抛 FollowupUnavailable。"""
+    from pi_glink.kernel.harness import select_family
+    from pi_glink.contracts import FollowupUnavailable
+    from pi_glink.store import RunStore
+
+    cfg = config(
+        {
+            "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
+            "PI_GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY",
+            "OPENROUTER_API_KEY": "sk-or-seed-branch-00000000000",
+        }
+    )
+    store = RunStore(cfg.data_root / "runs")
+    family = select_family(cfg.harness, config=cfg, store=store)
+    run_dir = tmp_path / "runs" / "r-seed"
+    with pytest.raises(FollowupUnavailable):
+        family.prepare_runtime(
+            "r-seed",
+            run_dir,
+            parent=None,
+            session_seed=b"pi-seed-has-no-acp-meaning",
+            egress=None,
+            sandbox=None,
+        )
+    assert not (run_dir / "acp-agent" / "home" / ".dsh" / ".credentials.yaml").exists()

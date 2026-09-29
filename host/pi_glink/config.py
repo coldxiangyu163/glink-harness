@@ -795,13 +795,22 @@ def _acp_knobs_are_acp_only(config: HostConfig) -> None:
     The command, session options and permission allowlist now live in the pack
     manifest (and are validated by its parser). The credential and env channels
     stay deployment configuration: an operator who sets them while the selected
-    pack drives pi gets a startup error rather than a silent no-op.
+    pack drives pi gets a startup error rather than a silent no-op. The env
+    render channel (``PI_GLINK_ACP_CREDENTIAL_ENV``) additionally renders a
+    **dsh-format** credentials file, so it is refused on non-dsh ACP packs
+    instead of writing a file that pack's agent never reads.
     """
     if config.harness == "acp":
+        if config.acp_credential_env and config.harness_pack != "dsh":
+            raise ConfigError(
+                "PI_GLINK_ACP_CREDENTIAL_ENV 渲染 dsh 格式的 .dsh/.credentials.yaml，"
+                f"只在 dsh 包下生效；当前 harness_pack={config.harness_pack!r}"
+            )
         return
-    if config.acp_credential_files or config.acp_env:
+    if config.acp_credential_files or config.acp_env or config.acp_credential_env:
         raise ConfigError(
-            "PI_GLINK_ACP_CREDENTIAL_FILES / PI_GLINK_ACP_ENV 只在 ACP 族"
+            "PI_GLINK_ACP_CREDENTIAL_FILES / PI_GLINK_ACP_ENV / "
+            "PI_GLINK_ACP_CREDENTIAL_ENV 只在 ACP 族"
             "（PI_GLINK_HARNESS=dsh|codex|opencode）下生效；当前 harness_pack="
             f"{config.harness_pack!r}"
         )

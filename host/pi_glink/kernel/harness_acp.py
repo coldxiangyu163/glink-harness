@@ -25,6 +25,7 @@ from .acp_env import (
     AcpRuntime,
     AcpStateInheritError,
     build_acp_argv,
+    discard_rendered_credential_copies,
     prepare_acp_runtime,
 )
 from .acp_execution import AcpExecutionAdapter, acp_resume_method
@@ -242,7 +243,10 @@ class AcpHarnessFamily(HarnessFamily):
             ) from exc
         if session_seed is not None:
             # The pi session seed has no ACP meaning; reaching it would mean
-            # a pi-shaped continuation was routed to the ACP adapter.
+            # a pi-shaped continuation was routed to the ACP adapter. The run
+            # stops before it ever has a close-out sweep, so the credentials
+            # just rendered for it are deleted here (docs/adr/0016).
+            discard_rendered_credential_copies(runtime.home, runtime.credential_dests)
             raise FollowupUnavailable("session_unavailable")
         # Credential material copied into this run's HOME — and any
         # credential-shaped value found in the inherited parent state — joins

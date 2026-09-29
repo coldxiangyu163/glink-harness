@@ -27,6 +27,12 @@
    `.dsh/.credentials.yaml`（`version: 1` + 平面 `refs` 映射）进该 run 的 HOME：
    0600、`O_NOFOLLOW`、父目录 owner-only——与文件注入同一条投递纪律；渲染副本登记为
    credential destination，收尾删除（决定 C，§18.4），值并入该 run 的脱敏边界。
+   **删除义务覆盖准备失败路径**：`prepare_acp_runtime` 在渲染之后的任何失败（状态继承
+   失败、族级 session_seed 拒绝）都会先就地删除已投递的副本再抛错——失败的 run 不进
+   收尾管线，渲染方自己是唯一的清理点（`discard_rendered_credential_copies`，与
+   ADR 0003 的收尾删除同一套「只删已知相对路径、不跟随链接、失败不遮蔽原异常」纪律）。
+   同理，该通道只在 dsh 包下生效（非 dsh 的 ACP 包与 pi 包配置即拒绝启动，不写没人读
+   的凭据文件）。
 2. **与 `PI_GLINK_ACP_CREDENTIAL_FILES` 互斥**：两者都往 run HOME 投递凭据，一次部署
    只选一个来源，同时配置拒绝启动。FILES 保留为逃生通道（非 dsh 形态的凭据文件）。
 3. **fail-fast**：声明的键名必须是环境变量形态；声明了但 `.env`/环境里没有值 → 拒绝

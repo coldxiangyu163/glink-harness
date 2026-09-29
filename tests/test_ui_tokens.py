@@ -2,14 +2,17 @@
 
 ``web/styles.css`` reproduces the library's palette / semantic / scale /
 typography / elevation / motion values; ``scripts/check-ui-tokens.py`` is the
-guard. The library lives outside this repository, so the test skips when it is
-not checked out next to the workbench — the guard is still runnable by hand:
+guard. The library lives outside this repository and the delivery gate never
+reads it, so the test runs only when its checkout is named explicitly through
+``GLINK_UI_LIBRARY`` (the same variable the script itself reads):
 
-    scripts/check-ui-tokens.py --library /path/to/glink-ui-library
+    GLINK_UI_LIBRARY=/path/to/glink-ui-library \
+        .venv/bin/python -m pytest tests/test_ui_tokens.py
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -18,15 +21,20 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check-ui-tokens.py"
-DEFAULT_LIBRARY = Path("/Users/coldxiangyu/work/BR/glink-ui-library")
+
+
+def _library() -> Path | None:
+    env = os.environ.get("GLINK_UI_LIBRARY", "").strip()
+    return Path(env) if env else None
 
 
 def test_ui_tokens_match_standard_library() -> None:
-    if not DEFAULT_LIBRARY.is_dir():
-        pytest.skip(f"百鉴标准库不在 {DEFAULT_LIBRARY}，跳过 token 对齐校验")
+    library = _library()
+    if library is None or not library.is_dir():
+        pytest.skip("未指定或不存在的百鉴标准库（GLINK_UI_LIBRARY），跳过 token 对齐校验")
 
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "--library", str(DEFAULT_LIBRARY)],
+        [sys.executable, str(SCRIPT), "--library", str(library)],
         capture_output=True,
         text=True,
         check=False,

@@ -404,7 +404,7 @@ ACP 族的送达通道、凭据注入与体积边界见 [ACP 集成笔记](docs/
 bash scripts/check.sh
 ```
 
-该入口在临时 HOME 和清空继承环境的子进程中依次执行：事件 schema 生成物校验 → ruff 静态检查（规则集见 `pyproject.toml`）→ mypy 类型检查（`host/pi_glink`）→ Python 回归（同时用 pytest-cov 采集覆盖率）→ 覆盖率总量 ratchet（低于 `scripts/coverage-baseline.json` 的总量基线即失败）→ Node 回归与 dsh bundle 单测；任一步非零退出即按原退出码失败。外部标准库逐值对齐明确记为 `SKIP`。覆盖率基线只降不升，升基线需重测并提交新值，语义见 [ADR 0014](docs/adr/0014-delivery-gate-lint-types-coverage.md)。不启动真实 pi、浏览器、Docker 或 E2B，也不读取真实 `.env` 或个人 pi 配置。它不是 OS 安全沙箱。定向命令和覆盖边界见 [验证矩阵](docs/engineering.md#验证矩阵)；`scripts/run-tests.sh` 保留为仅 Python 的低层入口，不代表全部交付检查。
+该入口在临时 HOME 和清空继承环境的子进程中依次执行：事件 schema 生成物校验 → ruff 静态检查（规则集见 `pyproject.toml`）→ mypy 类型检查（`host/pi_glink`）→ Python 回归（同时用 pytest-cov 采集覆盖率）→ 覆盖率总量 ratchet（低于 `scripts/coverage-baseline.json` 的总量基线即失败）→ Node 回归与 dsh bundle 单测；任一步非零退出即按原退出码失败。外部标准库逐值对齐明确记为 `SKIP`。覆盖率基线只升不降，升基线需重测并提交新值，语义见 [ADR 0014](docs/adr/0014-delivery-gate-lint-types-coverage.md)。不启动真实 pi、浏览器、Docker 或 E2B，也不读取真实 `.env` 或个人 pi 配置。它不是 OS 安全沙箱。定向命令和覆盖边界见 [验证矩阵](docs/engineering.md#验证矩阵)；`scripts/run-tests.sh` 保留为仅 Python 的低层入口，不代表全部交付检查。
 
 以下为**单独授权的浏览器/live 验收**：需要明确归属的目标宿主；`ui-features` 和 `run-smoke` 会提交真实研究、读取服务历史，以下脚本都会更新仓库证据文件。它们不接入默认检查，也不证明多租户已完成。
 

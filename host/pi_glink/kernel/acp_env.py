@@ -39,6 +39,7 @@ inherit shell expansion from the configuration.
 
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 from dataclasses import dataclass
@@ -53,6 +54,8 @@ from ..redaction import (
 )
 from ..artifacts import ArtifactError, ArtifactTree
 from .sweep import SessionSweep
+
+logger = logging.getLogger("pi_glink.kernel.acp_env")
 
 #: Per-run ACP agent directory inside the run directory.
 ACP_RUNTIME_DIRNAME = "acp-agent"
@@ -163,6 +166,33 @@ class AcpRuntime:
         )
 
 
+def discard_rendered_credential_copies(home: Path, dests: tuple[str, ...]) -> None:
+    """Delete just-delivered credential copies after a **failed** prepare.
+
+    A run whose ``prepare_acp_runtime`` raised never enters the execution and
+    close-out pipeline, so the sweep that owns ``remove_credential_copies``
+    (docs/adr/0003) never runs — without this deletion the rendered plaintext
+    would be the one thing a failed run leaves behind (docs/adr/0016). Same
+    discipline as the close-out deletion: only the known relative paths, never
+    a pattern match, never following links (``ArtifactTree`` refuses both),
+    best-effort so the original error always wins.
+    """
+    try:
+        tree = ArtifactTree(home)
+    except ArtifactError:
+        # No state root, nothing rendered to clean.
+        return
+    failures: list[str] = []
+    with tree:
+        for relative in dests:
+            try:
+                tree.remove(relative)
+            except (ArtifactError, OSError) as exc:
+                failures.append(f"{relative}: {type(exc).__name__}: {exc}")
+    for detail in failures:
+        logger.warning("prepare 失败后清理已渲染凭据副本失败（原异常优先）: %s", detail)
+
+
 def prepare_acp_runtime(
     config: HostConfig,
     *,
@@ -207,25 +237,35 @@ def prepare_acp_runtime(
     # destination must never lose to a same-path overlay entry (see
     # :func:`_apply_home_overlay`).
     _apply_home_overlay(config, home)
-    secrets = list(_inject_credential_files(config, home, base_home))
-    secrets.extend(_render_credential_env(config, home))
-    # ``PI_GLINK_ACP_ENV`` is the explicit env channel (an API-key style
-    # credential that an agent reads from the environment). Its values join the
-    # run's redaction boundary by the same rule the credential files use: only
-    # a credential-looking *name* makes a value a secret, so an ordinary knob
-    # (``ACME_MODE=workspace``) never becomes a redaction target.
-    secrets.extend(_env_credential_values(config))
     credential_dests = tuple(dest for _source, dest in config.acp_credential_files)
     if config.acp_credential_env:
         credential_dests = (DSH_CREDENTIALS_RELATIVE,) + credential_dests
-    if inherit_from is not None:
-        # After the injection above, so the fresh credential files win; the
-        # destinations are excluded from the copy for the same reason.
-        secrets.extend(
-            inherit_acp_state(
-                Path(inherit_from), home, skip=credential_dests
+    try:
+        # The pack overlay lands first, then the credential files: a credential
+        # destination must never lose to a same-path overlay entry (see
+        # :func:`_apply_home_overlay`).
+        secrets = list(_inject_credential_files(config, home, base_home))
+        secrets.extend(_render_credential_env(config, home))
+        # ``PI_GLINK_ACP_ENV`` is the explicit env channel (an API-key style
+        # credential that an agent reads from the environment). Its values join the
+        # run's redaction boundary by the same rule the credential files use: only
+        # a credential-looking *name* makes a value a secret, so an ordinary knob
+        # (``ACME_MODE=workspace``) never becomes a redaction target.
+        secrets.extend(_env_credential_values(config))
+        if inherit_from is not None:
+            # After the injection above, so the fresh credential files win; the
+            # destinations are excluded from the copy for the same reason.
+            secrets.extend(
+                inherit_acp_state(
+                    Path(inherit_from), home, skip=credential_dests
+                )
             )
-        )
+    except BaseException:
+        # A failed prepare never reaches its close-out sweep; the delivered
+        # plaintext copies must not outlive it (see
+        # :func:`discard_rendered_credential_copies`).
+        discard_rendered_credential_copies(home, credential_dests)
+        raise
     return AcpRuntime(
         directory=directory,
         home=home,
