@@ -22,6 +22,7 @@ from pi_glink.config import build_config
 from pi_glink.events import EventBus
 from pi_glink.harnesses import (
     HarnessPackError,
+    SessionConfigSource,
     load_pack,
     pack_names,
 )
@@ -90,6 +91,21 @@ def build_values(tmp_path: Path, harnesses_dir: Path, **overrides: str) -> dict[
     return values
 
 
+@pytest.mark.parametrize("binding", [
+    '{ source = "TYPO" }', '{ encoding = "value" }',
+    '{ source = "OPENAI_MODEL", default = "hardcoded" }',
+    '{ source = "OPENAI_MODEL", encoding = "unknown" }',
+    '{ source = "OPENAI_REASONING_EFFORT", encoding = "dsh-model" }',
+    '{ source = ["OPENAI_MODEL"] }', '{ source = "" }',
+])
+def test_invalid_session_config_source_is_refused(tmp_path: Path, binding: str) -> None:
+    directory = write_manifest(tmp_path, "demo", acp_manifest(capabilities=(
+        'resume = true\n[capabilities.session_config]\nmodel = ' + binding + '\n'
+    )))
+    with pytest.raises(HarnessPackError):
+        load_pack(directory.parent, "demo")
+
+
 # -- the shipped packs --------------------------------------------------------
 
 
@@ -110,7 +126,12 @@ def test_the_repository_packs_declare_the_expected_families_and_commands() -> No
     ]
     assert dsh.image.target == "acp-worker"
     caps = dsh.capabilities
-    assert caps.session_config == () and caps.permission_allow == ()
+    # GLINK-DSH-03: deployment values moved from the ineffective overlay to .env.
+    assert caps.session_config == (
+        ("model", SessionConfigSource("OPENAI_MODEL", "dsh-model")),
+        ("reasoning_effort", SessionConfigSource("OPENAI_REASONING_EFFORT")),
+    )
+    assert caps.permission_allow == ()
     # dsh 的 subagent 工具异步派发（GLINK-OBS-01 实测），由包声明而非宿主识别回复文本。
     assert caps.subagent_dispatch == "async"
     # 运行中子代理进度源由能力声明，族代码不再按包名 / 状态根目录特判 dsh。

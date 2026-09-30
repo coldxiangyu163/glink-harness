@@ -94,6 +94,7 @@ from .acp_rpc import (
     AcpRequestError,
     AcpRpcClient,
 )
+from .acp_session_config import apply_session_config
 from .acp_sandbox_park import (
     park_sandbox,
     read_generation_marker,
@@ -152,11 +153,6 @@ _AUTH_METHODS_LIMIT = 20
 #: bounded by the turn budget; the cap only keeps a misbehaving agent from
 #: growing the map without limit.
 _TOOL_KIND_MEMORY_LIMIT = 512
-
-#: Bound on the session config matrix carried into the ``session_ready`` frame.
-_CONFIG_OPTIONS_LIMIT = 20
-_CONFIG_VALUES_LIMIT = 100
-_CONFIG_TEXT_LIMIT = 300
 
 #: Bounds on the agent's stderr tail attached to a ``kernel_exit`` report. The
 #: tail is the only place an agent's own crash message (a stack trace, a missing
@@ -576,8 +572,7 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         self._modes = (
             dict(created["modes"]) if isinstance(created.get("modes"), Mapping) else {}
         )
-        self._config_options = _project_config_options(created.get("configOptions"))
-        self._apply_session_config(client, session_id)
+        self._apply_session_config(client, session_id, created.get("configOptions"))
 
     def _resume_session(self, client: AcpRpcClient, session_id: str) -> None:
         """Continue the parent's session the way this agent's matrix allows.
@@ -629,7 +624,6 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         self._modes = (
             dict(answer["modes"]) if isinstance(answer.get("modes"), Mapping) else {}
         )
-        self._config_options = _project_config_options(answer.get("configOptions"))
         self._on_frame(
             {
                 "type": "acp_session_resumed",
@@ -640,7 +634,7 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
                 "replayedUpdates": replayed,
             }
         )
-        self._apply_session_config(client, session_id)
+        self._apply_session_config(client, session_id, answer.get("configOptions"))
 
     def _resume_method(self) -> str | None:
         """The continuation channel this agent's capability matrix declares.
@@ -722,61 +716,22 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
             self._suppressing_replay = False
             return self._replayed_updates
 
-    def _apply_session_config(self, client: AcpRpcClient, session_id: str) -> None:
-        """Apply the pack's ``capabilities.session_config`` right after ``session/new``.
-
-        Modes, model and reasoning options are advertised by the agent as
-        ``configOptions``; the values differ per agent, so nothing is hardcoded.
-        An explicitly configured option or value the agent does not advertise
-        fails the run: silently dropping it would run a policy the operator did
-        not choose (fail closed). When the advertised current value already
-        matches, no request is sent.
-        """
-        for config_id, value in self.spec.config.pack.capabilities.session_config:
-            option = next(
-                (
-                    entry
-                    for entry in self._config_options
-                    if str(entry.get("id") or "") == config_id
-                ),
-                None,
-            )
-            if option is None:
-                raise AcpProtocolError(
-                    f"ACP agent 未提供配置选项 {config_id!r}；"
-                    "包清单 capabilities.session_config 不能被静默忽略"
-                )
-            if str(option.get("type") or "select") == "select":
-                values = _select_values(option)
-                if value not in values:
-                    raise AcpProtocolError(
-                        f"ACP 配置选项 {config_id!r} 不接受取值 {value!r}；"
-                        f"可选：{', '.join(values)}（协议要求先按 agent 声明取值）"
-                    )
-            if option.get("currentValue") == value:
-                continue
-            updated = client.request(
-                "session/set_config_option",
-                {"sessionId": session_id, "configId": config_id, "value": value},
-                timeout=REQUEST_TIMEOUT_SECONDS,
-            )
-            options = updated.get("configOptions") if isinstance(updated, Mapping) else None
-            if isinstance(options, list):
-                self._config_options = _project_config_options(options)
-            else:
-                for entry in self._config_options:
-                    if str(entry.get("id") or "") == config_id:
-                        entry["currentValue"] = value
-            # codex-acp models its approval presets both as a ``mode`` config
-            # option and as ``modes``; keep the run record's mode state truthful
-            # when the value really is one of the advertised mode ids.
-            mode_ids = {
-                str(mode.get("id"))
-                for mode in self._modes.get("availableModes", [])
-                if isinstance(mode, Mapping)
-            }
-            if config_id == "mode" and value in mode_ids:
-                self._modes["currentModeId"] = value
+    def _apply_session_config(
+        self, client: AcpRpcClient, session_id: str, advertised: Any,
+    ) -> None:
+        """Control validation consumes full advertisements, not display snapshots."""
+        self._config_options = apply_session_config(
+            client, session_id, self.spec.config.session_config, advertised,
+        )
+        # Only mirror verified approval state, never the requested value alone.
+        mode_ids = {
+            str(mode.get("id"))
+            for mode in self._modes.get("availableModes", [])
+            if isinstance(mode, Mapping)
+        }
+        for option in self._config_options:
+            if option.get("id") == "mode" and option.get("currentValue") in mode_ids:
+                self._modes["currentModeId"] = option["currentValue"]
 
     def _accept_initialize(self, negotiated: Mapping[str, Any]) -> None:
         version = negotiated.get("protocolVersion")
@@ -1536,52 +1491,3 @@ def _bounded_stderr_tail(lines: list[str]) -> str:
         return ""
     block = "\n".join(clipped)
     return block[-ACP_STDERR_TAIL_CHARS:]
-
-
-def _project_config_options(options: Any) -> list[dict[str, Any]]:
-    """A bounded, JSON-safe copy of the agent's advertised session options."""
-    if not isinstance(options, list):
-        return []
-    projected: list[dict[str, Any]] = []
-    for option in options[:_CONFIG_OPTIONS_LIMIT]:
-        if not isinstance(option, Mapping):
-            continue
-        entry: dict[str, Any] = {
-            key: option[key]
-            for key in ("id", "name", "type", "category", "currentValue")
-            if key in option
-        }
-        if isinstance(option.get("description"), str):
-            entry["description"] = _clip(option["description"], _CONFIG_TEXT_LIMIT)
-        values = option.get("options")
-        if isinstance(values, list):
-            entry["options"] = [
-                value
-                for value in values[:_CONFIG_VALUES_LIMIT]
-                if isinstance(value, Mapping)
-            ]
-        projected.append(entry)
-    return projected
-
-
-def _select_values(option: Mapping[str, Any]) -> tuple[str, ...]:
-    """Every selectable value id of one option, grouped or flat.
-
-    ACP's ``SessionConfigSelect`` allows either a flat option list or grouped
-    entries (dsh groups the model choices by provider); both shapes resolve to
-    the same value ids.
-    """
-    values: list[str] = []
-    entries = option.get("options")
-    if isinstance(entries, list):
-        for entry in entries:
-            if not isinstance(entry, Mapping):
-                continue
-            grouped = entry.get("options")
-            if isinstance(grouped, list):
-                for inner in grouped:
-                    if isinstance(inner, Mapping) and inner.get("value") is not None:
-                        values.append(str(inner["value"]))
-            elif entry.get("value") is not None:
-                values.append(str(entry["value"]))
-    return tuple(values)

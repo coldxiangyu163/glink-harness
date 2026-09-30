@@ -166,7 +166,8 @@ def test_process_environment_supplies_declared_acp_credential_keys(
     """
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "PI_GLINK_HARNESS=dsh\nPI_GLINK_ACP_CREDENTIAL_ENV=OPENROUTER_API_KEY\n",
+        "PI_GLINK_HARNESS=dsh\nOPENAI_MODEL=test/model\nOPENAI_REASONING_EFFORT=high\n"
+        "PI_GLINK_ACP_CREDENTIAL_ENV=OPENROUTER_API_KEY\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("OPENROUTER_API_KEY", "from-env-only")
@@ -175,8 +176,8 @@ def test_process_environment_supplies_declared_acp_credential_keys(
     assert dict(config.acp_credential_env_values) == {"OPENROUTER_API_KEY": "from-env-only"}
 
     env_file.write_text(
-        "PI_GLINK_HARNESS=dsh\nPI_GLINK_ACP_CREDENTIAL_ENV=OPENROUTER_API_KEY\n"
-        "OPENROUTER_API_KEY=rotated-away\n",
+        "PI_GLINK_HARNESS=dsh\nOPENAI_MODEL=test/model\nOPENAI_REASONING_EFFORT=high\n"
+        "PI_GLINK_ACP_CREDENTIAL_ENV=OPENROUTER_API_KEY\nOPENROUTER_API_KEY=rotated-away\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("OPENROUTER_API_KEY", "rotated-in")
@@ -189,7 +190,10 @@ def test_process_environment_can_declare_the_acp_credential_keys(
 ) -> None:
     """The declaration itself may come from the process environment too."""
     env_file = tmp_path / ".env"
-    env_file.write_text("PI_GLINK_HARNESS=dsh\n", encoding="utf-8")
+    env_file.write_text(
+        "PI_GLINK_HARNESS=dsh\nOPENAI_MODEL=test/model\nOPENAI_REASONING_EFFORT=high\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("PI_GLINK_ACP_CREDENTIAL_ENV", "OPENROUTER_API_KEY")
     monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
     config = load_config(None, REPO_ROOT, env_file=env_file)
@@ -423,6 +427,7 @@ def test_health_on_a_sandbox_face_does_not_probe_the_local_path(
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
             "LOCAL_WEB_PORT": "0",
             "OPENAI_MODEL": "test-model",
+            "OPENAI_REASONING_EFFORT": "high",
             "PI_GLINK_HARNESS": "dsh",
             "LOCAL_WEB_EXECUTOR": "e2b",
             "E2B_API_KEY": "test-e2b-key",

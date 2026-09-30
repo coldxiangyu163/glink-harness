@@ -158,6 +158,9 @@ class HostConfig:
     #: the per-run state root stays the isolation boundary. A value whose name
     #: looks credential-shaped joins the run's redaction boundary.
     acp_env: tuple[tuple[str, str], ...] = ()
+    #: OPENAI_REASONING_EFFORT is consumed only by packs declaring its source;
+    #: pi keeps its existing thinking policy. No implicit ACP effort default.
+    openai_reasoning_effort: str = ""
     openai_api_key: str = field(repr=False, default="")
     context_window: int = _DEFAULT_CONTEXT_WINDOW
     max_output_tokens: int = _DEFAULT_MAX_OUTPUT_TOKENS
@@ -320,6 +323,17 @@ class HostConfig:
     def work_agreement_path(self) -> Path:
         """The harness-independent working agreement appended to every run."""
         return self.methodology_dir / "work-agreement.md"
+
+    @property
+    def session_config(self) -> tuple[tuple[str, str, str], ...]:
+        """Deployment values carried by ExecutionSpec, not copied into the pack."""
+        try:
+            return self.pack.capabilities.resolve_session_config({
+                "OPENAI_MODEL": self.openai_model,
+                "OPENAI_REASONING_EFFORT": self.openai_reasoning_effort,
+            })
+        except HarnessPackError as exc:
+            raise ConfigError(str(exc)) from exc
 
     def public_view(self) -> dict[str, object]:
         """Fields safe to send to the browser: no credentials, no host paths."""
@@ -489,6 +503,7 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         workspace_root=_path(values, "PI_GLINK_WORKSPACE_ROOT", data_root / "workspaces"),
         openai_base_url=base_url,
         openai_model=model,
+        openai_reasoning_effort=_text(values, "OPENAI_REASONING_EFFORT", ""),
         openai_api_key=api_key,
         context_window=_positive_integer(
             values, "OPENAI_CONTEXT_WINDOW", _DEFAULT_CONTEXT_WINDOW
@@ -633,6 +648,8 @@ def validate_host_config(config: HostConfig) -> None:
         raise ConfigError(
             "PI_GLINK_TENANCY=multitenant 要求 Docker/E2B 执行面；inproc 仅用于本地单用户调试"
         )
+    # Resolve declared sources now, not after accepting a run or creating a sandbox.
+    _ = config.session_config
     _acp_knobs_are_acp_only(config)
     _acp_credentials_follow_policy(config)
     _egress_is_reachable(config)
@@ -729,6 +746,7 @@ def _looks_configured(key: str) -> bool:
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENAI_MODEL",
+        "OPENAI_REASONING_EFFORT",
         "OPENAI_CONTEXT_WINDOW",
         "OPENAI_MAX_TOKENS",
         "E2B_API_KEY",

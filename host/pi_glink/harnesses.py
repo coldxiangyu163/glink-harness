@@ -32,7 +32,7 @@ import shlex
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 #: The manifest format this module understands. An unknown value (including the
 #: retired ``pi-glink-harness/v1``) is refused so a schema change cannot be
@@ -124,6 +124,14 @@ class HarnessPackError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
+class SessionConfigSource:
+    """Structural binding to a host-frozen deployment value, not a pack default."""
+
+    source: str
+    encoding: str = "value"
+
+
+@dataclass(frozen=True, slots=True)
 class HarnessCapabilities:
     """The capability matrix a pack declares; family code reads only this."""
 
@@ -134,8 +142,26 @@ class HarnessCapabilities:
     resume: bool = False
     subagent_dispatch: str = "sync"
     child_progress: str | None = None
-    session_config: tuple[tuple[str, str], ...] = ()
+    session_config: tuple[tuple[str, str | SessionConfigSource], ...] = ()
     permission_allow: tuple[str, ...] = ()
+
+    def resolve_session_config(
+        self, values: Mapping[str, str]
+    ) -> tuple[tuple[str, str, str], ...]:
+        """Bind structural sources at startup; keep literal policies unchanged."""
+        resolved: list[tuple[str, str, str]] = []
+        for config_id, declaration in self.session_config:
+            if isinstance(declaration, str):
+                resolved.append((config_id, declaration, "value"))
+                continue
+            value = values.get(declaration.source, "")
+            if not value.strip():
+                raise HarnessPackError(
+                    f"capabilities.session_config.{config_id} 声明了来源 "
+                    f"{declaration.source}，必须在 .env/进程环境配置非空值"
+                )
+            resolved.append((config_id, value, declaration.encoding))
+        return tuple(resolved)
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,7 +389,9 @@ def _parse_capabilities(document: dict, family: str, manifest: Path) -> HarnessC
     )
 
 
-def _parse_session_config(table: dict, manifest: Path) -> tuple[tuple[str, str], ...]:
+def _parse_session_config(
+    table: dict, manifest: Path
+) -> tuple[tuple[str, str | SessionConfigSource], ...]:
     raw = table.get("session_config")
     if raw is None:
         return ()
@@ -371,15 +399,27 @@ def _parse_session_config(table: dict, manifest: Path) -> tuple[tuple[str, str],
         raise HarnessPackError(
             f"harness 清单 capabilities.session_config 必须是非空表：{manifest}"
         )
-    entries: list[tuple[str, str]] = []
+    entries: list[tuple[str, str | SessionConfigSource]] = []
     for config_id, value in raw.items():
         if not isinstance(config_id, str) or not config_id.strip():
             raise HarnessPackError(f"session_config 的选项名不能为空：{manifest}")
-        if not isinstance(value, str) or not value.strip():
+        if isinstance(value, dict):
+            _refuse_unknown(value, frozenset({"source", "encoding"}), "session_config source", manifest)
+            source = value.get("source")
+            encoding = value.get("encoding", "value")
+            if source not in ("OPENAI_MODEL", "OPENAI_REASONING_EFFORT"):
+                raise HarnessPackError(f"session_config.{config_id} 未知 source：{manifest}")
+            if encoding not in ("value", "dsh-model") or (
+                encoding == "dsh-model" and source != "OPENAI_MODEL"
+            ):
+                raise HarnessPackError(f"session_config.{config_id} 未知或不兼容 encoding：{manifest}")
+            entries.append((config_id.strip(), SessionConfigSource(source, encoding)))
+        elif isinstance(value, str) and value.strip():
+            entries.append((config_id.strip(), value.strip()))
+        else:
             raise HarnessPackError(
-                f"session_config.{config_id} 的取值必须是非空字符串：{manifest}"
+                f"session_config.{config_id} 的取值必须是非空字符串或 source 表：{manifest}"
             )
-        entries.append((config_id.strip(), value.strip()))
     return tuple(entries)
 
 

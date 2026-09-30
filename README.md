@@ -401,8 +401,17 @@ node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 26 个角�
 | `PI_GLINK_METHODOLOGY_DIR` | `<repo>/methodology` | 方法论根（`work-agreement.md` 与 `blueprints/`）放在别处时 |
 | `PI_GLINK_BLUEPRINTS_DIR` | `<methodology>/blueprints` | 蓝图目录单独覆盖时；目录缺失不是启动错误，只表示可用蓝图集合为空 |
 | `LOCAL_WEB_TASK_TIMEOUT_SECONDS` | `1800` | 单次 run 的整体超时（秒）；题型明显更长/更短时。E2B 沙箱寿命按它 + 300s 取值 |
+| `OPENAI_MODEL` | 空 | 部署主模型：pi 保持模型 id 原语义；dsh 必填，按 agent 广告的模型 id 唯一匹配，如 `openai/gpt-6-sol`，有歧义时用 `openrouter/openai/gpt-6-sol` 全路由消歧；不按首个斜杠猜 provider |
+| `OPENAI_REASONING_EFFORT` | 空 | dsh 必填，如 `xhigh`，须由目标模型广告；不改 pi 现有 thinking 策略，未声明来源的包不消费；与输出 token 上限无关 |
 | `OPENAI_CONTEXT_WINDOW` | `400000` | pi 面模型元数据的上下文窗口；provider 窗口更小时 |
 | `OPENAI_MAX_TOKENS` | `65536` | pi 面模型元数据的输出上限；provider 上限更短时 |
+
+dsh 的主模型与 reasoning effort 只在 `.env` 或进程环境声明，包仅保留来源、编码与 provider 接入结构。
+`OPENAI_API_KEY` / `OPENAI_BASE_URL` 仍是 pi 的 OpenAI 兼容通道，dsh 的 key 经具名 ACP 凭据通道投递，不自动复用它们。
+新会话和续接均按当前宿主冻结配置应用 ACP 选项，再核验 agent 返回的 `currentValue`；缺来源值拒绝启动，
+缺广告选项、无唯一模型路由、非法 effort、应用后不一致均在发送研究 prompt 前失败。
+续接可以切换到当前部署模型，父 run 的实际值与报告保持原样。
+包版本与模型组合须在部署验收时验证，隔离 fake ACP 回归不证明真实模型质量，见 [ADR 0016](docs/adr/0016-acp-credential-env-single-source.md)。
 
 ACP 族的送达通道、凭据注入与体积边界见 [ACP 集成笔记](docs/acp-integration-notes.md)；
 蓝图格式、准入与列举接口见 [会话蓝图](docs/blueprint-templates.md)。

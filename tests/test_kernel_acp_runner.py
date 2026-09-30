@@ -913,6 +913,34 @@ def test_acp_session_config_is_applied_and_recorded(tmp_path: Path) -> None:
     ]
 
 
+def test_acp_declared_model_must_match_actual_after_set_config(tmp_path: Path) -> None:
+    """原事故机制：请求成功但实际仍为 DeepSeek 时，禁止开始研究。"""
+    log = tmp_path / "agent.jsonl"
+    settings = {
+        "FAKE_ACP_LOG": str(log),
+        "FAKE_ACP_CONFIG_NO_CHANGE": True,
+        "FAKE_ACP_WRITE_REPORT": True,
+        "FAKE_ACP_CONFIG_OPTIONS": [{
+            "id": "model", "name": "Model", "type": "select",
+            "currentValue": '["deepseek-official","deepseek-v4-flash"]',
+            "options": [{"group": "openrouter", "name": "OpenRouter", "options": [{
+                "value": '["openrouter","openai/gpt-6-sol"]', "name": "GPT",
+            }]}],
+        }],
+    }
+    _config, store, manager = build_manager(
+        tmp_path, settings,
+        TEST_ACP_SESSION_CONFIG='model=["openrouter","openai/gpt-6-sol"]',
+    )
+    record = manager.start("声明 GPT，实际模型必须一致")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FAILED
+    assert final.stop_reason == "execution_error"
+    assert "currentValue" in (final.error or "")
+    assert [entry for entry in read_log(log) if entry["event"] == "prompt"] == []
+    assert read_events(store, record.run_id)[-1]["type"] == "run_failed"
+
+
 def test_acp_session_config_already_current_is_not_re_sent(tmp_path: Path) -> None:
     log = tmp_path / "agent.jsonl"
     settings = {

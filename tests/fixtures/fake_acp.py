@@ -97,6 +97,7 @@ _pending: dict[int, list[Any]] = {}
 _request_counter = 0
 _cancel = threading.Event()
 CONFIG: dict[str, Any] = {}
+_session_config_options: Any = None
 
 
 # -- settings -----------------------------------------------------------------
@@ -628,6 +629,7 @@ def handle_initialize(request: dict) -> None:
 
 
 def handle_new_session(request: dict) -> None:
+    global _session_config_options
     params = request.get("params") if isinstance(request.get("params"), dict) else {}
     log("session_new", cwd=params.get("cwd"), mcpServers=params.get("mcpServers"))
     home = os.environ.get("HOME", "")
@@ -640,9 +642,9 @@ def handle_new_session(request: dict) -> None:
     probe = os.environ.get("FAKE_ACP_ENV_PROBE")
     if probe:
         log("env_probe", name=probe, value=os.environ.get(probe))
-    config_options = structured("FAKE_ACP_CONFIG_OPTIONS", None)
-    if config_options is not None:
-        result["configOptions"] = config_options
+    _session_config_options = structured("FAKE_ACP_CONFIG_OPTIONS", None)
+    if _session_config_options is not None:
+        result["configOptions"] = _session_config_options
     modes = structured("FAKE_ACP_MODES", None)
     if modes is not None:
         result["modes"] = modes
@@ -680,6 +682,7 @@ def handle_resume(request: dict, method: str) -> None:
     the failure for the fail-closed regression; ``FAKE_ACP_RESUME_ALLOW_MISSING``
     lets a test exercise the protocol path without a state root.
     """
+    global _session_config_options
     params = request.get("params") if isinstance(request.get("params"), dict) else {}
     target = params.get("sessionId")
     state = read_state()
@@ -729,22 +732,32 @@ def handle_resume(request: dict, method: str) -> None:
                 },
             )
         log("load_replayed", count=count)
-    respond(request, result={})
+    _session_config_options = structured("FAKE_ACP_CONFIG_OPTIONS", None)
+    result = {} if _session_config_options is None else {"configOptions": _session_config_options}
+    respond(request, result=result)
 
 
 def handle_set_config_option(request: dict) -> None:
+    global _session_config_options
     params = request.get("params") if isinstance(request.get("params"), dict) else {}
     log("config_option", configId=params.get("configId"), value=params.get("value"))
     if flag("FAKE_ACP_CONFIG_ERROR"):
         respond(request, error={"code": -32000, "message": "config option refused by fake agent"})
         return
-    config_options = structured("FAKE_ACP_CONFIG_OPTIONS", None)
-    if isinstance(config_options, list):
+    responses = structured("FAKE_ACP_CONFIG_RESPONSES", {})
+    if isinstance(responses, dict) and params.get("configId") in responses:
+        result = responses[params["configId"]]
+        _session_config_options = result.get("configOptions") if isinstance(result, dict) else None
+        respond(request, result=result)
+        return
+    if isinstance(_session_config_options, list):
         updated = []
-        for option in config_options:
+        for option in _session_config_options:
             if isinstance(option, dict) and option.get("id") == params.get("configId"):
-                option = {**option, "currentValue": params.get("value")}
+                if not flag("FAKE_ACP_CONFIG_NO_CHANGE"):
+                    option = {**option, "currentValue": params.get("value")}
             updated.append(option)
+        _session_config_options = updated
         respond(request, result={"configOptions": updated})
         return
     respond(request, result={})
