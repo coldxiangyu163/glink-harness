@@ -94,7 +94,7 @@ from .acp_rpc import (
     AcpRequestError,
     AcpRpcClient,
 )
-from .acp_session_config import apply_session_config, project_config_options
+from .acp_session_config import apply_session_config
 from .acp_sandbox_park import (
     park_sandbox,
     read_generation_marker,
@@ -572,8 +572,7 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         self._modes = (
             dict(created["modes"]) if isinstance(created.get("modes"), Mapping) else {}
         )
-        self._config_options = project_config_options(created.get("configOptions"))
-        self._apply_session_config(client, session_id)
+        self._apply_session_config(client, session_id, created.get("configOptions"))
 
     def _resume_session(self, client: AcpRpcClient, session_id: str) -> None:
         """Continue the parent's session the way this agent's matrix allows.
@@ -625,7 +624,6 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         self._modes = (
             dict(answer["modes"]) if isinstance(answer.get("modes"), Mapping) else {}
         )
-        self._config_options = project_config_options(answer.get("configOptions"))
         self._on_frame(
             {
                 "type": "acp_session_resumed",
@@ -636,7 +634,7 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
                 "replayedUpdates": replayed,
             }
         )
-        self._apply_session_config(client, session_id)
+        self._apply_session_config(client, session_id, answer.get("configOptions"))
 
     def _resume_method(self) -> str | None:
         """The continuation channel this agent's capability matrix declares.
@@ -718,11 +716,12 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
             self._suppressing_replay = False
             return self._replayed_updates
 
-    def _apply_session_config(self, client: AcpRpcClient, session_id: str) -> None:
-        """Apply and verify declared options after both new and resume."""
+    def _apply_session_config(
+        self, client: AcpRpcClient, session_id: str, advertised: Any,
+    ) -> None:
+        """Control validation consumes full advertisements, not display snapshots."""
         self._config_options = apply_session_config(
-            client, session_id, self.spec.config.session_config,
-            self._config_options,
+            client, session_id, self.spec.config.session_config, advertised,
         )
         # Only mirror verified approval state, never the requested value alone.
         mode_ids = {

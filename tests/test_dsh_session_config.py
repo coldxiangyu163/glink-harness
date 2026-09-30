@@ -42,12 +42,15 @@ reasoning_effort = { source = "OPENAI_REASONING_EFFORT" }
 '''
 
 
-def wired_config(tmp_path: Path, settings: dict, *, env: dict | None = None):
+def wired_config(
+    tmp_path: Path, settings: dict, *, env: dict | None = None,
+    source_table: str = SOURCE_TABLE,
+):
     command = acp_command(tmp_path, settings)
     packs = write_acp_pack(tmp_path, command)
     manifest = packs / "dsh" / "harness.toml"
     manifest.write_text(
-        manifest.read_text().replace("[image]\n", SOURCE_TABLE + "[image]\n"),
+        manifest.read_text().replace("[image]\n", source_table + "[image]\n"),
         encoding="utf-8",
     )
     dotenv = tmp_path / ".env"
@@ -262,7 +265,147 @@ def test_explicit_provider_route_disambiguates_and_current_value_is_idempotent(
     assert ready["configOptions"][0]["currentValue"] == TARGET_MODEL
 
 
-def test_reasoning_choices_are_read_after_model_switch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("explicit_route", [False, True])
+def test_model_uniqueness_uses_catalogue_beyond_display_limit(
+    tmp_path: Path, explicit_route: bool,
+) -> None:
+    """B1：第 101 项同模型路由不可被显示上限隐去。"""
+    log = tmp_path / "agent.jsonl"
+    choices = [{"value": TARGET_MODEL, "name": "GPT"}]
+    choices += [{"value": f'["openrouter","other/model-{i}"]', "name": f"Other {i}"}
+                for i in range(99)]
+    choices.append({"value": '["other","openai/gpt-6-sol"]', "name": "Same model"})
+    config = wired_config(tmp_path, {
+        "FAKE_ACP_LOG": str(log), "FAKE_ACP_WRITE_REPORT": True,
+        "FAKE_ACP_CONFIG_OPTIONS": [{**MODEL_OPTIONS[0], "options": choices}, REASONING_OPTION],
+    }, env={"OPENAI_MODEL": "openrouter/openai/gpt-6-sol"} if explicit_route else {})
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    run = manager.start("完整广告中才可判断模型唯一性")
+    final = manager.wait(run.run_id, timeout=30)
+    assert final is not None and final.status == (FINISHED if explicit_route else FAILED)
+    if explicit_route:
+        ready = payloads(read_events(store, run.run_id), "session_ready")[0]
+        assert ready["configOptions"][0]["currentValue"] == TARGET_MODEL
+        assert len(ready["configOptions"][0]["options"]) == 100
+    else:
+        assert "匹配 2 个" in (final.error or "")
+        assert not [entry for entry in read_log(log) if entry["event"] == "prompt"]
+
+
+@pytest.mark.parametrize("phase", ["initial", "initial_beyond_display_limit", "model_response", "effort_response"])
+@pytest.mark.parametrize("duplicate_id", ["model", "reasoning_effort"])
+def test_declared_config_id_must_be_unique_in_every_advertisement(
+    tmp_path: Path, phase: str, duplicate_id: str,
+) -> None:
+    """B2：不能挑重复 id 的首项来证明实际配置。"""
+    log = tmp_path / "agent.jsonl"
+    actual_model = {**MODEL_OPTIONS[0], "currentValue": TARGET_MODEL}
+    duplicated = copy.deepcopy([actual_model, REASONING_OPTION])
+    extra = copy.deepcopy(actual_model if duplicate_id == "model" else REASONING_OPTION)
+    extra["currentValue"] = DEFAULT_MODEL if duplicate_id == "model" else "xhigh"
+    if phase == "initial_beyond_display_limit":
+        duplicated += [{"id": f"unused-{i}", "name": "Unused", "type": "text"}
+                       for i in range(20)]
+        duplicated.append(extra)
+    else:
+        duplicated.insert(1, extra)
+    settings = {"FAKE_ACP_LOG": str(log), "FAKE_ACP_WRITE_REPORT": True}
+    if phase in {"initial", "initial_beyond_display_limit"}:
+        settings["FAKE_ACP_CONFIG_OPTIONS"] = duplicated
+    else:
+        settings["FAKE_ACP_CONFIG_OPTIONS"] = MODEL_OPTIONS + [REASONING_OPTION]
+        mutated_id = "model" if phase == "model_response" else "reasoning_effort"
+        if phase == "effort_response":
+            for option in duplicated:
+                if option["id"] == "reasoning_effort":
+                    option["currentValue"] = "xhigh"
+        settings["FAKE_ACP_CONFIG_RESPONSES"] = {
+            mutated_id: {"configOptions": duplicated},
+        }
+    config = wired_config(tmp_path, settings)
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    run = manager.start("重复配置 id 必须失败")
+    final = manager.wait(run.run_id, timeout=30)
+    assert final is not None and final.status == FAILED
+    assert duplicate_id in (final.error or "") and "唯一" in (final.error or "")
+    assert not [entry for entry in read_log(log) if entry["event"] == "prompt"]
+
+
+@pytest.mark.parametrize("valid_json_route", [False, True])
+def test_non_json_route_siblings_cannot_supply_or_hide_a_valid_route(
+    tmp_path: Path, valid_json_route: bool,
+) -> None:
+    """只接受可解析的路由：全非 JSON 失败，混合唯一合法路由可用。"""
+    log = tmp_path / "agent.jsonl"
+    choices = [{"value": "not JSON", "name": "unsupported sibling"}]
+    if valid_json_route:
+        choices.append({"value": TARGET_MODEL, "name": "GPT"})
+    config = wired_config(tmp_path, {
+        "FAKE_ACP_LOG": str(log), "FAKE_ACP_WRITE_REPORT": True,
+        "FAKE_ACP_CONFIG_OPTIONS": [{**MODEL_OPTIONS[0], "options": choices}, REASONING_OPTION],
+    })
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    run = manager.start("非 JSON 旁项不参与路由身份匹配")
+    final = manager.wait(run.run_id, timeout=30)
+    assert final is not None and final.status == (FINISHED if valid_json_route else FAILED)
+    if valid_json_route:
+        ready = payloads(read_events(store, run.run_id), "session_ready")[0]
+        assert ready["configOptions"][0]["currentValue"] == TARGET_MODEL
+        assert ready["configOptions"][0]["options"][0]["value"] == "not JSON"
+    else:
+        assert "匹配 0 个" in (final.error or "")
+        assert not [entry for entry in read_log(log) if entry["event"] == "prompt"]
+
+
+@pytest.mark.parametrize("option_type", ["text", None])
+@pytest.mark.parametrize("phase", ["initial", "effort_response"])
+def test_applied_options_require_explicit_select_type_and_advertised_value(
+    tmp_path: Path, option_type: str | None, phase: str,
+) -> None:
+    """B3：非 select 或缺 type 不能绕过广告集校验。"""
+    log = tmp_path / "agent.jsonl"
+    effort = copy.deepcopy(REASONING_OPTION)
+    if option_type is None:
+        del effort["type"]
+    else:
+        effort["type"] = option_type
+        del effort["options"]
+    settings = {"FAKE_ACP_LOG": str(log), "FAKE_ACP_WRITE_REPORT": True}
+    if phase == "initial":
+        settings["FAKE_ACP_CONFIG_OPTIONS"] = MODEL_OPTIONS + [effort]
+    else:
+        effort["currentValue"] = "xhigh"
+        settings["FAKE_ACP_CONFIG_OPTIONS"] = MODEL_OPTIONS + [REASONING_OPTION]
+        settings["FAKE_ACP_CONFIG_RESPONSES"] = {"reasoning_effort": {"configOptions": [
+            {**MODEL_OPTIONS[0], "currentValue": TARGET_MODEL}, effort,
+        ]}}
+    config = wired_config(tmp_path, settings)
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    run = manager.start("应用选项类型必须受支持且显式声明")
+    final = manager.wait(run.run_id, timeout=30)
+    assert final is not None and final.status == FAILED
+    assert "type" in (final.error or "")
+    entries = read_log(log)
+    assert not [entry for entry in entries if entry["event"] == "prompt"]
+    if phase == "initial":
+        assert not [entry for entry in entries
+                    if entry["event"] == "config_option" and entry["configId"] == "reasoning_effort"]
+
+
+@pytest.mark.parametrize("effort_first", [False, True])
+def test_reasoning_choices_are_read_after_model_switch(
+    tmp_path: Path, effort_first: bool,
+) -> None:
+    """B4：合法来源表任意行序，都先模型、后 effort。"""
+    source_table = '''[capabilities.session_config]
+reasoning_effort = { source = "OPENAI_REASONING_EFFORT" }
+model = { source = "OPENAI_MODEL", encoding = "dsh-model" }
+
+''' if effort_first else SOURCE_TABLE
     log = tmp_path / "agent.jsonl"
     target_options = [{**MODEL_OPTIONS[0], "currentValue": TARGET_MODEL}, REASONING_OPTION]
     config = wired_config(tmp_path, {
@@ -270,7 +413,7 @@ def test_reasoning_choices_are_read_after_model_switch(tmp_path: Path) -> None:
         # The fallback model advertises no reasoning knob; target model does.
         "FAKE_ACP_CONFIG_OPTIONS": MODEL_OPTIONS,
         "FAKE_ACP_CONFIG_RESPONSES": {"model": {"configOptions": target_options}},
-    })
+    }, source_table=source_table)
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
     run = manager.start("模型切换后才有 reasoning 选项")
@@ -278,3 +421,7 @@ def test_reasoning_choices_are_read_after_model_switch(tmp_path: Path) -> None:
     assert final is not None and final.status == FINISHED
     ready = payloads(read_events(store, run.run_id), "session_ready")[0]
     assert ready["configOptions"][1]["currentValue"] == "xhigh"
+    assert [(entry["configId"], entry["value"]) for entry in read_log(log)
+            if entry["event"] == "config_option"] == [
+        ("model", TARGET_MODEL), ("reasoning_effort", "xhigh"),
+    ]
