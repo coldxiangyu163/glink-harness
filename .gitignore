@@ -45,3 +45,4 @@ harnesses/pi/web-search.json
 .DS_Store
 .idea/
 .vscode/
+.coverage
