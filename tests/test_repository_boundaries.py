@@ -111,6 +111,7 @@ _KERNEL_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
     "archive_channel.py": frozenset(),  # 归档通道自足：标准库 tar/json/hashlib
     "acp_env.py": frozenset({"pi_glink.artifacts", "pi_glink.config", "pi_glink.redaction"}),
     "acp_execution.py": frozenset({"pi_glink.__version__", "pi_glink.config"}),
+    "acp_session_config.py": frozenset(),
     "acp_projection.py": frozenset({"pi_glink.events", "pi_glink.redaction"}),
     "acp_rpc.py": frozenset(),
     "acp_sandbox_park.py": frozenset({"pi_glink.config", "pi_glink.contracts"}),  # 沙箱泊车只读宿主配置的 TTL

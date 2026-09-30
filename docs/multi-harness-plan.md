@@ -156,7 +156,7 @@ v1 时期的顶层 `command`/`package`/`version`/`session_config`/`permission_al
 | `[capabilities].resume` | 所有包（必填 bool） | `false`：准入层对该包的每个追问一律 `session_unavailable`，不读父会话；`true`：继续交给族的运行期事实（ACP 还要看协商出的 `sessionCapabilities.resume`/`loadSession`）。四个随仓库包都声明 `true` |
 | `[capabilities].subagent_dispatch` | ACP 包（可选） | `sync`（缺省：派发调用的终态即子代理结果）或 `async`（派发被接受即 completed，子代理继续运行，由 run 终帧收口；dsh 声明）；投影据此判定，不识别 agent 回复措辞 |
 | `[capabilities].child_progress` | ACP 包（可选） | 运行中子代理进度源；目前只有 `dsh-session-zstd`（状态根下 `.dsh/sessions` 的私有会话文件，dsh 声明）。未声明 = 该包如实没有进度源，族代码不按包名或目录猜 |
-| `[capabilities.session_config]` | ACP 包（可选） | `id → value` 表，`session/new` 后应用；agent 未声明该选项/取值时 run 失败闭环 |
+| `[capabilities.session_config]` | ACP 包（可选） | `id → value` 或结构来源表 `{ source = "OPENAI_MODEL" / "OPENAI_REASONING_EFFORT", encoding = "value" / "dsh-model" }`；来源从宿主冻结配置派生，缺值拒绝启动；`session/new` 与续接后应用并核验实际 `currentValue`，未广告选项/值或不一致即 run 失败；`dsh-model` 仅用于主模型，按 dsh 广告的 JSON 路由唯一匹配 |
 | `[capabilities].permission_allow` | ACP 包（可选） | ACP option/tool kind 的子集；缺省空 = fail-closed 全拒 |
 | `[image].target` | 所有包（必填） | 承载该包的 worker 镜像：pi 族只能是 `pi-worker`，ACP 族只能是 `acp-worker` |
 | `[image].cpu_count` / `memory_mb` | 所有包（可选，缺省 2 / 4096） | E2B 模板资源下限；同一镜像取成员包的最大值 |

@@ -27,6 +27,7 @@ def config(values: Mapping[str, str]):
         "OPENAI_API_KEY": "sk-test",
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
+        "OPENAI_REASONING_EFFORT": "high",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
     }
     base.update(values)
@@ -45,7 +46,9 @@ def test_an_acp_pack_derives_the_family_command_and_options() -> None:
     dsh = config({"PI_GLINK_HARNESS": "dsh"})
     assert dsh.harness == "acp" and dsh.harness_pack == "dsh"
     assert dsh.pack.command == ("dsh", "--profile", "acp")
-    assert dsh.pack.capabilities.session_config == ()
+    assert dsh.session_config == (
+        ("model", "test/model", "dsh-model"), ("reasoning_effort", "high", "value"),
+    )
     assert dsh.pack.capabilities.permission_allow == ()
 
     codex = config({"PI_GLINK_HARNESS": "codex"})
@@ -60,7 +63,10 @@ def test_an_acp_pack_derives_the_family_command_and_options() -> None:
 
 def test_the_pi_template_dir_defaults_to_the_selected_pack() -> None:
     assert config({}).agent_config_dir == REPO_ROOT / "harnesses" / "pi"
-    dsh = build_config({"PI_GLINK_HARNESS": "dsh"}, REPO_ROOT)
+    dsh = build_config({
+        "PI_GLINK_HARNESS": "dsh", "OPENAI_MODEL": "test/model",
+        "OPENAI_REASONING_EFFORT": "high",
+    }, REPO_ROOT)
     assert dsh.agent_config_dir == REPO_ROOT / "harnesses" / "dsh"
 
 
@@ -92,7 +98,9 @@ def test_retired_acp_knobs_are_not_read() -> None:
         }
     )
     assert selected.pack.command == ("dsh", "--profile", "acp")
-    assert selected.pack.capabilities.session_config == ()
+    assert selected.session_config == (
+        ("model", "test/model", "dsh-model"), ("reasoning_effort", "high", "value"),
+    )
     assert selected.pack.capabilities.permission_allow == ()
 
 

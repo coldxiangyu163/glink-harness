@@ -1,13 +1,7 @@
-# pi-glink 沙箱 dsh 的默认模型配置（无凭据；key 经宿主渲染，见
-# PI_GLINK_ACP_CREDENTIAL_ENV 与 PI_GLINK_ACP_CREDENTIAL_FILES）。
-#
-# 该文件随 harnesses/dsh/home overlay 在每 run 播种进沙箱 HOME 的 ~/.dsh/，
-# 是"这个部署的 dsh 默认用什么模型"的版本化答案。apiKeyEnv 只是凭据引用名，
-# 值永远不进仓库。本机 ~/.dsh/settings.yaml 是另一个家，互不影响。
-agent-default-model:
-  provider: openrouter
-  model: openai/gpt-5.6-sol
-  reasoningEffort: xhigh
+# 每 run HOME 的 provider 接入结构，不声明部署模型或 reasoning effort。
+# OPENAI_MODEL / OPENAI_REASONING_EFFORT 由宿主经 ACP 应用并核验；
+# apiKeyEnv 只是凭据引用名，值经宿主渲染（PI_GLINK_ACP_CREDENTIAL_ENV
+# 或 PI_GLINK_ACP_CREDENTIAL_FILES），永远不进仓库。本机 ~/.dsh/ 互不影响。
 llm-pi-ai:
   providers:
     openrouter:
