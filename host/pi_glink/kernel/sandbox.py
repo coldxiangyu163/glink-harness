@@ -26,6 +26,7 @@ configuration: a run keeps the face it was admitted on.
 
 from __future__ import annotations
 
+import logging
 import shlex
 import subprocess
 from abc import ABC, abstractmethod
@@ -59,6 +60,8 @@ from .e2b_env import (
     _recover_workspace,
     kill_within_budget,
 )
+
+logger = logging.getLogger("pi_glink.kernel.sandbox")
 
 
 #: Path roles a harness may place. ``workspace`` is the run workspace, the
@@ -99,6 +102,22 @@ class Launch:
 
 
 @dataclass(frozen=True, slots=True)
+class SandboxResume:
+    """A paused sandbox a follow-up may reconnect to (docs/adr/0020's hot path).
+
+    Built by the host from the conversation's lease record (fresh, matching
+    pack and template); the adapter still verifies the sandbox-side generation
+    marker after connecting — the lease is the host's memory, the marker is the
+    sandbox's fact, and only agreement between them is a hot cache.
+    """
+
+    sandbox_id: str
+    generation: int
+    conversation_run: str
+    template: str
+
+
+@dataclass(frozen=True, slots=True)
 class Spawn:
     """The concrete process a driver starts.
 
@@ -121,6 +140,12 @@ class CleanupReport:
     released: bool
     failures: tuple[str, ...] = ()
     external: Mapping[str, str] = field(default_factory=dict)
+    #: The conversation-lease handover (docs/adr/0020): set when the run's
+    #: sandbox was parked for the conversation's next follow-up (``parked:
+    #: true`` + the lease's facts) or when parking was attempted and degraded
+    #: to a destroy (``parked: false`` + the reason). ``None`` means no parking
+    #: was attempted at all — the pre-阶段 2 teardown semantics.
+    lease: Mapping[str, Any] | None = None
 
 
 IdentityCallback = Callable[[Mapping[str, str]], None]
@@ -145,12 +170,14 @@ class Sandbox(ABC):
         workspace: Path,
         sandbox_factory: Callable[..., Any] | None = None,
         on_identity: IdentityCallback | None = None,
+        resume_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.config = config
         self.run_id = run_id
         self.workspace = Path(workspace)
         self._sandbox_factory = sandbox_factory
         self._on_identity = on_identity
+        self._resume_factory = resume_factory
 
     @abstractmethod
     def place(self, role: str, host: Path) -> str:
@@ -160,10 +187,18 @@ class Sandbox(ABC):
         """Identity known before :meth:`open` (persisted before any start step)."""
         return {}
 
-    def open(self, launch: Launch, *, timeout_seconds: int) -> None:
-        """Create the resource. Raises when the face is unavailable."""
-        # Hook 默认空实现：本地 face 无资源可建（inproc 不覆写）；显式 return None
-        # 而非留空 body，避免被当成遗漏的 @abstractmethod（B027）。
+    def open(
+        self, launch: Launch, *, timeout_seconds: int, resume: "SandboxResume | None" = None
+    ) -> None:
+        """Create the resource. Raises when the face is unavailable.
+
+        Hook 默认空实现：本地 face 无资源可建（inproc 不覆写）；显式 return None
+        而非留空 body，避免被当成遗漏的 @abstractmethod（B027）。``resume``
+        只对可重连的面有意义（E2B），其余面忽略。
+        """
+        # ``resume`` 参数是可重连面（E2B 热路径，docs/adr/0020）的输入；本地
+        # 面没有可重连的资源，收到也不适用（正常情况下 adapter 只在 e2b 面传入）。
+        del resume
         return None
 
     @abstractmethod
@@ -187,6 +222,24 @@ class Sandbox(ABC):
     def session_facts(self) -> dict[str, Any]:
         """Facts about the carrier a ``session_ready`` frame records."""
         return {}
+
+    def defer_destroy(self) -> None:
+        """Hand the resource to a lifecycle beyond this run (base: no-op).
+
+        The conversation lease (docs/adr/0020) is the one caller: an E2B
+        sandbox is parked instead of destroyed. Every other face destroys with
+        the run and keeps the default no-op.
+        """
+        return None
+
+    def discard(self) -> bool:
+        """Abandon a just-reconnected resource (base: nothing to discard).
+
+        ``False`` means no live handle was destroyed, so the caller destroys
+        by the persisted id instead. Only the reconnectable face (E2B) can
+        ever answer ``True``.
+        """
+        return False
 
     def identity(self) -> Mapping[str, str]:
         return {}
@@ -256,10 +309,11 @@ class DockerSandbox(Sandbox):
         # failure anywhere in start() still leaves a named leftover.
         return {"container": self.container_name}
 
-    def open(self, launch: Launch, *, timeout_seconds: int) -> None:
+    def open(self, launch: Launch, *, timeout_seconds: int, resume: "SandboxResume | None" = None) -> None:
         if not docker_available():
             raise ConfigError("LOCAL_WEB_EXECUTOR=docker requires a reachable Docker daemon")
         self._opened = True
+        del resume  # A container is never reconnected; the hot path is E2B-only.
 
     def spawn(self, launch: Launch) -> Spawn:
         return Spawn(
@@ -335,6 +389,10 @@ class E2BSandbox(Sandbox):
         #: Lifetime the sandbox was created with; the kernel command must be
         #: allowed to run at least that long (see :meth:`command_timeout`).
         self.sandbox_timeout = 0
+        #: Cleared by :meth:`defer_destroy`: the conversation lease (docs/adr
+        #: 0020) owns the sandbox now, so ``close()`` hands it over paused
+        #: instead of killing it.
+        self._destroy_on_close = True
 
     @property
     def handle(self) -> Any | None:
@@ -352,9 +410,35 @@ class E2BSandbox(Sandbox):
             "sandbox must reach the host's credential egress proxy"
         )
 
-    def open(self, launch: Launch, *, timeout_seconds: int) -> None:
+    def open(
+        self, launch: Launch, *, timeout_seconds: int, resume: "SandboxResume | None" = None
+    ) -> None:
+        """Create — or reconnect to — the sandbox. Raises when the face is unavailable.
+
+        With ``resume`` (docs/adr/0020's hot path) the sandbox is reconnected by
+        id and cold-booted from its persisted filesystem; the adapter verifies
+        the sandbox-side generation marker right after and degrades to a fresh
+        ``create`` on any failure. The resume path reuses the run's own
+        persisted identity (``on_identity`` fires with the same id, so the
+        record's resource reconciliation never loses the name).
+        """
         if self._handle is not None:
             raise SandboxError("sandbox already started")
+        if resume is not None:
+            from .e2b_env import resume_sandbox
+
+            handle, self.sandbox_timeout = resume_sandbox(
+                self.config,
+                sandbox_id=resume.sandbox_id,
+                timeout_seconds=timeout_seconds,
+                resume_factory=self._resume_factory,
+            )
+            self._handle = handle
+            self.sandbox_id = str(getattr(handle, "sandbox_id", "") or resume.sandbox_id)
+            self.template = resume.template
+            if self.sandbox_id and self._on_identity is not None:
+                self._on_identity({"sandbox": self.sandbox_id})
+            return
         self.template = launch.template
         handle, self.sandbox_timeout = _create_sandbox(
             self.config,
@@ -437,7 +521,39 @@ class E2BSandbox(Sandbox):
     def identity(self) -> Mapping[str, str]:
         return {"sandbox": self.sandbox_id} if self.sandbox_id else {}
 
+    def discard(self) -> bool:
+        """Abandon the just-reconnected sandbox (hot-path degradation).
+
+        Kills the handle within budget and forgets it, so a subsequent
+        ``open`` can create a fresh sandbox. Returns whether a live handle was
+        destroyed (``False`` with no handle or a failed kill — the caller then
+        destroys by the persisted id, and the ledger's fail-closed
+        reconciliation is the backstop).
+        """
+        handle = self._handle
+        self._handle = None
+        if handle is None:
+            return False
+        try:
+            kill_within_budget(handle.kill, what="sandbox")
+        except Exception:  # noqa: BLE001 - the ledger reconciles by id
+            logger.warning("热路径降级销毁沙箱失败，交对账兜底 sandbox=%s", self.sandbox_id)
+            return False
+        return True
+
+    def defer_destroy(self) -> None:
+        """Hand the sandbox to the conversation lease; ``close()`` must not kill."""
+        self._destroy_on_close = False
+
     def close(self) -> CleanupReport:
+        if not self._destroy_on_close:
+            # The lease owns the paused sandbox now (docs/adr/0020): the run's
+            # own resource responsibility ends with the handover, and the
+            # lease's TTL — not this run — decides when it is destroyed.
+            self._handle = None
+            return CleanupReport(
+                released=True, external=dict(self.identity())
+            )
         failures: list[str] = []
         handle = self._handle
         self._handle = None
@@ -468,6 +584,7 @@ def open_sandbox(
     workspace: Path,
     sandbox_factory: Callable[..., Any] | None = None,
     on_identity: IdentityCallback | None = None,
+    resume_factory: Callable[..., Any] | None = None,
 ) -> Sandbox:
     """The sandbox for a run's frozen ``RunSpec.executor`` (not yet opened)."""
     try:
@@ -480,4 +597,5 @@ def open_sandbox(
         workspace=workspace,
         sandbox_factory=sandbox_factory,
         on_identity=on_identity,
+        resume_factory=resume_factory,
     )

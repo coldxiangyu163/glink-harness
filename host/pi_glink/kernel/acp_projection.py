@@ -174,6 +174,91 @@ class AcpProjector:
             # sessionId/method are agent-controlled identifiers: the payload
             # leaves through the same redaction boundary as every other path.
             return self._redact_all([(events.KERNEL_STATUS, payload)])
+        if frame_type == "acp_state_channel_degraded":
+            # The adapter's archive-channel degradation notice (阶段 1): the
+            # channel was issued but the recovery fell back to the bounded
+            # files walk. Visible as a warning, never silent — the follow-up
+            # still works, the operator just lost the O(增量) path this round.
+            detail = _clip(str(frame.get("detail") or ""), DETAIL_LIMIT)
+            return self._redact_all(
+                [
+                    (
+                        events.KERNEL_STATUS,
+                        {
+                            "level": "warning",
+                            "message": "acp_state_channel_degraded",
+                            "detail": detail,
+                        },
+                    )
+                ]
+            )
+        if frame_type == "acp_state_threshold_warning":
+            # The adapter's warning-tier state notice (阶段 1 收尾，ADR 0019):
+            # an inheritance/backfill/recovery crossed the anomaly-detection
+            # warning line but was still served. Visible as a warning — the
+            # follow-up works, the operator just sees that the session's state
+            # is anomalously large. The source (inherit/backfill/recovery) and
+            # the measured shape travel in the detail.
+            detail = _clip(str(frame.get("detail") or ""), DETAIL_LIMIT)
+            source = str(frame.get("source") or "")
+            if source:
+                detail = f"[{source}] {detail}"
+            return self._redact_all(
+                [
+                    (
+                        events.KERNEL_STATUS,
+                        {
+                            "level": "warning",
+                            "message": "acp_state_threshold_warning",
+                            "detail": detail,
+                        },
+                    )
+                ]
+            )
+        if frame_type == "acp_sandbox_resume":
+            # 阶段 2（docs/adr/0020）的热/冷路径事实：追问重连了对话租约沙箱
+            # （hot），或者候选存在却降级回了新沙箱 + 回灌（cold，带原因）。
+            # hot 是 info（正常路径，观测义务）；cold 降级是 warning——追问仍被
+            # 服务，但操作员应当看见热缓存为什么丢了。
+            path = str(frame.get("path") or "cold")
+            sandbox_id = str(frame.get("sandboxId") or "")
+            reason = _clip(str(frame.get("reason") or ""), DETAIL_LIMIT)
+            if path == "hot":
+                generation = frame.get("generation")
+                detail = "追问命中对话租约沙箱（热路径）：重连上一轮泊车的沙箱，未回灌状态"
+                if sandbox_id:
+                    detail += f"；sandbox={sandbox_id}"
+                if isinstance(generation, int):
+                    detail += f"；generation={generation}"
+                return self._redact_all(
+                    [
+                        (
+                            events.KERNEL_STATUS,
+                            {
+                                "level": "info",
+                                "message": "acp_sandbox_hot_path",
+                                "detail": _clip(detail, DETAIL_LIMIT),
+                            },
+                        )
+                    ]
+                )
+            detail = "追问降级冷路径（新沙箱 + 归档回灌）"
+            if sandbox_id:
+                detail += f"；放弃的租约沙箱 sandbox={sandbox_id}"
+            if reason:
+                detail += f"：{reason}"
+            return self._redact_all(
+                [
+                    (
+                        events.KERNEL_STATUS,
+                        {
+                            "level": "warning",
+                            "message": "acp_sandbox_hot_path_degraded",
+                            "detail": _clip(detail, DETAIL_LIMIT),
+                        },
+                    )
+                ]
+            )
         if frame_type == "acp_permission":
             produced.extend(self.flush())
             produced.append((events.KERNEL_STATUS, self._permission_notice(frame)))

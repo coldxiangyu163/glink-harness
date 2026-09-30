@@ -65,6 +65,7 @@ class RunPipeline:
         sandbox_factory: Callable[[], Any],
         client_factory: Callable[[], Any],
         on_committed: Callable[[str], None],
+        sandbox_resume_factory: Callable[[], Any] | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -88,6 +89,7 @@ class RunPipeline:
             plugins=self.plugins,
             sandbox_factory=sandbox_factory,
             client_factory=client_factory,
+            sandbox_resume_factory=sandbox_resume_factory or (lambda: None),
         )
         self.prepare = PrepareStage(services)
         self.launch = LaunchStage(services)

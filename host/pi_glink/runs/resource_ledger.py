@@ -30,12 +30,21 @@ Tests inject fakes through the same constructor arguments.
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from .. import event_schema, events
 from ..config import HostConfig
+from ..kernel.conversation_lease import (
+    ConversationLease,
+    LeaseCorruptError,
+    read_lease,
+    remove_lease,
+    write_lease,
+)
 from ..ownership import DataRootOwnership, OwnershipRequired
 from ..redaction import SecretRedactor
 from ..store import FAILED, RunAlreadyTerminal, RunRecord, RunStore
@@ -332,6 +341,145 @@ class ResourceLedger:
                 confirmed = False
         return confirmed, "+".join(methods), "; ".join(details)
 
+    # -- conversation leases (docs/adr/0020) ---------------------------------
+
+    def reconcile_leases(self) -> list[str]:
+        """Destroy expired conversation leases' sandboxes (fail-closed).
+
+        The lease sweep runs beside the resource sweep on the same watch: an
+        idle lease past its TTL is destroyed **by its persisted sandbox id**
+        (the same kill-based confirm contract as the resource probe), and the
+        record is deleted only once every sandbox it names is confirmed gone —
+        a destroy that cannot be confirmed keeps the lease on the books for the
+        next tick, never silently forgotten. An unexpired lease only retries
+        its ``retiredSandboxIds`` (sandboxes a later lease replaced but could
+        not destroy). Requires the frozen E2B key: without a way to destroy,
+        the sweep leaves every lease exactly where it is.
+        """
+        if not self.config.has_e2b_key:
+            return []
+        if not self._resource_sweep_lock.acquire(blocking=False):
+            return []
+        try:
+            destroyed: list[str] = []
+            for conversation_id in self.store.conversation_ids():
+                conversation_dir = self.store.conversations_root() / conversation_id
+                try:
+                    lease = read_lease(conversation_dir)
+                except LeaseCorruptError as exc:
+                    # 不可读租约不销毁也不跳过文件：显式告警保留，沙箱归属交
+                    # 操作员裁决（fail-closed，不把不可读当作无租约静默遗忘）。
+                    logger.warning(
+                        "对话租约不可读，本轮保留待人工处置 conversation=%s: %s",
+                        conversation_id,
+                        exc,
+                    )
+                    continue
+                if lease is None:
+                    continue
+                now = time.time()
+                if not lease.is_expired(now):
+                    self._retry_retired(conversation_dir, lease)
+                    continue
+                targets = [lease.sandbox_id, *lease.retired_sandbox_ids]
+                confirmed = [
+                    self._destroy_lease_sandbox(sandbox_id) for sandbox_id in targets
+                ]
+                if all(confirmed):
+                    remove_lease(conversation_dir)
+                    destroyed.append(conversation_id)
+                    logger.info(
+                        "对话租约到期已销毁 conversation=%s sandbox=%s",
+                        conversation_id,
+                        lease.sandbox_id,
+                    )
+                else:
+                    logger.warning(
+                        "对话租约到期但沙箱未能确认销毁，保留待下轮 conversation=%s",
+                        conversation_id,
+                    )
+            return destroyed
+        finally:
+            self._resource_sweep_lock.release()
+
+    def _destroy_lease_sandbox(self, sandbox_id: str) -> bool:
+        """Kill one lease-named sandbox; only the SDK contract confirms."""
+        try:
+            confirmed, _detail = self._sandbox_probe(sandbox_id)
+        except Exception as exc:  # noqa: BLE001 - uncertainty keeps the lease
+            logger.warning(
+                "对话租约沙箱销毁探测异常，保留 sandbox=%s: %s: %s",
+                sandbox_id,
+                type(exc).__name__,
+                exc,
+            )
+            return False
+        if not confirmed:
+            logger.warning("对话租约沙箱未确认销毁，保留 sandbox=%s", sandbox_id)
+        return confirmed
+
+    def _retry_retired(self, conversation_dir: Path, lease: ConversationLease) -> None:
+        """Retry a live lease's retired sandboxes; drop the ones confirmed gone."""
+        if not lease.retired_sandbox_ids:
+            return
+        remaining = [
+            sandbox_id
+            for sandbox_id in lease.retired_sandbox_ids
+            if not self._destroy_lease_sandbox(sandbox_id)
+        ]
+        if len(remaining) == len(lease.retired_sandbox_ids):
+            return
+        updated = ConversationLease(
+            conversation_run=lease.conversation_run,
+            sandbox_id=lease.sandbox_id,
+            generation=lease.generation,
+            template=lease.template,
+            pack=lease.pack,
+            run_id=lease.run_id,
+            paused_at=lease.paused_at,
+            expires_at=lease.expires_at,
+            retired_sandbox_ids=tuple(remaining),
+        )
+        try:
+            write_lease(conversation_dir, updated)
+        except Exception:  # noqa: BLE001 - the next tick retries the retired ids
+            logger.warning(
+                "对话租约 retired 重写失败，下轮重试 conversation=%s",
+                lease.conversation_run,
+                exc_info=True,
+            )
+
+    def delete_conversation(self, root_run_id: str) -> tuple[bool, list[str]]:
+        """Delete a conversation's host state: destroy the lease, remove the dir.
+
+        The deletion link's minimal loop (docs/adr/0020): destroying the
+        conversation means destroying its paused sandbox and cleaning the
+        host-side authoritative state objects (``conversations/<root>/`` —
+        the published state and the lease). Fail-closed exactly like the
+        sweep: a sandbox the kill cannot confirm keeps the directory and the
+        lease record; the run records and event logs are a separate product
+        surface this does not touch.
+        """
+        conversation_dir = self.store.conversations_root() / root_run_id
+        if not conversation_dir.is_dir():
+            return True, []
+        try:
+            lease = read_lease(conversation_dir)
+        except LeaseCorruptError as exc:
+            # 不可读租约下删除目录会把沙箱名字一并抹掉（永久孤儿）：拒绝删除，
+            # 由操作员先处置租约（修复或确认沙箱已销毁）再删对话。
+            return False, [f"conversation lease unreadable, refusing delete: {exc}"]
+        failures: list[str] = []
+        if lease is not None:
+            for sandbox_id in (lease.sandbox_id, *lease.retired_sandbox_ids):
+                confirmed, detail = self._sandbox_probe(sandbox_id)
+                if not confirmed:
+                    failures.append(f"sandbox {sandbox_id}: {detail}")
+        if failures:
+            return False, failures
+        shutil.rmtree(conversation_dir, ignore_errors=False)
+        return True, []
+
     def start_resource_watch(self) -> threading.Thread | None:
         """Start the periodic ledger sweep (once at startup, then every interval).
 
@@ -343,7 +491,16 @@ class ResourceLedger:
         operator path stays available either way.
         """
         interval = self.config.resource_reconcile_seconds
-        if interval <= 0 or self.config.executor not in ("docker", "e2b"):
+        if (
+            interval <= 0
+            or not (
+                self.config.executor in ("docker", "e2b") or self.config.has_e2b_key
+            )
+        ):
+            # The resource sweep needs an external face; the lease sweep
+            # (docs/adr/0020) needs only the frozen E2B key — a host switched
+            # away from the e2b face still destroys the leases its data root
+            # carries. Neither runs without the face or the key.
             return None
         with self._admission_lock:
             if self._resource_watch is not None:
@@ -364,6 +521,7 @@ class ResourceLedger:
         while not stop.is_set():
             try:
                 self.reconcile_resources()
+                self.reconcile_leases()
             except Exception:  # noqa: BLE001 - a sweep must never kill the host
                 logger.exception("资源自动对账失败，保留现有持有")
             stop.wait(interval)

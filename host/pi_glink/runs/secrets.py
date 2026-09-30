@@ -40,6 +40,7 @@ from .state import LOGGER_NAME
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..egress import EgressGrant, EgressProxy
+    from ..kernel.archive_channel import ArchiveGrant
 
 logger = logging.getLogger(LOGGER_NAME)
 
@@ -59,6 +60,7 @@ class RunSecretBoundary:
         self.redactor = redactor
         self.run_id = run_id
         self._grant: EgressGrant | None = None
+        self._archive_grant: ArchiveGrant | None = None
         self._trees: tuple[tuple[str, Path], ...] = ()
         self._sessions: tuple[SessionSweep, ...] = ()
 
@@ -97,11 +99,29 @@ class RunSecretBoundary:
         self._grant = grant
         self.learn(grant.token)
 
+    def hold_archive_grant(self, grant: "ArchiveGrant") -> None:
+        """Keep the run's archive grant (``pga_``); same discipline as egress.
+
+        The token joins the redaction boundary so an archive token echoed into
+        a stream, log or report is masked like every other secret the host
+        knows; the capability itself never leaves the grant object.
+        """
+        self._archive_grant = grant
+        self.learn(grant.token)
+
     def release_grant(self, egress: "EgressProxy") -> None:
-        """Revoke the grant (idempotent). The token stays known to the redactor."""
+        """Revoke both grants (idempotent). Tokens stay known to the redactor.
+
+        The archive grant follows the egress grant's lifetime exactly: issued
+        in Prepare, revoked after the verdict commit was attempted — the
+        kernel is gone by then, and a run never runs again either way.
+        """
         grant, self._grant = self._grant, None
         if grant is not None:
             egress.revoke(grant.token)
+        archive, self._archive_grant = self._archive_grant, None
+        if archive is not None:
+            egress.revoke_archive(archive.token)
 
     # -- sweep roots (bound as the run learns them) ----------------------------
 

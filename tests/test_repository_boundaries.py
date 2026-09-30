@@ -107,12 +107,15 @@ _KERNEL_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
     "__init__.py": frozenset(),
     "acp_child_progress.py": frozenset({"zstandard"}),  # ACP 会话压缩格式的可选解码器
     "acp_e2b_env.py": frozenset({"pi_glink.artifacts", "pi_glink.redaction"}),
+    "archive_channel.py": frozenset(),  # 归档通道自足：标准库 tar/json/hashlib
     "acp_env.py": frozenset({"pi_glink.artifacts", "pi_glink.config", "pi_glink.redaction"}),
     "acp_execution.py": frozenset({"pi_glink.__version__", "pi_glink.config"}),
     "acp_projection.py": frozenset({"pi_glink.events", "pi_glink.redaction"}),
     "acp_rpc.py": frozenset(),
+    "acp_sandbox_park.py": frozenset({"pi_glink.config"}),  # 沙箱泊车只读宿主配置的 TTL
     "agent_env.py": frozenset({"pi_glink.config"}),
     "child_progress.py": frozenset(),
+    "conversation_lease.py": frozenset(),  # 租约台账事实：纯标准库，自足
     "docker_env.py": frozenset({"pi_glink.config"}),
     "e2b_env.py": frozenset({"e2b", "pi_glink.artifacts", "pi_glink.config"}),
     "execution.py": frozenset({"pi_glink.config"}),

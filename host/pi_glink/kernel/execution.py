@@ -75,6 +75,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from ..config import HostConfig
+from .archive_channel import ArchiveEndpoint
 from .child_progress import E2bChildProgressSource, PiChildProgressSource
 from .e2b_env import (
     SANDBOX_SESSIONS,
@@ -83,7 +84,7 @@ from .e2b_env import (
 )
 from .outcome import POLL_SECONDS, ExecutionOutcome
 from .rpc import PiRpcClient, PiRpcError
-from .sandbox import CleanupReport, Launch, Sandbox
+from .sandbox import CleanupReport, Launch, Sandbox, SandboxResume
 
 __all__ = [
     "ABORT_SETTLE_GRACE_SECONDS",
@@ -119,6 +120,18 @@ class ExecutionSpec:
     extra_argv: tuple[str, ...] = ()
     resume_session: str | None = None
     expected_session_id: str | None = None
+    #: The archive channel endpoint (docs/adr/0018), present only for a remote
+    #: sandbox face whose conversation state travels over the channel; the
+    #: in-process and Docker faces keep their state on the host directly and
+    #: carry ``None`` here. ``conversation_dir`` is the host-side counterpart
+    #: (where recoveries publish); always set when ``archive`` is.
+    archive: ArchiveEndpoint | None = None
+    conversation_dir: Path | None = None
+    #: The paused sandbox a follow-up may reconnect to (docs/adr/0020's hot
+    #: path), built from the conversation's lease; ``None`` everywhere else
+    #: (a first turn, a missing/expired lease, a mismatched pack or template —
+    #: those take the cold path of a fresh sandbox + backfill).
+    sandbox_resume: SandboxResume | None = None
 
 
 @dataclass(frozen=True, slots=True)

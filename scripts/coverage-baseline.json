@@ -1,6 +1,6 @@
 {
-  "percent": 92.1,
+  "percent": 92.2,
   "scope": "--cov=host/pi_glink 的语句覆盖 TOTAL（pytest 全程 + test_check_entrypoint 相关，见 scripts/check.sh）",
-  "measured": "2026-09-29",
+  "measured": "2026-09-30",
   "note": "低于该值门禁失败。主动升基线：重跑 bash scripts/check.sh 通过后读取实测总覆盖率，向下取整到 0.1 更新 percent 并提交；降低基线必须说明被替代的义务。"
 }

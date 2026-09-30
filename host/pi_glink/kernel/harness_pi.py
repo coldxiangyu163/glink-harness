@@ -33,7 +33,7 @@ from .docker_env import worker_image
 from .execution import ExecutionAdapter, ExecutionSpec, PiExecutionAdapter
 from .harness import HarnessFamily, PreparedRuntime
 from .projection import Projector
-from .sandbox import Launch, Mount, Sandbox
+from .sandbox import Launch, Mount, Sandbox, SandboxResume
 from .subagent_artifacts import (
     associate_children,
     parse_artifact_filename,
@@ -43,6 +43,7 @@ from .subagent_artifacts import (
 if TYPE_CHECKING:  # pragma: no cover - annotation only
     from ..redaction import SecretRedactor
     from .agent_env import EgressEndpoint, RunCredentials
+    from .archive_channel import ArchiveEndpoint
 
 logger = logging.getLogger("pi_glink.kernel.harness_pi")
 
@@ -123,7 +124,13 @@ class PiHarnessFamily(HarnessFamily):
         session_seed: bytes | None,
         egress: "EgressEndpoint | None",
         sandbox: Sandbox,
+        archive: "ArchiveEndpoint | None" = None,
+        resume_target: "SandboxResume | None" = None,
     ) -> PreparedRuntime:
+        # The pi family has no sandbox lease (docs/adr/0020 is an ACP/E2B
+        # shape); the parameter stays in the shared signature so the pipeline
+        # does not branch on the family.
+        del resume_target
         if egress is None:
             # The pi family never renders a real key (docs/adr/0008): without
             # an egress grant there is nothing safe to put in auth.json.

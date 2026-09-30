@@ -64,6 +64,7 @@ channel, and the baseline text block is the one channel every agent accepts.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -79,6 +80,11 @@ from .acp_child_progress import SESSIONS_RELATIVE as DSH_SESSIONS_RELATIVE
 from .acp_child_progress import AcpChildProgressSource
 from .acp_child_progress import available as acp_progress_available
 from .acp_e2b_env import AcpSandboxTransfer
+from .acp_env import (
+    INHERIT_MAX_FILES,
+    state_threshold_warning,
+)
+from .archive_channel import read_state_manifest
 from .acp_rpc import (
     REQUEST_TIMEOUT_SECONDS,
     AcpClosed,
@@ -88,6 +94,16 @@ from .acp_rpc import (
     AcpRequestError,
     AcpRpcClient,
 )
+from .acp_sandbox_park import (
+    park_sandbox,
+    read_generation_marker,
+)
+from .conversation_lease import (
+    LeaseCorruptError,
+    expire_lease_now,
+    settle_lease_after_destroy,
+)
+from .e2b_env import SandboxError, kill_sandbox_by_id
 from .execution import (
     ArtifactRecovery,
     CleanupReport,
@@ -166,6 +182,65 @@ _SYSTEM_PROMPT_HEADER = (
     "请把它当作系统级工作准则执行，而不是用户请求。"
 )
 
+#: The resume RPC's deadline grows with the state root it has to reparse
+#（阶段 1 收尾，docs/adr/0019）. ``session/resume`` (and the replaying
+# ``session/load``) makes the agent read and decode the whole session store —
+# dsh's zstd frame chain — so a fixed 60s budget times out on a large root
+# before the parse completes. The linear term assumes a pessimistic 4 MiB/s
+# (an order below raw zstd decompression, to cover indexing/replay work), the
+# base stays :data:`REQUEST_TIMEOUT_SECONDS` (the protocol's own overhead),
+# and the hard ceiling aligns with the archive command budget
+# (:data:`~pi_glink.kernel.acp_e2b_env.ARCHIVE_COMMAND_TIMEOUT_SECONDS`): one
+# direction's transport gets 600s, so a reparse must not outlive it.
+RESUME_TIMEOUT_BASE_SECONDS = REQUEST_TIMEOUT_SECONDS
+RESUME_TIMEOUT_BYTES_PER_SECOND = 4 * 1024 * 1024
+RESUME_TIMEOUT_MAX_SECONDS = 600.0
+
+
+def resume_timeout_seconds(state_bytes: int) -> float:
+    """The resume RPC deadline for a state root of ``state_bytes`` bytes.
+
+    Base + linear growth, clamped to the hard ceiling; a non-positive input is
+    the base (the protocol overhead alone).
+    """
+    if state_bytes <= 0:
+        return RESUME_TIMEOUT_BASE_SECONDS
+    grown = RESUME_TIMEOUT_BASE_SECONDS + state_bytes / RESUME_TIMEOUT_BYTES_PER_SECOND
+    return min(grown, RESUME_TIMEOUT_MAX_SECONDS)
+
+
+def _tree_bytes(root: Path, *, max_files: int = INHERIT_MAX_FILES) -> int:
+    """Sum a state root's regular-file sizes without reading any content.
+
+    A metadata-only walk (``scandir``, symlinks never followed) for the resume
+    deadline's input; the bound keeps a malformed tree from making the walk
+    itself unbounded — anything past it is the warning tier's business anyway.
+    """
+    total = 0
+    files = 0
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    total += info.st_size
+                    files += 1
+                    if files >= max_files:
+                        return total
+        except OSError:
+            continue
+    return total
+
 
 def compose_prompt(system_prompt: str, prompt: str) -> str:
     """The text block one ``session/prompt`` carries, with the working agreement.
@@ -242,6 +317,18 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         #: admission gate reads the recovered directory itself, never this
         #: frame alone.
         self._state_recovered: bool | None = None
+        #: The last state recovery's full facts (mode/volume/duration), kept
+        #: for the post-recovery ``session_ready`` payload.
+        self._state_recovery: Any | None = None
+        #: Whether the close-out may park the sandbox as the conversation's
+        #: hot cache (docs/adr/0020): set once this run's recovery **succeeded
+        #: and published** (the manifest's ``sourceRunId`` is this run). A
+        #: failed recovery parks nothing — the sandbox is destroyed, exactly as
+        #: before 阶段 2.
+        self._park_ready = False
+        #: The sandbox id the hot path reconnected to (``None`` on a cold
+        #: path); a session-ready fact and the close-out's retire check.
+        self._hot_path_sandbox: str | None = None
         self._client: AcpRpcClient | None = None
         self._driver: threading.Thread | None = None
         self._done = threading.Event()
@@ -273,6 +360,10 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         #: Which continuation method this run used (``session/resume`` or
         #: ``session/load``); ``None`` for a first turn.
         self._resume_method_used: str | None = None
+        #: The wall-clock time the continuation RPC took (阶段 1 的观测义务:
+        #: resume 耗时 = agent 端重解析重建；回灌/继承的传输耗时另由
+        #: ``stateBackfill``/``stateInherit`` 携带)。 ``None`` for a first turn.
+        self._resume_duration_ms: float | None = None
         #: ``session/load`` replays the parent's conversation as ordinary
         #: ``session/update`` notifications before it answers. Those frames are
         #: history this host already recorded for the parent run, so they must
@@ -290,22 +381,137 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
 
     # -- lifecycle ------------------------------------------------------------
 
+    def _open_sandbox(self, sandbox: Sandbox) -> bool:
+        """Open the face; ``True`` when the hot path (docs/adr/0020) held.
+
+        A follow-up with a lease candidate reconnects to the paused parent
+        sandbox first (``on_resume="reboot"``: the agent process was stopped
+        before the pause, so a disk boot is the only resume that cannot
+        resurrect a second writer) and verifies the sandbox-side generation
+        marker against the lease. Any failure — the reconnect, a missing or
+        foreign marker, a sandbox E2B already reaped — **degrades to the cold
+        path** (a fresh sandbox + the 阶段 1 backfill): the follow-up is served,
+        the degradation is visible as a ``kernel_status`` warning, and the
+        abandoned sandbox is destroyed by id (the lease expires immediately
+        when even that fails, so the reconciliation sweep retries it).
+        """
+        target = self.spec.sandbox_resume
+        if target is None:
+            sandbox.open(self.launch, timeout_seconds=self.spec.timeout_seconds + 300)
+            return False
+        try:
+            sandbox.open(
+                self.launch,
+                timeout_seconds=self.spec.timeout_seconds + 300,
+                resume=target,
+            )
+            marker = read_generation_marker(sandbox.handle)
+            expected = (target.conversation_run, target.generation)
+            if marker != expected:
+                raise SandboxError(
+                    "沙箱状态代数与租约不一致"
+                    f"（sandbox={marker!r} != lease={expected!r}）"
+                )
+        except SandboxError as exc:
+            reason = str(exc)
+            self._degrade_from_hot_path(sandbox, target, reason)
+            sandbox.open(self.launch, timeout_seconds=self.spec.timeout_seconds + 300)
+            return False
+        self._on_frame(
+            {
+                "type": "acp_sandbox_resume",
+                "path": "hot",
+                "sandboxId": target.sandbox_id,
+                "generation": target.generation,
+            }
+        )
+        self._hot_path_sandbox = target.sandbox_id
+        return True
+
+    def _degrade_from_hot_path(
+        self, sandbox: Sandbox, target: Any, reason: str
+    ) -> None:
+        """Abandon the lease sandbox and record the degradation (cold path next).
+
+        The reconnected handle (when the reconnect got that far) is killed
+        first; without a handle — the reconnect itself failed — the sandbox is
+        destroyed by its persisted id (the SDK's not-found contract counts as
+        "already gone"). The lease follows the destroy's truth: gone means the
+        record goes, an unconfirmed destroy keeps the record but expires it, so
+        the very next reconciliation tick retries.
+        """
+        destroyed = bool(sandbox.discard())
+        if not destroyed:
+            destroyed, _detail = kill_sandbox_by_id(
+                target.sandbox_id, config=self.spec.config
+            )
+        conversation_dir = self.spec.conversation_dir
+        if conversation_dir is None:  # pragma: no cover - candidates always carry one
+            return
+        if destroyed:
+            try:
+                # 销毁的只是本沙箱：租约里挂账的 retired 还在账上，只有清空了
+                # 才删整个记录（否则改写为立即过期，下轮对账收尾）。
+                settle_lease_after_destroy(conversation_dir)
+            except LeaseCorruptError as exc:
+                logger.warning(
+                    "热路径降级销毁后租约不可读，保留待人工处置 run=%s: %s",
+                    self.spec.run_id,
+                    exc,
+                )
+        else:
+            # The sandbox may still be alive and billing: keep the record and
+            # expire it now, so the very next reconciliation tick destroys it.
+            expire_lease_now(conversation_dir)
+        self._on_frame(
+            {
+                "type": "acp_sandbox_resume",
+                "path": "cold",
+                "sandboxId": target.sandbox_id,
+                "reason": reason,
+            }
+        )
+
     def start(self) -> None:
         sandbox = self.sandbox
-        sandbox.open(self.launch, timeout_seconds=self.spec.timeout_seconds + 300)
+        hot = self._open_sandbox(sandbox)
         # From here on the sandbox has persisted any identity it created, so a
         # partial start still leaves a named leftover; ``close()`` releases it.
         if sandbox.remote:
             transfer = AcpSandboxTransfer(
-                sandbox.handle, self.spec.runtime, workspace=self.spec.workspace
+                sandbox.handle,
+                self.spec.runtime,
+                workspace=self.spec.workspace,
+                archive=self.spec.archive,
+                conversation_dir=self.spec.conversation_dir,
+                run_id=self.spec.run_id,
             )
             self._transfer = transfer
+            if (
+                self.spec.resume_session
+                and self.spec.archive is not None
+                and not hot
+            ):
+                # The follow-up's state half, over the archive channel: the
+                # sandbox pulls the conversation's authoritative root itself
+                # (docs/adr/0018), before the credential upload so a credential
+                # destination always wins over anything with the same path. A
+                # face without the channel keeps the host-side inheritance
+                # copy, which ``upload_home`` delivers file by file below. The
+                # **hot** path skips this (docs/adr/0020): the reconnected
+                # sandbox already *is* the conversation's state at the lease's
+                # generation — re-pulling it would only re-transmit what the
+                # sandbox never lost.
+                transfer.backfill_state()
             transfer.upload_home()
             if self.spec.resume_session:
                 # The continuation's workspace half: the resumed agent works in
                 # the conversation's workspace (M7), so the deliverable it
-                # produced there travels into the new sandbox first.
+                # produced there travels into the new sandbox first. On the hot
+                # path the workspace never left — the upload re-delivers the
+                # same bytes and stays the one code path for both.
                 transfer.upload_continuation()
+        self._emit_state_threshold_warnings()
         spawn = sandbox.spawn(self.launch)
         client_kwargs: dict[str, Any] = {
             "cwd": spawn.cwd,
@@ -403,7 +609,16 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
             # this turn's stream.
             self._begin_replay_suppression()
         try:
-            answer = client.request(method, params, timeout=REQUEST_TIMEOUT_SECONDS)
+            # The deadline grows with the state root the agent has to reparse
+            # (阶段 1 收尾，docs/adr/0019): a fixed budget times out on a large
+            # root before the parse completes, which would read as a refusal.
+            started = time.monotonic()
+            answer = client.request(
+                method,
+                params,
+                timeout=resume_timeout_seconds(self._resume_state_bytes()),
+            )
+            self._resume_duration_ms = round((time.monotonic() - started) * 1000, 1)
         finally:
             replayed = self._end_replay_suppression()
         self._session_id = session_id
@@ -432,6 +647,66 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         also accept the resume.
         """
         return acp_resume_method(self._capabilities)
+
+    def _resume_state_bytes(self) -> int:
+        """The bytes the agent will reparse on a continuation (three faces).
+
+        In-process and Docker: the run's own HOME after the inheritance copy —
+        that tree *is* the session store. Remote with the archive channel: the
+        backfilled conversation state plus the freshly rendered HOME (the
+        sandbox's state root is both). The **hot** path (docs/adr/0020) has no
+        backfill facts — the sandbox already carries the state — so the
+        conversation's published manifest supplies the volume the agent is
+        about to reparse. Symlinks are never followed and the walk stops at
+        the inheritance file bound: the tree that exceeds it is the anomaly
+        the warning tier already reports, not a reason to walk forever.
+        """
+        total = 0
+        home = getattr(self.spec.runtime, "home", None)
+        if home is not None:
+            total += _tree_bytes(Path(home))
+        backfill = getattr(self._transfer, "backfill_facts", None) if self._transfer else None
+        if backfill:
+            total += int(backfill.get("bytes") or 0)
+        elif self._hot_path_sandbox is not None and self.spec.conversation_dir is not None:
+            manifest = read_state_manifest(self.spec.conversation_dir)
+            if manifest is not None:
+                total += int(manifest.get("bytes") or 0)
+        return total
+
+    def _emit_state_threshold_warnings(self) -> None:
+        """Emit the warning-tier state notices the run opened with (ADR 0019).
+
+        Two sources exist by the time the agent starts: the inheritance copy
+        (in-process/Docker, ``runtime.inherit_facts``) and the archive-channel
+        backfill (remote, ``transfer.backfill_facts``). A warning never refuses
+        anything — the follow-up is served — but it must be visible in the
+        event stream instead of silently crossing a bound that size says is
+        anomalous.
+        """
+        inherit = getattr(self.spec.runtime, "inherit_facts", None)
+        if isinstance(inherit, Mapping) and inherit.get("warning"):
+            self._on_frame(
+                {
+                    "type": "acp_state_threshold_warning",
+                    "source": "inherit",
+                    "detail": str(inherit["warning"]),
+                }
+            )
+        backfill = getattr(self._transfer, "backfill_facts", None) if self._transfer else None
+        if isinstance(backfill, Mapping):
+            warning = state_threshold_warning(
+                files=int(backfill.get("files") or 0),
+                total_bytes=int(backfill.get("bytes") or 0),
+            )
+            if warning:
+                self._on_frame(
+                    {
+                        "type": "acp_state_threshold_warning",
+                        "source": "backfill",
+                        "detail": warning,
+                    }
+                )
 
     def _begin_replay_suppression(self) -> None:
         with self._replay_lock:
@@ -542,15 +817,51 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         payload.update(self.sandbox.session_facts())
         if self._state_recovered is not None:
             # Set once the state root has been recovered to the host (or the
-            # recovery failed): the durable ``acp-agent/recovered`` mirror is
-            # what a follow-up inherits.
+            # recovery failed): the durable published state (the conversation
+            # root since 阶段 1, the legacy ``acp-agent/recovered`` mirror
+            # before it) is what a follow-up inherits.
             payload["stateRootRecovered"] = self._state_recovered
+        transfer = self._transfer
+        backfill = getattr(transfer, "backfill_facts", None) if transfer else None
+        if backfill:
+            # The archive-channel backfill's facts (files/bytes/duration), for
+            # the run's own event stream — 阶段 1 的观测义务：回灌耗时进事件流。
+            payload["stateBackfill"] = dict(backfill)
+        inherit = getattr(self.spec.runtime, "inherit_facts", None)
+        if isinstance(inherit, Mapping):
+            # The host-side inheritance copy's facts (in-process/Docker — 阶段 1
+            # 的观测义务：继承即本族在那些面上的传输，耗时与体量进事件流;
+            # remote faces with the channel answer ``stateBackfill`` instead).
+            payload["stateInherit"] = dict(inherit)
+        if self._resume_duration_ms is not None:
+            # The continuation RPC's own wall clock (dsh's reparse/rebuild),
+            # separate from the transports above — 阶段 1 的观测义务：resume
+            # 耗时区分传输与解析。
+            payload["resumeDurationMs"] = self._resume_duration_ms
+        if self._state_recovery is not None and self._state_recovery.ok:
+            # The recovery's own facts: which path produced it (archive
+            # incremental/full or the files fallback), its volume and duration.
+            payload["stateRecovery"] = {
+                "mode": self._state_recovery.mode,
+                "files": len(self._state_recovery.files),
+                "bytes": self._state_recovery.bytes,
+                "durationMs": self._state_recovery.duration_ms,
+            }
         if self._resume_method_used is not None:
             # A continuation's session id is the parent's own id, so the run
             # record can prove the agent reattached to exactly that session
             # rather than opening a new one.
             payload["resumed"] = True
             payload["resumeMethod"] = self._resume_method_used
+        if self._hot_path_sandbox is not None:
+            # 阶段 2 的观测义务：本轮追问走的是热路径（重连泊车沙箱，未回灌）。
+            # The ``cold`` degradations are visible as their own
+            # ``kernel_status`` warning (``acp_sandbox_resume`` frame).
+            payload["sandboxResume"] = {
+                "path": "hot",
+                "sandboxId": self._hot_path_sandbox,
+                "backfilled": False,
+            }
         return SessionInfo(payload=payload, session_id=self._session_id, session_file=None)
 
     def deliver_input(self) -> None:
@@ -816,16 +1127,71 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         )
         # The sandbox destroys the agent state with it, so the state root is
         # recovered in the same pre-teardown window as the workspace. A failed
-        # recovery publishes no recovered root, which is exactly the
-        # fail-closed refusal a follow-up then earns.
+        # recovery publishes nothing, which is exactly the fail-closed refusal
+        # a follow-up then earns.
         state = transfer.recover_state()
         self._state_recovered = state.ok
+        self._state_recovery = state
+        if state.ok:
+            # 阶段 2（docs/adr/0020）的泊车前提：本轮回收不仅成功，而且由本 run
+            # 自己发布（manifest 的 sourceRunId）——租约的代数必须描述权威状态，
+            # 而不是某个回收失败后留在沙箱里的旧状态。files 降级路径的发布同样
+            # 带本 run 的 manifest（发布即真相），因此也可泊车。
+            self._park_ready = self._published_this_run()
+        if state.ok and state.mode == "files-fallback" and self.spec.archive is not None:
+            # 阶段 1 的降级事实必须可见（裁决）：通道在而回收走了 files 逐文件，
+            # 说明通道失败——观测上等价于一次退化，发 kernel_status 而不是
+            # 静默吞掉。追问不受影响（发布仍然成功）。
+            self._on_frame(
+                {
+                    "type": "acp_state_channel_degraded",
+                    "detail": (
+                        "归档通道回收失败，本轮已降级为 files 逐文件回收"
+                        f"（{state.files and len(state.files) or 0} 个文件，"
+                        f"{state.bytes} 字节）；追问仍可续接"
+                    ),
+                }
+            )
+        if state.ok:
+            # The recovery's own warning-tier check (ADR 0019): a state that
+            # crossed the warning line but still published is served to the
+            # next follow-up — visibly, not silently.
+            warning = state_threshold_warning(
+                files=len(state.files), total_bytes=state.bytes
+            )
+            if warning:
+                self._on_frame(
+                    {
+                        "type": "acp_state_threshold_warning",
+                        "source": "recovery",
+                        "detail": warning,
+                    }
+                )
         return ArtifactRecovery(
             files=tuple(files),
             failures=tuple(failures) + state.failures,
             state_recovered=state.ok,
             secrets=state.secrets,
         )
+
+    def _published_this_run(self) -> bool:
+        """Whether the conversation's published manifest names this run.
+
+        The parking precondition (docs/adr/0020): the sandbox's state is only
+        a hot cache for authoritative state that **this run** published. A
+        recovery that succeeded while the manifest still names an earlier run
+        (the legacy layout, a hand-placed state) parks a sandbox the follow-up
+        gate would refuse anyway.
+        """
+        conversation_dir = self.spec.conversation_dir
+        if conversation_dir is None:
+            return False
+        manifest = read_state_manifest(conversation_dir)
+        if manifest is None:
+            # The legacy per-run layout (pre-阶段 1): nothing conversation-level
+            # was published, so there is no authoritative state to cache.
+            return False
+        return manifest.get("sourceRunId") == self.spec.run_id
 
     def recovered_session(self) -> SessionInfo | None:
         # The state-root recovery verdict exists only once a remote sandbox's
@@ -880,14 +1246,108 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
                 # The client has reaped the child: a pending stream-loss report
                 # gets its exit status here, where that status really exists.
                 self._complete_kernel_exit(client, exit_code)
+        lease_payload = self._park_sandbox()
         # Client first (stop the agent), then the carrier: the sandbox
-        # force-removes the container by its persisted name or kills the E2B
-        # sandbox. Either failure is reported, never swallowed.
+        # force-removes the container by its persisted name or hands the E2B
+        # sandbox to the conversation lease (paused, docs/adr/0020) instead of
+        # killing it. Either failure is reported, never swallowed.
         self._transfer = None
         failures.extend(self.sandbox.close().failures)
         return CleanupReport(
-            released=not failures, failures=tuple(failures), external=dict(self.identity())
+            released=not failures,
+            failures=tuple(failures),
+            external=dict(self.identity()),
+            lease=lease_payload,
         )
+
+    def _park_sandbox(self) -> Mapping[str, Any] | None:
+        """Park this run's sandbox as the conversation's hot cache (ADR 0020).
+
+        Runs inside ``close()`` after the agent process is reaped, before the
+        carrier teardown. Eligibility: the E2B face, a conversation directory
+        (the lease's home), and a recovery this run itself published. A parking
+        failure degrades to the destroy (the cold-path semantics) and the fact
+        rides on the cleanup report — never as a failure that would keep the
+        run holding a slot for a sandbox that is already gone.
+        """
+        if self.sandbox.kind != "e2b" or self.spec.conversation_dir is None:
+            return None
+        if not self._park_ready or not self._sandbox_parkable():
+            return None
+        handle = self.sandbox.handle
+        if handle is None:
+            return None
+        reclaim_failure = self._reclaim_after_agent_stop()
+        if reclaim_failure is not None:
+            # 停机后增量发布失败 = 沙箱可能持有宿主不知道的状态：不泊车，
+            # 沙箱按冷路径销毁，宿主权威状态保持唯一（cc 终审 B1）。
+            return {
+                "parked": False,
+                "reason": f"post-close reclaim failed: {reclaim_failure}",
+            }
+        outcome = park_sandbox(
+            handle,
+            config=self.spec.config,
+            conversation_dir=self.spec.conversation_dir,
+            conversation_run=self._conversation_run(),
+            sandbox_id=self.sandbox.session_facts().get("sandboxId", ""),
+            template=str(self.sandbox.session_facts().get("template") or ""),
+            pack=self.spec.config.harness_pack,
+            run_id=self.spec.run_id,
+            credential_dests=tuple(
+                getattr(self.spec.runtime, "credential_dests", ()) or ()
+            ),
+            kill_by_id=lambda sandbox_id: kill_sandbox_by_id(
+                sandbox_id, config=self.spec.config
+            ),
+        )
+        # 泊车的每一步失败都由 ``park_sandbox`` 内部处理为销毁降级（已含写盘
+        # 与 pause 失败）；这里不另设防御分支——若未来出现新的异常面，让它
+        # 冒泡进 close 的护栏（released=False 保持持有）比吞成静默降级更诚实。
+        if outcome.ok:
+            assert outcome.lease is not None
+            # The lease owns the paused sandbox from here: the carrier's close
+            # hands it over instead of killing it.
+            self.sandbox.defer_destroy()
+            return outcome.lease.payload()
+        payload: dict[str, Any] = {"parked": False, "reason": outcome.reason}
+        if not outcome.destroyed:
+            payload["destroyFailed"] = True
+        return payload
+
+    def _reclaim_after_agent_stop(self) -> str | None:
+        """Re-reclaim after the agent stopped; ``None`` = OK, else the reason.
+
+        The first recovery (RecoverStage) runs while the agent is still alive;
+        an exit-time flush (dsh writing its session log or index on shutdown)
+        between that recovery and the process exit would leave the parked
+        sandbox holding state the host manifest does not know — the sandbox
+        would silently be the newer authority and the hot/cold paths would
+        diverge. Parking therefore re-runs the incremental reclaim **after**
+        the client reaped the agent and **before** pausing: the delta is
+        whatever the agent wrote on exit; a failed or non-publishing reclaim
+        refuses to park (cold-path semantics keep the host authoritative).
+        """
+        transfer = self._transfer
+        if transfer is None:
+            return "no transfer"
+        try:
+            recovery = transfer.recover_state()
+        except Exception as exc:  # noqa: BLE001 - reported, drives the park refusal
+            return f"{type(exc).__name__}: {exc}"
+        if not recovery.ok:
+            return "; ".join(recovery.failures) or "recovery failed"
+        return None
+
+    def _sandbox_parkable(self) -> bool:
+        """Only an ACP-family E2B run parks (the lease is an ACP shape)."""
+        return self.spec.config.harness == "acp" and self.sandbox.remote
+
+    def _conversation_run(self) -> str:
+        """The conversation's root run id (the lease's owner key)."""
+        conversation_dir = self.spec.conversation_dir
+        assert conversation_dir is not None
+        return conversation_dir.name
 
     # -- agent -> client ------------------------------------------------------
 

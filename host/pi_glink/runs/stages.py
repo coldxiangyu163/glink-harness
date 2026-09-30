@@ -39,7 +39,10 @@ from ..artifacts import ArtifactError, ArtifactMissing, ArtifactTree, deliverabl
 from ..config import ConfigError, HostConfig
 from ..contracts import FollowupUnavailable, Verdict
 from ..egress import MODEL_ROUTE, SEARCH_ROUTE, EgressProxy
+from ..kernel.acp_env import credential_destinations
+from ..kernel.archive_channel import ArchiveEndpoint
 from ..kernel.agent_env import RunCredentials
+from ..kernel.harness_acp import AcpHarnessFamily
 from ..kernel.execution import CleanupReport, ExecutionAdapter, ExecutionSpec
 from ..kernel.harness import (
     EgressEndpoint,
@@ -98,6 +101,10 @@ class StageServices:
     plugins: Callable[[RunExecution], "tuple[RunPlugin, ...]"]
     sandbox_factory: Callable[[], Any]
     client_factory: Callable[[], Any]
+    #: The E2B reconnect factory for the hot path (docs/adr/0020); lazily read
+    # like ``sandbox_factory`` so tests substitute it after construction.
+    # ``None`` means the SDK's own class method (production).
+    sandbox_resume_factory: Callable[[], Any] = lambda: None
 
     def family(self, execution: RunExecution) -> HarnessFamily:
         return self.admission.family_of(execution.record)
@@ -157,6 +164,7 @@ class PrepareStage:
             workspace=execution.workspace,
             sandbox_factory=self.s.sandbox_factory(),
             on_identity=lambda identity: store_identity(self.s.store, execution, identity),
+            resume_factory=self.s.sandbox_resume_factory(),
         )
         runtime = self.prepare_runtime(execution, sandbox)
         adapter = self.build_adapter(execution, runtime, sandbox)
@@ -222,6 +230,31 @@ class PrepareStage:
             if family.uses_egress
             else None
         )
+        # The archive channel (docs/adr/0018) exists only where the sandbox can
+        # reach the host's listener; a face without that reach degrades to the
+        # host-side inheritance copy, which is exactly the pre-channel ability.
+        archive = (
+            self.archive_endpoint(execution, sandbox, secrets)
+            if family.name == "acp" and sandbox.remote
+            else None
+        )
+        execution.archive_endpoint = archive
+        # 阶段 2（docs/adr/0020）：追问的热路径候选。判定在归档通道就绪之后、
+        # runtime 渲染之前——命中候选时族不再继承父状态（状态在泊车沙箱里），
+        # 若 start 阶段降级，冷路径用阶段 1 的通道回灌补上。无通道（无 public
+        # URL）不启用热路径：降级路径必须是完整的阶段 1 回灌，而不是一个已经
+        # 跳过了继承的 run。
+        resume_target = (
+            family.sandbox_resume_target(parent)
+            if (
+                isinstance(family, AcpHarnessFamily)
+                and archive is not None
+                and parent is not None
+                and execution.record.spec.executor == "e2b"
+            )
+            else None
+        )
+        execution.sandbox_resume = resume_target
         prepared = family.prepare_runtime(
             run_id,
             run_dir,
@@ -229,6 +262,8 @@ class PrepareStage:
             session_seed=execution.session_seed,
             egress=egress,
             sandbox=sandbox,
+            archive=archive,
+            resume_target=resume_target,
         )
         execution.runtime = prepared.runtime
         secrets.bind_runtime(prepared.runtime)
@@ -266,6 +301,45 @@ class PrepareStage:
             search_base_url=f"{origin}/{SEARCH_ROUTE}" if grant.has_search else None,
         )
 
+    def archive_endpoint(
+        self,
+        execution: RunExecution,
+        sandbox: Sandbox,
+        secrets: "RunSecretBoundary",
+    ) -> ArchiveEndpoint | None:
+        """Issue the run's archive grant and describe it as the sandbox sees it.
+
+        The grant binds the run to its conversation's state directory and
+        carries the credential destinations an archive must never contain. A
+        remote face without a reachable origin (no public URL) answers ``None``
+        — the run keeps the host-side inheritance path instead of being
+        refused; the token never travels outside the grant/secrets objects.
+        """
+        egress = self.s.egress
+        family = self.s.family(execution)
+        assert isinstance(family, AcpHarnessFamily)  # the only family here
+        conversation_dir = self.s.store.conversation_dir(
+            family.conversation_root(execution.record)
+        )
+        # The issue binds the shared listener; only then does a port exist.
+        grant = egress.issue_archive(
+            run_id=execution.record.run_id,
+            conversation_dir=conversation_dir,
+            credential_dests=credential_destinations(self.s.config),
+        )
+        port = egress.port
+        try:
+            if port is None:  # pragma: no cover - issue() binds the listener
+                egress.revoke_archive(grant.token)
+                return None
+            origin = sandbox.egress_origin(port).rstrip("/")
+        except ConfigError:
+            egress.revoke_archive(grant.token)
+            return None
+        secrets.hold_archive_grant(grant)
+        execution.conversation_dir = conversation_dir
+        return ArchiveEndpoint(origin=origin, token=grant.token)
+
     def build_adapter(
         self, execution: RunExecution, runtime: HarnessRuntime, sandbox: Sandbox
     ) -> ExecutionAdapter:
@@ -299,6 +373,11 @@ class PrepareStage:
             # recorded, against the state root inherited in prepare_runtime.
             resume_session=family.resume_value(parent),
             expected_session_id=parent.session_id if parent else None,
+            archive=execution.archive_endpoint,
+            conversation_dir=execution.conversation_dir,
+            # 阶段 2（docs/adr/0020）：热路径候选（泊车沙箱），由
+            # ``prepare_runtime`` 前的候选判定写入；adapter 校验代数后重连。
+            sandbox_resume=execution.sandbox_resume,
         )
         return family.build_adapter(
             spec,
@@ -758,6 +837,11 @@ class CommitStage:
                 "failures": list(cleanup.failures),
                 "external": dict(cleanup.external),
             }
+            if cleanup.lease is not None:
+                # 阶段 2（docs/adr/0020）：泊车事实随终帧留存——沙箱已作为对话
+                # 租约暂停（或泊车失败降级销毁的原因）。租约不占 run 槽位：
+                # released 为 true 时资源台账不把它算作持有。
+                cleanup_payload["lease"] = dict(cleanup.lease)
         else:
             # The Recover stage never ran (a close-out crash before it): no
             # cleanup was attempted, so the truth is "unknown", not

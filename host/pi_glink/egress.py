@@ -43,12 +43,22 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Mapping
 
+from .kernel.archive_channel import (
+    ARCHIVE_KIND_STATE,
+    ARCHIVE_READ_TIMEOUT_SECONDS,
+    ArchiveChannel,
+    ArchiveGrant,
+)
+
 logger = logging.getLogger("pi_glink.egress")
 
 #: Route prefixes (the kernel-view base URLs are ``<origin>/model`` and
 #: ``<origin>/search``).
 MODEL_ROUTE = "model"
 SEARCH_ROUTE = "search"
+#: The archive routes (``/archive/state``) served for the ACP sandbox face
+#: (docs/adr/0018). Same listener, separate capability (``pga_`` tokens).
+ARCHIVE_ROUTE = "archive"
 #: Request body ceiling; model requests carry the whole context.
 MAX_REQUEST_BYTES = 32 * 1024 * 1024
 #: How much of a non-streamed JSON response is kept for usage parsing.
@@ -153,6 +163,10 @@ class EgressProxy:
         self.host = host
         self._configured_port = port
         self._quota_for = quota_for or (lambda _tenant: EgressQuota())
+        #: The archive channel rides the same listener but keeps its own
+        #: grant table, so an egress token can never move state and an
+        #: archive token can never reach an upstream (docs/adr/0018).
+        self.archive = ArchiveChannel()
         #: sha256(token) -> grant. Looking a grant up by the token's digest
         #: keeps the comparison off the raw secret.
         self._grants: dict[str, EgressGrant] = {}
@@ -207,13 +221,46 @@ class EgressProxy:
         """
         with self._lock:
             grant = self._grants.pop(_digest(token), None)
-            if not self._grants:
+            if not self._grants and not self.archive.live_grants:
                 self._stop_listening()
         return grant.usage() if grant is not None else None
 
     def grant_for(self, token: str) -> EgressGrant | None:
         with self._lock:
             return self._grants.get(_digest(token))
+
+    # -- archive grants ---------------------------------------------------------
+
+    def issue_archive(
+        self,
+        *,
+        run_id: str,
+        conversation_dir: Any,
+        credential_dests: tuple[str, ...] = (),
+    ) -> ArchiveGrant:
+        """Mint one run's archive token (binding the shared listener).
+
+        The archive capability is scoped to exactly one conversation's state
+        directory and this run's publish identity; it carries no upstream
+        credential and never grants the model/search routes.
+        """
+        grant = self.archive.issue(
+            run_id=run_id,
+            conversation_dir=conversation_dir,
+            credential_dests=credential_dests,
+        )
+        with self._lock:
+            self._ensure_listening()
+        return grant
+
+    def revoke_archive(self, token: str) -> ArchiveGrant | None:
+        """Invalidate one archive token; the listener follows the shared rule."""
+        grant = self.archive.revoke(token)
+        if grant is not None:
+            with self._lock:
+                if not self._grants and not self.archive.live_grants:
+                    self._stop_listening()
+        return grant
 
     @property
     def port(self) -> int | None:
@@ -223,6 +270,7 @@ class EgressProxy:
     def close(self) -> None:
         with self._lock:
             self._grants.clear()
+            self.archive.close()
             self._stop_listening()
 
     def _ensure_listening(self) -> None:
@@ -348,6 +396,9 @@ class _EgressHandler(BaseHTTPRequestHandler):
 
     def _handle(self) -> None:
         proxy = self.server.proxy
+        if self.path.split("/", 3)[:2] == ["", ARCHIVE_ROUTE]:
+            self._archive()
+            return
         route = self._route()
         if route is None:
             self._refuse(404, "unknown_route")
@@ -392,6 +443,77 @@ class _EgressHandler(BaseHTTPRequestHandler):
             self._refuse(429, "quota_exceeded")
             return
         self._forward(proxy, grant, name, suffix, body)
+
+    def _archive(self) -> None:
+        """One archive request: POST (reclaim) or GET (backfill) on /archive/state.
+
+        The token is archive-scoped (``pga_``): an egress token is not accepted
+        here and an archive token is not accepted on the model/search routes
+        (those look a different table up and answer 401). Bodies stream to disk
+        with a socket read timeout, and the response never echoes the token.
+        """
+        proxy = self.server.proxy
+        split = urllib.parse.urlsplit(self.path)
+        parts = split.path.split("/")
+        if (
+            len(parts) != 3
+            or parts[0] != ""
+            or parts[1] != ARCHIVE_ROUTE
+            or parts[2] != ARCHIVE_KIND_STATE
+            or split.query
+            or "\\" in split.path
+        ):
+            self._refuse(404, "unknown_route")
+            return
+        token = self._token()
+        grant = proxy.archive.grant_for(token) if token else None
+        if grant is None:
+            self._refuse(401, "invalid_token")
+            return
+        try:
+            # A held-open socket must not pin the handler thread forever.
+            self.connection.settimeout(ARCHIVE_READ_TIMEOUT_SECONDS)
+        except OSError:  # pragma: no cover - defensive
+            pass
+        if self.command == "POST":
+            if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+                self._refuse(411, "length_required")
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                self._refuse(400, "bad_length")
+                return
+            if length <= 0:
+                self._refuse(400, "bad_length")
+                return
+            try:
+                facts = proxy.archive.receive(grant, self.rfile, length=length)
+            except Exception as exc:  # noqa: BLE001 - one bounded error reply
+                logger.warning(
+                    "archive receive failed run=%s: %s", grant.run_id, type(exc).__name__
+                )
+                self._refuse(413 if "超过上限" in str(exc) else 400, "archive_rejected")
+                return
+            body = json.dumps({"status": "published", **facts}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.command == "GET":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-tar")
+            self.end_headers()
+            try:
+                proxy.archive.serve(grant, self.wfile)
+            except (OSError, ValueError) as exc:
+                logger.info(
+                    "archive serve ended early run=%s: %s", grant.run_id, type(exc).__name__
+                )
+            return
+        self._refuse(405, "method_not_allowed")
 
     def _forward(
         self, proxy: EgressProxy, grant: EgressGrant, name: str, suffix: str, body: bytes

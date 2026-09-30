@@ -649,6 +649,78 @@ def _default_sandbox_factory() -> Callable[..., Any]:
     return factory
 
 
+def _default_resume_factory() -> Callable[..., Any]:
+    def factory(**kwargs: Any) -> Any:
+        from e2b import Sandbox
+
+        # The SDK's class-method variant: connect by sandbox id, resuming a
+        # paused sandbox on the way in (docs/adr/0020's hot path).
+        return Sandbox.connect(**kwargs)
+
+    return factory
+
+
+def resume_sandbox(
+    config: HostConfig,
+    *,
+    sandbox_id: str,
+    timeout_seconds: int | None,
+    resume_factory: Callable[..., Any] | None = None,
+) -> tuple[Any, int]:
+    """Reconnect to a paused sandbox as the conversation's hot cache.
+
+    The mirror of :func:`_create_sandbox` for the hot path (docs/adr/0020):
+    same credential flow (the frozen key over ``**opts``), same lifetime
+    ceiling, one difference — ``on_resume="reboot"`` cold-boots from the
+    persisted filesystem instead of restoring a memory snapshot. The parked
+    sandbox was paused with ``keep_memory=False`` and its agent process was
+    already stopped by the host, so there is no memory state worth restoring
+    and no process the host could ever reattach to; a disk boot is the only
+    resume that cannot resurrect a second writer. A control plane that rejects
+    the option or cannot resume raises, and the caller degrades to the cold
+    path (a fresh sandbox + the 阶段 1 backfill).
+    """
+    if not sandbox_id:
+        raise SandboxError("热路径缺少 sandbox_id")
+    if not config.has_e2b_key:
+        raise ConfigError("E2B_API_KEY 未配置")
+    factory = resume_factory or _default_resume_factory()
+    adapter_bound = int(timeout_seconds or 0)
+    ceiling = int(
+        config.e2b_sandbox_timeout_seconds or (config.task_timeout_seconds + 300)
+    )
+    timeout = min(adapter_bound, ceiling) if adapter_bound > 0 else ceiling
+    connect_kwargs: dict[str, Any] = {
+        "sandbox_id": sandbox_id,
+        "timeout": timeout,
+        "on_resume": "reboot",
+    }
+    if config.e2b_api_key:
+        connect_kwargs["api_key"] = config.e2b_api_key
+    try:
+        return factory(**connect_kwargs), int(timeout)
+    except Exception as exc:  # noqa: BLE001 - the caller degrades to cold path
+        raise SandboxError(
+            f"热路径沙箱恢复失败: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def kill_sandbox_by_id(
+    sandbox_id: str, *, config: HostConfig | None = None, api_key: str = ""
+) -> tuple[bool, str]:
+    """Destroy one sandbox by id (the lease sweep's fail-closed hammer).
+
+    Reuses the ledger's kill-based probe contract — only the SDK's own
+    not-found types confirm a sandbox is gone — so an expired lease's sandbox
+    is either confirmed destroyed or honestly left on the books for the next
+    tick. ``config`` and ``api_key`` mirror :func:`confirm_sandbox_absent`'s
+    two credential sources (the frozen configuration in production, a bare key
+    in tests).
+    """
+    key = api_key or (config.e2b_api_key if config is not None else "")
+    return confirm_sandbox_absent(sandbox_id, api_key=key)
+
+
 def _entry_kind(entry: Any) -> str:
     """The SDK's entry kind as a plain lowercase string.
 
@@ -1022,6 +1094,20 @@ def _is_not_found(exc: BaseException) -> bool:
     """
     not_found = _not_found_types()
     return bool(not_found) and isinstance(exc, not_found)
+
+
+def is_file_not_found(exc: BaseException) -> bool:
+    """True only for the SDK's file-not-found exception type.
+
+    The same type-based discipline as :func:`_is_not_found`, for the files
+    API's ``remove``: a path that is already gone is a successful delete,
+    while a transport error whose text mentions "not found" is a failure.
+    """
+    try:
+        from e2b import FileNotFoundException
+    except Exception:  # noqa: BLE001 - the SDK is an optional dependency
+        return False
+    return isinstance(exc, FileNotFoundException)
 
 
 def sandbox_available() -> tuple[bool, str]:

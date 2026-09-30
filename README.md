@@ -38,7 +38,10 @@
 完成后在同一对话发送追问会提交 `POST /api/runs {"prompt":"…","parentRunId":"<上一轮 runId>"}`，
 返回新 run 的 `parentRunId`。它复制上一轮经安全校验的会话副本，通过 pi 官方 `--session` 续接，
 不会另起会话或改写旧 run；侧栏按研究汇总，旧报告仍可打开。会话记录不可续接时返回
-`409 session_unavailable`，从旧轮分叉返回 `409 stale_run`。多租户模式下 `parentRunId` 只允许属于调用者
+`409 session_unavailable`，从旧轮分叉返回 `409 stale_run`。ACP 族的多轮会话状态由宿主持有
+（e2b 面经归档通道增量回收/回灌，上限是异常检测三分支：越过警告线只发 `kernel_status` 警告
+照常续接，真正异常量级才拒绝，见 [ADR 0018](docs/adr/0018-conversation-state-archive-channel.md)/
+[0019](docs/adr/0019-acp-state-bounds-warning-tier-and-adaptive-resume.md)）。多租户模式下 `parentRunId` 只允许属于调用者
 自己租户的父 run：未知/异租户/无 owner 的父 run 统一返回 `404 unknown_run`，且在确认所有者之前不读取
 它的会话、报告、状态或子 run 计数。
 收尾顺序固定为「产物回收 → 销毁执行面 → 安全校验并落盘报告 → 凭据清扫 → 终态与释放」。
@@ -129,7 +132,10 @@ scripts/run-local-web.sh --mark-released <runId> --note "已核对容器/沙箱�
 多租户模式把持有计入其 owner 租户与全局槽位，额度用尽时返回 `429 quota_exceeded`。Docker/E2B 宿主会按
 记录里持久化的容器名/沙箱 id 周期性自动对账（`PI_GLINK_RESOURCE_RECONCILE_SECONDS`，默认 60 秒，0 关闭；
 只探测、不猜名字），确认资源不存在后归还额度；核对真实资源后也可用 `--mark-released` 记录人工裁决。
-`--unreleased` 列出待核对项。run 记录与事件存放在 `<数据根>/runs/runs.db`（SQLite）；此前版本的
+`--unreleased` 列出待核对项。归档通道部署下，E2B 面 ACP run 收尾会把沙箱**泊车**为对话热缓存
+（`pause`，闲置 TTL `PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS` 默认 7200 秒、0 禁用）：追问优先重连原沙箱
+（热路径，省新沙箱与回灌），失败降级冷路径；泊车不占运行额度，到期由同一对账线程按沙箱 id 销毁
+（[ADR 0020](docs/adr/0020-conversation-sandbox-lease-hot-path.md)）。run 记录与事件存放在 `<数据根>/runs/runs.db`（SQLite）；此前版本的
 `runs/<id>/meta.json` / `events.jsonl` 与 `<数据根>/sessions/` 不再被读取，旧 run 不可见、不可追问，不提供迁移。
 
 ## 运行一次真实研究

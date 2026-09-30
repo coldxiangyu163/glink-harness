@@ -42,8 +42,10 @@ from __future__ import annotations
 import logging
 import os
 import shlex
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Mapping
 
 from ..config import ConfigError, HostConfig
 from ..redaction import (
@@ -68,15 +70,15 @@ ACP_HOME_DIRNAME = "home"
 #: exclusive at startup).
 DSH_CREDENTIALS_RELATIVE = ".dsh/.credentials.yaml"
 #: A state root recovered from an E2B sandbox, below
-#: :data:`ACP_RUNTIME_DIRNAME`. Only the E2B face writes it, and only after the
-#: whole bounded recovery succeeded (see
-#: :meth:`~pi_glink.kernel.acp_e2b_env.AcpSandboxTransfer.recover_state`): the
-#: sandbox destroys the agent's own state with it, so the host needs its own
-#: copy before that happens — and the directory's existence is the durable
-#: "父状态根回收成功" fact the ACP admission gate reads. It is a separate root
-#: from :data:`ACP_HOME_DIRNAME` so the rendered credential copies (and, for a
-#: follow-up, the inherited state that was uploaded) are never confused with
-#: what the sandbox actually wrote.
+#: :data:`ACP_RUNTIME_DIRNAME`. Before 阶段 1 (docs/adr/0018) the E2B face
+#: published every run's bounded recovery here and the directory's existence
+#: was the durable "父状态根回收成功" fact the admission gate read. 阶段 1 起
+#: recoveries publish to the conversation root instead
+#: (``conversations/<根run>/state``); runs recovered by the old code keep this
+#: mirror and it stays readable as the legacy inheritance source, so it is a
+#: separate root from :data:`ACP_HOME_DIRNAME` for the same reason it always
+#: was: the rendered credential copies are never confused with what the
+#: sandbox actually wrote.
 ACP_RECOVERED_DIRNAME = "recovered"
 #: Upper bound on one copied credential file. A credential store is small;
 #: a bigger file is refused instead of silently consumed/stored.
@@ -89,29 +91,93 @@ OVERLAY_MAX_ENTRIES = 512
 OVERLAY_MAX_FILE_BYTES = 100 * 1024
 OVERLAY_MAX_TOTAL_BYTES = 4 * 1024 * 1024
 
-#: Continuation state inherited from a parent run is bounded on all three axes
-#: (file count, one file, total bytes). A research agent's own state is small;
-#: the bounds keep one run's cache — or a hostile session file — from making the
-#: next run copy without limit. Exceeding any bound refuses the follow-up
-#: instead of silently resuming from a partial state. The per-file bound is the
-#: E2B face's upload ceiling (``e2b_env.UPLOAD_MAX_BYTES``), so a state root that
-#: inherits on one face is not undeliverable on another.
-INHERIT_MAX_FILES = 4096
-INHERIT_MAX_FILE_BYTES = 8 * 1024 * 1024
-INHERIT_MAX_TOTAL_BYTES = 64 * 1024 * 1024
+#: Bounds on the state one run hands the next (inherit and recovery alike).
+# These are **anomaly-detection** bounds, not session-lifetime quotas
+#（阶段 1，docs/adr/0018）: a research session's own state is well under a
+# hundred files and a few MB (measured dsh: ~835KB after 2 turns, linear), so
+# reaching any of them means something runaway — a hostile session file, a
+# cache explosion — and the follow-up is refused instead of silently resuming
+# from a partial state. The transport ceiling they align with is the archive
+# channel's :data:`~pi_glink.kernel.archive_channel.ARCHIVE_MAX_BYTES`.
+INHERIT_MAX_FILES = 16384
+INHERIT_MAX_FILE_BYTES = 128 * 1024 * 1024
+INHERIT_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 #: How much inherited text is scanned for credential-shaped values that join the
 #: run's redaction boundary (this bounds the scan, not the copy).
-INHERIT_SCAN_MAX_BYTES = 8 * 1024 * 1024
+INHERIT_SCAN_MAX_BYTES = 64 * 1024 * 1024
+
+#: The **warning** tier between a healthy research session and the fail-closed
+#: bounds（阶段 1 收尾，docs/adr/0019）. Reaching any of these does not refuse
+#: anything: the state still inherits/recovers/backfills, and the fact is
+#: emitted as a ``kernel_status`` warning the operator can see. The numbers sit
+#: at several times a real session's ceiling and well below the fail-closed
+#: line: measured dsh grows ~420KB per turn, so even a 50-turn session stays
+#: near 21MB and a few hundred files; 64MB total / 32MB one file / 2048 files is
+#: already runaway-growth territory (a cache explosion, a runaway session
+#: file), while a 256MB transport cannot complete anyway.
+INHERIT_WARN_FILES = 2048
+INHERIT_WARN_FILE_BYTES = 32 * 1024 * 1024
+INHERIT_WARN_TOTAL_BYTES = 64 * 1024 * 1024
 
 
 class AcpStateInheritError(RuntimeError):
     """A follow-up's parent state could not be inherited safely.
 
-    Raised for a missing/unreadable parent state root, a bound violation or an
-    unsafe entry. The caller refuses the follow-up: the alternative — resuming
+    Raised for a missing/unreadable parent state root, a **fail-closed** bound
+    violation (:data:`INHERIT_MAX_*`, docs/adr/0019's third tier) or an unsafe
+    entry. The caller refuses the follow-up: the alternative — resuming
     from a partial copy or from nothing — would present a continuation the
-    agent does not actually have.
+    agent does not actually have. A *warning*-tier excess does not raise; it
+    travels out through :attr:`AcpStateInheritOutcome.warning`.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class AcpStateInheritOutcome:
+    """What one bounded inheritance achieved, beyond its secret values.
+
+    ``files``/``bytes`` are the copied tree's facts (the run's event stream
+    observes them as ``stateInherit``, 阶段 1 的观测义务);
+    ``largest_file`` is the biggest single file copied, kept so the warning
+    tier (:func:`state_threshold_warning`) can judge the per-file dimension
+    without re-walking the tree. ``warning`` describes a warning-tier excess —
+    the copy still completed — or stays ``None`` for a healthy session.
+    """
+
+    secrets: tuple[str, ...] = ()
+    files: int = 0
+    bytes: int = 0
+    largest_file: int = 0
+    warning: str | None = None
+
+
+def state_threshold_warning(
+    *, files: int, total_bytes: int, largest_file: int | None = None
+) -> str | None:
+    """The warning-tier verdict for one state handoff (阶段 1 收尾，ADR 0019).
+
+    Judges the same three dimensions the fail-closed bounds cover, against the
+    :data:`INHERIT_WARN_*` line: an excess answers a human-readable description
+    for a ``kernel_status`` event (the follow-up is still served); ``None`` means
+    a healthy session says nothing. ``largest_file`` may be ``None`` where the
+    caller's facts do not carry it (the recovery verdict, for instance).
+    """
+    exceeded: list[str] = []
+    if files > INHERIT_WARN_FILES:
+        exceeded.append(f"文件数 {files} > {INHERIT_WARN_FILES}")
+    if largest_file is not None and largest_file > INHERIT_WARN_FILE_BYTES:
+        exceeded.append(
+            f"单文件 {largest_file} > {INHERIT_WARN_FILE_BYTES} 字节"
+        )
+    if total_bytes > INHERIT_WARN_TOTAL_BYTES:
+        exceeded.append(f"总量 {total_bytes} > {INHERIT_WARN_TOTAL_BYTES} 字节")
+    if not exceeded:
+        return None
+    return (
+        "会话状态超过异常检测警告线（"
+        + "；".join(exceeded)
+        + "）。正常研究会话远低于此；本轮照常续接，但请检查是否有失控的缓存或异常会话文件"
+    )
 
 
 
@@ -132,6 +198,12 @@ class AcpRuntime:
     #: were injected. The container face uses these to mount each injected
     #: credential file read-only on top of the writable state root.
     credential_dests: tuple[str, ...] = ()
+    #: Facts of the parent state this run inherited (阶段 1 的观测义务):
+    #: ``files``/``bytes``/``durationMs``/``warning``. ``None`` on a first turn
+    #: (or a remote face whose state travels over the archive channel instead
+    #: — there the backfill's own facts carry the volume). Diagnostic only;
+    #: nothing branches on it.
+    inherit_facts: Mapping[str, Any] | None = None
 
     def session_sweeps(self) -> tuple[SessionSweep, ...]:
         """ACP 写出的状态路径：本 run 的状态根，**只读扫描**不重写。
@@ -209,8 +281,9 @@ def prepare_acp_runtime(
 
     ``inherit_from`` is the authorized parent run's ACP state root — its own
     ``runs/<parent>/acp-agent/home`` on the in-process and Docker faces, or the
-    sandbox state root recovered to ``runs/<parent>/acp-agent/recovered`` on the
-    E2B face — when this run continues that parent's session. It is copied into
+    conversation's published state root (``conversations/<根run>/state``, and
+    before 阶段 1 the per-run ``runs/<parent>/acp-agent/recovered`` mirror) on
+    the E2B face — when this run continues that parent's session. It is copied into
     this run's own HOME — the ACP analogue
     of the pi face's sanitized session-file copy — after the fresh credentials
     are in place, and every configured credential destination is skipped: the
@@ -255,11 +328,19 @@ def prepare_acp_runtime(
         if inherit_from is not None:
             # After the injection above, so the fresh credential files win; the
             # destinations are excluded from the copy for the same reason.
-            secrets.extend(
-                inherit_acp_state(
-                    Path(inherit_from), home, skip=credential_dests
-                )
+            inherit_started = time.monotonic()
+            outcome = inherit_acp_state(
+                Path(inherit_from), home, skip=credential_dests
             )
+            inherit_facts: dict[str, Any] | None = {
+                "files": outcome.files,
+                "bytes": outcome.bytes,
+                "durationMs": round((time.monotonic() - inherit_started) * 1000, 1),
+                "warning": outcome.warning,
+            }
+            secrets.extend(outcome.secrets)
+        else:
+            inherit_facts = None
     except BaseException:
         # A failed prepare never reaches its close-out sweep; the delivered
         # plaintext copies must not outlive it (see
@@ -272,6 +353,7 @@ def prepare_acp_runtime(
         command=shlex.join(config.pack.command),
         secrets=_dedupe(secrets),
         credential_dests=credential_dests,
+        inherit_facts=inherit_facts,
     )
 
 
@@ -280,7 +362,7 @@ def inherit_acp_state(
     home: Path,
     *,
     skip: tuple[str, ...] = (),
-) -> tuple[str, ...]:
+) -> AcpStateInheritOutcome:
     """Copy an authorized parent's ACP state into this run's HOME (bounded).
 
     The copy is the ACP counterpart of the pi face's session-file breadcrumb: a
@@ -294,9 +376,12 @@ def inherit_acp_state(
       never land outside this run's own HOME;
     * only regular files are copied; device nodes, FIFOs and sockets are not
       inherited;
-    * the copy is bounded (file count, per-file bytes, total bytes) and any
-      bound violation raises :class:`AcpStateInheritError` instead of leaving a
-      silently truncated state behind;
+    * the copy is bounded (file count, per-file bytes, total bytes) and a
+      **fail-closed** bound violation (:data:`INHERIT_MAX_*`) raises
+      :class:`AcpStateInheritError` instead of leaving a silently truncated
+      state behind — a *warning*-tier excess (:data:`INHERIT_WARN_*`) still
+      copies everything and reports through
+      :attr:`AcpStateInheritOutcome.warning`（阶段 1 收尾，docs/adr/0019）；
     * ``skip`` names this configuration's credential destinations (relative to
       HOME), which the caller has just re-rendered for this run: inheriting the
       parent's copies would shadow the fresh ones and put values into the run
@@ -318,13 +403,15 @@ def inherit_acp_state(
         source = ArtifactTree(source_dir)
     except ArtifactError as exc:
         raise AcpStateInheritError(f"父 run 的 ACP 状态目录不可用: {exc}") from exc
+    files = 0
+    total = 0
+    largest = 0
     with source, ArtifactTree(destination_dir) as destination:
         relatives = source.files(max_files=INHERIT_MAX_FILES + 1)
         if len(relatives) > INHERIT_MAX_FILES:
             raise AcpStateInheritError(
                 f"父 run 的 ACP 状态文件数超过上限 {INHERIT_MAX_FILES}"
             )
-        total = 0
         scanned = 0
         secrets: list[str] = []
         for relative in relatives:
@@ -352,17 +439,41 @@ def inherit_acp_state(
                 raise AcpStateInheritError(
                     f"写入继承的父 run 状态失败 {relative}: {exc}"
                 ) from exc
+            files += 1
+            largest = max(largest, len(data))
             if scanned < INHERIT_SCAN_MAX_BYTES and b"\x00" not in data[:1024]:
                 scanned += len(data)
                 secrets.extend(
                     credential_secrets_from_text(data.decode("utf-8", errors="replace"))
                 )
-    return _dedupe(secrets)
+    return AcpStateInheritOutcome(
+        secrets=_dedupe(secrets),
+        files=files,
+        bytes=total,
+        largest_file=largest,
+        warning=state_threshold_warning(
+            files=files, total_bytes=total, largest_file=largest
+        ),
+    )
 
 
 def _normalise_relative(value: str) -> str:
     """One config credential destination as a forward-slash relative path."""
     return str(value).strip().lstrip("/")
+
+
+def credential_destinations(config: HostConfig) -> tuple[str, ...]:
+    """The credential destinations this configuration renders, in order.
+
+    The same list :func:`prepare_acp_runtime` injects (and
+    :class:`AcpRuntime.credential_dests` carries), computed ahead of the render
+    so the archive channel can refuse those paths in an archive before the
+    run's HOME exists (the POST side of docs/adr/0018's 双保险).
+    """
+    dests = tuple(dest for _source, dest in config.acp_credential_files)
+    if config.acp_credential_env:
+        return (DSH_CREDENTIALS_RELATIVE,) + dests
+    return dests
 
 
 def build_acp_argv(config: HostConfig) -> list[str]:
@@ -567,3 +678,43 @@ def _chmod_file_private(path: Path) -> None:
         os.chmod(path, 0o600)
     except OSError:
         pass
+
+
+def learn_conversation_state_secrets(state_dir: Path) -> tuple[str, ...]:
+    """Learn credential-shaped values from the conversation's authoritative state.
+
+    The E2B follow-up paths that skip the local inheritance copy (the archive
+    backfill and the parked-sandbox hot path) still must know the values an
+    earlier round's state carried: a value that only exists in a historical
+    file would otherwise be echoed unmasked in a later run (the learning half
+    of :func:`inherit_acp_state`, which those paths bypassed — cc 终审 B3).
+    Same discipline as the inheritance scan: text files only (a NUL byte in
+    the head means binary), one total scan budget, values never logged.
+    """
+    directory = Path(state_dir)
+    if not directory.is_dir():
+        return ()
+    try:
+        tree = ArtifactTree(directory)
+    except ArtifactError:
+        return ()
+    secrets: list[str] = []
+    scanned = 0
+    try:
+        with tree:
+            for relative in tree.files(max_files=INHERIT_MAX_FILES):
+                if scanned >= INHERIT_SCAN_MAX_BYTES:
+                    break
+                try:
+                    data = tree.read(relative, max_bytes=INHERIT_MAX_FILE_BYTES)
+                except ArtifactError:
+                    continue
+                if b"\x00" in data[:1024]:
+                    continue
+                scanned += len(data)
+                secrets.extend(
+                    credential_secrets_from_text(data.decode("utf-8", errors="replace"))
+                )
+    except ArtifactError:
+        pass
+    return _dedupe(secrets)

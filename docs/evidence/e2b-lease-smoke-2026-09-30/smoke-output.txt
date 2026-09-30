@@ -1,0 +1,12 @@
+# 冒烟开始 2026-09-30 11:36:38（key 已读取，不打印）
+[PASS] 11:36:39 create 沙箱 — sandbox_id=iuzuxklm8ppgi4m09txbm
+[PASS] 11:36:41 写代数标记文件
+[PASS] 11:36:41 pause(keep_memory=False) — return=True
+[PASS] 11:36:41 暂停态 get_info — state='paused'
+[PASS] 11:36:42 pause 幂等（已暂停返回 False） — return=False
+[PASS] 11:36:55 connect(on_resume='reboot') — sandbox_id 不变: True
+[PASS] 11:36:55 恢复后 get_info 为 RUNNING — state='running'
+[PASS] 11:36:55 标记文件跨 pause/resume 保留且代数一致
+[PASS] 11:36:55 kill 销毁确认 — return=True
+[PASS] 11:36:56 销毁后 connect 报 not found
+# 冒烟全部通过 2026-09-30 11:36:56

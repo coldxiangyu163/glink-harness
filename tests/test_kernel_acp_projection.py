@@ -221,6 +221,23 @@ def test_session_resumed_records_the_method_and_the_dropped_replay() -> None:
     assert "5" in payload["detail"]
 
 
+def test_state_channel_degraded_is_a_visible_warning() -> None:
+    """归档通道降级（0018）：可见 warning，不静默。"""
+    projector = AcpProjector(SecretRedactor())
+    produced = projector.project(
+        {
+            "type": "acp_state_channel_degraded",
+            "detail": "归档通道回收失败，本轮已降级为 files 逐文件回收（1 个文件，"
+            "9 字节）；追问仍可续接",
+        }
+    )
+    assert [kind for kind, _ in produced] == [events.KERNEL_STATUS]
+    payload = produced[0][1]
+    assert payload["level"] == "warning"
+    assert payload["message"] == "acp_state_channel_degraded"
+    assert "降级" in payload["detail"]
+
+
 def test_session_resumed_without_a_replay_says_so() -> None:
     projector = AcpProjector(SecretRedactor())
     payload = projector.project(

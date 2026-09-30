@@ -28,6 +28,13 @@ from .harnesses import (
     pack_names,
 )
 
+#: 对话租约 TTL 的默认值与硬上限（秒）。真源在
+#: :mod:`pi_glink.kernel.conversation_lease`（kernel 不可反向导入 config，
+#: 否则与 kernel 包初始化成环）；两侧由 tests/test_kernel_conversation_lease.py
+#: 的常量对齐断言钉住。
+_DEFAULT_LEASE_TTL_SECONDS = 2 * 60 * 60
+_MAX_LEASE_TTL_SECONDS = 24 * 60 * 60
+
 #: Re-exported from :mod:`pi_glink.harnesses`（清单解析器拥有这套词表）：ACP 权限白名单
 #: 只能命名这些取值，避免拼写错误静默失效。见 ``HarnessCapabilities.permission_allow``。
 __all__ = ["ACP_PERMISSION_OPTION_KINDS", "ACP_PERMISSION_TOOL_KINDS"]
@@ -241,6 +248,13 @@ class HostConfig:
     docker_pids_limit: int = 512
     #: E2B sandbox lifetime ceiling; 0 keeps the adapter default (task timeout + 300s).
     e2b_sandbox_timeout_seconds: int = 0
+    #: 闲置对话租约的寿命（秒，docs/adr/0020）。一轮 ACP/E2B run 结束后其沙箱
+    #: 可以泊车（pause）作为对话状态的热缓存，下次追问省掉新沙箱与回灌；这个
+    #: 旋钮是闲置多久后由对账销毁。``0`` 禁用热路径（收尾直接销毁＝阶段 2 前
+    #: 的行为）；硬上限
+    #: :data:`~pi_glink.kernel.conversation_lease.MAX_LEASE_TTL_SECONDS`
+    #: （24h）在启动校验里拒绝越界值。
+    conversation_lease_ttl_seconds: int = _DEFAULT_LEASE_TTL_SECONDS
     #: Interval of the online resource ledger sweep (seconds). The sweep asks
     #: the execution face whether the resources of an unconfirmed hold still
     #: exist, addressing only the identity persisted with the run. ``0`` disables
@@ -554,6 +568,11 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
         e2b_sandbox_timeout_seconds=_non_negative_integer(
             values, "LOCAL_WEB_E2B_TIMEOUT_SECONDS", 0
         ),
+        conversation_lease_ttl_seconds=_non_negative_integer(
+            values,
+            "PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS",
+            _DEFAULT_LEASE_TTL_SECONDS,
+        ),
         resource_reconcile_seconds=_non_negative_integer(
             values, "PI_GLINK_RESOURCE_RECONCILE_SECONDS", 60
         ),
@@ -604,6 +623,14 @@ def validate_host_config(config: HostConfig) -> None:
     _acp_knobs_are_acp_only(config)
     _acp_credentials_follow_policy(config)
     _egress_is_reachable(config)
+    if config.conversation_lease_ttl_seconds > _MAX_LEASE_TTL_SECONDS:
+        # 硬上限是对话租约的防线（docs/adr/0020）：闲置热缓存不能被配置成
+        # 无限期的云端占用；越界拒绝启动，不做静默钳制。
+        raise ConfigError(
+            "PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS 不得超过 "
+            f"{_MAX_LEASE_TTL_SECONDS} 秒（当前 {config.conversation_lease_ttl_seconds}）；"
+            "0 表示禁用热路径"
+        )
 
 
 def _egress_is_reachable(config: HostConfig) -> None:

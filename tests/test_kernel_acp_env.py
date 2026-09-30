@@ -21,7 +21,11 @@ import pytest
 from acp_pack import apply_acp_pack
 from pi_glink.config import ConfigError, build_config
 from harness_helpers import compose_launch, execution_spec
-from pi_glink.kernel.acp_env import AcpStateInheritError, prepare_acp_runtime
+from pi_glink.kernel.acp_env import (
+    AcpStateInheritError,
+    learn_conversation_state_secrets,
+    prepare_acp_runtime,
+)
 from pi_glink.redaction import credential_secrets_from_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -402,3 +406,22 @@ def test_pi_session_seed_branch_deletes_rendered_copies(tmp_path: Path) -> None:
             sandbox=None,
         )
     assert not (run_dir / "acp-agent" / "home" / ".dsh" / ".credentials.yaml").exists()
+
+
+# -- 对话权威状态的学习扫描（cc 终审 B3：跳过继承的路径仍要认识历史凭据形值） ----
+
+
+def test_learn_conversation_state_secrets_reads_text_and_skips_binary(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "session.jsonl").write_text(
+        'the agent echoed sk-live-history-credential-1\n', encoding="utf-8"
+    )
+    (state / "binary.bin").write_bytes(b"sk-bin\x00ary" + b"\x00" * 10)
+    secrets = learn_conversation_state_secrets(state)
+    assert "sk-live-history-credential-1" in secrets
+    assert all("\x00" not in value for value in secrets), "二进制文件被跳过"
+
+
+def test_learn_conversation_state_secrets_is_empty_without_the_directory(tmp_path: Path) -> None:
+    assert learn_conversation_state_secrets(tmp_path / "absent") == ()

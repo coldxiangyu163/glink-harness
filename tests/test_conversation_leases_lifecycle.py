@@ -1,0 +1,282 @@
+"""对话租约的生命周期对账与删除链路（阶段 2，docs/adr/0020）。
+
+覆盖三块，全部合成（fake kill 探测，不打真实 E2B）：
+
+* **到期对账**（``ResourceLedger.reconcile_leases``）：过期租约按沙箱 id
+  销毁、确认后删记录；销毁未确认保留到下轮；未过期只重试 retired；无
+  E2B key 时不动任何租约；
+* **删除链路**（``RunManager.delete_conversation``）：销毁租约沙箱 + 删除
+  宿主对话状态目录（state/lease）；任一沙箱未确认销毁则目录与租约原样
+  保留（fail-closed）；多租户 owner 门禁（未知/异租户不销毁不删除）；运行
+  记录与事件日志不属于这个最小闭环；
+* **租约不占 run 槽位**：泊车的沙箱不构成 resource hold，本对话/其他对话
+  的新 run 照常受理。
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Any
+
+
+from pi_glink.config import build_config
+from pi_glink.events import EventBus
+from pi_glink.kernel.conversation_lease import (
+    ConversationLease,
+    read_lease,
+    write_lease,
+)
+from pi_glink.runs.runner import RunManager
+from pi_glink.store import FINISHED, RunSpec, RunStore
+from pi_glink.tenancy import TenantContext
+
+from store_helpers import finish
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def context(tenant_id: str) -> TenantContext:
+    return TenantContext(
+        tenant_id=tenant_id,
+        user_id="user",
+        role="admin",
+        audience="test",
+        expires_at=time.time() + 300,
+    )
+
+
+def make_config(tmp_path: Path, **overrides: str):
+    values = {
+        "OPENAI_API_KEY": "sk-test",
+        "OPENAI_BASE_URL": "https://example.invalid/v1",
+        "OPENAI_MODEL": "test/model",
+        "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
+        "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
+        "LOCAL_WEB_EXECUTOR": "e2b",
+        "E2B_API_KEY": "e2b-secret-key",
+        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
+    }
+    values.update(overrides)
+    return build_config(values, REPO_ROOT)
+
+
+def a_lease(*, run_id: str = "conv-1", sandbox_id: str = "sbx-1", generation: int = 1,
+            paused_ago: float = 0.0, ttl: float = 3600.0,
+            retired: tuple[str, ...] = ()) -> ConversationLease:
+    """A valid lease: ``paused_ago + ttl`` 过去即已到期（且到期晚于暂停）。"""
+    now = time.time()
+    return ConversationLease(
+        conversation_run="conv-1",
+        sandbox_id=sandbox_id,
+        generation=generation,
+        template="glink-acp-worker",
+        pack="dsh",
+        run_id=run_id,
+        paused_at=now - paused_ago,
+        expires_at=now - paused_ago + ttl,
+        retired_sandbox_ids=retired,
+    )
+
+
+def seeded_store(config) -> tuple[RunStore, Path]:
+    """A one-turn conversation: its root run id names the conversation dir."""
+    store = RunStore(config.data_root / "runs")
+    conversation = store.conversation_dir("conv-1")
+    store.create(
+        "泊车的 run",
+        run_id="conv-1",
+        spec=RunSpec(family="acp", pack="dsh", executor="e2b"),
+    )
+    finish(store, "conv-1", FINISHED, finished_at=time.time(),
+           cleanup={"released": True, "failures": [], "external": {"sandbox": "sbx-1"}})
+    return store, conversation
+
+
+def a_manager(config, store, *, confirm=None):
+    def default_confirm(sandbox_id: str, **_kwargs: Any):
+        # The kill-based contract: not-found counts as confirmed gone.
+        return (True, "fake confirm")
+
+    return RunManager(
+        config, EventBus(), store=store,
+        sandbox_probe=confirm or default_confirm,
+    )
+
+
+# -- expiry sweep -----------------------------------------------------------------
+
+
+def test_expired_lease_is_destroyed_and_removed(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    store, conversation = seeded_store(config)
+    write_lease(conversation, a_lease(paused_ago=7200, ttl=3600))
+    destroyed: list[str] = []
+    manager = a_manager(
+        config, store,
+        confirm=lambda sandbox_id, **_k: (destroyed.append(sandbox_id) or (True, "gone")),
+    )
+    assert manager.reconcile_leases() == ["conv-1"]
+    assert destroyed == ["sbx-1"]
+    assert read_lease(conversation) is None
+
+
+def test_unexpired_lease_is_left_alone(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    store, conversation = seeded_store(config)
+    write_lease(conversation, a_lease(paused_ago=10, ttl=3600))
+    manager = a_manager(config, store, confirm=lambda _id, **_k: (True, "should not run"))
+    assert manager.reconcile_leases() == []
+    assert read_lease(conversation) is not None
+
+
+def test_unconfirmed_destroy_keeps_the_lease(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    store, conversation = seeded_store(config)
+    write_lease(conversation, a_lease(paused_ago=7200, ttl=3600))
+    manager = a_manager(config, store, confirm=lambda _id, **_k: (False, "gateway wedged"))
+    assert manager.reconcile_leases() == []
+    # fail-closed：记录保留，下一轮重试。
+    assert read_lease(conversation) is not None
+
+
+def test_destroy_probe_error_keeps_the_lease(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    store, conversation = seeded_store(config)
+    write_lease(conversation, a_lease(paused_ago=7200, ttl=3600))
+
+    def explode(_sandbox_id: str, **_k: Any):
+        raise TimeoutError("probe hung")
+
+    manager = a_manager(config, store, confirm=explode)
+    assert manager.reconcile_leases() == []
+    assert read_lease(conversation) is not None
+
+
+def test_retired_sandboxes_are_retried_on_a_live_lease(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    store, conversation = seeded_store(config)
+    write_lease(
+        conversation,
+        a_lease(paused_ago=10, ttl=3600, retired=("sbx-stuck-1", "sbx-stuck-2")),
+    )
+    confirmed: list[str] = []
+    manager = a_manager(
+        config, store,
+        confirm=lambda sandbox_id, **_k: (
+            confirmed.append(sandbox_id) or (
+                (False, "still stuck") if sandbox_id == "sbx-stuck-1" else (True, "gone")
+            )
+        ),
+    )
+    assert manager.reconcile_leases() == []
+    lease = read_lease(conversation)
+    assert lease is not None
+    # 只有确认销毁的离开挂账；未确认的留到下轮。
+    assert lease.retired_sandbox_ids == ("sbx-stuck-1",)
+    assert confirmed == ["sbx-stuck-1", "sbx-stuck-2"]
+
+
+def test_no_e2b_key_leaves_every_lease_in_place(tmp_path: Path) -> None:
+    config = make_config(tmp_path, E2B_API_KEY="")
+    store, conversation = seeded_store(config)
+    write_lease(conversation, a_lease(paused_ago=7200, ttl=3600))
+    manager = a_manager(config, store, confirm=lambda _id, **_k: (True, "must not run"))
+    assert manager.reconcile_leases() == []
+    assert read_lease(conversation) is not None
+
+
+# -- the deletion link --------------------------------------------------------------
+
+
+def test_delete_conversation_destroys_and_removes(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    store, conversation = seeded_store(config)
+    write_lease(conversation, a_lease(retired=("sbx-retired",)))
+    (conversation / "state").mkdir()
+    (conversation / "state" / "session.zst").write_bytes(b"state")
+    destroyed: list[str] = []
+    manager = a_manager(
+        config, store,
+        confirm=lambda sandbox_id, **_k: (destroyed.append(sandbox_id) or (True, "gone")),
+    )
+    result = manager.delete_conversation("conv-1")
+    assert result["deleted"] is True and result["failures"] == []
+    assert destroyed == ["sbx-1", "sbx-retired"]
+    assert not conversation.exists()
+    # The run record is a separate product surface: untouched.
+    assert store.get("conv-1") is not None
+
+
+def test_delete_conversation_keeps_state_when_a_destroy_is_unconfirmed(tmp_path: Path):
+    config = make_config(tmp_path)
+    store, conversation = seeded_store(config)
+    write_lease(conversation, a_lease())
+    manager = a_manager(config, store, confirm=lambda _id, **_k: (False, "still alive"))
+    result = manager.delete_conversation("conv-1")
+    assert result["deleted"] is False
+    assert result["failures"] and "sbx-1" in result["failures"][0]
+    assert conversation.is_dir()
+    assert read_lease(conversation) is not None
+
+
+def test_delete_conversation_without_a_lease_just_removes_the_directory(tmp_path: Path):
+    config = make_config(tmp_path)
+    store, conversation = seeded_store(config)
+    (conversation / "state").mkdir()
+    manager = a_manager(config, store, confirm=lambda _id, **_k: (True, "gone"))
+    assert manager.delete_conversation("conv-1")["deleted"] is True
+    assert not conversation.exists()
+
+
+def test_delete_conversation_gates_on_tenancy(tmp_path: Path) -> None:
+    config = make_config(
+        tmp_path,
+        PI_GLINK_TENANCY="multitenant",
+        PI_GLINK_AUTH_MODE="accounts",
+        PI_GLINK_MODEL_CREDENTIALS="shared",
+        OPENAI_API_KEY="sk-test",
+    )
+    store, conversation = seeded_store(config)
+    write_lease(conversation, a_lease())
+    manager = a_manager(config, store, confirm=lambda _id, **_k: (True, "gone"))
+    # Unknown conversation and foreign owner answer alike and destroy nothing.
+    assert manager.delete_conversation("no-such")["reason"] == "unknown"
+    assert manager.delete_conversation("conv-1", context("other-tenant"))["reason"] == "unknown"
+    assert conversation.is_dir()
+    store.update("conv-1", tenant_id="tenant-a")
+    assert manager.delete_conversation("conv-1", context("tenant-a"))["deleted"] is True
+    assert not conversation.exists()
+
+
+def test_delete_conversation_unknown_in_local_mode(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    store, _ = seeded_store(config)
+    manager = a_manager(config, store)
+    assert manager.delete_conversation("no-such") == {"deleted": False, "reason": "unknown"}
+    # 台账层直接删一个不存在的对话目录：无租约无沙箱，直接成功。
+    assert manager._ledger.delete_conversation("never-created") == (True, [])  # noqa: SLF001
+
+
+# -- leases do not occupy run slots -------------------------------------------------
+
+
+def test_a_parked_run_holds_no_slot(tmp_path: Path) -> None:
+    """泊车的沙箱不是 resource hold：下一个 run 照常受理（local 模式最严）。"""
+    config = make_config(tmp_path)
+    store, conversation = seeded_store(config)
+    write_lease(conversation, a_lease())
+    manager = a_manager(config, store)
+    assert manager._ledger.resource_holds() == []
+    # The local-mode admission gate refuses on any hold; with none, the check
+    # passes (the manager is not asked to actually run anything here).
+    manager._check_admission(None, manager.store.holding_records())  # noqa: SLF001
+
+
+def test_conversation_ids_list_only_real_directories(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    store, _ = seeded_store(config)
+    assert store.conversation_ids() == ["conv-1"]
+    # A stray file (not a directory) is never a conversation.
+    (store.conversations_root() / "noise.txt").write_text("x", encoding="utf-8")
+    assert store.conversation_ids() == ["conv-1"]

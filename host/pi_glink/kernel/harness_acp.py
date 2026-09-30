@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import stat
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, TYPE_CHECKING
 
@@ -26,14 +27,17 @@ from .acp_env import (
     AcpStateInheritError,
     build_acp_argv,
     discard_rendered_credential_copies,
+    learn_conversation_state_secrets,
     prepare_acp_runtime,
 )
+from .archive_channel import ArchiveEndpoint, read_state_manifest
 from .acp_execution import AcpExecutionAdapter, acp_resume_method
 from .acp_projection import ACP_STOP_REASONS, AcpProjector
+from .conversation_lease import LeaseCorruptError, read_lease
 from .docker_env import acp_worker_image
 from .execution import ExecutionAdapter, ExecutionSpec
 from .harness import HarnessFamily, PreparedRuntime
-from .sandbox import Launch, Mount, Sandbox
+from .sandbox import Launch, Mount, Sandbox, SandboxResume
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only
     from ..redaction import SecretRedactor
@@ -46,6 +50,10 @@ logger = logging.getLogger("pi_glink.kernel.harness_acp")
 #: published right after a run opens, so the scan is independent of how long the
 #: parent's transcript grew afterwards.
 _ACP_CAPABILITY_SCAN_EVENTS = 50
+#: Bound on the parent-chain walk that finds a conversation's root run. Every
+#: follow-up has exactly one parent (the stale-run gate), so the chain is the
+#: conversation's turn count; the bound only refuses a (corrupt) cycle.
+_CONVERSATION_CHAIN_LIMIT = 128
 
 
 class AcpHarnessFamily(HarnessFamily):
@@ -98,11 +106,12 @@ class AcpHarnessFamily(HarnessFamily):
 
         The E2B face needs one more fact and is admitted by it:
 
-        * 沙箱销毁前把该 run 的状态根有界回收到宿主；追问在「父状态根回收
-          成功」时与 inproc/docker 面同样受理（docs/adr/0005）。回收到
-          ``acp-agent/recovered`` 是整份成功的才发布，所以下面这个目录检查就是
-          “回收成功”这个事实本身：失败（或未尝试）的回收什么都不留下，追问维持
-          拒绝，而不是先花一个注定 resume 失败的云端沙箱。
+        * 沙箱销毁前把该 run 的状态根回收到宿主并**由该 run 自己发布**；追问
+          在「父状态根回收成功且是父 run 自己的版本」时与 inproc/docker 面同样
+          受理（docs/adr/0005 的受理语义、0018 的落点）。发布是整份成功才可见
+          （staging + rename），manifest 的 ``sourceRunId`` 必须等于父 run——
+          失败（或未尝试）的回收什么都不留下、陈旧的发布对不上父 run，追问都
+          维持拒绝，而不是先花一个注定 resume 失败的云端沙箱。
 
         The admitted continuation also reuses the parent run's workspace (the
         caller reads :attr:`RunRecord.workspace`): the ACP session's ``cwd`` is
@@ -127,6 +136,18 @@ class AcpHarnessFamily(HarnessFamily):
             raise FollowupUnavailable("session_unavailable")
         if acp_resume_method(capabilities) is None:
             raise FollowupUnavailable("session_unavailable")
+        # E2B 面的新鲜度事实：对话状态根的 manifest 必须是**父 run 自己**
+        # 发布的（``sourceRunId == parent.run_id``）。替换式发布保证最新一轮
+        # 回收失败时状态停在更早的轮次，而这个校验拒收它——呈现一个 agent
+        # 并不完整拥有的会话，比拒绝追问更糟（ADR 0005 的语义在对话根上
+        # 的对应物）。旧布局（无 manifest）沿用目录存在性这一事实本身。
+        if parent.spec.executor == "e2b":
+            conversation = self._store.conversation_dir(
+                self.conversation_root(parent)
+            )
+            manifest = read_state_manifest(conversation)
+            if manifest is not None and manifest.get("sourceRunId") != parent.run_id:
+                raise FollowupUnavailable("session_unavailable")
         state_home = self.state_home(parent)
         try:
             info = os.stat(state_home, follow_symlinks=False)
@@ -163,24 +184,105 @@ class AcpHarnessFamily(HarnessFamily):
             return dict(capabilities) if isinstance(capabilities, Mapping) else {}
         return None
 
+    def conversation_root(self, run: RunRecord) -> str:
+        """The root run id of the conversation ``run`` belongs to.
+
+        Every follow-up has exactly one parent (the stale-run gate), so the
+        parent chain is the conversation; the root is its first turn. The walk
+        is bounded and a (corrupt) cycle fails closed instead of looping.
+        """
+        current = run
+        seen = {run.run_id}
+        while current.parent_run_id is not None:
+            if len(seen) > _CONVERSATION_CHAIN_LIMIT:
+                raise FollowupUnavailable("session_unavailable")
+            parent = self._store.get(current.parent_run_id)
+            if parent is None:
+                raise FollowupUnavailable("session_unavailable")
+            if parent.run_id in seen:
+                raise FollowupUnavailable("session_unavailable")
+            seen.add(parent.run_id)
+            current = parent
+        return current.run_id
+
     def state_home(self, run: RunRecord) -> Path:
         """The ACP agent state root of one run a follow-up could inherit.
 
         In-process and Docker runs keep the state root the run rendered and the
-        agent wrote (``acp-agent/home``). An E2B run's agent state only ever
-        existed inside the sandbox, so the face recovers it to
-        ``acp-agent/recovered`` before destroying the sandbox; that path is
-        derived from the run record like the other one — never from caller
-        input — and its existence is the recovered-state fact itself.
+        agent wrote (``acp-agent/home``) — on those faces the host *is* the
+        durable owner, so the latest turn's own home is the conversation's
+        authoritative state (docs/adr/0018's three-face mapping: the common
+        layer only abstracts "where the host holds the authoritative state
+        root"; it does not flatten what each face can do). An E2B run's agent
+        state only ever existed inside the sandbox, so the face publishes every
+        turn's recovery to the conversation state root
+        (``<data_root>/conversations/<root run>/state``); runs recovered before
+        阶段 1 keep their per-run ``acp-agent/recovered`` mirror, which stays
+        readable as the legacy layout.
 
-        Which of the two applies follows the run's own ``spec.executor``
+        Which of the paths applies follows the run's own ``spec.executor``
         (frozen at admission), never the host's current face: a host that
         switched faces still resumes its earlier runs (docs/adr/0002).
         """
         base = self._store.run_dir(run.run_id) / ACP_RUNTIME_DIRNAME
         if run.spec.executor == "e2b":
+            conversation = self._store.conversation_dir(
+                self.conversation_root(run)
+            )
+            if (conversation / "state").is_dir():
+                return conversation / "state"
             return base / ACP_RECOVERED_DIRNAME
         return base / ACP_HOME_DIRNAME
+
+    def sandbox_resume_target(self, parent: RunRecord) -> SandboxResume | None:
+        """The paused parent sandbox a follow-up may hot-path onto (ADR 0020).
+
+        The candidate exists only when every fact lines up:
+
+        * the parent ran the **E2B face** (a paused sandbox is an E2B shape);
+        * the conversation's lease record exists and is **fresh** — written by
+          the parent run itself (``run_id`` equals the parent), so the sandbox
+          carries exactly the state the follow-up gate already admitted against
+          (the manifest's ``sourceRunId`` freshness check in
+          :meth:`check_continuation` is the same fact's state side);
+        * the lease's pack and template match what this host would run now —
+          a different agent binary or image layout makes the sandbox's state
+          root a foreign environment, and the follow-up takes the cold path;
+        * the lease has not expired (the idle TTL) and TTL is enabled.
+
+        The answer is a candidate, not a decision: the adapter still verifies
+        the sandbox-side generation marker after reconnecting, and any failure
+        there degrades to the cold path (a fresh sandbox + the 阶段 1 backfill).
+        """
+        if parent.spec.executor != "e2b":
+            return None
+        if int(self._config.conversation_lease_ttl_seconds) <= 0:
+            return None
+        conversation_dir = self._store.conversation_dir(self.conversation_root(parent))
+        try:
+            lease = read_lease(conversation_dir)
+        except LeaseCorruptError:
+            # 不可读租约不呈现为候选：降级冷路径（宿主权威状态仍在，追问照常）。
+            return None
+        if lease is None:
+            return None
+        if lease.run_id != parent.run_id:
+            # A stale lease (an earlier turn parked a sandbox, but the parent
+            # itself did not — its close-out destroyed or replaced it) must not
+            # present an older sandbox as the parent's hot cache.
+            return None
+        if lease.pack != parent.spec.pack:
+            return None
+        if lease.template != self._config.acp_e2b_template:
+            return None
+        if lease.is_expired(time.time()):
+            return None
+        return SandboxResume(
+            sandbox_id=lease.sandbox_id,
+            generation=lease.generation,
+            conversation_run=lease.conversation_run,
+            template=lease.template,
+        )
 
     def continuation_workspace(self, parent: RunRecord) -> Path | None:
         # An ACP continuation keeps the conversation's working directory: an
@@ -221,13 +323,39 @@ class AcpHarnessFamily(HarnessFamily):
         session_seed: bytes | None,
         egress: "EgressEndpoint | None",
         sandbox: Sandbox,
+        archive: "ArchiveEndpoint | None" = None,
+        resume_target: SandboxResume | None = None,
     ) -> PreparedRuntime:
         # A follow-up inherits the authorized parent's agent state root into
-        # this run's own HOME. The parent gate ran at admission and the runner
-        # re-authorized the record before calling; the credential destinations
-        # are re-rendered fresh and excluded from the copy (see
+        # this run's own HOME — except on a remote face the archive channel
+        # can serve: there the state travels sandbox-side (``backfill_state``
+        # pulls the conversation root), so this run's HOME stays credentials
+        # only and nothing copies the state twice (docs/adr/0018). Without a
+        # channel (no public URL) the remote face degrades to the host-side
+        # copy exactly like before. 阶段 2 (docs/adr/0020) adds one more
+        # skip: a hot-path candidate (``resume_target``) leaves the state in
+        # the parked sandbox — the follow-up reconnects to it, and only a
+        # degradation falls back to the channel backfill.
+        # The parent gate ran at admission and the runner re-authorized the
+        # record before calling; the credential destinations are re-rendered
+        # fresh and excluded from the copy (see
         # :func:`prepare_acp_runtime`).
-        inherit_from = self.state_home(parent) if parent is not None else None
+        channel_backfill = sandbox is not None and sandbox.remote and archive is not None
+        inherit_from = (
+            None
+            if parent is None or channel_backfill or resume_target is not None
+            else self.state_home(parent)
+        )
+        # 跳过本地继承的两条 E2B 路径（归档回灌/热路径）仍然要认识历史状态里
+        # 的凭据形值：宿主本地的对话权威状态就是那份历史，扫描它的学习半部
+        # 与继承路径同一套预算与判定（cc 终审 B3；inproc/docker 走继承扫描，
+        # 对话目录不存在时这里空转，三面口径统一）。
+        learned_secrets: tuple[str, ...] = ()
+        if parent is not None and inherit_from is None:
+            state_dir = (
+                self._store.conversation_dir(self.conversation_root(parent)) / "state"
+            )
+            learned_secrets = learn_conversation_state_secrets(state_dir)
         try:
             runtime = prepare_acp_runtime(
                 self._config,
@@ -253,7 +381,9 @@ class AcpHarnessFamily(HarnessFamily):
         # this run's redaction boundary (and only this run's): a value the
         # agent echoes into a stream, tool result or report is masked like
         # every other secret the host knows. The values never reach a log.
-        return PreparedRuntime(runtime=runtime, secret_values=tuple(runtime.secrets))
+        return PreparedRuntime(
+            runtime=runtime, secret_values=tuple(runtime.secrets) + learned_secrets
+        )
 
     def make_projector(self, redactor: "SecretRedactor") -> AcpProjector:
         return AcpProjector(

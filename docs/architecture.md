@@ -515,8 +515,13 @@ Docker/E2B，也不删除任何资源。
 「已不存在」只认执行面的契约（inspect 的 no-such、SDK 的 `False` 返回或 `SandboxNotFoundException`
 类型）：探测失败、超时、鉴权错误或无法判定的返回一律保持持有。对账不在准入锁内执行，关闭宿主时
 停止该线程；`inproc` 宿主不启用它（不取得外部资源；遗留的外部身份仍走离线人工裁决）。
+同一个扫描线程还销毁**过期的对话租约**（[ADR 0020](adr/0020-conversation-sandbox-lease-hot-path.md)）：
+`conversations/<根run>/lease.json` 过了闲置 TTL 就按其记录的沙箱 id（含挂账的 retired）销毁，
+全部确认后才删记录；未确认保留到下轮，未过期不动。租约对账只需要冻结的 E2B key（宿主
+换面后仍能清理），无 key 时不动任何租约；它不进入 run 的持有/槽位语义。
 台账、重启对账、人工裁决与在线扫描的实现归属 `runs/resource_ledger.py`（`RunManager` 上的同名方法
-只是转发，探针组装——含 E2B 冻结凭据——也在该模块内完成）。
+只是转发，探针组装——含 E2B 冻结凭据——也在该模块内完成）；对话删除的最小闭环
+（`RunManager.delete_conversation`：销毁租约沙箱 + 清理对话状态对象）也在该模块承载。
 
 **所有权、重启对账与关闭**：宿主先取得 `data_root/host.lock` 的独占 `flock`（进程存活期间
 持有、退出即释放；同进程二次获取也被拒），**再**对账和绑定端口。`data_root` 由宿主以 0700 创建，
@@ -613,7 +618,7 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 token，run 收尾时 token 已吊销，文件保留也无害，见 §6）。共享项只限于
 仓库 `harnesses/<pack>/` 与 `methodology/` 模板目录（只读输入）和 `data_root` 本身。
 
-**多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。E2B 面的续接身份验证时点与另两面相同（GLINK-ARCH-3 起）：pi 以 `--session /home/user/sessions/continued.jsonl` 原地打开续接会话（保持原 session id），RPC `get_state` 在 `session_ready` 即知会话身份，追问身份不符在**回合前、第一次模型调用前**拒 `session_unavailable`；e2b 面 `session_ready` 也从回合后补发改为回合前发布（回收后 `recovered_session()` 仍会补发一帧带宿主 `session_file` 的 `session_ready`）。（决策史见 [ADR 0004](adr/0004-pi-e2b-rpc-convergence.md)。）ACP 追问的状态根继承按**父 run 记录的 `executor`** 推导：e2b 指向 `acp-agent/recovered`、其余执行面指向 `acp-agent/home`，宿主切换执行面后历史 e2b run 的合法追问仍可受理（[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)）。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
+**多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。E2B 面的续接身份验证时点与另两面相同（GLINK-ARCH-3 起）：pi 以 `--session /home/user/sessions/continued.jsonl` 原地打开续接会话（保持原 session id），RPC `get_state` 在 `session_ready` 即知会话身份，追问身份不符在**回合前、第一次模型调用前**拒 `session_unavailable`；e2b 面 `session_ready` 也从回合后补发改为回合前发布（回收后 `recovered_session()` 仍会补发一帧带宿主 `session_file` 的 `session_ready`）。（决策史见 [ADR 0004](adr/0004-pi-e2b-rpc-convergence.md)。）ACP 追问的状态根继承按**父 run 记录的 `executor`** 推导：e2b 指向对话状态根 `conversations/<根run>/state`（阶段 1 前的历史 run 回退 `acp-agent/recovered`）、其余执行面指向 `acp-agent/home`，宿主切换执行面后历史 e2b run 的合法追问仍可受理（[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)、[ADR 0018](adr/0018-conversation-state-archive-channel.md)）。e2b 面的回收/回灌优先走归档通道（单请求 tar 流，按 offset 增量，凭据目标不进归档），门禁要求发布的 manifest `sourceRunId` 等于父 run 自己；通道不可用或失败时降级为宿主侧继承 + files 逐文件（现状能力），降级事实进事件流。状态上限是异常检测三分支（[ADR 0019](adr/0019-acp-state-bounds-warning-tier-and-adaptive-resume.md)）：越过警告线（总量 64MB/单文件 32MB/2048 文件，正常研究会话的数倍）只发 `kernel_status` 警告（`acp_state_threshold_warning`）照常续接，越过 fail-closed 线（总量 256MB 对齐通道）才整次拒绝；续接 RPC 的超时按状态根体量自适应（保底 60s + 4MiB/s，硬上限 600s），继承/回灌/回收的体量耗时与 resume 重解析耗时（`stateInherit`/`stateBackfill`/`stateRecovery`/`resumeDurationMs`）进 `session_ready`。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
 
 **子代理副产物**：pi-subagents 的分支会话与主会话同名同目录（只能按会话头区分，见上表），产物目录由 `artifactDir: "session"` 落在会话目录的 `subagent-artifacts/`。E2B 面在沙箱销毁前把这些有界镜像到宿主拥有的 `runs/<id>/subagents/`（分支会话进 `sessions/`、产物进 `artifacts/`；深度/文件数/单文件/总量限幅，链接不跟随，失败记 `artifactFailures`），inproc/Docker 面的同类文件本就在宿主会话目录内、不另拷贝；两路的会话目录与镜像目录都在收尾时过 run 的脱敏边界（与 §6.1 会话文件同一条规则）。R1 起每个子代理另有权威文档 `runs/<id>/children/<n>/child.json`（§3.5）：它是协议可见事实的落地，与 P0 的 `subagents/` 原始镜像各自独立——镜像是回收基质（保持原样、不改写）；R2 起收尾时按序数启发式把产物关联复制进 `children/<n>/`（§3.5「R2 增强与关联」），未关联的文件留在基质里并记日志。
 
@@ -757,7 +762,7 @@ run 只拿到宿主凭据出口代理（`host/pi_glink/egress.py::EgressProxy`�
 | 报告文件 | 经工作区目录句柄读取、脱敏、在 run 目录句柄内原子写入 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `runs/stages.py::SealStage.report` |
 | 声明交付文件 | ACP `present` → `deliverables_declared`（声明≠交付）；封存最多 8 个工作区相对路径，逐件校验/脱敏，终帧与记录携带逐件结果。E2B 优先取主报告与声明文件再取其他直系子文件，64 MiB 总量不变 | `kernel/acp_projection.py`、`runs/channel.py`、`runs/stages.py`、`kernel/e2b_env.py` |
 | 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源；子代理分支会话与 `subagent-artifacts/` 同目录被同一边界清扫 | `runs/secrets.py::RunSecretBoundary.sanitize_session_file`、`sandbox.DockerSandbox.host_path`（`docker_env.translate_container_path`） |
-| ACP 状态根 | 收尾扫描范围与处置由运行时契约声明：agent 自己的会话存储（`acp-agent/home`，E2B 回收后 `acp-agent/recovered`）**只读扫描**——凭据形状值并入本 run 边界，文件字节不改写（改写会破坏追问要续接的会话，与 §10.2 继承口径同一义务）；**注入凭据副本**（`PI_GLINK_ACP_CREDENTIAL_FILES` 的 dest）在扫描之后逐个删除（只删已知相对路径：不按模式匹配、不跟随链接、必须在根内；追问会从源重新注入，继承已 skip 这些目标）；删除失败记入终帧 `artifactFailures` 并告警，不改变终态；缺失的根按「无可扫之物」处理 | `kernel/sweep.py::SessionSweep`、`kernel/acp_env.py::AcpRuntime.session_sweeps`、`runs/secrets.py::RunSecretBoundary.seal_sessions`、`absorb`、`remove_credential_copies`、`artifacts.py::ArtifactTree.remove` |
+| ACP 状态根 | 收尾扫描范围与处置由运行时契约声明：agent 自己的会话存储（`acp-agent/home`，E2B 历史回收的 `acp-agent/recovered`）**只读扫描**——凭据形状值并入本 run 边界，文件字节不改写（改写会破坏追问要续接的会话，与 §10.2 继承口径同一义务）；对话状态根（`conversations/<根run>/state`，0018）的凭据形状值在**回收时**吸收（只扫本轮变化的文件，同一预算），不在收尾重复改写；**注入凭据副本**（`PI_GLINK_ACP_CREDENTIAL_FILES` 的 dest）在扫描之后逐个删除（只删已知相对路径：不按模式匹配、不跟随链接、必须在根内；追问会从源重新注入，继承与归档都 skip 这些目标）；删除失败记入终帧 `artifactFailures` 并告警，不改变终态；缺失的根按「无可扫之物」处理 | `kernel/sweep.py::SessionSweep`、`kernel/acp_env.py::AcpRuntime.session_sweeps`、`runs/secrets.py::RunSecretBoundary.seal_sessions`、`absorb`、`remove_credential_copies`、`kernel/acp_e2b_env.py::_scan_published_secrets`、`artifacts.py::ArtifactTree.remove` |
 | 子代理镜像 | E2B 面回收的 `runs/<id>/subagents/`（分支会话 + 产物）收尾时经目录句柄清扫，与 §5.2 同一条边界 | `runs/secrets.py::RunSecretBoundary.sweep_tree`（`seal_trees`）、`kernel/e2b_env.py::recover_subagent_files` |
 | 子代理文档 | `runs/<id>/children/<n>/child.json` 只由已过两道脱敏的事件载荷构造（投影 → 提交前再脱敏），`GET /api/runs/{id}/children` 按存储原样下发，不引入新秘密；`children/<n>/<file>` 产物下载按报告下载同一套规则（服务前再脱敏、`X-Redacted`） | `runs/channel.py::RunChannel.emit`、`runs/plugins.py::ChildDocumentsPlugin`、`store.py::read_children`、`web_routes.py` |
 | 报告下载 | `report_path` 不是下载能力：只认一个固定位置——宿主产物副本 `runs/<id>/artifacts/report.md`；工作区 `workspaces/<id>/report.md` 及其他路径一律视为无报告（[ADR 0007](adr/0007-report-served-only-from-host-artifact.md)）。服务前再脱敏，响应头 `X-Redacted` 标明是否发生；`hasReport` 用同一位置规则与同一拒绝条件计算 | `store.py::report_location`、`web_routes.py::_send_report`、`artifacts.py` |
@@ -807,8 +812,8 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `redaction`（出站脱敏）/ `accounts`（站内账号）/ `auth`（身份断言与会话）/ `dotenv`（.env 解析）/ `blueprints`（蓝图目录推导与解析渲染）、`harnesses`（harness 包清单的目录推导、fail-closed 解析与选择）；组成根 `app`（服务器与 `create_server`） |
 | `host/pi_glink/web_*.py` | 宿主 HTTP 层 | `web_routes`（路由与 run/health/报告 API）/ `web_sse`（事件流与连接额度）/ `web_security`（身份、会话与请求防护）/ `web_http`（请求体、响应、静态资源、脱敏访问日志）；一个 `HostRequestHandler` 由它们组合而成 |
 | `host/pi_glink/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
-| `host/pi_glink/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env` / `subagent_artifacts`（pi-subagents 产物布局解析与关联，R2）；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）；两族的 run 生命周期策略：`harness` / `harness_pi` / `harness_acp`。不导入 `runs/` 或宿主编排模块 |
-| `host/pi_glink/runs/` | 编排层 | run 准入与执行骨架、收尾顺序、终态提交与资源台账：`runner`（RunManager 公共 API 与准入锁）/ `admission`（两段式准入）/ `pipeline` + `stages`（生命周期管线与各阶段）/ `state`（阶段事实类型）/ `channel`（事件提交路径）/ `secrets`（run 秘密边界）/ `plugins`（子代理文档/进度/增强插件）/ `errors` / `limits` / `resource_ledger`（外部资源台账、重启对账、人工裁决与在线身份探测扫描）/ `child_progress_observer`（R3a 每 run 进度观察者） |
+| `host/pi_glink/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env` / `subagent_artifacts`（pi-subagents 产物布局解析与关联，R2）；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手，含 resume/kill-by-id）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）；对话状态基础设施：`archive_channel`（0018 归档通道）/ `conversation_lease` + `acp_sandbox_park`（0020 对话租约事实与收尾泊车）；两族的 run 生命周期策略：`harness` / `harness_pi` / `harness_acp`。不导入 `runs/` 或宿主编排模块 |
+| `host/pi_glink/runs/` | 编排层 | run 准入与执行骨架、收尾顺序、终态提交与资源台账：`runner`（RunManager 公共 API 与准入锁）/ `admission`（两段式准入）/ `pipeline` + `stages`（生命周期管线与各阶段）/ `state`（阶段事实类型）/ `channel`（事件提交路径）/ `secrets`（run 秘密边界）/ `plugins`（子代理文档/进度/增强插件）/ `errors` / `limits` / `resource_ledger`（外部资源台账、重启对账、人工裁决、在线身份探测扫描与对话租约对账/删除闭环，0020）/ `child_progress_observer`（R3a 每 run 进度观察者） |
 | `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
 | `harnesses/<pack>/` | Harness 包 | `harness.toml`（`pi-glink-harness/v2` 清单：`family`、`[entry].command`、`[capabilities]` 能力矩阵、`[image]` 镜像需求与上游包精确版本；Dockerfile ARG、`docker/e2b/templates.json` 与 pi 的 `settings.json` 包列表由 `scripts/generate-pack-artifacts.py` 从它生成）、可选 `capabilities.md`（能力提示，拼入系统提示）、ACP 包的 `home/`（每 run HOME 覆盖层，先于凭据注入）；pi 包另有 `settings.json`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
 | `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |
@@ -817,7 +822,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `scripts/` | 运维 | 启动、测试、真实 run 冒烟、E2B 模板构建；`spikes/`（ACP 各面的 live 探针） |
 | `docs/` | 文档与证据 | 架构、边界、集成笔记、`evidence/` |
 | `tests/` | 回归 | `test_*.py`（宿主/内核）、`web/*.test.mjs`（前端模型）、`browser/`（真实浏览器） |
-| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/runs.db`（run 记录与事件，SQLite WAL，含 `-wal`/`-shm`）、`runs/<id>/{pi-agent/ 或 acp-agent/,sessions/,artifacts/,subagents/,children/}`（按本 run 的 harness 渲染；`subagents/` 为 E2B 面回收的子代理镜像；`children/<n>/child.json` 为子代理权威文档，§3.5）、`workspaces/<id>/`；目录由宿主以 0700 创建，已存在的符号链接或组/其他人可写目录拒绝启动（不自动 chmod） |
+| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/runs.db`（run 记录与事件，SQLite WAL，含 `-wal`/`-shm`）、`runs/<id>/{pi-agent/ 或 acp-agent/,sessions/,artifacts/,subagents/,children/}`（按本 run 的 harness 渲染；`subagents/` 为 E2B 面回收的子代理镜像；`children/<n>/child.json` 为子代理权威文档，§3.5）、`conversations/<根run>/state/`（ACP 对话级权威状态与 manifest，0018）与 `conversations/<根run>/lease.json`（对话沙箱租约，0020）、`workspaces/<id>/`；目录由宿主以 0700 创建，已存在的符号链接或组/其他人可写目录拒绝启动（不自动 chmod） |
 
 运行期配置目录 `runs/<id>/pi-agent/` 是 pi 的 `PI_CODING_AGENT_DIR`：宿主在其中渲染
 `models.json` 与 `web-search.json`，复制 `harnesses/pi/` 的可版本化配置，pi 自己往里写 `auth.json` /
@@ -825,9 +830,11 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 所以并发 run 不会互写凭据或扩展。ACP 族的对应物是 `runs/<id>/acp-agent/home`（子进程的
 `HOME`）：先铺 `harnesses/<pack>/home/` 覆盖层、再只读复制注入凭据（凭据目标优先，不被覆盖层
 覆盖）且值并入该 run 脱敏边界；**run 收尾在只读扫描之后按 `credential_dests` 删除宿主
-一侧的注入凭据副本**（`home` 与 `recovered` 两处，[ADR 0003](adr/0003-acp-credential-copies-removed-at-close-out.md)）；e2b 面在沙箱销毁前有界回收为
-`acp-agent/recovered`，追问时灌回新沙箱。追问继承哪一个状态根按父 run 记录的 `executor`
-推导（e2b→`recovered`，其余→`home`），不随宿主当前执行面配置漂移（[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)）。
+一侧的注入凭据副本**（`home` 与历史 `recovered` 两处，[ADR 0003](adr/0003-acp-credential-copies-removed-at-close-out.md)）；e2b 面在沙箱销毁前回收并发布到
+对话状态根 `conversations/<根run>/state`（0018：归档通道按 offset 增量，凭据目标不进归档，
+manifest 记 `sourceRunId`；历史 run 的 `acp-agent/recovered` 保留为兼容继承源），追问时经归档
+通道回灌新沙箱（通道不可用降级宿主侧继承 + files 逐文件）。追问继承哪一个状态根按父 run 记录的 `executor`
+推导（e2b→对话状态根，其余→`home`），不随宿主当前执行面配置漂移（[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)）。归档通道部署下，e2b 面 ACP run 收尾在回收发布成功后**泊车**（`pause(keep_memory=False)`）而非销毁：沙箱内凭据副本先删（凭据不随沙箱持久化），状态代数标记与对话租约（`conversations/<根run>/lease.json`，[ADR 0020](adr/0020-conversation-sandbox-lease-hot-path.md)）成对落盘，终帧 `cleanup.lease` 记录泊车事实且**不构成 resource hold**；追问优先重连该泊车沙箱（热路径，跳过回灌，`session/resume` 照常新起 agent 进程），代数双端不一致或重连失败一律降级阶段 1 冷路径（新沙箱 + 回灌），降级发 `kernel_status` 警告；闲置 TTL（`PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS`，默认 7200s、0 禁用、硬上限 24h）到期由资源对账 sweep 按沙箱 id fail-closed 销毁，删除对话走 `RunManager.delete_conversation` 最小闭环（销毁租约沙箱 + 清理对话状态对象；run 记录与事件另属产品面）。
 
 宿主 HTTP 层的职责边界：路由只决定请求含义（`web_routes`），身份与请求防护集中在
 `web_security`，事件流与连接额度在 `web_sse`，字节读写与静态资源在 `web_http`；`app.py` 只做
@@ -947,7 +954,9 @@ SSE 连接同样有界：全局 `PI_GLINK_MAX_GLOBAL_STREAMS`（默认 64）与�
 Docker 面的每个容器实例额外带 `--cpus` / `--memory` / `--pids-limit`（默认 2 / 2g / 512，可配置）与
 `--cap-drop ALL` / `--security-opt no-new-privileges`，镜像与模板不变。E2B 面只能限制沙箱生命周期
 （`LOCAL_WEB_E2B_TIMEOUT_SECONDS`，默认 task timeout + 300 秒）；SDK 不暴露 CPU/内存控制，因此宿主
-只声明自己实际传给云端的限制，不把未请求的限制当作已执行。两者都未在本次交付中做 live 验证。
+只声明自己实际传给云端的限制，不把未请求的限制当作已执行。追问热路径的泊车沙箱另受闲置租约 TTL
+约束（`PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS`，默认 7200 秒、0 禁用、硬上限 24 小时，[ADR 0020](adr/0020-conversation-sandbox-lease-hot-path.md)；
+paused 沙箱的云端保留期与计费模型在 SDK 内无文档，TTL 是宿主侧的唯一收敛手段）。两者都未在本次交付中做 live 验证。
 
 ### 10.5 行为迁移、回退与未覆盖范围
 

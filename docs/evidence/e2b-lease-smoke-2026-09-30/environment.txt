@@ -1,0 +1,4 @@
+e2b SDK unknown
+python Python 3.12.10
+command: .venv/bin/python scripts/smoke-e2b-lease-pause.py
+e2b SDK 2.51.0

@@ -280,6 +280,104 @@ def test_state_home_ignores_the_host_current_executor(tmp_path: Path) -> None:
     )
 
 
+# -- 对话级权威状态（阶段 1，docs/adr/0018）----------------------------------------
+
+
+def write_conversation_state(
+    store: RunStore, root_run_id: str, *, source_run_id: str, files: dict[str, bytes]
+) -> Path:
+    """发布一份对话状态根（manifest + 文件），如同一次成功的回收。"""
+    import hashlib
+    import json
+
+    conversation = store.conversation_dir(root_run_id)
+    state = conversation / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "version": 1,
+        "sourceRunId": source_run_id,
+        "mode": "archive-full",
+        "bytes": sum(len(data) for data in files.values()),
+        "files": {
+            relative: {
+                "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+            for relative, data in files.items()
+        },
+    }
+    for relative, data in files.items():
+        target = state / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    (state / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True), encoding="utf-8"
+    )
+    return conversation
+
+
+def test_e2b_state_home_prefers_the_conversation_root(tmp_path: Path) -> None:
+    """e2b 父 run 的状态根指向对话状态根；无对话根时回退旧 ``recovered``。"""
+    _config, store, family = make_family(tmp_path)
+    parent = craft_parent(store, "parent000020", executor="e2b", state_root="recovered")
+    legacy = store.run_dir(parent.run_id) / "acp-agent" / "recovered"
+    assert family.state_home(parent) == legacy
+    conversation = write_conversation_state(
+        store, "parent000020", source_run_id="parent000020", files={"s/a": b"x"}
+    )
+    assert family.state_home(parent) == conversation / "state"
+
+
+def test_conversation_root_fails_closed_on_gaps_and_cycles(tmp_path: Path) -> None:
+    """父链缺失或成环：上溯 fail-closed（拒绝追问），不猜测对话根。"""
+    _config, store, family = make_family(tmp_path)
+    # A record whose parent id points at nothing at all.
+    orphan = craft_parent(store, "parent000040", executor="e2b", state_root="recovered")
+    store.update("parent000040", parent_run_id="parent000039")
+    with pytest.raises(FollowupUnavailable):
+        family.conversation_root(store.get("parent000040"))
+    # A two-node cycle: the walk refuses instead of looping.
+    craft_parent(store, "parent000041", executor="e2b", state_root="recovered")
+    store.update("parent000041", parent_run_id="parent000040")
+    store.update("parent000040", parent_run_id="parent000041")
+    with pytest.raises(FollowupUnavailable):
+        family.conversation_root(store.get("parent000041"))
+    assert orphan is not None
+
+
+def test_conversation_root_walks_the_parent_chain(tmp_path: Path) -> None:
+    """对话根=链头 run；沿 parent 链上溯，且环 fail-closed。"""
+    _config, store, family = make_family(tmp_path)
+
+    craft_parent(store, "parent000021", executor="e2b", state_root="recovered")
+    craft_parent(store, "parent000022", executor="e2b", state_root="recovered")
+    store.update("parent000022", parent_run_id="parent000021")
+    craft_parent(store, "parent000023", executor="e2b", state_root="recovered")
+    store.update("parent000023", parent_run_id="parent000022")
+    # Read the records back after the update (the walk reads parent_run_id).
+    assert family.conversation_root(store.get("parent000023")) == "parent000021"
+    assert family.conversation_root(store.get("parent000021")) == "parent000021"
+
+
+def test_e2b_continuation_requires_the_parents_own_recovery(tmp_path: Path) -> None:
+    """manifest 的 sourceRunId 必须是父 run：陈旧状态拒追问（新鲜度门禁）。"""
+    _config, store, family = make_family(tmp_path)
+    # 第一轮已发布，第二轮 terminal 但回收失败：状态停在第一轮。
+    craft_parent(store, "parent000030", executor="e2b", state_root=None)
+    write_conversation_state(
+        store, "parent000030", source_run_id="parent000030", files={"s/a": b"x"}
+    )
+    craft_parent(store, "parent000031", executor="e2b", state_root=None)
+    store.update("parent000031", parent_run_id="parent000030")
+    with pytest.raises(FollowupUnavailable):
+        family.check_continuation(store.get("parent000031"))
+    # 第二轮自己发布了：受理（状态根存在性走 manifest 所在的对话根）。
+    write_conversation_state(
+        store, "parent000030", source_run_id="parent000031", files={"s/a": b"y"}
+    )
+    family.check_continuation(store.get("parent000031"))
+
+
 # -- 续接种子与工作区 --------------------------------------------------------------
 
 

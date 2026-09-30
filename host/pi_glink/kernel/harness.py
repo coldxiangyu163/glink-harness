@@ -27,7 +27,8 @@ from ..contracts import Verdict
 from ..store import RunRecord, RunStore
 from .agent_env import EgressEndpoint
 from .execution import ExecutionAdapter, ExecutionSpec
-from .sandbox import Launch, Sandbox
+from .archive_channel import ArchiveEndpoint
+from .sandbox import Launch, Sandbox, SandboxResume
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only
     from ..redaction import SecretRedactor
@@ -168,12 +169,19 @@ class HarnessFamily(ABC):
         session_seed: bytes | None,
         egress: EgressEndpoint | None,
         sandbox: Sandbox,
+        archive: ArchiveEndpoint | None = None,
+        resume_target: "SandboxResume | None" = None,
     ) -> PreparedRuntime:
         """Render the run's per-harness configuration.
 
         ``egress`` is the run's proxy endpoint (base URLs as the sandbox's
         execution face reaches them plus the run token) when the family
         ``uses_egress``; otherwise ``None``. No real credential is passed.
+
+        ``archive`` is the run's archive-channel endpoint (docs/adr/0018) when
+        the face is remote and the channel can serve it; otherwise ``None``.
+        The ACP family uses it to move the follow-up's state inheritance off
+        the host-side copy (the sandbox pulls the conversation state itself).
 
         ``sandbox`` is asked facts only: an ``isolated`` sandbox runs the
         kernel from its image, so pi's ``settings.json`` names the image-local
@@ -182,9 +190,9 @@ class HarnessFamily(ABC):
         调用前 runner 已做好父记录二次授权（``_authorized_parent`` 重查，
         失败即 ``session_unavailable``）。pi：prepare_agent_dir + 种子写入
         continued.jsonl（凭据位只写 egress token）。ACP：
-        prepare_acp_runtime（含 inherit_from=self.state_home(parent)、
-        AcpStateInheritError 原文包装）；session_seed 非 None 抛
-        ``session_unavailable``。
+        prepare_acp_runtime（inproc/docker 含 inherit_from=self.state_home(parent)、
+        AcpStateInheritError 原文包装；e2b 走归档通道时状态不在宿主复制）；
+        session_seed 非 None 抛 ``session_unavailable``。
         """
 
     @abstractmethod

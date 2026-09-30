@@ -91,6 +91,7 @@ class RunManager:
         *,
         client_factory: Callable[..., Any] | None = None,
         sandbox_factory: Callable[..., Any] | None = None,
+        sandbox_resume_factory: Callable[..., Any] | None = None,
         ownership: DataRootOwnership | None = None,
         credential_store: TenantCredentialStore | None = None,
         docker_probe: Callable[[str], tuple[bool, str]] | None = None,
@@ -103,6 +104,10 @@ class RunManager:
         #: construction; the stages read them at call time).
         self._client_factory = client_factory
         self._sandbox_factory = sandbox_factory
+        #: The E2B reconnect factory for the conversation lease's hot path
+        #: (docs/adr/0020); ``None`` in production (the SDK's own class method),
+        #: a fake in tests — the same seam as ``sandbox_factory``.
+        self._sandbox_resume_factory = sandbox_resume_factory
         # The host-level redaction boundary: it carries the host's own secrets
         # (global model/search keys, sandbox key). Each run's secret boundary
         # derives its own copy and adds only its own credentials and egress
@@ -134,6 +139,7 @@ class RunManager:
             sandbox_factory=lambda: self._sandbox_factory,
             client_factory=lambda: self._client_factory,
             on_committed=self._forget,
+            sandbox_resume_factory=lambda: self._sandbox_resume_factory,
         )
         #: The external-resource ledger: restart reconciliation, operator
         #: adjudication and the online identity-probe sweep. It shares this
@@ -468,6 +474,36 @@ class RunManager:
     def reconcile_resources(self) -> list[str]:
         """Confirm persisted resources are gone and release the verified holds."""
         return self._ledger.reconcile_resources()
+
+    def reconcile_leases(self) -> list[str]:
+        """Destroy expired conversation leases' sandboxes (docs/adr/0020)."""
+        return self._ledger.reconcile_leases()
+
+    def delete_conversation(
+        self, root_run_id: str, context: TenantContext | None = None
+    ) -> dict[str, Any]:
+        """Delete one conversation: destroy its paused sandbox and host state.
+
+        The deletion link (docs/adr/0020): the conversation's lease sandbox is
+        destroyed by id, then the host-side authoritative state objects
+        (``conversations/<root>/``) are removed. The run records, event logs
+        and workspaces of the conversation's turns are **not** part of this
+        minimal loop — a product-facing delete surface (HTTP route, recycling
+        policy) is a separate decision that composes on top of it.
+
+        The owner gate matches every other conversation-shaped read: in
+        multi-tenant mode an unknown, foreign or ownerless conversation is
+        refused as ``unknown`` before anything is destroyed.
+        """
+        record = self.store.get(root_run_id)
+        if record is None:
+            return {"deleted": False, "reason": "unknown"}
+        if self.config.multi_tenant and (
+            context is None or record.tenant_id != context.tenant_id
+        ):
+            return {"deleted": False, "reason": "unknown"}
+        deleted, failures = self._ledger.delete_conversation(root_run_id)
+        return {"deleted": deleted, "failures": failures}
 
     def start_resource_watch(self) -> threading.Thread | None:
         """Start the periodic ledger sweep (once at startup, then every interval)."""

@@ -29,6 +29,8 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
+from types import SimpleNamespace
+
 import pytest
 
 from pi_glink.config import build_config
@@ -352,10 +354,14 @@ def make_sandbox_adapter(
     identities: list[Mapping[str, str]] = []
     transfer = ScriptedTransfer(log)
     transfers: list[tuple[object, Path]] = []
+    transfer_kwargs: dict[str, Any] = {}
 
-    def build_transfer(handle, runtime, *, workspace):
-        # The adapter hands the transfer the opened sandbox's own handle.
+    def build_transfer(handle, runtime, *, workspace, **_kwargs):
+        # The adapter hands the transfer the opened sandbox's own handle (the
+        # archive-channel context travels as extra keyword-only arguments a
+        # scripted transfer may ignore).
         transfers.append((handle, workspace))
+        transfer_kwargs.update(_kwargs)
         return transfer
 
     monkeypatch.setattr("pi_glink.kernel.acp_execution.AcpSandboxTransfer", build_transfer)
@@ -386,6 +392,7 @@ def make_sandbox_adapter(
     )
     sandbox.transfer = transfer  # type: ignore[attr-defined] - test handle
     sandbox.transfers = transfers  # type: ignore[attr-defined]
+    sandbox.transfer_kwargs = transfer_kwargs  # type: ignore[attr-defined]
     return adapter, sandbox, created, log, frames, identities
 
 
@@ -970,6 +977,28 @@ def test_tool_kinds_are_remembered_and_never_relabelled(tmp_path: Path) -> None:
 # -- the sandbox face --------------------------------------------------------------------
 
 
+def test_sandbox_start_hands_the_archive_context_to_the_transfer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The frozen spec's archive endpoint/conversation reach the transfer."""
+    from pi_glink.kernel.archive_channel import ArchiveEndpoint
+
+    adapter, sandbox, _created, _log, _frames, _ids = make_sandbox_adapter(
+        tmp_path,
+        monkeypatch,
+        spec_overrides={
+            "archive": ArchiveEndpoint(origin="http://pub.example", token="pga_wiring"),
+            "conversation_dir": tmp_path / "conversations" / "r1",
+        },
+    )
+    adapter.start()
+    adapter.close()
+    kwargs = sandbox.transfer_kwargs  # type: ignore[attr-defined]
+    assert kwargs["archive"] is not None
+    assert kwargs["archive"].url == "http://pub.example/archive/state"
+    assert kwargs["conversation_dir"] == tmp_path / "conversations" / "r1"
+
+
 def test_sandbox_start_orders_creation_identity_upload_and_protocol(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1103,3 +1132,85 @@ def test_sandbox_close_reports_client_then_sandbox_failures(
     assert report.released is False
     assert report.failures == ("sandbox kill failed: boom",)
     assert report.external == {"sandbox": "sbx-1"}
+
+
+# -- 泊车前的停机后回收（cc 终审 B1：沙箱不得成为事实权威） ----------------------
+
+
+class _ReclaimTransfer:
+    def __init__(self, *, ok: bool, raises: bool = False) -> None:
+        self.ok = ok
+        self.raises = raises
+        self.calls = 0
+
+    def recover_state(self):
+        self.calls += 1
+        if self.raises:
+            raise RuntimeError("boom-after-agent-stop")
+        from pi_glink.kernel.acp_e2b_env import AcpStateRecovery
+
+        return AcpStateRecovery(ok=self.ok, failures=() if self.ok else ("回收发布失败",))
+
+
+def _park_adapter(tmp_path: Path, transfer) -> AcpExecutionAdapter:
+    """A bare adapter wired only for the park decision path (no process)."""
+    adapter = object.__new__(AcpExecutionAdapter)
+    adapter.sandbox = SimpleNamespace(
+        kind="e2b",
+        remote=True,
+        handle=object(),
+        session_facts=lambda: {"sandboxId": "sbx-1", "template": "tpl"},
+        defer_destroy=lambda: None,
+    )
+    adapter.spec = SimpleNamespace(
+        conversation_dir=tmp_path,
+        run_id="unit-run",
+        config=SimpleNamespace(harness="acp", harness_pack="dsh"),
+        runtime=SimpleNamespace(credential_dests=()),
+    )
+    adapter._park_ready = True
+    adapter._transfer = transfer
+    return adapter
+
+
+def test_park_refuses_when_the_post_close_reclaim_fails(tmp_path: Path) -> None:
+    """停机后增量发布失败：不泊车（沙箱走销毁，宿主保持唯一权威）。"""
+    transfer = _ReclaimTransfer(ok=False)
+    adapter = _park_adapter(tmp_path, transfer)
+    payload = adapter._park_sandbox()
+    assert payload is not None and payload["parked"] is False
+    assert "post-close reclaim failed" in payload["reason"]
+    assert transfer.calls == 1
+
+
+def test_park_refuses_when_the_post_close_reclaim_raises(tmp_path: Path) -> None:
+    transfer = _ReclaimTransfer(ok=True, raises=True)
+    adapter = _park_adapter(tmp_path, transfer)
+    payload = adapter._park_sandbox()
+    assert payload is not None and payload["parked"] is False
+    assert "RuntimeError" in payload["reason"]
+
+
+def test_park_proceeds_to_parking_after_a_clean_post_close_reclaim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """停机后回收干净：泊车继续（park_sandbox 被调用，回收执行了两次语义中的第二次）。"""
+    parked: list[dict] = []
+
+    class Outcome:
+        ok = True
+        destroyed = False
+        reason = ""
+        lease = SimpleNamespace(payload=lambda: {"parked": True})
+
+    def fake_park(handle, **kwargs):
+        parked.append(kwargs)
+        return Outcome()
+
+    monkeypatch.setattr("pi_glink.kernel.acp_execution.park_sandbox", fake_park)
+    transfer = _ReclaimTransfer(ok=True)
+    adapter = _park_adapter(tmp_path, transfer)
+    payload = adapter._park_sandbox()
+    assert payload == {"parked": True}
+    assert parked and parked[0]["sandbox_id"] == "sbx-1"
+    assert transfer.calls == 1

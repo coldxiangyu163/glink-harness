@@ -29,6 +29,7 @@ from ..blueprints import Blueprint
 from ..contracts import Verdict
 from ..kernel.agent_env import RunCredentials
 from ..kernel.execution import CleanupReport, ExecutionAdapter, ExecutionOutcome
+from ..kernel.archive_channel import ArchiveEndpoint
 from ..kernel.harness import FrameProjector, HarnessRuntime
 from ..store import RunRecord
 from ..tenancy import TenantContext
@@ -212,6 +213,16 @@ class RunExecution:
     #: Set once the pipeline finished (committed or not).
     finalized: threading.Event = field(default_factory=threading.Event)
     verdict: Verdict | None = None
+    #: The archive-channel endpoint (docs/adr/0018) and the conversation state
+    #: directory it serves, issued by Prepare on a remote ACP face; ``None``
+    #: elsewhere. ``LaunchPlan``-shaped staging: ``build_adapter`` reads them
+    #: into the frozen :class:`~pi_glink.kernel.execution.ExecutionSpec`.
+    archive_endpoint: "ArchiveEndpoint | None" = None
+    conversation_dir: Path | None = None
+    #: 阶段 2（docs/adr/0020）：追问的热路径候选（泊车沙箱），由 Prepare 在
+    #: ``prepare_runtime`` 前判定、``build_adapter`` 冻结进 ExecutionSpec。
+    #: ``None`` = 冷路径（新沙箱 + 阶段 1 回灌）。
+    sandbox_resume: Any = None
     #: Execution facts stay open until Decide freezes them; artifact and
     #: resource facts are the frozen outputs of Seal and Recover.
     execution_facts: LiveExecutionFacts = field(default_factory=LiveExecutionFacts)

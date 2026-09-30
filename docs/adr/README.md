@@ -23,3 +23,6 @@
 | [0015](0015-acp-credential-channels-under-model-credential-policy.md) | ACP 凭据通道视同模型凭据，服从 tenant/shared 政策；shared 按族分流冻结清单 |
 | [0016](0016-acp-credential-env-single-source.md) | ACP 凭据新增 `.env` 单源渲染通道（每 run 渲染 dsh 凭据、收尾删除）；与文件注入互斥；dsh 默认模型经仓库 overlay 版本化 |
 | [0017](0017-declared-deliverables.md) | ACP `present` 声明 → 安全回收多文件 → 宿主副本下载与交付卡片；主报告仍遵循 0007 |
+| [0018](0018-conversation-state-archive-channel.md) | 宿主持有对话级权威状态，E2B 面回收/回灌走归档通道（增量 tar 流），继承阈值改为异常检测 |
+| [0019](0019-acp-state-bounds-warning-tier-and-adaptive-resume.md) | 状态上限三分支（警告档不拒、fail-closed 才拒），resume 超时按状态根体量自适应，继承/回灌/回收与 resume 耗时进事件流 |
+| [0020](0020-conversation-sandbox-lease-hot-path.md) | 对话沙箱租约：收尾泊车（pause）而非销毁，追问热路径重连原沙箱（代数双端一致才命中，失败降级冷路径），TTL 对账销毁与删除最小闭环；租约不占 run 槽位 |

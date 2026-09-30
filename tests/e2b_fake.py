@@ -39,6 +39,15 @@ from pi_glink.kernel.e2b_env import SANDBOX_PACKAGE_GUARD, SANDBOX_WORKSPACE
 
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
 
+# 事实类型对齐真实 SDK（tests/test_kernel_e2b_env.py 的先例：宿主的 not-found
+# 判定是类型化的，fake 必须抛同一类型才能穿透 is_file_not_found/_is_not_found）。
+from e2b import FileNotFoundException as FakeFileNotFoundException  # noqa: E402
+from e2b import SandboxNotFoundException  # noqa: E402
+
+
+class FakeSandboxNotFound(SandboxNotFoundException):
+    """Stand-in for the SDK's ``SandboxNotFoundException`` (by-id lookup miss)."""
+
 
 def translate(sandbox_path: str, root: Path) -> Path:
     """把一个 ``/home/user/…`` 沙箱路径映射到假沙箱的真实目录树。"""
@@ -85,6 +94,16 @@ class FakeFiles:
         real = self._real(path)
         real.parent.mkdir(parents=True, exist_ok=True)
         real.write_bytes(data)
+
+    def remove(self, path: str, **_kwargs: Any) -> None:
+        """The SDK's ``files.remove``: a missing path raises not-found."""
+        real = self._real(path)
+        if not real.exists():
+            raise FakeFileNotFoundException(path)
+        if real.is_dir() and not real.is_symlink():
+            real.rmdir()
+        else:
+            real.unlink()
 
     def _bytes(self, path: str) -> bytes:
         if path in self._sandbox.readable:
@@ -328,7 +347,19 @@ class FakeCommands:
 
 
 class FakeSandbox:
-    """Minimal stand-in for ``e2b.Sandbox`` driven by the tests."""
+    """Minimal stand-in for ``e2b.Sandbox`` driven by the tests.
+
+    阶段 2（docs/adr/0020）的表面：实例互相独立之外，还有一个**类级注册表**
+    （``FakeSandbox.REGISTRY``，sandbox_id → 实例），让类方法形态的
+    ``FakeSandbox.connect(sandbox_id, ...)`` 能找回暂停的沙箱——与真实
+    SDK 的 ``Sandbox.connect`` 类方法变体同形：paused 自动恢复、killed
+    报 not found、幂等（已 running 直接返回）；``pause(keep_memory=...)``
+    记录调用事实（幂等：已暂停返回 False）。``files.remove`` 补齐删除面
+    （凭据副本清理路径）。
+    """
+
+    #: Class-level registry: every constructed fake registers itself by id.
+    REGISTRY: dict[str, "FakeSandbox"] = {}
 
     def __init__(
         self,
@@ -339,10 +370,22 @@ class FakeSandbox:
         workspace_files: tuple[str, ...] | None = None,
         fake_pi_env: dict[str, str] | None = None,
         stream_break_marker: bytes | None = None,
+        metadata: dict[str, str] | None = None,
+        register: bool = True,
     ) -> None:
         self.root = root if root is not None else Path(tempfile.mkdtemp(prefix="fake-e2b-"))
         self.root.mkdir(parents=True, exist_ok=True)
         self.sandbox_id = sandbox_id
+        #: The SDK's lifecycle states (``running`` / ``paused`` / ``killed``).
+        self.state = "running"
+        #: ``create``-time metadata (the conversation lease's label hook).
+        self.metadata = dict(metadata or {})
+        #: Every ``pause`` call's kwargs, for the keep_memory assertion.
+        self.pause_calls: list[dict[str, Any]] = []
+        #: Every ``connect`` call's kwargs (the on_resume contract).
+        self.connect_calls: list[dict[str, Any]] = []
+        if register:
+            FakeSandbox.REGISTRY[sandbox_id] = self
         self.dirs: list[str] = []
         self.written: dict[str, str] = {}
         self.readable: dict[str, Any] = {}
@@ -386,10 +429,63 @@ class FakeSandbox:
         self.files = FakeFiles(self)
         self.commands = FakeCommands(self)
 
+    def pause(self, keep_memory: bool | None = None, **_opts: Any) -> bool:
+        """The SDK's pause: ``True`` just paused, ``False`` already paused."""
+        if self.killed:
+            raise FakeSandboxNotFound(self.sandbox_id)
+        self.pause_calls.append({"keep_memory": keep_memory})
+        if self.state == "paused":
+            return False
+        self.state = "paused"
+        return True
+
+    @classmethod
+    def connect(
+        cls,
+        sandbox_id: str,
+        timeout: int | None = None,
+        *,
+        on_resume: str = "restore",
+        **opts: Any,
+    ) -> "FakeSandbox":
+        """The SDK's class-method connect: resume a paused sandbox by id."""
+        sandbox = cls.REGISTRY.get(sandbox_id)
+        if sandbox is None or sandbox.killed:
+            raise FakeSandboxNotFound(sandbox_id)
+        sandbox.connect_calls.append(
+            {"timeout": timeout, "on_resume": on_resume, "opts": dict(opts)}
+        )
+        if sandbox.state == "paused":
+            # ``reboot`` cold-boots from disk: the fake keeps the same tree.
+            sandbox.state = "running"
+        return sandbox
+
+    @classmethod
+    def kill_by_id(cls, sandbox_id: str, **_opts: Any) -> bool:
+        """The SDK's class-method kill: ``False`` when not found."""
+        sandbox = cls.REGISTRY.get(sandbox_id)
+        if sandbox is None or sandbox.killed:
+            return False
+        sandbox.kill()
+        return True
+
     def kill(self) -> None:
         if self.agent_process is not None and self.agent_process.poll() is None:
             self.agent_process.kill()
         self.killed = True
+        self.state = "killed"
+        FakeSandbox.REGISTRY.pop(self.sandbox_id, None)
+
+    def get_info(self) -> Any:
+        """The SDK's ``SandboxInfo`` shape (state + metadata), by-id facts."""
+
+        class _Info:
+            def __init__(self, sandbox: "FakeSandbox") -> None:
+                self.sandbox_id = sandbox.sandbox_id
+                self.state = sandbox.state
+                self.metadata = dict(sandbox.metadata)
+
+        return _Info(self)
 
 
 class IdleHandle:

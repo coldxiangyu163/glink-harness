@@ -4,9 +4,12 @@ Structured run state lives in ``<data_root>/runs/runs.db`` (standard-library
 :mod:`sqlite3`, WAL). Files a run produces stay files, all under the run's own
 directory:
 
-    <data_root>/runs/
-    ├── runs.db              run records + events (+ -wal / -shm sidecars)
-    └── <run_id>/
+    <data_root>/
+    ├── runs/
+    │   ├── runs.db          run records + events (+ -wal / -shm sidecars)
+    │   └── <run_id>/
+    └── conversations/<root_run_id>/state/   the ACP conversation's
+                                             authoritative state (0018)
         ├── pi-agent/ | acp-agent/   the run's rendered runtime configuration
         ├── sessions/            PI_CODING_AGENT_SESSION_DIR of a pi run
         ├── subagents/           E2B-recovered subagent mirror
@@ -78,6 +81,11 @@ DATABASE_NAME = "runs.db"
 REPORT_FILENAME = "report.md"
 #: Host-owned artifact directory inside the run directory.
 ARTIFACTS_DIRNAME = "artifacts"
+#: The conversations root, beside ``runs``: one directory per conversation
+#: (named by its root run), holding the ACP conversation-level authoritative
+#: state (docs/adr/0018). Kept outside ``runs/<id>`` because the state spans
+#: every turn of a conversation while each run directory belongs to one turn.
+CONVERSATIONS_DIRNAME = "conversations"
 #: A pi run's session directory (``PI_CODING_AGENT_SESSION_DIR``), inside the
 #: run directory: one run owns exactly one, created with the run's runtime.
 SESSIONS_DIRNAME = "sessions"
@@ -358,6 +366,43 @@ class RunStore:
 
     def run_dir(self, run_id: str) -> Path:
         return self._root / run_id
+
+    def conversation_dir(self, root_run_id: str) -> Path:
+        """The conversation-root directory for a chain of runs (0700).
+
+        The directory is host-owned and holds the ACP conversation state
+        (``<root>/state/`` plus its manifest); it is created owner-only on
+        first use and lives beside the runs root, never inside any one run's
+        directory (a run belongs to one turn; the state belongs to the
+        conversation).
+        """
+        path = self._root.parent / CONVERSATIONS_DIRNAME / root_run_id
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(path, 0o700)
+        except OSError:  # pragma: no cover - best effort on shared roots
+            pass
+        return path
+
+    def conversations_root(self) -> Path:
+        """The conversations root, beside the runs root (may not exist yet)."""
+        return self._root.parent / CONVERSATIONS_DIRNAME
+
+    def conversation_ids(self) -> builtins.list[str]:
+        """Every conversation directory's root-run id (sorted, no recursion).
+
+        For the lease sweep (docs/adr/0020): the directories the data root
+        actually carries — a symlink is never followed and never enumerated as
+        a conversation.
+        """
+        root = self.conversations_root()
+        if not root.is_dir():
+            return []
+        return sorted(
+            child.name
+            for child in root.iterdir()
+            if child.is_dir() and not child.is_symlink()
+        )
 
     def session_dir(self, run_id: str) -> Path:
         """The run's own pi session directory (``runs/<id>/sessions``)."""
