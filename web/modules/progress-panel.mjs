@@ -4,7 +4,7 @@
  *
  * It answers "what did the AI just do" without growing the conversation:
  *
- *   进度      one timeline row per step (tool call / thinking block)
+ *   进度      latest whole task plan, otherwise actual tool/thinking steps
  *   上下文    输出（this run's report）· 来源（what it searched and read on the web）
  *   运行信息  status, time, usage, model
  *
@@ -22,7 +22,9 @@ import {
   formatTokens,
   modelLabel,
   statusLabel,
+  planProgressLabel,
 } from './present.mjs';
+import { createProgressMarker, createTodoTimeline, isTodoWrite, latestTodoEntries } from './todo-panel.mjs';
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -91,23 +93,29 @@ export function collectSources(items) {
   return { queries, pages };
 }
 
-export function createProgressPanel({ root, onOpenReport = null }) {
+export function createProgressPanel({ root, onOpenReport = null, onClose = null }) {
   const card = el('div', 'progress-card');
 
-  // 进度
-  const stepsSection = el('section', 'progress-section');
-  const stepsHead = sectionHead('进度', 'progress-steps-list');
-  const stepsMeta = stepsHead.querySelector('.progress-section-meta');
+  // 进度：有整表计划时用任务时间轴，无源时保留实际执行步骤。
+  const stepsSection = el('section', 'progress-section progress-section-steps');
+  const stepsBody = el('div', 'progress-steps-body');
+  stepsBody.id = 'progress-steps-body';
+  const stepsMeta = el('span', 'progress-section-meta');
+  const stepsHead = sectionHead('进度', stepsBody, stepsMeta);
+  stepsMeta.setAttribute('role', 'status');
+  stepsMeta.setAttribute('aria-live', 'polite');
+  const todo = createTodoTimeline();
   const steps = el('ol', 'progress-steps');
   steps.id = 'progress-steps-list';
   const stepsEmpty = el('p', 'progress-empty', '还没有步骤。开始研究后，每一步都会出现在这里。');
-  stepsSection.append(stepsHead, steps, stepsEmpty);
+  stepsBody.append(todo.node, steps, stepsEmpty);
+  stepsSection.append(stepsHead, stepsBody);
 
   // 上下文
   const contextSection = el('section', 'progress-section');
-  const contextHead = sectionHead('上下文', 'progress-context');
   const context = el('div', 'progress-context');
   context.id = 'progress-context';
+  const contextHead = sectionHead('上下文', context);
   const tabs = el('div', 'segmented');
   tabs.setAttribute('role', 'tablist');
   tabs.setAttribute('aria-label', '上下文类型');
@@ -129,22 +137,34 @@ export function createProgressPanel({ root, onOpenReport = null }) {
 
   card.append(stepsSection, contextSection, facts);
   root.replaceChildren(card);
+  root.classList.toggle('has-close', Boolean(onClose));
+  if (onClose) {
+    const close = el('button', 'progress-close');
+    close.type = 'button';
+    close.setAttribute('aria-label', '关闭进度与上下文');
+    close.dataset.tip = '关闭进度与上下文';
+    close.append(icon('close', 16));
+    close.addEventListener('click', onClose);
+    root.append(close);
+  }
 
   let latest = null;
   let modelName = '';
 
-  function sectionHead(title, controls) {
+  function sectionHead(title, content, meta = el('span', 'progress-section-meta')) {
     const head = el('button', 'progress-section-head');
     head.type = 'button';
     head.setAttribute('aria-expanded', 'true');
-    head.setAttribute('aria-controls', controls);
+    head.setAttribute('aria-label', `收起${title}`);
+    head.setAttribute('aria-controls', content.id);
     const chevron = icon('chevron-down', 12);
     chevron.classList.add('progress-chevron');
-    const meta = el('span', 'progress-section-meta');
     head.append(el('span', 'progress-section-title', title), meta, chevron);
     head.addEventListener('click', () => {
       const open = head.getAttribute('aria-expanded') !== 'true';
       head.setAttribute('aria-expanded', String(open));
+      head.setAttribute('aria-label', `${open ? '收起' : '展开'}${title}`);
+      content.hidden = !open;
       head.parentElement.dataset.collapsed = String(!open);
     });
     return head;
@@ -178,13 +198,17 @@ export function createProgressPanel({ root, onOpenReport = null }) {
   }
 
   function drawSteps(model) {
-    const rows = model.items.filter((item) => item.kind === 'tool' || item.kind === 'thinking' ||
-      item.kind === 'subagent' || (item.kind === 'stage' && item.stage === 'plan'));
     const running = model.status === 'running';
-    stepsMeta.textContent = rows.length
-      ? running ? `第 ${rows.length} 步` : `共 ${rows.length} 步`
-      : '';
-    stepsEmpty.hidden = rows.length > 0;
+    card.dataset.status = model.status;
+    const entries = latestTodoEntries(model.items);
+    todo.render(entries, running);
+    const rows = entries.length ? [] : model.items.filter((item) =>
+      (item.kind === 'tool' && !isTodoWrite(item)) || item.kind === 'thinking' ||
+      item.kind === 'subagent' || (item.kind === 'stage' && item.stage === 'plan'));
+    stepsMeta.textContent = entries.length ? planProgressLabel(entries, running)
+      : rows.length ? running ? `第 ${rows.length} 步` : `共 ${rows.length} 步` : '';
+    steps.hidden = entries.length > 0 || rows.length === 0;
+    stepsEmpty.hidden = entries.length > 0 || rows.length > 0;
     steps.replaceChildren(
       ...rows.map((item) => {
         const li = el('li', 'progress-step');
@@ -197,9 +221,6 @@ export function createProgressPanel({ root, onOpenReport = null }) {
           status = 'running';
         }
         li.dataset.status = status;
-        const marker = el('span', 'progress-marker');
-        if (status === 'done') marker.append(icon('check', 12));
-        if (status === 'failed') marker.append(icon('close', 12));
         const srStatus = { done: '已完成', failed: '失败', running: '进行中', stopped: '未完成' }[status];
         let label;
         if (item.kind === 'thinking') {
@@ -214,7 +235,9 @@ export function createProgressPanel({ root, onOpenReport = null }) {
           label = described.object ? `${described.action} · ${described.object}` : described.action;
         }
         const text = el('span', 'progress-step-text', label);
-        li.append(marker, text, el('span', 'sr-only', `，${srStatus}`));
+        const row = el('div', 'progress-step-row');
+        row.append(createProgressMarker(status, label), text, el('span', 'sr-only', `，${srStatus}`));
+        li.append(row);
         return li;
       }),
     );

@@ -887,34 +887,6 @@ h1, h2, h3, h4, p { margin: 0; }
 }
 #run-question:empty { display: none; }
 
-/* 当前轮任务停靠在对话滚动区上方；旧轮快照留在原位置，不遮挡过程控件。 */
-.pi-todo-panel {
-  flex-shrink: 0;
-  width: 100%;
-  max-width: var(--conversation-width);
-  min-width: 0;
-  margin-inline: auto;
-  padding: var(--space-3) var(--space-4);
-  border-radius: var(--corner-lg);
-  background: var(--card);
-  box-shadow: var(--elev-hairline), var(--elev-surface);
-}
-#chat-view > .pi-todo-panel { margin-top: var(--space-3); }
-.pi-todo-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); }
-.pi-todo-head h3 { margin: 0; font-size: var(--text-caption); line-height: var(--text-caption--line-height); font-weight: 600; }
-.pi-todo-count, .pi-todo-state { color: var(--muted-foreground); font-size: var(--text-mini); line-height: var(--text-mini--line-height); }
-.pi-todo-list { display: flex; flex-direction: column; gap: var(--space-1); max-height: min(36vh, 320px); margin: var(--space-2) 0 0; padding: 0; overflow-y: auto; list-style: none; }
-.pi-todo-item { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; font-size: var(--text-caption); line-height: var(--text-caption--line-height); }
-.pi-todo-mark { flex: 0 0 8px; width: 8px; height: 8px; border: 1px solid var(--border-strong); border-radius: var(--corner-full); }
-.pi-todo-item[data-status="in_progress"] .pi-todo-mark { border-color: var(--primary-link); background: var(--primary-link); }
-.pi-todo-item[data-status="in_progress"] .pi-todo-content { color: var(--foreground); font-weight: 500; }
-.pi-todo-item[data-status="done"] .pi-todo-mark,
-.pi-todo-item[data-status="completed"] .pi-todo-mark { border-color: var(--muted-foreground); background: var(--muted-foreground); }
-.pi-todo-item[data-status="done"], .pi-todo-item[data-status="completed"] { color: var(--muted-foreground); }
-.pi-todo-item[data-status="done"] .pi-todo-content,
-.pi-todo-item[data-status="completed"] .pi-todo-content { text-decoration: line-through; }
-.pi-todo-state { flex: 0 0 auto; }
-.pi-todo-content { min-width: 0; overflow-wrap: anywhere; }
 .pi-plan-update[data-status="error"] { color: var(--destructive-text); }
 
 /* ── 研究过程（标准库 Thinking · steps + ToolChips）── */
@@ -1385,14 +1357,25 @@ details[open] > summary .pi-row-chevron { transform: rotate(180deg); }
   max-height: calc(100% - var(--space-4) - var(--composer-dock) - var(--space-4));
   overflow: auto;
   padding: var(--space-5);
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: var(--corner-xl);
-  background: var(--card);
+  background: color-mix(in srgb, var(--card) 96%, transparent);
+  backdrop-filter: blur(6px);
   box-shadow: var(--elev-floating);
   pointer-events: auto;
 }
 .pane.progress-open .conversation-scroll,
 .pane.progress-open .composer-dock { padding-right: calc(var(--progress-panel-width) + var(--space-4)); }
+.progress-close {
+  position: absolute; top: var(--space-4); right: var(--space-4); z-index: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; border: 1px solid transparent;
+  border-radius: var(--corner-full); color: var(--muted-foreground);
+  transition: background-color var(--dur-1) var(--ease-soft), color var(--dur-1) var(--ease-soft);
+}
+.progress-close:hover { background: var(--muted); color: var(--foreground); }
+.progress-close:active { transform: scale(0.96); }
+.progress-panel.has-close .progress-section-steps > .progress-section-head { width: calc(100% - var(--space-7)); }
 .progress-card { display: flex; flex-direction: column; gap: var(--space-6); }
 .progress-section { display: flex; flex-direction: column; gap: var(--space-4); }
 .progress-section-head {
@@ -1400,6 +1383,7 @@ details[open] > summary .pi-row-chevron { transform: rotate(180deg); }
   align-items: center;
   gap: var(--space-1_5);
   width: 100%;
+  min-height: 24px;
   border-radius: var(--corner-sm);
   color: var(--foreground);
   font-size: var(--text-body-lg);
@@ -1407,46 +1391,34 @@ details[open] > summary .pi-row-chevron { transform: rotate(180deg); }
   text-align: left;
 }
 .progress-section-title { flex: 1; }
-.progress-section-meta { color: var(--muted-foreground); font-size: var(--text-caption); line-height: var(--text-caption--line-height); }
+.progress-section-meta { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--muted-foreground); font-size: var(--text-caption); line-height: var(--text-caption--line-height); }
+.progress-section-head:active { transform: translateY(1px); }
 .progress-chevron { color: var(--muted-foreground); transform: rotate(180deg); transition: transform var(--dur-2) var(--ease-strong); }
 .progress-section[data-collapsed="true"] .progress-chevron { transform: none; }
 .progress-section[data-collapsed="true"] > :not(.progress-section-head) { display: none; }
 .progress-empty { color: var(--muted-foreground); font-size: var(--text-caption); line-height: var(--text-caption--line-height); }
 
-/* 时间轴（TaskRows timeline）：22 状态点 + 连接线，文案整段可读 */
-.progress-steps { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
-.progress-step { position: relative; display: flex; align-items: flex-start; gap: var(--space-3); padding-bottom: var(--space-4); }
+/* 时间轴取工作台的 TaskRows timeline：22px 状态点，行内下垫16，行间再垫20。
+ * 只有浮层一处滚动，不另套卡片、阴影或第二个限高列表。 */
+.progress-steps { display: flex; flex-direction: column; width: 100%; gap: 0; margin: 0; padding: 0; list-style: none; }
+.progress-step { position: relative; min-width: 0; padding-bottom: var(--space-5); overflow: hidden; }
 .progress-step::before { content: ""; position: absolute; top: 26px; bottom: 0; left: 11px; width: 1px; background: var(--border); }
 .progress-step:last-child { padding-bottom: 0; }
 .progress-step:last-child::before { display: none; }
+.progress-step-row { display: flex; align-items: flex-start; gap: var(--space-3); padding-bottom: var(--space-4); }
 .progress-marker {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  border: 1px dashed var(--border);
-  border-radius: var(--corner-full);
+  position: relative; display: flex; align-items: center; justify-content: center;
+  flex: 0 0 22px; width: 22px; height: 22px;
+  border: 1px dashed var(--border); border-radius: var(--corner-full);
 }
-.progress-step[data-status="done"] .progress-marker { border: 0; background: var(--primary); color: var(--primary-foreground); }
-.progress-step[data-status="failed"] .progress-marker { border: 0; background: var(--destructive); color: var(--destructive-foreground); }
-.progress-step[data-status="running"] .progress-marker {
-  border: 2px solid var(--border);
-  border-top-color: var(--foreground);
-  animation: spin 1.1s linear infinite;
-}
+.progress-step[data-status="done"] .progress-marker { border: 0 solid var(--border); background: var(--primary); color: var(--primary-foreground); }
+.progress-step[data-status="failed"] .progress-marker { border: 0 solid var(--border); background: var(--destructive); color: var(--destructive-foreground); }
+.progress-step[data-status="running"] .progress-marker { border: 0 solid var(--border); }
+.progress-marker svg { position: absolute; transform: rotate(-90deg); }
+.progress-arc { transform-origin: 50% 50%; animation: spin 1.1s linear infinite; }
 .progress-step-text {
-  display: -webkit-box;
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  padding-top: 1px;
-  color: var(--muted-foreground);
-  font-size: var(--text-body);
-  line-height: var(--text-body--line-height);
+  min-width: 0; flex: 1; color: var(--muted-foreground);
+  font-size: var(--text-body); line-height: var(--text-body--line-height);
   overflow-wrap: anywhere;
 }
 .progress-step[data-status="running"] .progress-step-text { color: var(--foreground); }

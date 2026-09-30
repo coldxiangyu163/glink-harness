@@ -112,7 +112,7 @@ bash scripts/check.sh
 （`pi_glink.kernel.harness_pi.PiExecutionAdapter`，与 Python 回归同一机制）；它只读合成凭据、不发邮件、
 不接触真实 `.env`/`~/.pi`/既有服务，退出时由调用者按**记录的 PID** 终止（不要用宽匹配 `pkill`）。
 fixture 支持 `accounts` / `local` / `gateway` 三种身份面，题目里的 `[scenario:…]` 标记选择合成场景
-（`tools` / `subagent` / `slow` / `fail` / `length`）。
+（`tools` / `subagent` / `slow` / `fail` / `length`；工作台任务验收另用 `todo` / `todoempty` / `todolong`，见 `tests/browser/README.md`）。
 
 `tests/browser/acceptance.mjs` 用**仓库内、lockfile 锁定**的 Playwright（`tests/browser/package.json`，
 不扫描 `~/.npm/_npx`、不猜版本；`node_modules` 被忽略）驱动生产前端，覆盖 identity / shell /

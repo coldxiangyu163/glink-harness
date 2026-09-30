@@ -43,7 +43,7 @@ import {
   toolStateLabel,
 } from './present.mjs';
 import { childrenPanel } from './run-reducer.mjs';
-import { createTodoPanel, isTodoWrite } from './todo-panel.mjs';
+import { isTodoWrite } from './todo-panel.mjs';
 
 let viewCounter = 0;
 
@@ -105,7 +105,6 @@ export function createRunView({
   inner.append(track);
   body.append(inner);
   process.append(toggle, body);
-  const todo = createTodoPanel();
 
   // ── answer frame ─────────────────────────────────────────────────────────
   const answer = el('div', 'pi-answer');
@@ -195,17 +194,9 @@ export function createRunView({
   actions.append(copyButton, downloadButton, rerunButton);
 
   answer.append(answerHead, answerBody, childrenSection, output, deliveries, outcome, actions);
-  // The active run's panel belongs above the scrolling conversation, not on
-  // top of its process toggle. Past turns keep their own inline (non-sticky)
-  // snapshot. In isolated renderers without the workbench shell, stay inline.
-  const scroll = root.id === 'run-view' ? root.parentElement?.parentElement : null;
-  const docked = scroll?.id === 'conversation-scroll' && scroll.parentElement;
-  if (docked) {
-    scroll.parentElement.insertBefore(todo.node, scroll);
-    root.replaceChildren(process, answer);
-  } else {
-    root.replaceChildren(todo.node, process, answer);
-  }
+  // Task plans belong to ProgressPanel, not a dock above the conversation or
+  // a second card inside past turns. The conversation retains plan-update rows.
+  root.replaceChildren(process, answer);
 
   // Answers often point at the report by its relative name ("见 report.md"); the
   // browser would navigate to a host path that does not exist. Open the slot instead.
@@ -255,7 +246,6 @@ export function createRunView({
 
   function draw(model) {
     root.dataset.status = model.status;
-    todo.render(model.items);
     drawItems(model);
     drawProcessHead(model);
     drawAnswer(model);
@@ -752,7 +742,6 @@ export function createRunView({
       frame = null;
       latest = null;
       rendered = [];
-      todo.node.remove();
       root.replaceChildren();
       delete root.dataset.status;
     },

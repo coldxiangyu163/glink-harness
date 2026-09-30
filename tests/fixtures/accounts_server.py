@@ -26,6 +26,9 @@ serves every browser scenario the suite needs:
 ``[scenario:slow]``      stays in the running phase until cancelled
 ``[scenario:fail]``      model error close (``stopReason=error``)
 ``[scenario:length]``    truncated delivery (``stopReason=length``)
+``[scenario:todo]``      latest task-plan replacement, waits for cancellation
+``[scenario:todoempty]`` replaces the plan with an empty list
+``[scenario:todolong]``  twenty long task labels, same bounded fake execution
 no marker                thinking + answer + ``report.md`` (the original frames)
 =======================  =========================================================
 
@@ -82,7 +85,7 @@ ADMINS = {
 
 REPORT = "# 合成报告\n\n这是浏览器验收生成的合成报告，不来自真实模型。\n"
 SESSION_ID = "synthetic-browser-session"
-SCENARIOS = ("default", "tools", "subagent", "slow", "fail", "length")
+SCENARIOS = ("default", "tools", "subagent", "slow", "fail", "length", "todo", "todoempty", "todolong")
 _SCENARIO_RE = re.compile(r"\[scenario:([a-z]+)\]")
 
 # The real pi path sends model calls through the credential egress proxy, whose
@@ -222,7 +225,7 @@ class FakeAdapter(ExecutionAdapter):
         )
 
     def wait(self, *, cancel, deadline):
-        if self._scenario == "slow":
+        if self._scenario in ("slow", "todo", "todoempty", "todolong"):
             while not cancel() and time.monotonic() < deadline and not self._stop.is_set():
                 time.sleep(0.05)
         self._stop.set()
@@ -307,6 +310,55 @@ class FakeAdapter(ExecutionAdapter):
         self._emit(_text_frame("研究已经开始了，仍在进行中。"))
         self._stop.wait(timeout=self.SLOW_MAX_SECONDS)
         self._emit({"type": "agent_settled"})
+
+    # -- task-plan scenarios ---------------------------------------------------
+    # The existing fake pi wire supplies a todo_write whose product projection
+    # has the same whole-list shape as ACP. This tests the host/SSE/browser chain,
+    # not the real ACP adapter or a model's ability to create a plan.
+    TODO_LABELS = (
+        "从 iManage、邮件和文件库中收集源文件",
+        "识别各 DRL 条目中的风险",
+        "使用事务所提供的模板起草逐项查看文件，并回复备忘录",
+        "组装生产集并将标记项目发送审核",
+    )
+
+    def _emit_plan(self, call_id: str, todos: list[dict]) -> None:
+        self._emit({"type": "tool_execution_start", "toolCallId": call_id,
+                    "toolName": "todo_write", "args": {"todos": todos}})
+        self._emit({"type": "tool_execution_end", "toolCallId": call_id,
+                    "toolName": "todo_write", "result": {"content": [{"type": "text", "text": "updated"}]},
+                    "isError": False})
+
+    def _scenario_todo(self) -> None:
+        self._write_report()
+        self._emit({"type": "agent_start"})
+        self._emit({"type": "turn_start"})
+        self._emit(_thinking_frame("先制定任务计划，再逐项核验。"))
+        first = [{"content": label, "status": "in_progress" if i == 0 else "pending"}
+                 for i, label in enumerate(self.TODO_LABELS)]
+        self._emit_plan("plan-1", first)
+        if self._stop.wait(timeout=1.2):
+            return
+        second = [{"content": label, "status": "completed" if i == 0 else "in_progress" if i < 3 else "pending"}
+                  for i, label in enumerate(self.TODO_LABELS)]
+        self._emit_plan("plan-2", second)
+        self._emit(_text_frame("任务计划已更新；当前有两项核验并行进行。"))
+        if self._scenario == "todoempty":
+            if self._stop.wait(timeout=1.2):
+                return
+            self._emit_plan("plan-empty", [])
+        elif self._scenario == "todolong":
+            long = [{"content": f"第 {i + 1} 项：" + "完整核验来源和依据的说明" * 8,
+                     "status": "in_progress" if i == 0 else "pending"} for i in range(20)]
+            self._emit_plan("plan-long", long)
+        self._stop.wait(timeout=self.SLOW_MAX_SECONDS)
+        self._emit({"type": "agent_settled"})
+
+    def _scenario_todoempty(self) -> None:
+        self._scenario_todo()
+
+    def _scenario_todolong(self) -> None:
+        self._scenario_todo()
 
     # -- subagent scenario -----------------------------------------------------
 

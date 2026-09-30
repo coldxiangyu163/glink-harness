@@ -275,6 +275,13 @@ export function planSummary(entries) {
   return `${oneLine(active[0]?.content ?? entries[0].content, 56)}${extra} · ${done}/${entries.length} 项`;
 }
 
+/** A research plan may have several simultaneous items, unlike a sequential demo. */
+export function planProgressLabel(entries, running) {
+  const done = entries.filter((entry) => ['done', 'completed'].includes(entry.status)).length;
+  const active = running ? entries.filter((entry) => entry.status === 'in_progress').length : 0;
+  return `${done}/${entries.length} 项已完成${active > 1 ? ` · ${active} 项进行中` : ''}`;
+}
+
 export function planStatusLabel(status) {
   return { in_progress: '进行中', pending: '待开始', done: '已完成', completed: '已完成' }[status] ?? '';
 }

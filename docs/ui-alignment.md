@@ -7,7 +7,7 @@
 
 - 事实源：`/Users/coldxiangyu/work/BR/glink-ui-library`
   - token 数值：`src/styles/globals.css`
-  - 组件形态与行为：`src/components/*.tsx`（Thinking / ToolChips / ConnectionState / Tooltip / Toaster / EmptyState / Button / Badge）
+  - 组件形态与行为：`src/components/*.tsx` 及 `src/components/ai/*.tsx`（Thinking / TaskRows / ToolChips / ConnectionState / Tooltip / Toaster / EmptyState / Button / Badge）
   - 组合与页面几何：`src/pages/agent-assistant-demo/*`（规范站唯一的完整页面 Demo）
   - 使用规则：`百鉴 UI Design Specification.md`（§2.2 工作台布局、§2.3 两栏与栏头、§4.3 组件取用、§6 AI 体验、§8 无障碍）
 - 落地：`web/styles.css`（token 层 + 组件层）、`web/index.html`（外壳骨架）、`web/modules/*.mjs`（DOM 与交互）
@@ -46,11 +46,12 @@
 | 开合键（S-04） | 双箭头 « »，箭头指向分割线要走的方向；左栏收起键在左栏头最右，右栏收起键在屏幕最右 | 同（`chevrons-left` 取自 Demo 资产，右向旋转 180°） |
 | 过程折叠 | Thinking（steps）：进行时写具体动作并扫光，完成后「已完成 · N 个步骤」并自动收起，人的选择优先 | 同；过程、回答与输入器共用居中的 720px 阅读列，主栏不足 720px 时收缩 |
 | 过程行 | ToolChips：行 h-28 / 圆角 6 / 行间 0；标签只写动作，chip 写操作对象；chevron 悬停才出现 | 同；思考块也用同一行几何 |
+| 当前任务 | 完整工作台 `ProgressPanel` 内的 TaskRows `timeline`，不是组件展区的 `panel` 卡：22px 黑色运行环/完成勾、待开始虚线环、1px 连线；正文 13/20 整段可读；行内下垫 16、工作台场景行间再垫 20，末行不加行间距；不另套卡片 | `progress-panel.mjs` 管位置/折叠，`todo-panel.mjs` 只画时间轴；最新整表进入右侧「进度」，对话仅留「计划更新」；当前轮、历史轮均不挂顶部/内联任务卡。专用验收 `tests/browser/todo-panel.mjs` 对比工作台真源码与场景 CSS |
 | 回答外壳 | AnswerFrame：助理名 + `待核验草稿` 徽标 + 免责说明（规范 6.1） | 同（不画「标记为已核验」，见 §6） |
 | 文件卡 | OutputResult：rounded-lg、inset 1px 发丝线、p-20；文件图块 + 名称 + 类型 + 下载 | 主报告卡不变；有 ACP 交付声明时另列有界卡片，文件名/说明/可打开与下载状态来自宿主逐件封存结果；旧 run 不显示额外区（[ADR 0017](adr/0017-declared-deliverables.md)） |
 | 回答动作条 | 纯图标一排；带文件产出时键距 16、键高 24（`.demo-output-actions`） | 复制 / 下载 / 重新研究 |
 | 结果与连接状态 | ConnectionState：图标 + 标题 + 说明 + 下一步；停止中性（虚线圆，不用 ×）、慢网 warning、失败 destructive 且红只落在详情块 | 已停止 / 未完成 / 连接中断 / 过程记录读不到 / 追问没能接上之前的研究（失败且有父 run、未建立会话：说明先前结果不受影响，下一步是“作为新研究开始”，不暗示重试能续接） |
-| 进度与上下文 | 340 浮层（<1250 收至 308），栏头之下、下缘让开输入器；宽屏把对话列让开 356，<1050 改覆盖 | 同；时间轴 22 点 + 连接线，上下文分「输出 / 来源」页签 |
+| 进度与上下文 | 340 浮层（<1250 收至 308），栏头之下 top/right 16、p-20、圆角 16 / floating 阴影 / 96% 白底与 6px 背景模糊；宽屏把对话列让开 356，<1050 改覆盖；× 为 32px、距上/右各 16 | 同；下缘让开输入器，面板与报告互斥。× / Esc 关闭均将焦点还给栏头入口；收起时同时设 `inert` 与 `aria-hidden`；「进度」有任务源时展示任务整表，无源时展示实际执行步骤；上下文仍分「输出 / 来源」页签。模糊仅用于这块标准库已有的临时浮层，不成为通用卡片样式 |
 | 报告右槽 | 主区最多两栏；AgentSplit 默认 50%、对话 ≥560、右槽 ≥360、竖线可拖/双击复位/记住；阅读档 px-40 pt-56 pb-80、760、正文 16/26 muted、H1 28/36 | 同；主区放不下 921 时改覆盖浮层（按主区实宽判） |
 | 输入器 | min-h-120 / 圆角 20 / hover 与激活同为 1px 近黑；Enter 发送、Shift+Enter 换行、组字中回车不提交；运行中发送键原位变「停止生成」、输入只读 | 同 |
 | 输入器留白 | 滚动区底部 = 输入器实测高度 + 56 渐隐 + 24（ResizeObserver） | 同（`--composer-dock`） |
@@ -108,7 +109,7 @@ HTTP `Server` 头带仓库名、`globalThis.__piGlink`、`pi-*` 类名与 `pi-gl
 | 核验 | 画「待核验草稿」徽标与说明，不画「标记为已核验」 | 没有持久化与署名主体，按钮会是一个假控件 |
 | 来源 | 「进度与上下文 · 来源」列出本次检索的查询词与读过的网页（取自工具事件）；**正文不做引用角标与来源清单** | 前端不承载报告层（`tests/web/run-stream.test.mjs` 的边界断言：不解析 citation / artifact） |
 | 工具失败 / 中断 | 行尾多一枚 mini 状态字（失败 / 已中断 / 已停止）；完成不写字 | 异常态需要文字而不只靠颜色（规范 §8） |
-| 当前任务面板 | 独立于过程折叠、停靠在对话滚动区上方的 720px 卡片（最大高度可滚动，不遮挡过程控件）；只取 ACP `todo_write` 的最新一次整表投影，进行中标亮、已完成划线，多项并行时显式计数；过程只留「计划更新」行，无源时隐藏 | 参考 dsh 的常驻任务列表行为，不直接引其组件；百鉴 Demo 无同角色，沿用本仓库语义 token，不纳入既有 30 角色逐值门禁 |
+| 当前任务的业务口径 | 完成数与多项并行计数，不套 Demo 的单个当前步骤；不伪造序号、百分比、明细或逐项重试；停止/结束后仍未完成的条目用中性「未完成」，不继续转环或冒充完成；「进度」标题命中区至少 24px（参考为 22px） | 任务只取 `todo_write` 最新整表投影，空表清除旧计划；无任务源时回到真实执行时间轴，不从工具次数伪造任务。仅浮层自身滚动，不给任务列表再限高或裁成两行；当前选中轮与历史回放均按自身事实渲染，追问不沿用父计划。原顶部/历史内联卡及其展区验收已被工作台布局替代，事件/持久化契约不变 |
 
 ## 7. 复现
 
@@ -127,6 +128,10 @@ cd tests/browser && npm install --no-audit --no-fund                     # 一�
 node tests/browser/acceptance.mjs --mode accounts                        # 102 项
 node tests/browser/acceptance.mjs --mode local                           # 81 项
 node tests/browser/acceptance.mjs --mode gateway                         # 7 项
+# 工作台任务验收：隔离真实宿主的合成执行事件经过投影/存储/SSE/生产前端，
+# 对比标准库 ProgressPanel 真源码 + 工作台场景 CSS；需标准库已有的 node_modules/Vite。
+# 会在临时数据根创建/停止合成研究，不调用真实模型/ACP/Docker/E2B，不触碰已有服务。
+node tests/browser/todo-panel.mjs --reference /Users/coldxiangyu/work/BR/glink-ui-library
 # 结果与截图写在 --out（默认系统临时目录），不覆盖 docs/evidence/；
 # 最近一次全量结果见 docs/browser-acceptance-report.md。
 ```

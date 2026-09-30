@@ -53,7 +53,7 @@ HOME / XDG 都是本次运行专属的临时目录，合成凭据只写进临时
 已在运行的服务。fixture 由调用方按**记录的 PID** 终止，不用宽匹配 `pkill`。
 
 题目里的 `[scenario:…]` 标记选择合成场景（`tools` / `subagent` / `slow` / `fail` /
-`length`，无标记是默认的思考+回答+报告）。同一批场景在 HTTP 层也有 Python 回归
+`length`，无标记是默认的思考+回答+报告；任务专用场景为 `todo` / `todoempty` / `todolong`）。同一批场景在 HTTP 层也有 Python 回归
 （`tests/test_runner.py` 等）覆盖；浏览器层验证的是**前端在这些事实下的呈现**。
 
 ## 覆盖维度
@@ -62,6 +62,28 @@ HOME / XDG 都是本次运行专属的临时目录，合成凭据只写进临时
 `report`、`progress`、`tenancy`、`resilience`、`gateway-identity`、`assets`。
 缺省 `accounts` 模式跑 102 项，`local` 81 项（账号/租户维度按设计跳过），
 `gateway` 7 项（没有站内身份，可测面就是未认证入口与静态资产）。
+
+## 当前任务组件对齐
+
+```bash
+node tests/browser/todo-panel.mjs --reference /Users/coldxiangyu/work/BR/glink-ui-library
+```
+
+通过真实生产交互创建/停止合成研究：仅执行面是 fake，投影、存储、SSE、reducer、
+workspace 与 DOM 均为生产链，不手填最终状态。`todo` / `todoempty` / `todolong` 场景以
+既有 fake pi wire 产生与 ACP `todo_write` 同形的整表产品事件，不代表真实 ACP 或模型验收。
+数据根、HOME 与宿主端口均隔离，不触碰已有服务或真实凭据。
+
+参考面用标准库自身已安装的 Vite 渲染**工作台 `ProgressPanel` 真源码 + 场景 CSS**，不是
+单独组件展区，不修改标准库源码或重建 `dist/`。`--reference` 必填，不缺库静默通过；
+参考服务也使用 OS 分配的 loopback 端口，Vite 缓存与证据写本次 `--out`（默认系统临时目录）。
+宿主按记录 PID 关闭，参考服务由 `finally` 关闭。
+
+覆盖默认对话不挂任务卡、右侧任务时间轴三态/行距/字号/关闭键逐值、13 个视口含断点两侧与
+640px 最小高度、输入器不遮挡、键盘折叠与更新保持、×/Esc 焦点归还、报告互斥、上下文页签、
+停止不伪造完成、历史回放与追问不串计划、长清单单层滚动、减弱动效、空表替换。
+完成/并行计数是研究事实，不套单个当前步骤；无源不画序号/百分比；标题24px命中区与
+真实运行信息是已登记的消费方差异，见 `docs/ui-alignment.md`。本脚本不接入默认 `scripts/check.sh`。
 
 ## 诊断工具
 

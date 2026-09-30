@@ -132,7 +132,11 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
   /* Observers outlive a render pass; dispose must not leave them watching. */
   const disposers = [];
 
-  const progress = createProgressPanel({ root: el('progress-panel'), onOpenReport: (runId) => openReport(runId) });
+  const progress = createProgressPanel({
+    root: el('progress-panel'),
+    onOpenReport: (runId) => openReport(runId),
+    onClose: () => setSlot(null, { returnFocus: progressToggle }),
+  });
   const tooltips = installTooltips({ isRail: () => shell.dataset.sidebar === 'collapsed' || rail.matches });
   /* The account area owns the sidebar identity menu and the admin invitation
    * dialog; its logout button calls back into this module because only here can
@@ -268,6 +272,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
     pane.classList.toggle('progress-open', open);
     progressLayer.dataset.open = String(open);
     progressLayer.inert = !open;
+    progressLayer.setAttribute('aria-hidden', String(!open));
     if (open) renderProgressNow();
     if (report) applySplit(readSplit());
     syncHeader();
