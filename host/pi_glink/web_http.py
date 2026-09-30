@@ -26,6 +26,20 @@ MAX_REQUEST_BYTES = 64 * 1024
 class HttpPlumbingMixin:
     """Bodies, responses, static assets and log sanitization."""
 
+    def _reject_transfer_encoding(self) -> bool:
+        """Reject unsupported framing before a POST handler can mutate state."""
+        if self.headers.get_all("Transfer-Encoding") is None:
+            return False
+        self.close_connection = True
+        self._body_consumed = True  # handled by closing, not by interpreting chunks as a length
+        self._send_json(
+            HTTPStatus.LENGTH_REQUIRED,
+            {"error": "invalid_request", "message": "Transfer-Encoding is not supported"},
+            head_only=False,
+            extra_headers={"Connection": "close"},
+        )
+        return True
+
     def _drain_body(self) -> None:
         """Read and discard an unconsumed request body.
 
@@ -34,6 +48,9 @@ class HttpPlumbingMixin:
         and by :data:`MAX_REQUEST_BYTES`; an oversized body closes the
         connection instead of being drained.
         """
+        if self.headers.get_all("Transfer-Encoding") is not None:
+            self.close_connection = True
+            return
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except (TypeError, ValueError):

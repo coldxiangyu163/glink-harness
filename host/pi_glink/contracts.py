@@ -15,7 +15,38 @@ This module is a leaf: it may not import the kernel or the orchestration layer
 
 from __future__ import annotations
 
+import os
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator
+
+
+# One process owns the data root. Admission, state/cache mutation and resource
+# destruction must share this same conversation-scoped exclusion. Never hold
+# the manager's global admission lock while waiting for it. Entries disappear
+# with their last user/waiter, so historical conversations do not leak locks.
+_CONVERSATION_LOCKS: dict[str, tuple[threading.RLock, int]] = {}
+_CONVERSATION_REGISTRY_LOCK = threading.Lock()
+
+
+@contextmanager
+def conversation_guard(directory: Path) -> Iterator[None]:
+    key = os.path.abspath(directory)
+    with _CONVERSATION_REGISTRY_LOCK:
+        lock, users = _CONVERSATION_LOCKS.get(key, (threading.RLock(), 0))
+        _CONVERSATION_LOCKS[key] = lock, users + 1
+    try:
+        with lock:
+            yield
+    finally:
+        with _CONVERSATION_REGISTRY_LOCK:
+            _, users = _CONVERSATION_LOCKS[key]
+            if users == 1:
+                del _CONVERSATION_LOCKS[key]
+            else:
+                _CONVERSATION_LOCKS[key] = lock, users - 1
 
 
 class FollowupUnavailable(RuntimeError):

@@ -486,8 +486,11 @@ def test_prepare_issues_an_archive_grant_for_a_remote_acp_face(tmp_path: Path) -
             spec=RunSpec(family="acp", pack="dsh", executor="e2b"),
         )
         execution = RunExecution(record=record, workspace=Path(record.workspace))
+        transfer = family.state_transfer(record, parent=None, source=None,
+                                         sandbox=_RemoteSandbox(origin="http://pub.example"))
+        assert transfer is not None
         reachable = PrepareStage(services).archive_endpoint(
-            execution, _RemoteSandbox(origin="http://pub.example"), secrets
+            execution, _RemoteSandbox(origin="http://pub.example"), secrets, transfer
         )
         assert reachable is not None
         assert reachable.url == "http://pub.example/archive/state"
@@ -499,7 +502,7 @@ def test_prepare_issues_an_archive_grant_for_a_remote_acp_face(tmp_path: Path) -
         other = RunExecution(record=record, workspace=Path(record.workspace))
         assert (
             PrepareStage(services).archive_endpoint(
-                other, _RemoteSandbox(origin=None), secrets
+                other, _RemoteSandbox(origin=None), secrets, transfer
             )
             is None
         )

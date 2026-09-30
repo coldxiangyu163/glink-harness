@@ -65,7 +65,8 @@ def server(tmp_path: Path):
 
 
 def request(
-    server: PiGlinkServer, path: str, *, method: str = "GET", body: dict | None = None
+    server: PiGlinkServer, path: str, *, method: str = "GET", body: dict | None = None,
+    headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], bytes]:
     port = server.server_address[1]
     payload = json.dumps(body).encode("utf-8") if body is not None else None
@@ -74,11 +75,67 @@ def request(
     )
     if payload is not None:
         req.add_header("Content-Type", "application/json")
+    for name, value in (headers or {}).items():
+        req.add_header(name, value)
     try:
         with urllib.request.urlopen(req, timeout=10) as response:
             return response.status, dict(response.headers), response.read()
     except urllib.error.HTTPError as error:
         return error.code, dict(error.headers), error.read()
+
+
+@pytest.mark.parametrize("headers", [
+    {"Origin": "https://evil.example"},
+    {"Referer": "https://evil.example/page"},
+    {"Sec-Fetch-Site": "cross-site"},
+])
+def test_local_cross_site_mutations_never_create_runs(server, headers):
+    before = _run_dirs(server)
+    status, _, _ = request(server, "/api/runs", method="POST",
+                           body={"prompt": "未经同意的研究"}, headers=headers)
+    assert status == 403
+    assert _run_dirs(server) == before
+    assert server.manager.active_run_id is None
+
+
+def test_local_non_json_run_body_is_refused(server):
+    before = _run_dirs(server)
+    status, _, raw = request(server, "/api/runs", method="POST",
+                            body={"prompt": "不是 JSON 媒体类型"},
+                            headers={"Content-Type": "text/plain"})
+    assert status == 415 and json.loads(raw)["error"] == "unsupported_media_type"
+    assert _run_dirs(server) == before
+
+
+def test_same_origin_json_and_headerless_stop_remain_usable(server):
+    port = server.server_address[1]
+    status, _, raw = request(server, "/api/runs", method="POST",
+                            body={"prompt": "正常同源请求"},
+                            headers={"Origin": f"http://127.0.0.1:{port}",
+                                     "Sec-Fetch-Site": "same-origin"})
+    assert status == 201, raw
+    run_id = json.loads(raw)["run"]["runId"]
+    status, _, _ = request(server, f"/api/runs/{run_id}/stop", method="POST")
+    assert status in (200, 409)  # the real fake agent may already have settled
+    assert wait_for_terminal(server, run_id)["status"] in {"finished", "cancelled"}
+
+
+def test_refused_local_post_does_not_poison_keep_alive(server):
+    connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+    try:
+        for headers, expected in (({"Origin": "https://evil.example"}, 403),
+                                  ({"Content-Type": "text/plain"}, 415)):
+            connection.request("POST", "/api/runs", json.dumps({"prompt": "拒绝"}),
+                               {"Content-Type": "application/json", **headers})
+            response = connection.getresponse()
+            assert response.status == expected
+            response.read()
+            connection.request("GET", "/api/health")
+            response = connection.getresponse()
+            assert response.status == 200
+            assert json.loads(response.read())["status"] == "ok"
+    finally:
+        connection.close()
 
 
 def wait_for_terminal(server: PiGlinkServer, run_id: str, timeout: float = 30.0) -> dict:
@@ -421,7 +478,8 @@ def test_empty_prompt_is_rejected(server: PiGlinkServer) -> None:
 def test_non_json_body_is_rejected(server: PiGlinkServer) -> None:
     port = server.server_address[1]
     req = urllib.request.Request(
-        f"http://127.0.0.1:{port}/api/runs", data=b"not json", method="POST"
+        f"http://127.0.0.1:{port}/api/runs", data=b"not json", method="POST",
+        headers={"Content-Type": "application/json"},  # exercise JSON parsing, not the media gate
     )
     try:
         urllib.request.urlopen(req, timeout=10)
@@ -868,3 +926,93 @@ def test_paging_never_crosses_a_tenant_boundary(server: PiGlinkServer) -> None:
         seen += [record.run_id for record in page]
         cursor = (page[-1].created_at, page[-1].run_id)
     assert sorted(seen) == ["alpha000", "alpha001", "alpha002", "alpha003"]
+
+
+@pytest.mark.parametrize("origin_header", ["Origin", "Referer"])
+def test_request_host_cannot_authorize_dns_rebinding(server, origin_header):
+    port = server.server_address[1]
+    before = _run_dirs(server)
+    status, _, _ = request(
+        server, "/api/runs", method="POST", body={"prompt": "DNS rebinding"},
+        headers={"Host": f"attacker.example:{port}",
+                 origin_header: f"http://attacker.example:{port}",
+                 "Sec-Fetch-Site": "same-origin"},
+    )
+    assert status == 403
+    assert _run_dirs(server) == before
+    assert server.manager.active_run_id is None
+
+
+@pytest.mark.parametrize("hostname", ["127.0.0.1", "localhost", "[::1]"])
+def test_listening_loopback_origins_remain_trusted(server, hostname):
+    port = server.server_address[1]
+    status, _, raw = request(
+        server, "/api/runs", method="POST", body={"prompt": "合法 loopback 来源"},
+        headers={"Origin": f"http://{hostname}:{port}", "Sec-Fetch-Site": "same-origin"},
+    )
+    assert status == 201, raw
+    assert wait_for_terminal(server, json.loads(raw)["run"]["runId"])["status"] == "finished"
+
+
+def test_reverse_proxy_origin_comes_from_frozen_config_not_host(tmp_path):
+    instance = create_server(make_config(tmp_path, PI_GLINK_PUBLIC_ORIGIN="https://glink.example.test"),
+                             client_factory=fake_factory())
+    thread = threading.Thread(target=instance.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, _, raw = request(
+            instance, "/api/runs", method="POST", body={"prompt": "合法反代来源"},
+            headers={"Host": "glink.example.test", "Origin": "https://glink.example.test",
+                     "Sec-Fetch-Site": "same-origin"},
+        )
+        assert status == 201, raw
+        assert wait_for_terminal(instance, json.loads(raw)["run"]["runId"])["status"] == "finished"
+    finally:
+        instance.shutdown()
+        instance.server_close()
+        thread.join(5)
+
+
+def test_chunked_stop_is_rejected_before_cancel_and_connection_is_closed(server):
+    status, _, raw = request(server, "/api/runs", method="POST",
+                            body={"prompt": "请保持运行 NOSETTLE"})
+    assert status == 201
+    run_id = json.loads(raw)["run"]["runId"]
+    connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+    try:
+        connection.request("POST", f"/api/runs/{run_id}/stop", body=iter([b"x"]),
+                           encode_chunked=True)
+        response = connection.getresponse()
+        assert response.status == 411, response.read()
+        assert response.getheader("Connection") == "close"
+        response.read()
+        assert json.loads(request(server, f"/api/runs/{run_id}")[2])["run"]["status"] == "running"
+        # HTTPConnection observes Connection: close and reconnects, rather than
+        # treating leftover chunk bytes as the next request line.
+        connection.request("GET", "/api/health")
+        response = connection.getresponse()
+        assert response.status == 200
+        response.read()
+        status, _, _ = request(server, f"/api/runs/{run_id}/stop", method="POST")
+        assert status == 200
+        assert wait_for_terminal(server, run_id)["status"] == "cancelled"
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("path", ["/api/runs", "/api/auth/login", "/api/auth/register",
+                                   "/api/auth/logout", "/api/admin/invitations",
+                                   "/api/invitations/check"])
+def test_transfer_encoding_is_rejected_before_every_post_route(server, path):
+    before = _run_dirs(server)
+    connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+    try:
+        connection.request("POST", path, body=iter([b'{"prompt":"chunked"}']),
+                           headers={"Content-Type": "application/json"}, encode_chunked=True)
+        response = connection.getresponse()
+        assert response.status == 411, response.read()
+        assert response.getheader("Connection") == "close"
+        response.read()
+        assert _run_dirs(server) == before
+    finally:
+        connection.close()

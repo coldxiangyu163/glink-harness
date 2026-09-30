@@ -173,12 +173,12 @@ class RoutesMixin:
         # block below drains whatever a handler did not consume.
         self._body_consumed = False
         try:
-            # Multi-tenant POSTs carry a server-derived identity (an injected
-            # assertion or a session cookie), and a browser can be made to send
-            # one cross-site; refuse requests whose own origin metadata says
-            # they came from another site. This runs before any credential is
-            # checked — including login and registration.
-            if self.server.tenancy is not None and not self._request_origin_allowed():
+            if self._reject_transfer_encoding():
+                return
+            # Browser-origin protection applies to local mode too: a cross-site
+            # page must not start a paid run or control the host's tools.
+            # Headerless scripts remain valid. Check before login/credentials.
+            if not self._request_origin_allowed():
                 self._send_json(
                     HTTPStatus.FORBIDDEN,
                     {"error": "forbidden", "message": "cross-site request refused"},
@@ -378,6 +378,13 @@ class RoutesMixin:
             )
             return
         if not self._require_csrf(context):
+            return
+        if not self._expects_json():
+            self._send_json(
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                {"error": "unsupported_media_type", "message": "Content-Type 必须是 application/json"},
+                head_only=False,
+            )
             return
         body = self._read_json_body()
         if body is None:

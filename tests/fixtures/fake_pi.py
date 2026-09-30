@@ -214,7 +214,8 @@ def call_upstreams() -> None:
             status, text = _post(
                 f"{base}/chat/completions",
                 {"Authorization": f"Bearer {runtime_secret()}"},
-                {"model": "m", "stream": os.environ.get("FAKE_PI_STREAM") == "1", "messages": []},
+                {"model": os.environ.get("FAKE_PI_MODEL_OVERRIDE") or provider["models"][0]["id"],
+                 "stream": os.environ.get("FAKE_PI_STREAM") == "1", "messages": []},
             )
             calls.append({"route": "model", "status": status, "body": text[:2000]})
     if os.environ.get("FAKE_PI_CALL_SEARCH") == "1":

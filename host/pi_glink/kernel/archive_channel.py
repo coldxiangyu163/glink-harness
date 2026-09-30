@@ -293,6 +293,8 @@ class ArchiveChannel:
         (``upload_home``), so the backfill must never shadow them. Returns the
         served facts for the run's event stream.
         """
+        if read_state_manifest(grant.conversation_dir) is None:
+            raise ArchiveError("对话权威状态尚未发布，不能回灌空归档")
         state = grant.state_dir
         skip = {MANIFEST_MEMBER, *grant.credential_dests}
         entries = _walk_state(state, skip)

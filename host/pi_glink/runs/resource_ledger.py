@@ -38,6 +38,7 @@ from typing import Any, Callable
 
 from .. import event_schema, events
 from ..config import HostConfig
+from ..contracts import conversation_guard
 from ..kernel.conversation_lease import (
     ConversationLease,
     LeaseCorruptError,
@@ -361,48 +362,46 @@ class ResourceLedger:
         if not self._resource_sweep_lock.acquire(blocking=False):
             return []
         try:
-            holding_roots = self.store.holding_conversation_roots()
             destroyed: list[str] = []
             for conversation_id in self.store.conversation_ids():
-                if conversation_id in holding_roots:
-                    # 对话内仍有 run 持有资源：热路径可能正在重连这个暂停沙箱，
-                    # 销毁会打断追问（cc 终审 S1）；本轮跳过，终态后自然恢复。
-                    continue
                 conversation_dir = self.store.conversations_root() / conversation_id
-                try:
-                    lease = read_lease(conversation_dir)
-                except LeaseCorruptError as exc:
-                    # 不可读租约不销毁也不跳过文件：显式告警保留，沙箱归属交
-                    # 操作员裁决（fail-closed，不把不可读当作无租约静默遗忘）。
-                    logger.warning(
-                        "对话租约不可读，本轮保留待人工处置 conversation=%s: %s",
-                        conversation_id,
-                        exc,
-                    )
-                    continue
-                if lease is None:
-                    continue
-                now = time.time()
-                if not lease.is_expired(now):
-                    self._retry_retired(conversation_dir, lease)
-                    continue
-                targets = [lease.sandbox_id, *lease.retired_sandbox_ids]
-                confirmed = [
-                    self._destroy_lease_sandbox(sandbox_id) for sandbox_id in targets
-                ]
-                if all(confirmed):
-                    remove_lease(conversation_dir)
-                    destroyed.append(conversation_id)
-                    logger.info(
-                        "对话租约到期已销毁 conversation=%s sandbox=%s",
-                        conversation_id,
-                        lease.sandbox_id,
-                    )
-                else:
-                    logger.warning(
-                        "对话租约到期但沙箱未能确认销毁，保留待下轮 conversation=%s",
-                        conversation_id,
-                    )
+                with conversation_guard(conversation_dir):
+                    if conversation_id in self.store.holding_conversation_roots():
+                        continue
+                    try:
+                        lease = read_lease(conversation_dir)
+                    except LeaseCorruptError as exc:
+                        # 不可读租约不销毁也不跳过文件：显式告警保留，沙箱归属交
+                        # 操作员裁决（fail-closed，不把不可读当作无租约静默遗忘）。
+                        logger.warning(
+                            "对话租约不可读，本轮保留待人工处置 conversation=%s: %s",
+                            conversation_id,
+                            exc,
+                        )
+                        continue
+                    if lease is None:
+                        continue
+                    now = time.time()
+                    if not lease.is_expired(now):
+                        self._retry_retired(conversation_dir, lease)
+                        continue
+                    targets = [lease.sandbox_id, *lease.retired_sandbox_ids]
+                    confirmed = [
+                        self._destroy_lease_sandbox(sandbox_id) for sandbox_id in targets
+                    ]
+                    if all(confirmed):
+                        remove_lease(conversation_dir)
+                        destroyed.append(conversation_id)
+                        logger.info(
+                            "对话租约到期已销毁 conversation=%s sandbox=%s",
+                            conversation_id,
+                            lease.sandbox_id,
+                        )
+                    else:
+                        logger.warning(
+                            "对话租约到期但沙箱未能确认销毁，保留待下轮 conversation=%s",
+                            conversation_id,
+                        )
             return destroyed
         finally:
             self._resource_sweep_lock.release()
@@ -465,29 +464,30 @@ class ResourceLedger:
         lease record; the run records and event logs are a separate product
         surface this does not touch.
         """
-        conversation_dir = self.store.conversations_root() / root_run_id
-        if not conversation_dir.is_dir():
+        with conversation_guard(self.store.conversations_root() / root_run_id):
+            conversation_dir = self.store.conversations_root() / root_run_id
+            if not conversation_dir.is_dir():
+                return True, []
+            if root_run_id in self.store.holding_conversation_roots():
+                # 对话内仍有 run 持有资源（可能正走在热路径上）：删除会从脚下抽走
+                # 它的沙箱/状态（cc 终审 S3）；等终态或取消后再删。
+                return False, ["对话内仍有运行中的 run，拒绝删除；请先等待或取消"]
+            try:
+                lease = read_lease(conversation_dir)
+            except LeaseCorruptError as exc:
+                # 不可读租约下删除目录会把沙箱名字一并抹掉（永久孤儿）：拒绝删除，
+                # 由操作员先处置租约（修复或确认沙箱已销毁）再删对话。
+                return False, [f"conversation lease unreadable, refusing delete: {exc}"]
+            failures: list[str] = []
+            if lease is not None:
+                for sandbox_id in (lease.sandbox_id, *lease.retired_sandbox_ids):
+                    confirmed, detail = self._sandbox_probe(sandbox_id)
+                    if not confirmed:
+                        failures.append(f"sandbox {sandbox_id}: {detail}")
+            if failures:
+                return False, failures
+            shutil.rmtree(conversation_dir, ignore_errors=False)
             return True, []
-        if root_run_id in self.store.holding_conversation_roots():
-            # 对话内仍有 run 持有资源（可能正走在热路径上）：删除会从脚下抽走
-            # 它的沙箱/状态（cc 终审 S3）；等终态或取消后再删。
-            return False, ["对话内仍有运行中的 run，拒绝删除；请先等待或取消"]
-        try:
-            lease = read_lease(conversation_dir)
-        except LeaseCorruptError as exc:
-            # 不可读租约下删除目录会把沙箱名字一并抹掉（永久孤儿）：拒绝删除，
-            # 由操作员先处置租约（修复或确认沙箱已销毁）再删对话。
-            return False, [f"conversation lease unreadable, refusing delete: {exc}"]
-        failures: list[str] = []
-        if lease is not None:
-            for sandbox_id in (lease.sandbox_id, *lease.retired_sandbox_ids):
-                confirmed, detail = self._sandbox_probe(sandbox_id)
-                if not confirmed:
-                    failures.append(f"sandbox {sandbox_id}: {detail}")
-        if failures:
-            return False, failures
-        shutil.rmtree(conversation_dir, ignore_errors=False)
-        return True, []
 
     def start_resource_watch(self) -> threading.Thread | None:
         """Start the periodic ledger sweep (once at startup, then every interval).

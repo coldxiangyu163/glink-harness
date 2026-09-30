@@ -29,8 +29,7 @@ from ..blueprints import Blueprint
 from ..contracts import Verdict
 from ..kernel.agent_env import RunCredentials
 from ..kernel.execution import CleanupReport, ExecutionAdapter, ExecutionOutcome
-from ..kernel.archive_channel import ArchiveEndpoint
-from ..kernel.harness import FrameProjector, HarnessRuntime
+from ..kernel.harness import ArchiveEndpoint, FrameProjector, HarnessRuntime
 from ..store import RunRecord
 from ..tenancy import TenantContext
 
@@ -172,6 +171,8 @@ class AdmittedRun:
     parent_run_id: str | None
     blueprint: Blueprint | None
     blueprint_prompt: str
+    #: The source validated at authoritative admission, not re-derived later.
+    continuation_source: Path | None = None
 
 
 @dataclass
@@ -219,6 +220,8 @@ class RunExecution:
     #: into the frozen :class:`~pi_glink.kernel.execution.ExecutionSpec`.
     archive_endpoint: "ArchiveEndpoint | None" = None
     conversation_dir: Path | None = None
+    continuation_source: Path | None = None
+    archive_backfill: bool = False
     #: 阶段 2（docs/adr/0020）：追问的热路径候选（泊车沙箱），由 Prepare 在
     #: ``prepare_runtime`` 前判定、``build_adapter`` 冻结进 ExecutionSpec。
     #: ``None`` = 冷路径（新沙箱 + 阶段 1 回灌）。
@@ -242,4 +245,5 @@ class RunExecution:
             parent_run_id=admitted.parent_run_id,
             blueprint=admitted.blueprint,
             blueprint_prompt=admitted.blueprint_prompt,
+            continuation_source=admitted.continuation_source,
         )

@@ -12,12 +12,13 @@ import logging
 import os
 import stat
 import time
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Callable, Mapping, TYPE_CHECKING
 
 from .. import events
 from ..config import ConfigError
-from ..contracts import FollowupUnavailable, Verdict
+from ..contracts import FollowupUnavailable, Verdict, conversation_guard
 from ..store import CANCELLED, FAILED, FINISHED, RunRecord
 from .acp_env import (
     ACP_HOME_DIRNAME,
@@ -26,6 +27,7 @@ from .acp_env import (
     AcpRuntime,
     AcpStateInheritError,
     build_acp_argv,
+    credential_destinations,
     discard_rendered_credential_copies,
     learn_conversation_state_secrets,
     prepare_acp_runtime,
@@ -36,7 +38,7 @@ from .acp_projection import ACP_STOP_REASONS, AcpProjector
 from .conversation_lease import LeaseCorruptError, read_lease
 from .docker_env import acp_worker_image
 from .execution import ExecutionAdapter, ExecutionSpec
-from .harness import HarnessFamily, PreparedRuntime
+from .harness import HarnessFamily, PreparedRuntime, StateTransfer
 from .sandbox import Launch, Mount, Sandbox, SandboxResume
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only
@@ -83,7 +85,7 @@ class AcpHarnessFamily(HarnessFamily):
 
     # -- (b) 追问门禁与续接种子 -------------------------------------------------
 
-    def check_continuation(self, parent: RunRecord) -> None:
+    def check_continuation(self, parent: RunRecord) -> Path:
         """The ACP follow-up gate, on top of the runner's shared parent gate.
 
         An ACP continuation needs three more facts, all of which are read
@@ -136,25 +138,39 @@ class AcpHarnessFamily(HarnessFamily):
             raise FollowupUnavailable("session_unavailable")
         if acp_resume_method(capabilities) is None:
             raise FollowupUnavailable("session_unavailable")
-        # E2B 面的新鲜度事实：对话状态根的 manifest 必须是**父 run 自己**
-        # 发布的（``sourceRunId == parent.run_id``）。替换式发布保证最新一轮
-        # 回收失败时状态停在更早的轮次，而这个校验拒收它——呈现一个 agent
-        # 并不完整拥有的会话，比拒绝追问更糟（ADR 0005 的语义在对话根上
-        # 的对应物）。旧布局（无 manifest）沿用目录存在性这一事实本身。
-        if parent.spec.executor == "e2b":
-            conversation = self._store.conversation_dir(
-                self.conversation_root(parent)
-            )
-            manifest = read_state_manifest(conversation)
-            if manifest is not None and manifest.get("sourceRunId") != parent.run_id:
-                raise FollowupUnavailable("session_unavailable")
+        # E2B freshness follows the parent's own recovery. A files-only turn
+        # owns recovered/ even if an older channel turn left a valid archive.
+        # Without that mirror, the archive must have been published by this
+        # parent. A corrupt publication never becomes a legacy fallback.
         state_home = self.state_home(parent)
+        if parent.spec.executor == "e2b":
+            conversation = self._store.conversations_root() / self.conversation_root(parent)
+            manifest = read_state_manifest(conversation)
+            # A known corrupt publication is not a missing archive. Even a
+            # per-run mirror must not silently hide that uncertainty.
+            try:
+                published = os.stat(conversation / "state", follow_symlinks=False)
+            except FileNotFoundError:
+                published = None
+            except OSError as exc:
+                raise FollowupUnavailable("session_unavailable") from exc
+            if published is not None and (
+                not stat.S_ISDIR(published.st_mode) or manifest is None
+                or not isinstance(manifest.get("sourceRunId"), str)
+                or not manifest["sourceRunId"]
+            ):
+                raise FollowupUnavailable("session_unavailable")
+            state_home = self.state_home(parent)  # a swap-window read may have restored state/
+            if (state_home == conversation / "state"
+                    and (manifest is None or manifest.get("sourceRunId") != parent.run_id)):
+                raise FollowupUnavailable("session_unavailable")
         try:
             info = os.stat(state_home, follow_symlinks=False)
         except OSError as exc:
             raise FollowupUnavailable("session_unavailable") from exc
         if not stat.S_ISDIR(info.st_mode):
             raise FollowupUnavailable("session_unavailable")
+        return state_home
 
     def recorded_capabilities(
         self, parent: RunRecord
@@ -205,6 +221,9 @@ class AcpHarnessFamily(HarnessFamily):
             current = parent
         return current.run_id
 
+    def continuation_guard(self, parent: RunRecord) -> AbstractContextManager[None]:
+        return conversation_guard(self._store.conversations_root() / self.conversation_root(parent))
+
     def state_home(self, run: RunRecord) -> Path:
         """The ACP agent state root of one run a follow-up could inherit.
 
@@ -216,9 +235,11 @@ class AcpHarnessFamily(HarnessFamily):
         root"; it does not flatten what each face can do). An E2B run's agent
         state only ever existed inside the sandbox, so the face publishes every
         turn's recovery to the conversation state root
-        (``<data_root>/conversations/<root run>/state``); runs recovered before
-        阶段 1 keep their per-run ``acp-agent/recovered`` mirror, which stays
-        readable as the legacy layout.
+        (``<data_root>/conversations/<root run>/state``). A files-only turn
+        (including a turn after the archive channel was disabled) keeps its
+        own ``acp-agent/recovered`` mirror. When present that mirror is the
+        parent's authoritative source, ahead of any earlier archive; the
+        continuation gate still rejects a known corrupt archive manifest.
 
         Which of the paths applies follows the run's own ``spec.executor``
         (frozen at admission), never the host's current face: a host that
@@ -226,9 +247,12 @@ class AcpHarnessFamily(HarnessFamily):
         """
         base = self._store.run_dir(run.run_id) / ACP_RUNTIME_DIRNAME
         if run.spec.executor == "e2b":
-            conversation = self._store.conversation_dir(
-                self.conversation_root(run)
-            )
+            recovered = base / ACP_RECOVERED_DIRNAME
+            # A files-only turn publishes its own recovered/ mirror even when
+            # an earlier channel turn left a conversation archive behind.
+            if recovered.is_dir():
+                return recovered
+            conversation = self._store.conversations_root() / self.conversation_root(run)
             if (conversation / "state").is_dir():
                 return conversation / "state"
             return base / ACP_RECOVERED_DIRNAME
@@ -258,7 +282,7 @@ class AcpHarnessFamily(HarnessFamily):
             return None
         if int(self._config.conversation_lease_ttl_seconds) <= 0:
             return None
-        conversation_dir = self._store.conversation_dir(self.conversation_root(parent))
+        conversation_dir = self._store.conversations_root() / self.conversation_root(parent)
         try:
             lease = read_lease(conversation_dir)
         except LeaseCorruptError:
@@ -315,6 +339,24 @@ class AcpHarnessFamily(HarnessFamily):
 
     # -- (c) runtime 渲染与 projector 工厂 --------------------------------------
 
+    def state_transfer(
+        self, run: RunRecord, *, parent: RunRecord | None,
+        source: Path | None, sandbox: Sandbox,
+    ) -> StateTransfer | None:
+        if not sandbox.remote:
+            return None
+        directory = self._store.conversation_dir(self.conversation_root(run))
+        backfill = parent is not None and source == directory / "state"
+        target = None
+        warning = None
+        if parent is not None and backfill and run.spec.executor == "e2b":
+            try:
+                target = self.sandbox_resume_target(parent)
+            except LeaseCorruptError as exc:
+                warning = str(exc)
+        return StateTransfer(directory, credential_destinations(self._config),
+                             backfill, target, warning)
+
     def prepare_runtime(
         self,
         run_id: str,
@@ -326,6 +368,7 @@ class AcpHarnessFamily(HarnessFamily):
         sandbox: Sandbox,
         archive: "ArchiveEndpoint | None" = None,
         resume_target: SandboxResume | None = None,
+        continuation_source: Path | None = None,
     ) -> PreparedRuntime:
         # A follow-up inherits the authorized parent's agent state root into
         # this run's own HOME — except on a remote face the archive channel
@@ -341,22 +384,21 @@ class AcpHarnessFamily(HarnessFamily):
         # record before calling; the credential destinations are re-rendered
         # fresh and excluded from the copy (see
         # :func:`prepare_acp_runtime`).
-        channel_backfill = sandbox is not None and sandbox.remote and archive is not None
-        inherit_from = (
-            None
-            if parent is None or channel_backfill or resume_target is not None
-            else self.state_home(parent)
-        )
+        source = (continuation_source if continuation_source is not None else
+                  self.state_home(parent) if parent is not None else None)
+        directory = (self._store.conversations_root() / self.conversation_root(parent)
+                     if parent is not None else None)
+        channel_backfill = (sandbox is not None and sandbox.remote and archive is not None
+                            and directory is not None and source == directory / "state")
+        inherit_from = None if channel_backfill or resume_target is not None else source
         # 跳过本地继承的两条 E2B 路径（归档回灌/热路径）仍然要认识历史状态里
         # 的凭据形值：宿主本地的对话权威状态就是那份历史，扫描它的学习半部
         # 与继承路径同一套预算与判定（cc 终审 B3；inproc/docker 走继承扫描，
         # 对话目录不存在时这里空转，三面口径统一）。
         learned_secrets: tuple[str, ...] = ()
         if parent is not None and inherit_from is None:
-            state_dir = (
-                self._store.conversation_dir(self.conversation_root(parent)) / "state"
-            )
-            learned_secrets = learn_conversation_state_secrets(state_dir)
+            assert source is not None
+            learned_secrets = learn_conversation_state_secrets(source)
         try:
             runtime = prepare_acp_runtime(
                 self._config,

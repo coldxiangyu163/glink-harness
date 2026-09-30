@@ -435,7 +435,8 @@ error/aborted/length，ACP 的 StopReason 集合）译成产品终态词汇，�
 策略（报告检查）；产品词汇本身（status 三值与 stop_reason 字符串集合）仍由 `DecideStage`
 定义；(f) 子代理增强与运行中事实——pi 族的产物关联（`meta`/`unmatched`/`none`）、按族的进度
 配对（pi=transcript index+agent 同名，ACP=call_id 精确命中）与按族的用量累计（pi 去重累加，
-ACP 累计快照替换）。编排层保留：锁与相位（open/committed/uncommitted）、准入并发与配额、
+ACP 累计快照替换）。族的 `state_transfer` 从准入认可的状态来源返回归档能力请求、回灌决定及热路径候选；宿主仅签发能力，
+不导入 ACP 具体类型或重新选择状态来源。编排层保留：锁与相位（open/committed/uncommitted）、准入并发与配额、
 stop()/StopDecision、生命周期管线的**顺序控制**、`DecideStage` 的共同前缀与交付策略收尾、
 终帧 payload 组装与持久化、事件提交路径（`RunChannel`）、资源台账转发、共享追问门禁
 （owner→`spec.family`/`spec.pack`→terminal→stale 的拒绝次序是生命周期策略）与 harness 无关的蓝图/命令
@@ -515,9 +516,12 @@ Docker/E2B，也不删除任何资源。
 「已不存在」只认执行面的契约（inspect 的 no-such、SDK 的 `False` 返回或 `SandboxNotFoundException`
 类型）：探测失败、超时、鉴权错误或无法判定的返回一律保持持有。对账不在准入锁内执行，关闭宿主时
 停止该线程；`inproc` 宿主不启用它（不取得外部资源；遗留的外部身份仍走离线人工裁决）。
+追问权威准入、泊车、租约更新、清理与删除共享对话级进程内互斥（`contracts.conversation_guard`）；
+清理在锁内重查持有 run，检查、按 id 销毁与删除记录同属一个临界段。追问先等对话锁、再进全局准入锁
+复核并创建持有记录，慢云调用不占全局准入锁；运行中会话不靠延长闲置 TTL 获得保护。
 同一个扫描线程还销毁**过期的对话租约**（[ADR 0020](adr/0020-conversation-sandbox-lease-hot-path.md)）：
 `conversations/<根run>/lease.json` 过了闲置 TTL 就按其记录的沙箱 id（含挂账的 retired）销毁，
-全部确认后才删记录；未确认保留到下轮，未过期不动。租约对账只需要冻结的 E2B key（宿主
+全部确认后才删记录；未确认保留到下轮，未过期仅重试 retired 挂账。租约对账只需要冻结的 E2B key（宿主
 换面后仍能清理），无 key 时不动任何租约；它不进入 run 的持有/槽位语义。
 台账、重启对账、人工裁决与在线扫描的实现归属 `runs/resource_ledger.py`（`RunManager` 上的同名方法
 只是转发，探针组装——含 E2B 冻结凭据——也在该模块内完成）；对话删除的最小闭环
@@ -618,7 +622,7 @@ start() → session_info() → deliver_input() → wait(cancel, deadline)
 token，run 收尾时 token 已吊销，文件保留也无害，见 §6）。共享项只限于
 仓库 `harnesses/<pack>/` 与 `methodology/` 模板目录（只读输入）和 `data_root` 本身。
 
-**多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。E2B 面的续接身份验证时点与另两面相同（GLINK-ARCH-3 起）：pi 以 `--session /home/user/sessions/continued.jsonl` 原地打开续接会话（保持原 session id），RPC `get_state` 在 `session_ready` 即知会话身份，追问身份不符在**回合前、第一次模型调用前**拒 `session_unavailable`；e2b 面 `session_ready` 也从回合后补发改为回合前发布（回收后 `recovered_session()` 仍会补发一帧带宿主 `session_file` 的 `session_ready`）。（决策史见 [ADR 0004](adr/0004-pi-e2b-rpc-convergence.md)。）ACP 追问的状态根继承按**父 run 记录的 `executor`** 推导：e2b 指向对话状态根 `conversations/<根run>/state`（阶段 1 前的历史 run 回退 `acp-agent/recovered`）、其余执行面指向 `acp-agent/home`，宿主切换执行面后历史 e2b run 的合法追问仍可受理（[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)、[ADR 0018](adr/0018-conversation-state-archive-channel.md)）。e2b 面的回收/回灌优先走归档通道（单请求 tar 流，按 offset 增量，凭据目标不进归档），门禁要求发布的 manifest `sourceRunId` 等于父 run 自己；通道不可用或失败时降级为宿主侧继承 + files 逐文件（现状能力），降级事实进事件流。状态上限是异常检测三分支（[ADR 0019](adr/0019-acp-state-bounds-warning-tier-and-adaptive-resume.md)）：越过警告线（总量 64MB/单文件 32MB/2048 文件，正常研究会话的数倍）只发 `kernel_status` 警告（`acp_state_threshold_warning`）照常续接，越过 fail-closed 线（总量 256MB 对齐通道）才整次拒绝；续接 RPC 的超时按状态根体量自适应（保底 60s + 4MiB/s，硬上限 600s），继承/回灌/回收的体量耗时与 resume 重解析耗时（`stateInherit`/`stateBackfill`/`stateRecovery`/`resumeDurationMs`）进 `session_ready`。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
+**多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。E2B 面的续接身份验证时点与另两面相同（GLINK-ARCH-3 起）：pi 以 `--session /home/user/sessions/continued.jsonl` 原地打开续接会话（保持原 session id），RPC `get_state` 在 `session_ready` 即知会话身份，追问身份不符在**回合前、第一次模型调用前**拒 `session_unavailable`；e2b 面 `session_ready` 也从回合后补发改为回合前发布（回收后 `recovered_session()` 仍会补发一帧带宿主 `session_file` 的 `session_ready`）。（决策史见 [ADR 0004](adr/0004-pi-e2b-rpc-convergence.md)。）ACP 追问的状态根继承按**父 run 记录的 `executor`** 推导：e2b 指向对话状态根 `conversations/<根run>/state`（父轮有自身 `acp-agent/recovered` 完整镜像时优先取它，包括混合通道历史；没有自身镜像时对话 manifest 必须来自父轮自己，坏 manifest 不回退）、其余执行面指向 `acp-agent/home`，宿主切换执行面后历史 e2b run 的合法追问仍可受理（[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)、[ADR 0018](adr/0018-conversation-state-archive-channel.md)）。e2b 面的回收/回灌优先走归档通道（单请求 tar 流，按 offset 增量，凭据目标不进归档），没有父轮自身 recovered 镜像时，门禁要求对话 manifest 的 `sourceRunId` 等于父 run 自己；坏 manifest 一律拒绝而不回退。门禁认可的状态根随准入事实传给 Prepare，只有该根是对话级 `state/` 时才由归档通道回灌；旧 `recovered` 或本地/Docker 父轮的 `home` 仍经继承 + files 上传，不能因通道开启而换成另一个空源。缺少合法 manifest 的 `state/` 不受理，归档 GET 返回 404 而非成功空 tar；通道不可用或失败时降级为宿主侧继承 + files 逐文件（现状能力），降级事实进事件流。状态上限是异常检测三分支（[ADR 0019](adr/0019-acp-state-bounds-warning-tier-and-adaptive-resume.md)）：越过警告线（总量 64MB/单文件 32MB/2048 文件，正常研究会话的数倍）只发 `kernel_status` 警告（`acp_state_threshold_warning`）照常续接，越过 fail-closed 线（总量 256MB 对齐通道）才整次拒绝；续接 RPC 的超时按状态根体量自适应（保底 60s + 4MiB/s，硬上限 600s），继承/回灌/回收的体量耗时与 resume 重解析耗时（`stateInherit`/`stateBackfill`/`stateRecovery`/`resumeDurationMs`）进 `session_ready`。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
 
 **子代理副产物**：pi-subagents 的分支会话与主会话同名同目录（只能按会话头区分，见上表），产物目录由 `artifactDir: "session"` 落在会话目录的 `subagent-artifacts/`。E2B 面在沙箱销毁前把这些有界镜像到宿主拥有的 `runs/<id>/subagents/`（分支会话进 `sessions/`、产物进 `artifacts/`；深度/文件数/单文件/总量限幅，链接不跟随，失败记 `artifactFailures`），inproc/Docker 面的同类文件本就在宿主会话目录内、不另拷贝；两路的会话目录与镜像目录都在收尾时过 run 的脱敏边界（与 §6.1 会话文件同一条规则）。R1 起每个子代理另有权威文档 `runs/<id>/children/<n>/child.json`（§3.5）：它是协议可见事实的落地，与 P0 的 `subagents/` 原始镜像各自独立——镜像是回收基质（保持原样、不改写）；R2 起收尾时按序数启发式把产物关联复制进 `children/<n>/`（§3.5「R2 增强与关联」），未关联的文件留在基质里并记日志。
 
@@ -716,14 +720,17 @@ run 只拿到宿主凭据出口代理（`host/pi_glink/egress.py::EgressProxy`�
 
 * **代理**：宿主进程内一个独立的 loopback 监听（`PI_GLINK_EGRESS_HOST`，默认 `127.0.0.1`；
   `PI_GLINK_EGRESS_PORT`，默认 0 = 随机端口），与 Web 端口分开。首个 grant 签发时绑定，最后一个 grant
-  吊销后同步停止（在锁内等监听 socket 关闭后才返回，所以固定端口下紧接着的签发可以立即重新绑定），空闲宿主没有打开的出口端口。路由只有两条：`/model/…` 转发到宿主冻结的
-  `OPENAI_BASE_URL`（替换为 `Authorization: Bearer <真实 key>`），`/search/…` 转发到宿主冻结的
-  `PI_GLINK_WEB_SEARCH_UPSTREAM`（默认 `https://api.exa.ai`，替换为 `x-api-key`）。内核送来的
+  吊销后同步停止（在锁内等监听 socket 关闭后才返回，所以固定端口下紧接着的签发可以立即重新绑定），空闲宿主没有打开的出口端口。仅接受 `POST /model/chat/completions` 转发到宿主冻结的
+  `OPENAI_BASE_URL`（替换为 `Authorization: Bearer <真实 key>`），及有检索授权时的
+  `POST /search/search`、`POST /search/answer` 转发到宿主冻结的
+  `PI_GLINK_WEB_SEARCH_UPSTREAM`（默认 `https://api.exa.ai`，替换为 `x-api-key`）。方法、路径精确
+  匹配，不接受其它端点、编码别名或查询串；模型请求须为 UTF-8 JSON，顶层 `model` 精确等于
+  grant 中冻结的宿主模型 id，非法 JSON、重复键或媒体类型不符均不转发、不注入 key。内核送来的
   `Authorization` / `x-api-key` / `Cookie` 与逐跳头不透传；上游重定向原样返回、不跟随（跟随会把真实
   key 带去别处）；上游只接受 https，或 loopback 上的 http；loopback 上游不经操作员 `HTTP(S)_PROXY`。
   拒绝码：未知路由 404 `unknown_route`（含 `..` 等路径穿越）、token 无效/已吊销 401 `invalid_token`、
-  无检索授权 403 `search_not_granted`、配额用尽 429 `quota_exceeded`、上游不可达 502。
-* **token**：每个 run 一个（`pge_` + 32 字节随机），绑定 `run_id` 与 tenant（以及该 run 解析出的真实
+  无检索授权 403 `search_not_granted`、模型/JSON 不符 403 `model_not_granted`、配额用尽 429 `quota_exceeded`、上游不可达 502。
+* **token**：每个 run 一个（`pge_` + 32 字节随机），绑定 `run_id`、tenant 与冻结模型 id（以及该 run 解析出的真实
   key），**只存宿主内存**（按 sha256 摘要索引）。runner 在终帧提交时吊销（此时内核已退出）；宿主重启
   使全部 token 失效。token 是本 run 已知秘密，并入本 run 的脱敏边界。
 * **渲染**：`models.json` 的 `baseUrl` 为 `<egress origin>/model`（字面量；不含 `apiKey`）；`auth.json`
@@ -878,7 +885,7 @@ LOCAL_WEB_EXECUTOR=e2b scripts/run-local-web.sh        # 云沙箱执行面
 `multitenant` 后身份入口由 `PI_GLINK_AUTH_MODE` 选择：`gateway`（默认）部署在本机认证网关之后，
 由网关注入身份断言；`accounts`（§10.6）在宿主内完成邀请注册、登录与服务端会话。模型凭据来源另由
 `PI_GLINK_MODEL_CREDENTIALS` 显式选择：`tenant`（默认，每租户自己的 key 文件）或 `shared`
-（SaaS 策略，宿主冻结一套模型凭据供所有租户使用，见 §10.3）。`local` 模式没有身份入口，行为完全不变。
+（SaaS 策略，宿主冻结一套模型凭据供所有租户使用，见 §10.3）。`local` 模式没有身份入口；浏览器来源检查与 JSON-body API 的媒体类型门禁在所有模式一致执行。
 
 ### 10.1 身份与请求授权
 
@@ -896,8 +903,14 @@ owner 校验、配额、凭据与脱敏边界完全共用；客户端在任一�
   持久 `events` 表的每一帧、实时订阅的每次等待都先确认断言未过期，过期即干净结束该流（实时
   等待用 `EventBus.subscribe(idle_poll=…)` 返回控制流，不改变持久事件语义）。过期没有宽限窗口：
   通过验证的上下文绝不会已经过期，`clock_skew` 只容忍签发时间略快于宿主时钟的网关。
-- POST 检查 `Origin` / `Referer` / `Sec-Fetch-Site`：任何表示跨站的元数据都会在启动执行面之前被拒绝；
-  无这些头的非浏览器客户端（网关、运维脚本）不受影响。
+- 所有模式（含 local）的 POST 检查 `Origin` / `Referer` / `Sec-Fetch-Site`：任何表示跨站的元数据都会在启动执行面之前被拒绝；
+  可信来源仅取实际监听端口上的 loopback origin（`127.0.0.1` / `localhost` / `[::1]`，HTTP）
+  与冻结的 `PI_GLINK_PUBLIC_ORIGIN`；请求自带的 `Host` / `X-Forwarded-*` 不扩大信任范围。
+  反代的外部浏览器 origin 必须通过已有的 `PI_GLINK_PUBLIC_ORIGIN` 配置，不依靠转发 Host。
+  无这些头的非浏览器客户端（网关、运维脚本）不受影响。所有 POST 在路由/认证/副作用前拒绝
+  任何 `Transfer-Encoding`（411，`Connection: close`，不尝试按 Content-Length 排空 chunk 字节）；
+  `POST /api/runs` 在认证/CSRF 后、读取体之前要求 `application/json`（否则 415）；真正无体、
+  无 Transfer-Encoding 的 stop 维持原调用方式。
 
 ### 10.2 owner 与历史数据
 

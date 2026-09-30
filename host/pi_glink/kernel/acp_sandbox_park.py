@@ -23,6 +23,8 @@ agent 进程再 ``session/resume``；无内存快照则恢复必是磁盘冷启�
 
 from __future__ import annotations
 
+from pi_glink.contracts import conversation_guard
+
 import json
 import logging
 import time
@@ -175,70 +177,76 @@ def park_sandbox(
     knows about). A failure at any step destroys the sandbox (cold-path
     semantics); a destroy that itself fails is reported, never papered over.
     """
-    ttl = int(config.conversation_lease_ttl_seconds)
-    if ttl <= 0:
-        # 配置禁用热路径：直接销毁（阶段 2 之前的行为）。
-        return _destroy_outcome(handle, "租约 TTL 为 0，热路径已禁用")
-    current = None
-    try:
-        current = read_lease(conversation_dir)
-    except LeaseCorruptError as exc:
-        # 不可读租约下泊车无法确认旧沙箱归属与挂账名单：不泊车，销毁降级
-        # （冷路径语义，宿主权威状态不受影响），损坏文件保留待人工处置。
-        logger.warning("对话租约不可读，泊车降级为销毁 run=%s: %s", run_id, exc)
-        return _destroy_outcome(handle, f"对话租约不可读，泊车降级: {exc}")
-    retired = list(current.retired_sandbox_ids) if current is not None else []
-    if current is not None and current.sandbox_id != sandbox_id:
-        # 本沙箱替换了旧租约的沙箱：销毁旧的；失败则挂账给对账重试。
-        if kill_by_id is not None:
-            destroyed, detail = kill_by_id(current.sandbox_id)
-            if not destroyed:
-                retired.append(current.sandbox_id)
-                logger.warning(
-                    "旧租约沙箱销毁失败，已挂账对账 run=%s sandbox=%s: %s",
-                    run_id,
-                    current.sandbox_id,
-                    detail,
-                )
-        else:  # pragma: no cover - production always injects the killer
-            retired.append(current.sandbox_id)
-    generation = (current.generation + 1) if current is not None else 1
-    try:
-        remove_sandbox_credential_copies(handle, credential_dests)
-        write_generation_marker(handle, conversation_run=conversation_run, generation=generation)
-    except SandboxError as exc:
-        return _destroy_outcome(handle, str(exc))
-    lease = ConversationLease(
-        conversation_run=conversation_run,
-        sandbox_id=sandbox_id,
-        generation=generation,
-        template=template,
-        pack=pack,
-        run_id=run_id,
-        paused_at=now if now is not None else time.time(),
-        expires_at=(now if now is not None else time.time()) + ttl,
-        retired_sandbox_ids=tuple(retired),
-    )
-    try:
-        write_lease(conversation_dir, lease)
-    except Exception as exc:  # noqa: BLE001 - destroy, the failure is a fact
-        return _destroy_outcome(handle, f"租约写入失败: {type(exc).__name__}: {exc}")
-    try:
-        # Nothing run-scoped may survive into the parked sandbox (cc 终审
-        # S2): the archive token and every transfer scratch file are removed
-        # right before the pause — best-effort, a failed cleanup only logs.
+    with conversation_guard(conversation_dir):
+        ttl = int(config.conversation_lease_ttl_seconds)
+        if ttl <= 0:
+            # 配置禁用热路径：直接销毁（阶段 2 之前的行为）。
+            return _destroy_outcome(handle, "租约 TTL 为 0，热路径已禁用")
+        current = None
         try:
-            handle.commands.run(RECLAIM_CLEANUP_COMMAND, timeout=30)
-        except Exception:  # noqa: BLE001 - cleanup never fails the park
-            logger.warning("泊车前清理沙箱 scratch 失败（忽略）", exc_info=True)
-        # ``False`` = already paused (idempotent), still a parked sandbox.
-        handle.pause(keep_memory=False)
-    except Exception as exc:  # noqa: BLE001 - destroy, the failure is a fact
-        from .conversation_lease import remove_lease
+            current = read_lease(conversation_dir)
+        except LeaseCorruptError as exc:
+            # 不可读租约下泊车无法确认旧沙箱归属与挂账名单：不泊车，销毁降级
+            # （冷路径语义，宿主权威状态不受影响），损坏文件保留待人工处置。
+            logger.warning("对话租约不可读，泊车降级为销毁 run=%s: %s", run_id, exc)
+            return _destroy_outcome(handle, f"对话租约不可读，泊车降级: {exc}")
+        retired = list(current.retired_sandbox_ids) if current is not None else []
+        if current is not None and current.sandbox_id != sandbox_id:
+            # 本沙箱替换了旧租约的沙箱：销毁旧的；失败则挂账给对账重试。
+            if kill_by_id is not None:
+                destroyed, detail = kill_by_id(current.sandbox_id)
+                if not destroyed:
+                    retired.append(current.sandbox_id)
+                    logger.warning(
+                        "旧租约沙箱销毁失败，已挂账对账 run=%s sandbox=%s: %s",
+                        run_id,
+                        current.sandbox_id,
+                        detail,
+                    )
+            else:  # pragma: no cover - production always injects the killer
+                retired.append(current.sandbox_id)
+        generation = (current.generation + 1) if current is not None else 1
+        try:
+            remove_sandbox_credential_copies(handle, credential_dests)
+            write_generation_marker(handle, conversation_run=conversation_run, generation=generation)
+        except SandboxError as exc:
+            return _destroy_outcome(handle, str(exc))
+        lease = ConversationLease(
+            conversation_run=conversation_run,
+            sandbox_id=sandbox_id,
+            generation=generation,
+            template=template,
+            pack=pack,
+            run_id=run_id,
+            paused_at=now if now is not None else time.time(),
+            expires_at=(now if now is not None else time.time()) + ttl,
+            retired_sandbox_ids=tuple(retired),
+        )
+        try:
+            write_lease(conversation_dir, lease)
+        except Exception as exc:  # noqa: BLE001 - destroy, the failure is a fact
+            return _destroy_outcome(handle, f"租约写入失败: {type(exc).__name__}: {exc}")
+        try:
+            # Nothing run-scoped may survive into the parked sandbox (cc 终审
+            # S2): the archive token and every transfer scratch file are removed
+            # right before the pause — best-effort, a failed cleanup only logs.
+            try:
+                handle.commands.run(RECLAIM_CLEANUP_COMMAND, timeout=30)
+            except Exception:  # noqa: BLE001 - cleanup never fails the park
+                logger.warning("泊车前清理沙箱 scratch 失败（忽略）", exc_info=True)
+            # ``False`` = already paused (idempotent), still a parked sandbox.
+            handle.pause(keep_memory=False)
+        except Exception as exc:  # noqa: BLE001 - destroy, the failure is a fact
+            from .conversation_lease import expire_lease_now, settle_lease_after_destroy
 
-        remove_lease(conversation_dir)
-        return _destroy_outcome(handle, f"沙箱 pause 失败: {type(exc).__name__}: {exc}")
-    return ParkOutcome(ok=True, lease=lease)
+            # Invalidate the hot candidate before destruction, but never erase
+            # unconfirmed current/retired identities from the cleanup ledger.
+            expire_lease_now(conversation_dir)
+            outcome = _destroy_outcome(handle, f"沙箱 pause 失败: {type(exc).__name__}: {exc}")
+            if outcome.destroyed:
+                settle_lease_after_destroy(conversation_dir)
+            return outcome
+        return ParkOutcome(ok=True, lease=lease)
 
 
 def destroy_sandbox(handle: Any) -> bool:

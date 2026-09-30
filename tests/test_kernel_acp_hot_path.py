@@ -146,7 +146,7 @@ class ParkableSandbox(FakeSandbox):
     def __init__(self, tmp_path: Path, *, sandbox_id: str, report: str | None = None,
                  conversation_dir: Path | None = None,
                  credential_dests: tuple[str, ...] = ()) -> None:
-        super().__init__(tmp_path, sandbox_id=sandbox_id, report=report)
+        super().__init__(tmp_path / sandbox_id, sandbox_id=sandbox_id, report=report)
         self.state = "running"
         self.pause_calls: list[dict[str, Any]] = []
         self.connect_calls: list[dict[str, Any]] = []
@@ -764,3 +764,90 @@ def test_hot_path_degrades_when_the_lease_sandbox_is_gone(
     assert lease is not None and lease.sandbox_id == sandboxes[1].sandbox_id
     assert not sandboxes[1].killed and sandboxes[1].state == "paused"
 
+
+
+@pytest.mark.parametrize("parent_executor", ["e2b", "inproc"])
+def test_non_archive_parent_keeps_its_admitted_state_when_archive_is_enabled(
+    tmp_path, monkeypatch, parent_executor,
+):
+    """Exercise both real runs; only SDK/agent external inputs are fake."""
+    fake_kill_by_id(monkeypatch)
+    command = fake_agent_command(tmp_path, {})
+    config = make_config(tmp_path, TEST_ACP_COMMAND=command, PI_GLINK_EGRESS_PUBLIC_URL="",
+                         LOCAL_WEB_EXECUTOR=parent_executor)
+    store = RunStore(config.data_root / "runs")
+    sandboxes = []
+
+    def factory(**kw):
+        sandbox = ParkableSandbox(tmp_path / f"face-{len(sandboxes)}",
+                                  sandbox_id=f"legacy-{len(sandboxes)}", conversation_dir=None)
+        sandboxes.append(sandbox)
+        return sandbox
+
+    first_manager = RunManager(config, EventBus(), store=store, sandbox_factory=factory)
+    try:
+        first = first_manager.start("REMEMBER:LEGACY-671")
+        final = first_manager.wait(first.run_id, timeout=20)
+        assert final and final.status == FINISHED, final
+    finally:
+        first_manager.shutdown()
+    source = store.run_dir(first.run_id) / "acp-agent" / (
+        "recovered" if parent_executor == "e2b" else "home"
+    )
+    assert source.is_dir() and list(source.rglob("*"))
+    conversation = store.conversations_root() / first.run_id
+    assert not (conversation / "state").exists()
+    config = make_config(tmp_path, TEST_ACP_COMMAND=command)
+    second_manager = RunManager(config, EventBus(), store=store, sandbox_factory=factory)
+    try:
+        second = second_manager.start("RECALL", parent_run_id=first.run_id)
+        final = second_manager.wait(second.run_id, timeout=20)
+        assert final and final.status == FINISHED, final.error if final else final
+        assert "REMEMBERED:LEGACY-671" in assistant_text(store, second.run_id)
+        assert sandboxes[-1].commands.backfills == 0
+    finally:
+        second_manager.shutdown()
+
+
+@pytest.mark.parametrize("third_has_channel", [False, True])
+def test_archive_then_files_only_recovery_can_be_followed_again(tmp_path, monkeypatch, third_has_channel):
+    """Three real runs must resume the newest turn, not the stale root archive."""
+    from pi_glink.kernel.archive_channel import read_state_manifest
+
+    fake_kill_by_id(monkeypatch)
+    command = fake_agent_command(tmp_path, {})
+    config = make_config(tmp_path, TEST_ACP_COMMAND=command)
+    store = RunStore(config.data_root / "runs")
+    sandboxes = []
+    conversation_holder = {}
+
+    def factory(**kw):
+        sandbox = ParkableSandbox(tmp_path, sandbox_id=f"mixed-{len(sandboxes)}",
+                                  conversation_dir=conversation_holder.get("directory"))
+        sandboxes.append(sandbox)
+        return sandbox
+
+    def run_turn(prompt, parent_id, public_url):
+        configuration = make_config(tmp_path, TEST_ACP_COMMAND=command,
+                                    PI_GLINK_EGRESS_PUBLIC_URL=public_url)
+        manager = RunManager(configuration, EventBus(), store, sandbox_factory=factory)
+        try:
+            record = manager.start(prompt, parent_run_id=parent_id)
+            final = manager.wait(record.run_id, timeout=20)
+            assert final and final.status == FINISHED, final.error if final else final
+            return record
+        finally:
+            manager.shutdown()
+
+    first = run_turn("REMEMBER:ARCHIVE-111", None, config.egress_public_url)
+    conversation = store.conversations_root() / first.run_id
+    conversation_holder["directory"] = conversation
+    assert read_state_manifest(conversation)["sourceRunId"] == first.run_id
+    second = run_turn("REMEMBER:FILES-222", first.run_id, "")
+    recovered = store.run_dir(second.run_id) / "acp-agent" / "recovered"
+    assert recovered.is_dir() and list(recovered.rglob("*"))
+    assert read_state_manifest(conversation)["sourceRunId"] == first.run_id
+    third = run_turn("RECALL", second.run_id,
+                     config.egress_public_url if third_has_channel else "")
+    assert "REMEMBERED:FILES-222" in assistant_text(store, third.run_id)
+    assert sandboxes[-1].commands.backfills == 0, "the stale conversation archive must not be fetched"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 import re
 import subprocess
@@ -112,10 +113,10 @@ _KERNEL_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
     "acp_execution.py": frozenset({"pi_glink.__version__", "pi_glink.config"}),
     "acp_projection.py": frozenset({"pi_glink.events", "pi_glink.redaction"}),
     "acp_rpc.py": frozenset(),
-    "acp_sandbox_park.py": frozenset({"pi_glink.config"}),  # 沙箱泊车只读宿主配置的 TTL
+    "acp_sandbox_park.py": frozenset({"pi_glink.config", "pi_glink.contracts"}),  # 沙箱泊车只读宿主配置的 TTL
     "agent_env.py": frozenset({"pi_glink.config"}),
     "child_progress.py": frozenset(),
-    "conversation_lease.py": frozenset(),  # 租约台账事实：纯标准库，自足
+    "conversation_lease.py": frozenset({"pi_glink.contracts"}),  # 租约台账事实：纯标准库，自足
     "docker_env.py": frozenset({"pi_glink.config"}),
     "e2b_env.py": frozenset({"e2b", "pi_glink.artifacts", "pi_glink.config"}),
     "execution.py": frozenset({"pi_glink.config"}),
@@ -201,7 +202,9 @@ def kernel_import_violations(root: Path) -> list[str]:
 #: 也就写不出两族运行期的联合类型。
 _RUNNER_KERNEL_ALLOWLIST: dict[str, frozenset[str] | None] = {
     "pi_glink.kernel.harness": None,
-    "pi_glink.kernel.execution": None,
+    "pi_glink.kernel.execution": frozenset({
+        "ExecutionAdapter", "ExecutionSpec", "ExecutionOutcome", "CleanupReport", "SessionInfo",
+    }),
     "pi_glink.kernel.sweep": None,
     "pi_glink.kernel.sandbox": frozenset(
         {"Sandbox", "SANDBOXES", "open_sandbox", "Launch", "Spawn", "CleanupReport"}
@@ -214,8 +217,39 @@ _RUNNER = Path("host/pi_glink/runs/runner.py")
 def runner_kernel_imports(relative: Path, text: str) -> list[str]:
     """Kernel imports of the orchestration module outside the abstraction allowlist."""
     package = list(relative.with_suffix("").parts)[1:-1]
+    tree = ast.parse(text, filename=str(relative))
+    library_names = {"importlib"}
+    loader_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            library_names.update(alias.asname or alias.name for alias in node.names
+                                 if alias.name == "importlib")
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "importlib":
+            loader_names.update(alias.asname or alias.name for alias in node.names
+                                if alias.name == "import_module")
     violations: list[str] = []
-    for node in ast.walk(ast.parse(text, filename=str(relative))):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and node.args:
+            function = node.func
+            dynamic = (isinstance(function, ast.Name)
+                       and (function.id == "__import__" or function.id in loader_names))
+            dynamic |= (isinstance(function, ast.Attribute)
+                        and isinstance(function.value, ast.Name)
+                        and function.value.id in library_names and function.attr == "import_module")
+            if (dynamic and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)):
+                module = node.args[0].value
+                if module.startswith("."):
+                    argument = (node.args[1] if len(node.args) > 1 else
+                                next((kw.value for kw in node.keywords if kw.arg == "package"), None))
+                    base = (argument.value if isinstance(argument, ast.Constant)
+                            and isinstance(argument.value, str) else ".".join(package))
+                    try:
+                        module = importlib.util.resolve_name(module, base)
+                    except (ImportError, ValueError):
+                        violations.append(f"{relative}: unresolvable relative import {module}")
+                if module.startswith("pi_glink.kernel"):
+                    violations.append(f"{relative}: forbidden import {module}")
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name.startswith("pi_glink.kernel"):
@@ -690,3 +724,50 @@ def test_the_distribution_declares_the_kernel_subpackage() -> None:
         find = setuptools["packages"]["find"]
         assert find["where"] == ["host"]
         assert any(fnmatch.fnmatchcase(name, pattern) for pattern in find["include"]), name
+
+
+def test_lifecycle_stages_depend_on_kernel_abstractions_only():
+    path = Path("host/pi_glink/runs/stages.py")
+    assert runner_kernel_imports(path, (ROOT / path).read_text(encoding="utf-8")) == []
+
+
+def test_runs_package_never_imports_harness_specific_modules():
+    for path in sorted((ROOT / "host/pi_glink/runs").rglob("*.py")):
+        relative = path.relative_to(ROOT)
+        # The existing resolver understands aliases, absolute/relative imports
+        # and root-package imports. Do not permit concrete families in new
+        # lifecycle modules just because the runner was split into stages.
+        violations = runner_kernel_imports(relative, path.read_text(encoding="utf-8"))
+        assert not [v for v in violations if any(name in v for name in (
+            "kernel.harness_acp", "kernel.harness_pi", "kernel.acp_",
+            "AcpRuntime", "AgentRuntime", "PiExecutionAdapter",
+        ))], violations
+
+
+@pytest.mark.parametrize("source", [
+    "__import__('pi_glink.kernel.harness_acp')",
+    "import importlib; importlib.import_module('pi_glink.kernel.harness_pi')",
+])
+def test_orchestration_guard_rejects_literal_dynamic_kernel_imports(source):
+    assert runner_kernel_imports(Path("host/pi_glink/runs/stages.py"), source)
+
+
+def test_abstract_execution_module_does_not_expose_a_concrete_driver_to_stages():
+    assert runner_kernel_imports(Path("host/pi_glink/runs/stages.py"),
+                                 "from ..kernel.execution import PiExecutionAdapter")
+
+
+@pytest.mark.parametrize("source", [
+    "import importlib; importlib.import_module('..kernel.harness_acp', __package__)",
+    "from importlib import import_module; import_module('pi_glink.kernel.harness_acp')",
+    "import importlib as il; il.import_module('pi_glink.kernel.harness_acp')",
+    "from importlib import import_module as load; load('..kernel.harness_acp', __package__)",
+])
+def test_orchestration_dynamic_import_aliases_and_relative_names_cannot_bypass_guard(source):
+    violations = runner_kernel_imports(Path("host/pi_glink/runs/stages.py"), source)
+    assert violations and "pi_glink.kernel.harness_acp" in violations[0]
+
+
+def test_dynamic_relative_host_imports_are_not_mistaken_for_kernel_dependencies():
+    assert runner_kernel_imports(Path("host/pi_glink/runs/stages.py"),
+                                 "import importlib as il; il.import_module('.plugins', __package__)") == []

@@ -234,17 +234,20 @@ class RunManager:
         request = self._admission.prepare(
             prompt, context, parent_run_id=parent_run_id, blueprint=blueprint
         )
-        with self._lock:
-            admitted = self._admission.admit(
-                request, lambda holding: self._check_admission(context, holding)
-            )
-            execution = RunExecution.from_admitted(admitted)
-            run_id = admitted.record.run_id
-            self._executions[run_id] = execution
-            # Register the run before the caller gets the id back: a browser
-            # that opens the event stream immediately must see an open run, not
-            # a 404 race with the execution thread's first line.
-            self.bus.open_run(run_id)
+        # Per-conversation cleanup may call the cloud; wait before taking the
+        # global admission lock so unrelated tenants can still start runs.
+        with self._admission.continuation_guard(request):
+            with self._lock:
+                admitted = self._admission.admit(
+                    request, lambda holding: self._check_admission(context, holding)
+                )
+                execution = RunExecution.from_admitted(admitted)
+                run_id = admitted.record.run_id
+                self._executions[run_id] = execution
+                # Register the run before the caller gets the id back: a browser
+                # that opens the event stream immediately must see an open run, not
+                # a 404 race with the execution thread's first line.
+                self.bus.open_run(run_id)
 
         threading.Thread(
             target=self._pipeline.execute,

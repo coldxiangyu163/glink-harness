@@ -17,7 +17,12 @@
 1. 宿主进程内运行一个凭据出口代理：独立 loopback 监听（`PI_GLINK_EGRESS_HOST` / `PI_GLINK_EGRESS_PORT`），
    首个 grant 签发时绑定、最后一个吊销后同步停止（socket 关闭后才释放锁，固定端口下下一次签发可立即重绑）。`/model/…` 转发到宿主冻结的 `OPENAI_BASE_URL`，
    `/search/…` 转发到宿主冻结的 `PI_GLINK_WEB_SEARCH_UPSTREAM`，由宿主替换 `Authorization` /
-   `x-api-key`。不跟随重定向；上游只接受 https 或 loopback http。
+   `x-api-key`。仅放行 `POST /model/chat/completions` 与有检索授权的
+   `POST /search/search`、`POST /search/answer`，路径精确匹配（不接受编码别名、额外后缀或查询串）；
+   grant 绑定宿主冻结的模型 id，UTF-8 JSON 请求的顶层 `model` 必须精确相等，重复键、非法 JSON
+   与非 JSON 媒体类型拒绝，且不转发、不计量、不注入真实 key。依据 pi 0.86.1 的
+   `openai-completions` 与 pi-web-access 0.31.0 的实际消费者；包升级须重新核对白名单。
+   不跟随重定向；上游只接受 https 或 loopback http。
 2. 每个 run 一个短期 token（`pge_…`），绑定 `run_id` 与 tenant，只存内存；终帧提交时吊销，宿主重启
    全部失效。执行环境只看到代理 URL 与 token：`auth.json` 的 key 与 `web-search.json` 的 `exaApiKey`
    都是 token，`models.json` / `web-search.json` 的 base URL 指向代理。
@@ -39,5 +44,6 @@
 ## 理由与残留
 
 真实 key 不再进入任何执行环境，租户之间也不再共享同一份可读 key。token 在 run 期间对内核工具可见，
-但只能访问宿主冻结的两个上游、受配额限制、run 结束即失效。越过 token 配额的那一次请求仍会完成；
+但只能访问宿主冻结的两个上游中获准的端点与模型、受配额限制、run 结束即失效。
+这仍允许工具直接使用 token 请求同一模型或合法搜索端点，不是网络隔离；ACP 的注入例外不变。越过 token 配额的那一次请求仍会完成；
 多宿主进程之间不共享配额；public URL 与固定端口的转发属于部署义务。

@@ -50,9 +50,18 @@ E2B 面 ACP/dsh 追问链路是每 run 一次性沙箱 + 有界回收回灌：fi
    预算 64MB。正常研究会话远低于此（dsh 30 轮 ≈ 12-25MB）；达到即异常量级，
    fail-closed 拒绝（回收失败→无发布→追问按新鲜度门禁拒绝），事实进事件流。
    追问回灌走通道后 files API 的 8MB/文件上传上限不再约束状态文件。
-5. **回灌走通道**。通道可用时（E2B + public URL），追问 run 的宿主 HOME 只渲染
-   凭据，沙箱端 curl GET 拉取权威状态根（冷路径语义不变：仍是新沙箱 + 回灌 +
-   session/resume）；凭据上传在后，同路径时凭据副本赢。
+5. **回灌沿用准入认可的同一状态来源**。族门禁返回状态根路径，在权威准入后随
+   `AdmittedRun` 传给 Prepare；族的 `StateTransfer` 决定回灌/热路径，编排层不再按
+   ACP 具体类型分派。只有该来源是已发布的对话 `state/` 且通道可用时（E2B + public URL），
+   追问 run 的宿主 HOME 才只渲染凭据，沙箱端 curl GET 拉取同一权威状态根
+   （冷路径仍是新沙箱 + 回灌 + session/resume）；凭据上传在后，同路径时凭据副本赢。
+   旧 E2B `acp-agent/recovered` 或 inproc/docker 父轮 `home` 作为来源时，仍继承该根并
+   经 files 上传，即使归档通道已开启也不从另一个空目录回灌；本轮回收仍可通过归档通道发布。
+   混合通道历史中，父轮自己的完整 `recovered/` 优先于早期轮次的对话级归档；没有自身
+   镜像时仍必须由父轮自己发布 manifest，陈旧归档拒绝续接。已存在但损坏/缺失 manifest
+   的对话状态不以 `recovered/` 隐藏其不确定性。
+   对话 `state/` 缺少合法 manifest 时门禁拒绝；归档 GET 在响应头前返回 404，直接 serve
+   同样拒绝，不以成功的空 tar 冒充已有状态。
 6. **降级链（缺失降级，非安全降级）**。通道不可用（无 public URL）或通道失败
    时：追问回灌退回宿主侧继承 + files API 逐文件上传（现状能力）；回收退回
    files 逐文件镜像，发布目标仍是对话状态根（mode=`files-fallback`），凭据目标

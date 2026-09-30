@@ -21,6 +21,8 @@ run 结束时的状态根与工作区，让下一次追问可以省掉「新沙�
 
 from __future__ import annotations
 
+from pi_glink.contracts import conversation_guard
+
 import json
 import logging
 import os
@@ -125,74 +127,55 @@ def read_lease(conversation_dir: Path) -> ConversationLease | None:
     its ``retiredSandboxIds`` from the books), so the callers keep the file
     and the unknown state fail-closed.
     """
-    path = Path(conversation_dir) / LEASE_FILENAME
-    try:
-        raw_text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise LeaseCorruptError(f"对话租约不可读: {type(exc).__name__}: {exc}") from exc
-    try:
-        raw = json.loads(raw_text)
-    except ValueError as exc:
-        raise LeaseCorruptError(f"对话租约不是合法 JSON: {exc}") from exc
-    if not isinstance(raw, dict) or raw.get("version") != LEASE_VERSION:
-        raise LeaseCorruptError("对话租约版本或结构不认识")
-    lease = _lease_from_mapping(raw)
-    if lease is None:
-        raise LeaseCorruptError("对话租约字段校验失败")
-    return lease
+    with conversation_guard(conversation_dir):
+        path = Path(conversation_dir) / LEASE_FILENAME
+        try:
+            raw_text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise LeaseCorruptError(f"对话租约不可读: {type(exc).__name__}: {exc}") from exc
+        try:
+            raw = json.loads(raw_text)
+        except ValueError as exc:
+            raise LeaseCorruptError(f"对话租约不是合法 JSON: {exc}") from exc
+        if not isinstance(raw, dict) or raw.get("version") != LEASE_VERSION:
+            raise LeaseCorruptError("对话租约版本或结构不认识")
+        lease = _lease_from_mapping(raw)
+        if lease is None:
+            raise LeaseCorruptError("对话租约字段校验失败")
+        return lease
 
 
 def write_lease(conversation_dir: Path, lease: ConversationLease) -> None:
     """Atomically write the lease record (0600, ``os.replace``)."""
-    directory = Path(conversation_dir)
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    staging = directory / f".{LEASE_FILENAME}.staging"
-    payload = json.dumps(lease.to_json(), ensure_ascii=False, sort_keys=True)
-    try:
-        descriptor = os.open(
-            staging,
-            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
+    with conversation_guard(conversation_dir):
+        directory = Path(conversation_dir)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        staging = directory / f".{LEASE_FILENAME}.staging"
+        payload = json.dumps(lease.to_json(), ensure_ascii=False, sort_keys=True)
         try:
-            os.write(descriptor, payload.encode("utf-8") + b"\n")
-        finally:
-            os.close(descriptor)
-        os.replace(staging, directory / LEASE_FILENAME)
-    except OSError as exc:
-        raise LeaseError(f"对话租约写入失败: {type(exc).__name__}: {exc}") from exc
+            descriptor = os.open(
+                staging,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            try:
+                os.write(descriptor, payload.encode("utf-8") + b"\n")
+            finally:
+                os.close(descriptor)
+            os.replace(staging, directory / LEASE_FILENAME)
+        except OSError as exc:
+            raise LeaseError(f"对话租约写入失败: {type(exc).__name__}: {exc}") from exc
 
 
 def remove_lease(conversation_dir: Path) -> None:
     """Delete the lease record (best-effort; the sweep re-derives the truth)."""
-    try:
-        (Path(conversation_dir) / LEASE_FILENAME).unlink(missing_ok=True)
-    except OSError:
-        pass
-
-
-def claim_lease(conversation_dir: Path, *, seconds: float = 120.0) -> bool:
-    """Extend a lease's expiry to cover an in-flight reconnect (cc 终审 S1).
-
-    The sweep may race a follow-up that sits between the candidate check and
-    ``connect``; claiming pushes the expiry past the reconnect window so the
-    sweep cannot destroy a sandbox the follow-up is about to resume. Best
-    effort: a claim that cannot be read or written leaves the race window as
-    it was (the sweep's holding-run guard above is the second layer).
-    """
-    try:
-        lease = read_lease(conversation_dir)
-    except LeaseCorruptError:
-        return False
-    if lease is None:
-        return False
-    try:
-        write_lease(conversation_dir, replace(lease, expires_at=time.time() + seconds))
-    except LeaseError:
-        return False
-    return True
+    with conversation_guard(conversation_dir):
+        try:
+            (Path(conversation_dir) / LEASE_FILENAME).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def settle_lease_after_destroy(conversation_dir: Path) -> bool:
@@ -205,14 +188,15 @@ def settle_lease_after_destroy(conversation_dir: Path) -> bool:
     destroying one sandbox must never drop the others from the ledger.
     Returns whether the record is fully settled (gone).
     """
-    lease = read_lease(conversation_dir)
-    if lease is None:
-        return True
-    if not lease.retired_sandbox_ids:
-        remove_lease(conversation_dir)
-        return True
-    write_lease(conversation_dir, replace(lease, expires_at=time.time()))
-    return False
+    with conversation_guard(conversation_dir):
+        lease = read_lease(conversation_dir)
+        if lease is None:
+            return True
+        if not lease.retired_sandbox_ids:
+            remove_lease(conversation_dir)
+            return True
+        write_lease(conversation_dir, replace(lease, expires_at=time.time()))
+        return False
 
 
 def expire_lease_now(conversation_dir: Path) -> ConversationLease | None:
@@ -223,21 +207,22 @@ def expire_lease_now(conversation_dir: Path) -> ConversationLease | None:
     is not forgotten — with an expiry that makes the very next reconciliation
     tick retry the destroy.
     """
-    try:
-        lease = read_lease(conversation_dir)
-    except LeaseCorruptError as exc:
-        # 损坏的租约改写不了，也不删除：保留原文并显式告警，沙箱处置交给
-        # 操作员（fail-closed：不把不可读当作无租约静默放过）。
-        logger.warning("对话租约不可读，保留待人工处置: %s", exc)
-        return None
-    if lease is None:
-        return None
-    expired = replace(lease, expires_at=time.time())
-    try:
-        write_lease(conversation_dir, expired)
-    except LeaseError:
-        return lease
-    return expired
+    with conversation_guard(conversation_dir):
+        try:
+            lease = read_lease(conversation_dir)
+        except LeaseCorruptError as exc:
+            # 损坏的租约改写不了，也不删除：保留原文并显式告警，沙箱处置交给
+            # 操作员（fail-closed：不把不可读当作无租约静默放过）。
+            logger.warning("对话租约不可读，保留待人工处置: %s", exc)
+            return None
+        if lease is None:
+            return None
+        expired = replace(lease, expires_at=time.time())
+        try:
+            write_lease(conversation_dir, expired)
+        except LeaseError:
+            return lease
+        return expired
 
 
 def _lease_from_mapping(raw: Mapping[str, Any]) -> ConversationLease | None:

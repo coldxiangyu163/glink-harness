@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
@@ -83,6 +84,7 @@ class AdmissionRequest:
     credentials: RunCredentials
     secrets: RunSecretBoundary
     session_seed: bytes | None
+    continuation_source: Path | None
 
 
 class RunAdmission:
@@ -360,12 +362,15 @@ class RunAdmission:
         # blueprint); the credential origin completes it below.
         target = self.spec(blueprint_template)
         family = self.family_for(target.family)
+        continuation_source = None
         if parent_run_id is not None:
             # 锁外追问门禁：共享门禁（owner→harness 字段→terminal→stale）先行，
             # 族的追加事实（ACP 族的能力矩阵、session id、状态根；pi 族无追加）
             # 随后。fail-closed 发生在凭据解析与 run 目录创建之前；子 adapter
             # 在任何 resume 请求前还会自查它自己协商到的能力。
-            family.check_continuation(self.resumable_parent(context, parent_run_id, target))
+            continuation_source = family.check_continuation(
+                self.resumable_parent(context, parent_run_id, target)
+            )
         credentials = self.credentials_for(context)
         family.validate_credentials(credentials)
         spec = replace(target, credential_origin=credentials.origin)
@@ -389,7 +394,16 @@ class RunAdmission:
             credentials=credentials,
             secrets=secrets,
             session_seed=seed,
+            continuation_source=continuation_source,
         )
+
+    def continuation_guard(self, request: AdmissionRequest) -> AbstractContextManager[None]:
+        if request.parent_run_id is None:
+            return nullcontext()
+        parent = self.authorized_parent(request.context, request.parent_run_id)
+        if parent is None:
+            raise FollowupUnavailable("unknown_run")
+        return self.family_for(request.spec.family).continuation_guard(parent)
 
     def admit(
         self, request: AdmissionRequest, admission_check: AdmissionCheck | None = None
@@ -403,6 +417,7 @@ class RunAdmission:
         context = request.context
         parent_run_id = request.parent_run_id
         continuation_workspace: Path | None = None
+        continuation_source = request.continuation_source
         if parent_run_id is not None:
             # Authoritative recheck (the snapshot may have raced a concurrent
             # follow-up of the same parent): a refusal here discards the seed,
@@ -410,7 +425,7 @@ class RunAdmission:
             # 保持原次序（先共享后族）。
             family = self.family_for(request.spec.family)
             parent = self.resumable_parent(context, parent_run_id, request.spec)
-            family.check_continuation(parent)
+            continuation_source = family.check_continuation(parent)
             # The family decides whether the conversation's workspace is reused
             # (ACP keeps it: the session's ``cwd`` is recorded in the agent's
             # own state) or fresh (pi).
@@ -453,4 +468,5 @@ class RunAdmission:
             parent_run_id=parent_run_id,
             blueprint=blueprint,
             blueprint_prompt=request.blueprint_prompt,
+            continuation_source=continuation_source,
         )

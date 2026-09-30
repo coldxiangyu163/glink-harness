@@ -126,6 +126,8 @@ class ExecutionSpec:
     #: carry ``None`` here. ``conversation_dir`` is the host-side counterpart
     #: (where recoveries publish); always set when ``archive`` is.
     archive: ArchiveEndpoint | None = None
+    #: Frozen decision: the admitted source is the conversation archive root.
+    archive_backfill: bool = False
     conversation_dir: Path | None = None
     #: The paused sandbox a follow-up may reconnect to (docs/adr/0020's hot
     #: path), built from the conversation's lease; ``None`` everywhere else

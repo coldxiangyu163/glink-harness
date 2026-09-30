@@ -18,6 +18,7 @@ docs/architecture.md §4「族接口」.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, TYPE_CHECKING
@@ -71,6 +72,17 @@ class PreparedRuntime:
     seed_consumed: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class StateTransfer:
+    """Family-owned state transfer policy; the host only issues its capability."""
+
+    conversation_dir: Path
+    credential_dests: tuple[str, ...]
+    backfill: bool
+    resume_target: SandboxResume | None = None
+    warning: str | None = None
+
+
 class HarnessFamily(ABC):
     """One harness family's policy surface. One instance per family name.
 
@@ -107,11 +119,12 @@ class HarnessFamily(ABC):
 
     # -- (b) 追问门禁与续接种子 ------------------------------------------------
 
-    def check_continuation(self, parent: RunRecord) -> None:
+    def check_continuation(self, parent: RunRecord) -> Path | None:
         """Family-specific follow-up gate, after the runner's shared gate
         （owner→harness 字段→terminal→stale，runner 保留）。
 
-        基类空实现（pi 无额外门禁）。ACP 族覆写，追加事实：能力矩阵
+        返回权威准入认可的状态根（pi 无状态根、返回 None），供后续准备/传输
+        沿用同一事实。ACP 族覆写，追加事实：能力矩阵
         （父 run ``session_ready`` 帧，族已由父记录 ``spec.family`` 证明）、
         session_id、``acp_resume_method``、状态根目录存在性；拒绝一律
         ``pi_glink.contracts.FollowupUnavailable("session_unavailable")``。
@@ -119,6 +132,14 @@ class HarnessFamily(ABC):
         # Hook 默认空实现：pi 族没有额外门禁（显式 return None，区别于被
         # 遗忘的空 body；B027 语义：要么覆写，要么明确什么都不做）。
         return None
+
+    def continuation_guard(self, parent: RunRecord) -> AbstractContextManager[None]:
+        """Serialize admission with conversation state/resource destruction.
+
+        The pi seed is a per-run snapshot; stateful families override this for
+        their shared conversation. Acquire before the global admission lock.
+        """
+        return nullcontext()
 
     def continuation_workspace(self, parent: RunRecord) -> Path | None:
         """The workspace a follow-up reuses.
@@ -159,6 +180,16 @@ class HarnessFamily(ABC):
 
     # -- (c) runtime 渲染与 projector 工厂 -------------------------------------
 
+    def state_transfer(
+        self, run: RunRecord, *, parent: RunRecord | None,
+        source: Path | None, sandbox: Sandbox,
+    ) -> StateTransfer | None:
+        """Stateful families select transfer/resume policy from admitted facts.
+
+        pi's per-run session seed needs no conversation archive or hot cache.
+        """
+        return None
+
     @abstractmethod
     def prepare_runtime(
         self,
@@ -171,6 +202,7 @@ class HarnessFamily(ABC):
         sandbox: Sandbox,
         archive: ArchiveEndpoint | None = None,
         resume_target: "SandboxResume | None" = None,
+        continuation_source: Path | None = None,
     ) -> PreparedRuntime:
         """Render the run's per-harness configuration.
 

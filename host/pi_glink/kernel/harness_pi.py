@@ -126,11 +126,12 @@ class PiHarnessFamily(HarnessFamily):
         sandbox: Sandbox,
         archive: "ArchiveEndpoint | None" = None,
         resume_target: "SandboxResume | None" = None,
+        continuation_source: Path | None = None,
     ) -> PreparedRuntime:
         # The pi family has no sandbox lease (docs/adr/0020 is an ACP/E2B
         # shape); the parameter stays in the shared signature so the pipeline
         # does not branch on the family.
-        del resume_target
+        del resume_target, continuation_source
         if egress is None:
             # The pi family never renders a real key (docs/adr/0008): without
             # an egress grant there is nothing safe to put in auth.json.

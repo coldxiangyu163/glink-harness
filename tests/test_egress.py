@@ -153,12 +153,14 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def post(url: str, *, headers: dict[str, str] | None = None, body: dict | None = None):
+def post(url: str, *, headers: dict[str, str] | None = None, body: Any = None,
+         raw_body: bytes | None = None, method: str = "POST"):
     request = urllib.request.Request(
         url,
-        data=json.dumps(body or {}).encode("utf-8"),
+        data=(raw_body if raw_body is not None else
+              json.dumps(body if body is not None else {"model": "m"}).encode("utf-8")),
         headers={"Content-Type": "application/json", **(headers or {})},
-        method="POST",
+        method=method,
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     try:
@@ -179,7 +181,7 @@ def base(proxy: EgressProxy) -> str:
 def test_the_upstream_sees_only_the_real_key_and_the_kernel_only_the_token(
     proxy: EgressProxy, upstream: FakeUpstream
 ) -> None:
-    grant = proxy.issue(run_id="run-1", tenant="tenant-a", model_key=MODEL_KEY)
+    grant = proxy.issue(run_id="run-1", tenant="tenant-a", model_key=MODEL_KEY, model_id="m")
     status, _headers, raw = post(
         f"{base(proxy)}/model/chat/completions",
         headers={"Authorization": f"Bearer {grant.token}", "Cookie": "c=1"},
@@ -209,7 +211,7 @@ def test_the_upstream_sees_only_the_real_key_and_the_kernel_only_the_token(
 def test_a_missing_or_foreign_token_is_refused_before_the_upstream(
     proxy: EgressProxy, upstream: FakeUpstream
 ) -> None:
-    proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY)
+    proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY, model_id="m")
     for headers in ({}, {"Authorization": "Bearer pge_not-issued"}, {"Authorization": f"Bearer {MODEL_KEY}"}):
         status, _headers, raw = post(f"{base(proxy)}/model/chat/completions", headers=headers)
         assert status == 401, headers
@@ -220,8 +222,8 @@ def test_a_missing_or_foreign_token_is_refused_before_the_upstream(
 def test_a_revoked_token_is_refused_and_the_idle_listener_closes(
     proxy: EgressProxy, upstream: FakeUpstream
 ) -> None:
-    first = proxy.issue(run_id="run-1", tenant="a", model_key=MODEL_KEY)
-    second = proxy.issue(run_id="run-2", tenant="b", model_key="sk-other-tenant-key-000")
+    first = proxy.issue(run_id="run-1", tenant="a", model_key=MODEL_KEY, model_id="m")
+    second = proxy.issue(run_id="run-2", tenant="b", model_key="sk-other-tenant-key-000", model_id="m")
     url = f"{base(proxy)}/model/chat/completions"
     final = proxy.revoke(first.token)
     assert final is not None and final["requests"] == 0
@@ -250,7 +252,7 @@ def test_a_fixed_port_rebinds_right_after_the_last_grant_is_revoked(
     )
     try:
         for round_no in range(5):
-            grant = proxy.issue(run_id=f"run-{round_no}", tenant=None, model_key=MODEL_KEY)
+            grant = proxy.issue(run_id=f"run-{round_no}", tenant=None, model_key=MODEL_KEY, model_id="m")
             assert proxy.port == fixed
             url = f"http://127.0.0.1:{fixed}/model/chat/completions"
             assert post(url, headers={"Authorization": f"Bearer {grant.token}"})[0] == 200
@@ -263,14 +265,14 @@ def test_a_fixed_port_rebinds_right_after_the_last_grant_is_revoked(
 def test_search_needs_its_own_grant_and_forwards_the_search_key(
     proxy: EgressProxy, upstream: FakeUpstream
 ) -> None:
-    plain = proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY)
+    plain = proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY, model_id="m")
     status, _headers, raw = post(
         f"{base(proxy)}/search/search", headers={"x-api-key": plain.token}, body={"query": "q"}
     )
     assert status == 403 and json.loads(raw)["error"]["code"] == "search_not_granted"
     assert upstream.requests == []
 
-    searching = proxy.issue(run_id="run-2", tenant=None, model_key=MODEL_KEY, search_key=SEARCH_KEY)
+    searching = proxy.issue(run_id="run-2", tenant=None, model_key=MODEL_KEY, model_id="m", search_key=SEARCH_KEY)
     status, _headers, _raw = post(
         f"{base(proxy)}/search/search", headers={"x-api-key": searching.token}, body={"query": "q"}
     )
@@ -286,7 +288,7 @@ def test_search_needs_its_own_grant_and_forwards_the_search_key(
 def test_unknown_routes_and_path_tricks_never_reach_the_upstream(
     proxy: EgressProxy, upstream: FakeUpstream
 ) -> None:
-    grant = proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY)
+    grant = proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY, model_id="m")
     auth = {"Authorization": f"Bearer {grant.token}"}
     for path in ("/v1/chat/completions", "/model", "/model/../search/x", "/model//x", "/other/x"):
         status, _headers, _raw = post(f"{base(proxy)}{path}", headers=auth)
@@ -294,12 +296,49 @@ def test_unknown_routes_and_path_tricks_never_reach_the_upstream(
     assert upstream.requests == []
 
 
+@pytest.mark.parametrize("path,method", [
+    ("/model/files", "POST"), ("/model/embeddings", "POST"),
+    ("/model/chat/completions/extra", "POST"),
+    ("/model/chat/completions?model=other", "POST"),
+    ("/model/chat/completions", "GET"),
+    ("/model/%63hat/completions", "POST"),
+    ("/search/other", "POST"), ("/search/search?q=x", "POST"),
+])
+def test_ungranted_endpoints_never_use_the_upstream_key(proxy, upstream, path, method):
+    grant = proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY, model_id="m", search_key=SEARCH_KEY)
+    status, _, _ = post(f"{base(proxy)}{path}",
+                        headers={"Authorization": f"Bearer {grant.token}"}, method=method)
+    assert status == 404
+    assert upstream.requests == []
+    assert grant.usage()["requests"] == grant.usage()["searchRequests"] == 0
+
+
+@pytest.mark.parametrize("body", [
+    {"model": "other"}, {}, {"model": None}, {"model": ["m"]}, "m",
+])
+def test_only_the_granted_model_can_be_requested(proxy, upstream, body):
+    grant = proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY, model_id="m")
+    status, _, raw = post(f"{base(proxy)}/model/chat/completions", body=body,
+                         headers={"Authorization": f"Bearer {grant.token}"})
+    assert status == 403 and json.loads(raw)["error"]["code"] == "model_not_granted"
+    assert upstream.requests == [] and grant.usage()["requests"] == 0
+
+
+def test_search_answer_is_a_legal_keyed_consumer(proxy, upstream):
+    grant = proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY, model_id="m", search_key=SEARCH_KEY)
+    status, _, _ = post(f"{base(proxy)}/search/answer", body={"query": "q"},
+                        headers={"x-api-key": grant.token})
+    assert status == 200
+    assert upstream.requests[0]["path"] == "/exa/answer"
+    assert grant.usage()["searchRequests"] == 1
+
+
 def test_an_upstream_redirect_is_returned_not_followed(
     upstream: FakeUpstream,
 ) -> None:
     proxy = EgressProxy(model_upstream=f"{upstream.origin}/redirect", search_upstream=upstream.origin)
     try:
-        grant = proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY)
+        grant = proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY, model_id="m")
         status, _headers, _raw = post(
             f"{base(proxy)}/model/chat/completions",
             headers={"Authorization": f"Bearer {grant.token}"},
@@ -316,11 +355,11 @@ def test_an_upstream_redirect_is_returned_not_followed(
 def test_a_streamed_response_is_passed_through_and_metered(
     proxy: EgressProxy, upstream: FakeUpstream
 ) -> None:
-    grant = proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY)
+    grant = proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY, model_id="m")
     status, headers, raw = post(
         f"{base(proxy)}/model/chat/completions",
         headers={"Authorization": f"Bearer {grant.token}"},
-        body={"stream": True},
+        body={"model": "m", "stream": True},
     )
     assert status == 200
     assert headers["Content-Type"] == "text/event-stream"
@@ -335,12 +374,12 @@ def test_a_response_without_usage_is_counted_as_unmetered(
     proxy: EgressProxy, upstream: FakeUpstream
 ) -> None:
     upstream.usage = None
-    grant = proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY)
+    grant = proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY, model_id="m")
     for stream in (False, True):
         status, _headers, _raw = post(
             f"{base(proxy)}/model/chat/completions",
             headers={"Authorization": f"Bearer {grant.token}"},
-            body={"stream": stream},
+            body={"model": "m", "stream": stream},
         )
         assert status == 200
     usage = grant.usage()
@@ -365,7 +404,7 @@ def test_normalize_usage_ignores_malformed_counters() -> None:
 def test_the_quota_hook_refuses_requests_past_the_per_run_ceiling(upstream: FakeUpstream) -> None:
     by_requests = make_proxy(upstream, max_requests=1)
     try:
-        grant = by_requests.issue(run_id="run-1", tenant="a", model_key=MODEL_KEY)
+        grant = by_requests.issue(run_id="run-1", tenant="a", model_key=MODEL_KEY, model_id="m")
         url = f"{base(by_requests)}/model/chat/completions"
         auth = {"Authorization": f"Bearer {grant.token}"}
         assert post(url, headers=auth)[0] == 200
@@ -377,7 +416,7 @@ def test_the_quota_hook_refuses_requests_past_the_per_run_ceiling(upstream: Fake
 
     by_tokens = make_proxy(upstream, max_tokens=10)
     try:
-        grant = by_tokens.issue(run_id="run-2", tenant="a", model_key=MODEL_KEY)
+        grant = by_tokens.issue(run_id="run-2", tenant="a", model_key=MODEL_KEY, model_id="m")
         url = f"{base(by_tokens)}/model/chat/completions"
         auth = {"Authorization": f"Bearer {grant.token}"}
         # The crossing request completes (its usage is only known afterwards)…
@@ -588,3 +627,41 @@ def test_a_run_calls_the_model_and_search_through_the_proxy_end_to_end(
     for path in ((config.data_root / "runs" / record.run_id / "sessions")).rglob("*"):
         if path.is_file():
             assert MODEL_KEY not in path.read_text(encoding="utf-8", errors="replace")
+
+
+@pytest.mark.parametrize("raw", [
+    b'{"model":"other","model":"m"}', b'{"model":"m","model":"other"}',
+    b'{"model":"m","x":NaN}', b'[', b'[' * 2000,
+    '{"model":"m"}'.encode("utf-16"),
+])
+def test_ambiguous_json_is_refused_before_key_injection(proxy, upstream, raw):
+    grant = proxy.issue(run_id="r", tenant=None, model_key=MODEL_KEY, model_id="m")
+    status, _, _ = post(f"{base(proxy)}/model/chat/completions", raw_body=raw,
+                        headers={"Authorization": f"Bearer {grant.token}"})
+    assert status == 403
+    assert upstream.requests == [] and grant.usage()["requests"] == 0
+
+
+def test_rendered_grant_rejects_an_agent_selected_model_end_to_end(tmp_path, upstream):
+    log = tmp_path / "calls.jsonl"
+
+    def factory(argv, *, cwd=None, env=None, on_event=None):
+        return PiRpcClient([sys.executable, str(FAKE_PI), *argv[1:]], cwd=cwd, on_event=on_event,
+                           env={**(env or {}), "FAKE_PI_CALL_MODEL": "1",
+                                "FAKE_PI_MODEL_OVERRIDE": "not-the-host-model",
+                                "FAKE_PI_CALL_LOG": str(log)})
+
+    config = build_config(_values(tmp_path, OPENAI_BASE_URL=f"{upstream.origin}/v1"), REPO_ROOT)
+    manager = RunManager(config, EventBus(), RunStore(config.data_root / "runs"),
+                         client_factory=factory)
+    try:
+        record = manager.start("合成 agent 尝试切换模型")
+        final = manager.wait(record.run_id, timeout=20)
+        assert final is not None
+        [call] = [json.loads(line) for line in log.read_text().splitlines()]
+        assert call["status"] == 403
+        assert final.usage["requests"] == 0
+        assert upstream.requests == []
+        assert manager.egress.port is None
+    finally:
+        manager.shutdown()

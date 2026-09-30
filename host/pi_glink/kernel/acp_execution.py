@@ -100,7 +100,6 @@ from .acp_sandbox_park import (
 )
 from .conversation_lease import (
     LeaseCorruptError,
-    claim_lease,
     expire_lease_now,
     settle_lease_after_destroy,
 )
@@ -400,11 +399,9 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         if target is None:
             sandbox.open(self.launch, timeout_seconds=self.spec.timeout_seconds + 300)
             return False
-        # Claim before the reconnect (cc 终审 S1)：把租约到期推过一个重连窗，
-        # 对账 sweep 不会销毁一个正被本 run 接管的沙箱（另一层是对账跳过
-        # 持有资源的对话）。认领失败不阻断——竞态窗口维持原样。
-        if self.spec.conversation_dir is not None:
-            claim_lease(self.spec.conversation_dir)
+        # Authoritative admission holds this conversation through its running
+        # run record. Cleanup checks that ownership under the same guard used
+        # by admission; a reconnect TTL extension is neither needed nor safe.
         try:
             sandbox.open(
                 self.launch,
@@ -496,6 +493,7 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
             if (
                 self.spec.resume_session
                 and self.spec.archive is not None
+                and self.spec.archive_backfill
                 and not hot
             ):
                 # The follow-up's state half, over the archive channel: the

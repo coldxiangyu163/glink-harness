@@ -48,6 +48,7 @@ from .kernel.archive_channel import (
     ARCHIVE_READ_TIMEOUT_SECONDS,
     ArchiveChannel,
     ArchiveGrant,
+    read_state_manifest,
 )
 
 logger = logging.getLogger("pi_glink.egress")
@@ -56,6 +57,13 @@ logger = logging.getLogger("pi_glink.egress")
 #: ``<origin>/search``).
 MODEL_ROUTE = "model"
 SEARCH_ROUTE = "search"
+# pi 0.86.1 openai-completions and pi-web-access 0.31.0 keyed Exa calls.
+# Recheck these exact consumer paths when upgrading the pinned packages.
+_ALLOWED_PATHS = {
+    "/model/chat/completions": (MODEL_ROUTE, "chat/completions"),
+    "/search/search": (SEARCH_ROUTE, "search"),
+    "/search/answer": (SEARCH_ROUTE, "answer"),
+}
 #: The archive routes (``/archive/state``) served for the ACP sandbox face
 #: (docs/adr/0018). Same listener, separate capability (``pga_`` tokens).
 ARCHIVE_ROUTE = "archive"
@@ -85,6 +93,11 @@ _HOP_BY_HOP = {
     "authorization",
     "x-api-key",
     "cookie",
+    # An upstream must not reinterpret our authorized method/path via headers.
+    "x-http-method-override",
+    "x-method-override",
+    "x-original-url",
+    "x-rewrite-url",
 }
 _RESPONSE_DROP = _HOP_BY_HOP | {"set-cookie", "content-encoding"}
 
@@ -111,6 +124,7 @@ class EgressGrant:
     token: str = field(repr=False)
     run_id: str
     tenant: str | None
+    model_id: str
     model_key: str = field(repr=False, default="")
     search_key: str = field(repr=False, default="")
     quota: EgressQuota = field(default_factory=EgressQuota)
@@ -195,6 +209,7 @@ class EgressProxy:
         run_id: str,
         tenant: str | None,
         model_key: str,
+        model_id: str,
         search_key: str = "",
     ) -> EgressGrant:
         """Mint a run's token (binding the listener if it is not up yet)."""
@@ -203,6 +218,7 @@ class EgressProxy:
             run_id=run_id,
             tenant=tenant,
             model_key=model_key,
+            model_id=model_id,
             search_key=search_key,
             quota=self._quota_for(tenant),
         )
@@ -375,18 +391,8 @@ class _EgressHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _route(self) -> tuple[str, str] | None:
-        split = urllib.parse.urlsplit(self.path)
-        parts = split.path.split("/")
-        # "/model/chat/completions" -> ["", "model", "chat", "completions"]
-        if len(parts) < 3 or parts[0] != "" or parts[1] not in (MODEL_ROUTE, SEARCH_ROUTE):
-            return None
-        rest = parts[2:]
-        if any(segment in ("", ".", "..") for segment in rest) or "\\" in split.path:
-            return None
-        suffix = "/".join(rest)
-        if split.query:
-            suffix += "?" + split.query
-        return parts[1], suffix
+        # Exact wire path: no encoded aliases, suffixes, query or fragment.
+        return _ALLOWED_PATHS.get(self.path) if self.command == "POST" else None
 
     def _token(self) -> str:
         authorization = self.headers.get("Authorization", "")
@@ -424,6 +430,12 @@ class _EgressHandler(BaseHTTPRequestHandler):
             self._refuse(413, "request_too_large")
             return
         body = self.rfile.read(length) if length else b""
+        if name == MODEL_ROUTE:
+            types = self.headers.get_all("Content-Type") or []
+            if (len(types) != 1 or types[0].split(";", 1)[0].strip().lower() != "application/json"
+                    or not _matches_model(body, grant.model_id)):
+                self._refuse(403, "model_not_granted")
+                return
         with grant.lock:
             quota = grant.quota
             used = grant.requests + grant.search_requests
@@ -503,6 +515,9 @@ class _EgressHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if self.command == "GET":
+            if read_state_manifest(grant.conversation_dir) is None:
+                self._refuse(404, "state_unavailable")
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/x-tar")
             self.end_headers()
@@ -581,6 +596,28 @@ class _EgressHandler(BaseHTTPRequestHandler):
                         grant.output += usage.get("output", 0)
                         grant.cache_read += usage.get("cacheRead", 0)
                         grant.total_tokens += usage.get("totalTokens", 0)
+
+
+def _matches_model(body: bytes, model_id: str) -> bool:
+    """Reject ambiguous/non-UTF8 JSON before injecting the upstream key."""
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    def invalid_constant(value: str) -> None:
+        raise ValueError("non-JSON numeric constant")
+
+    try:
+        document = json.loads(body.decode("utf-8"), object_pairs_hook=pairs,
+                              parse_constant=invalid_constant)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return False
+    return (isinstance(document, dict) and isinstance(document.get("model"), str)
+            and document["model"] == model_id and bool(model_id))
 
 
 class _UsageMeter:

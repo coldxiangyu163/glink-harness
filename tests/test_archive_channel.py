@@ -292,7 +292,7 @@ def test_archive_routes_require_an_archive_token(proxy: EgressProxy, tmp_path: P
     conversation = tmp_path / "conversations" / "r1"
     grant = proxy.issue_archive(run_id="r1", conversation_dir=conversation)
     egress_grant = proxy.issue(
-        run_id="r1", tenant=None, model_key="mk", search_key="sk"
+        run_id="r1", tenant=None, model_key="mk", model_id="m", search_key="sk"
     )
     assert grant.token.startswith(ARCHIVE_TOKEN_PREFIX)
     url = f"http://127.0.0.1:{proxy.port}/archive/state"
@@ -302,7 +302,8 @@ def test_archive_routes_require_an_archive_token(proxy: EgressProxy, tmp_path: P
     assert exc.value.code == 401
     with pytest.raises(urllib.error.HTTPError) as exc:
         _Probe(proxy).request(
-            "GET", f"http://127.0.0.1:{proxy.port}/model/chat", token=grant.token
+            "POST", f"http://127.0.0.1:{proxy.port}/model/chat/completions", token=grant.token,
+            data=b'{"model":"m"}',
         )
     assert exc.value.code == 401
 
@@ -495,3 +496,14 @@ def test_member_count_ceiling_is_enforced(tmp_path: Path) -> None:
         publish_archive(
             tmp_path / "a.tar", conversation, source_run_id="r1", max_members=0
         )
+
+
+def test_missing_state_is_not_a_successful_empty_archive(proxy, tmp_path):
+    grant = proxy.issue_archive(run_id="r1", conversation_dir=tmp_path / "conversation")
+    out = io.BytesIO()
+    with pytest.raises(ArchiveError, match="状态"):
+        proxy.archive.serve(grant, out)
+    assert out.getvalue() == b""
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _Probe(proxy).request("GET", f"http://127.0.0.1:{proxy.port}/archive/state", token=grant.token)
+    assert exc.value.code == 404

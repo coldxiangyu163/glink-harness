@@ -39,14 +39,12 @@ from ..artifacts import ArtifactError, ArtifactMissing, ArtifactTree, deliverabl
 from ..config import ConfigError, HostConfig
 from ..contracts import FollowupUnavailable, Verdict
 from ..egress import MODEL_ROUTE, SEARCH_ROUTE, EgressProxy
-from ..kernel.acp_env import credential_destinations
-from ..kernel.archive_channel import ArchiveEndpoint
 from ..kernel.agent_env import RunCredentials
-from ..kernel.conversation_lease import LeaseCorruptError
-from ..kernel.harness_acp import AcpHarnessFamily
 from ..kernel.execution import CleanupReport, ExecutionAdapter, ExecutionSpec
 from ..kernel.harness import (
+    ArchiveEndpoint,
     EgressEndpoint,
+    StateTransfer,
     HarnessFamily,
     HarnessRuntime,
 )
@@ -231,38 +229,20 @@ class PrepareStage:
             if family.uses_egress
             else None
         )
-        # The archive channel (docs/adr/0018) exists only where the sandbox can
-        # reach the host's listener; a face without that reach degrades to the
-        # host-side inheritance copy, which is exactly the pre-channel ability.
-        archive = (
-            self.archive_endpoint(execution, sandbox, secrets)
-            if family.name == "acp" and sandbox.remote
-            else None
+        transfer = family.state_transfer(
+            execution.record, parent=parent, source=execution.continuation_source,
+            sandbox=sandbox,
         )
+        archive = (self.archive_endpoint(execution, sandbox, secrets, transfer)
+                   if transfer is not None else None)
         execution.archive_endpoint = archive
-        # 阶段 2（docs/adr/0020）：追问的热路径候选。判定在归档通道就绪之后、
-        # runtime 渲染之前——命中候选时族不再继承父状态（状态在泊车沙箱里），
-        # 若 start 阶段降级，冷路径用阶段 1 的通道回灌补上。无通道（无 public
-        # URL）不启用热路径：降级路径必须是完整的阶段 1 回灌，而不是一个已经
-        # 跳过了继承的 run。
-        resume_target = None
-        if (
-            isinstance(family, AcpHarnessFamily)
-            and archive is not None
-            and parent is not None
-            and execution.record.spec.executor == "e2b"
-        ):
-            try:
-                resume_target = family.sandbox_resume_target(parent)
-            except LeaseCorruptError as exc:
-                # 租约损坏不阻断追问（降级冷路径），但热缓存为何失效必须对
-                # 操作员可见：进事件流而不只是日志（cc 复审 SHOULD）。
-                self.s.channel.warn(
-                    execution,
-                    "对话沙箱租约不可读，追问降级冷路径",
-                    f"热路径候选被拒：{exc}",
-                    label="lease",
-                )
+        execution.archive_backfill = bool(archive is not None and transfer and transfer.backfill)
+        resume_target = transfer.resume_target if archive is not None and transfer else None
+        if transfer is not None and transfer.warning:
+            self.s.channel.warn(
+                execution, "对话沙箱租约不可读，追问降级冷路径",
+                f"热路径候选被拒：{transfer.warning}", label="lease",
+            )
         execution.sandbox_resume = resume_target
         prepared = family.prepare_runtime(
             run_id,
@@ -273,6 +253,7 @@ class PrepareStage:
             sandbox=sandbox,
             archive=archive,
             resume_target=resume_target,
+            continuation_source=execution.continuation_source,
         )
         execution.runtime = prepared.runtime
         secrets.bind_runtime(prepared.runtime)
@@ -297,6 +278,7 @@ class PrepareStage:
             run_id=execution.record.run_id,
             tenant=context.tenant_id if context is not None else None,
             model_key=credentials.model_api_key,
+            model_id=self.s.config.openai_model,
             search_key=credentials.web_search_key,
         )
         secrets.hold_grant(grant)
@@ -315,6 +297,7 @@ class PrepareStage:
         execution: RunExecution,
         sandbox: Sandbox,
         secrets: "RunSecretBoundary",
+        transfer: StateTransfer,
     ) -> ArchiveEndpoint | None:
         """Issue the run's archive grant and describe it as the sandbox sees it.
 
@@ -325,16 +308,12 @@ class PrepareStage:
         refused; the token never travels outside the grant/secrets objects.
         """
         egress = self.s.egress
-        family = self.s.family(execution)
-        assert isinstance(family, AcpHarnessFamily)  # the only family here
-        conversation_dir = self.s.store.conversation_dir(
-            family.conversation_root(execution.record)
-        )
+        conversation_dir = transfer.conversation_dir
         # The issue binds the shared listener; only then does a port exist.
         grant = egress.issue_archive(
             run_id=execution.record.run_id,
             conversation_dir=conversation_dir,
-            credential_dests=credential_destinations(self.s.config),
+            credential_dests=transfer.credential_dests,
         )
         port = egress.port
         try:
@@ -383,6 +362,7 @@ class PrepareStage:
             resume_session=family.resume_value(parent),
             expected_session_id=parent.session_id if parent else None,
             archive=execution.archive_endpoint,
+            archive_backfill=execution.archive_backfill,
             conversation_dir=execution.conversation_dir,
             # 阶段 2（docs/adr/0020）：热路径候选（泊车沙箱），由
             # ``prepare_runtime`` 前的候选判定写入；adapter 校验代数后重连。

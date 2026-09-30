@@ -316,8 +316,8 @@ def write_conversation_state(
     return conversation
 
 
-def test_e2b_state_home_prefers_the_conversation_root(tmp_path: Path) -> None:
-    """e2b 父 run 的状态根指向对话状态根；无对话根时回退旧 ``recovered``。"""
+def test_e2b_state_home_prefers_the_parents_own_recovered_state(tmp_path: Path) -> None:
+    """自己的完整 recovered 优先；没有自己的镜像时才取对话级发布。"""
     _config, store, family = make_family(tmp_path)
     parent = craft_parent(store, "parent000020", executor="e2b", state_root="recovered")
     legacy = store.run_dir(parent.run_id) / "acp-agent" / "recovered"
@@ -325,7 +325,11 @@ def test_e2b_state_home_prefers_the_conversation_root(tmp_path: Path) -> None:
     conversation = write_conversation_state(
         store, "parent000020", source_run_id="parent000020", files={"s/a": b"x"}
     )
+    assert family.state_home(parent) == legacy
+    assert family.check_continuation(parent) == legacy
+    legacy.rmdir()  # synthetic empty fixture: now there is no per-run mirror
     assert family.state_home(parent) == conversation / "state"
+    assert family.check_continuation(parent) == conversation / "state"
 
 
 def test_conversation_root_fails_closed_on_gaps_and_cycles(tmp_path: Path) -> None:
@@ -443,3 +447,22 @@ def test_backfill_followup_learns_historical_credential_secrets(tmp_path: Path) 
         archive=ArchiveEndpoint(origin="http://127.0.0.1:1", token="pga-unit"),
     )
     assert "sk-live-turn1-echo-000000000000" in prepared.secret_values
+
+
+@pytest.mark.parametrize("manifest_text", [
+    None, "{broken", '{"version":99,"files":{}}',
+    '{"version":1,"files":{},"sourceRunId":42}',
+])
+def test_corrupt_conversation_publication_is_not_hidden_by_recovered_state(tmp_path, manifest_text):
+    _, store, family = make_family(tmp_path)
+    parent = craft_parent(store, "parent-corrupt", executor="e2b", state_root="recovered")
+    conversation = write_conversation_state(store, parent.run_id,
+                                             source_run_id=parent.run_id, files={"s/a": b"x"})
+    manifest = conversation / "state" / "manifest.json"
+    if manifest_text is None:
+        manifest.unlink()
+    else:
+        manifest.write_text(manifest_text, encoding="utf-8")
+    with pytest.raises(FollowupUnavailable) as error:
+        family.check_continuation(parent)
+    assert error.value.code == "session_unavailable"

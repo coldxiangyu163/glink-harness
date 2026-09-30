@@ -40,8 +40,8 @@ AUTH_POST_PATHS = frozenset(
 def same_origin(url: str, expected: str) -> bool:
     """True when a browser-supplied Origin/Referer names this exact place.
 
-    ``expected`` is either the ``Host`` header (``host[:port]``) or the frozen
-    public origin (``scheme://host[:port]``). Parsed with :func:`urlsplit`;
+    ``expected`` comes from the listening loopback address/port or the frozen
+    public origin, never from the request's Host header. Parsed with :func:`urlsplit`;
     anything unparseable, a non-HTTP scheme or a mismatched netloc is refused.
     ``null`` origins (sandboxed iframes, file://) are refused as well.
     """
@@ -143,13 +143,12 @@ class RequestSecurityMixin:
         A non-browser client (the gateway, curl, a smoke script) sends none of
         these headers, and cannot be tricked by a website into carrying the
         gateway's identity header. Any header that is present must agree that
-        the request came from this origin — either the host the request was
-        addressed to, or the frozen ``PI_GLINK_PUBLIC_ORIGIN`` when a TLS
-        terminating proxy presents a different external origin. Client-supplied
-        ``X-Forwarded-*`` headers are never consulted.
+        the request came from the actual listening loopback port or the frozen
+        ``PI_GLINK_PUBLIC_ORIGIN`` for a reverse proxy. Request-supplied Host
+        and X-Forwarded-* are not trust roots (DNS rebinding can forge Host).
         """
-        host = self.headers.get("Host", "")
-        expected = [host] if host else []
+        port = self.server.server_address[1]
+        expected = [f"http://{host}:{port}" for host in ("127.0.0.1", "localhost", "[::1]")]
         public = self.server.config.public_origin
         if public:
             expected.append(public)
