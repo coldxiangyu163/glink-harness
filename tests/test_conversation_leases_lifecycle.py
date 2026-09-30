@@ -409,3 +409,88 @@ def test_the_park_cap_must_be_positive(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="PI_GLINK_MAX_PARKED_SANDBOXES"):
         make_config(tmp_path, PI_GLINK_MAX_PARKED_SANDBOXES="0")
+
+
+def test_concurrent_parks_cannot_both_take_the_last_slot(tmp_path: Path, monkeypatch) -> None:
+    """原义务：各对话在自己的锁里"读占用数→写租约"，两个并发泊车都读到 0，上限 1
+    下留下 2 份有效租约。新义务：计数与写租约是全宿主的一个预留临界段（纯本地，
+    不含云调用），上限在并发下仍成立。"""
+    import threading
+
+    from pi_glink.kernel import acp_sandbox_park
+
+    config = make_config(tmp_path, PI_GLINK_MAX_PARKED_SANDBOXES="1")
+    store = RunStore(config.data_root / "runs")
+    original = acp_sandbox_park._live_parked_elsewhere
+    entered = threading.Event()
+
+    def slow_count(directory):
+        count = original(directory)
+        entered.set()
+        time.sleep(0.3)  # widen the old read→write window
+        return count
+
+    monkeypatch.setattr(acp_sandbox_park, "_live_parked_elsewhere", slow_count)
+    outcomes: list = []
+
+    def park(name: str) -> None:
+        outcomes.append(park_sandbox(
+            _parkable_handle([]), config=config, conversation_dir=store.conversation_dir(name),
+            conversation_run=name, sandbox_id=f"sbx-{name}", template="glink-acp-worker",
+            pack="dsh", run_id=name, credential_dests=(),
+        ))
+
+    threads = [threading.Thread(target=park, args=(name,)) for name in ("A", "B")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    live = [read_lease(store.conversation_dir(name)) for name in ("A", "B")]
+    assert sum(outcome.ok for outcome in outcomes) == 1
+    assert sum(lease is not None and not lease.is_expired() for lease in live) == 1
+
+
+def test_a_refused_park_does_not_leave_a_phantom_slot(tmp_path: Path) -> None:
+    """原义务：超限拒绝时只销毁本沙箱，本对话的旧租约仍未到期，继续被计入上限
+    （它指向的沙箱已被本轮替换销毁）。新义务：拒绝后本对话的记录已结清——全部确认
+    销毁即删除；有未确认身份则以**已过期**记录保留给对账，不再占名额。"""
+    config = make_config(tmp_path, PI_GLINK_MAX_PARKED_SANDBOXES="1")
+    store = RunStore(config.data_root / "runs")
+    write_lease(store.conversation_dir("other"), a_lease(sandbox_id="sbx-other"))
+    write_lease(store.conversation_dir("conv-1"), a_lease(sandbox_id="sbx-prev"))
+    killed: list[str] = []
+    outcome = park_sandbox(
+        _parkable_handle([]), config=config, conversation_dir=store.conversation_dir("conv-1"),
+        conversation_run="conv-1", sandbox_id="sbx-new", template="glink-acp-worker",
+        pack="dsh", run_id="conv-2", credential_dests=(),
+        kill_by_id=lambda sandbox_id: (killed.append(sandbox_id) or (True, "gone")),
+    )
+    assert not outcome.ok and outcome.destroyed
+    assert killed == ["sbx-prev"]
+    assert read_lease(store.conversation_dir("conv-1")) is None
+
+
+def test_a_refused_park_keeps_unconfirmed_identities_expired(tmp_path: Path) -> None:
+    config = make_config(tmp_path, PI_GLINK_MAX_PARKED_SANDBOXES="1")
+    store = RunStore(config.data_root / "runs")
+    write_lease(store.conversation_dir("other"), a_lease(sandbox_id="sbx-other"))
+    write_lease(store.conversation_dir("conv-1"), a_lease(sandbox_id="sbx-prev"))
+
+    def fail(**_kwargs: Any) -> None:
+        raise OSError("control plane unavailable")
+
+    handle = SimpleNamespace(
+        files=SimpleNamespace(write=lambda *_args: None),
+        commands=SimpleNamespace(run=lambda *_args, **_kwargs: None),
+        pause=lambda **_kwargs: None, kill=fail,
+    )
+    outcome = park_sandbox(
+        handle, config=config, conversation_dir=store.conversation_dir("conv-1"),
+        conversation_run="conv-1", sandbox_id="sbx-new", template="glink-acp-worker",
+        pack="dsh", run_id="conv-2", credential_dests=(),
+        kill_by_id=lambda _sandbox_id: (False, "stuck"),
+    )
+    assert not outcome.ok and not outcome.destroyed
+    lease = read_lease(store.conversation_dir("conv-1"))
+    assert lease is not None and lease.is_expired()
+    assert {lease.sandbox_id, *lease.retired_sandbox_ids} == {"sbx-new", "sbx-prev"}

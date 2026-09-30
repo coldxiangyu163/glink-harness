@@ -318,6 +318,7 @@ class SandboxCommandProcess:
                     self._offer(self._stdout, str(stdout).encode("utf-8"))
                 if stderr:
                     self._offer(self._stderr, str(stderr).encode("utf-8"))
+                self._drop_sdk_capture()
         except Exception as exc:  # noqa: BLE001 - reported through the exit code
             self._stream_error = f"{type(exc).__name__}: {exc}"
         finally:
@@ -325,6 +326,23 @@ class SandboxCommandProcess:
             self._end(self._stdout)
             self._end(self._stderr)
             self._exited.set()
+
+    def _drop_sdk_capture(self) -> None:
+        """Keep the SDK handle from retaining the whole stream.
+
+        ``e2b`` 2.x ``CommandHandle`` appends every decoded chunk to
+        ``_stdout_chunks``/``_stderr_chunks`` and joins them into the final
+        ``CommandResult`` — the entire agent output would stay in host memory
+        however bounded the hand-off queue is. The host reads only the exit
+        code from that result (the chunks already travelled through the queue),
+        so the capture is cleared after each event. The attributes are SDK
+        internals: only an existing ``list`` is touched, anything else is left
+        as is (a later SDK that stops capturing needs nothing from us).
+        """
+        for name in ("_stdout_chunks", "_stderr_chunks"):
+            captured = getattr(self._handle, name, None)
+            if isinstance(captured, list) and captured:
+                captured.clear()
 
     def _offer(self, chunks: "queue.Queue[bytes | None]", data: bytes) -> None:
         """Block while the reader is behind; drop once the command is being torn down.

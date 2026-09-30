@@ -27,8 +27,9 @@ from pi_glink.contracts import conversation_guard
 
 import json
 import logging
+import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,7 @@ from .conversation_lease import (
     LeaseCorruptError,
     peek_lease,
     read_lease,
+    remove_lease,
     write_lease,
 )
 from .e2b_env import SANDBOX_HOME, SandboxError, is_file_not_found, kill_within_budget
@@ -185,13 +187,6 @@ def park_sandbox(
             # 配置禁用热路径：直接销毁（阶段 2 之前的行为）。
             return _destroy_outcome(handle, "租约 TTL 为 0，热路径已禁用")
         cap = int(config.max_parked_sandboxes)
-        live = _live_parked_elsewhere(conversation_dir)
-        if live >= cap:
-            # TTL 只限保留时长；数量上限防止云端堆积暂停沙箱。超限不泊车，
-            # 按冷路径销毁（宿主权威状态不受影响，下一轮走回灌）。
-            return _destroy_outcome(
-                handle, f"暂停沙箱已达上限 {cap}（其它对话仍有 {live} 个），本轮不泊车"
-            )
         current = None
         try:
             current = read_lease(conversation_dir)
@@ -232,10 +227,29 @@ def park_sandbox(
             expires_at=(now if now is not None else time.time()) + ttl,
             retired_sandbox_ids=tuple(retired),
         )
-        try:
-            write_lease(conversation_dir, lease)
-        except Exception as exc:  # noqa: BLE001 - destroy, the failure is a fact
-            return _destroy_outcome(handle, f"租约写入失败: {type(exc).__name__}: {exc}")
+        # Count and claim the slot in one host-wide critical section: every
+        # conversation holds its own guard, so a per-conversation read→write
+        # would let two parks both see the last free slot. Only local file
+        # reads/writes happen inside (no cloud call), and no conversation guard
+        # is waited on while holding it (the count uses ``peek_lease``).
+        write_failure: str | None = None
+        with _PARK_SLOTS:
+            live = _live_parked_elsewhere(conversation_dir)
+            over_cap = live >= cap
+            if not over_cap:
+                try:
+                    write_lease(conversation_dir, lease)
+                except Exception as exc:  # noqa: BLE001 - destroy below, outside the lock
+                    write_failure = f"租约写入失败: {type(exc).__name__}: {exc}"
+        if write_failure is not None:
+            return _destroy_outcome(handle, write_failure)
+        if over_cap:
+            # TTL 只限保留时长；数量上限防止云端堆积暂停沙箱。超限不泊车，
+            # 按冷路径销毁（宿主权威状态不受影响，下一轮走回灌）。
+            return _refuse_over_cap(
+                handle, conversation_dir, lease,
+                f"暂停沙箱已达上限 {cap}（其它对话仍有 {live} 个），本轮不泊车",
+            )
         try:
             # Nothing run-scoped may survive into the parked sandbox (cc 终审
             # S2): the archive token and every transfer scratch file are removed
@@ -257,6 +271,49 @@ def park_sandbox(
                 settle_lease_after_destroy(conversation_dir)
             return outcome
         return ParkOutcome(ok=True, lease=lease)
+
+
+#: Host-wide park-slot reservation (see :func:`park_sandbox`). One process owns
+#: the data root, so an in-process lock is the whole reservation.
+_PARK_SLOTS = threading.Lock()
+
+
+def _refuse_over_cap(
+    handle: Any,
+    conversation_dir: Path,
+    lease: ConversationLease,
+    reason: str,
+) -> ParkOutcome:
+    """Destroy this sandbox and settle the conversation's own lease record.
+
+    ``lease`` is the record this park would have written: it already carries
+    the previous lease's unconfirmed identities (``retired_sandbox_ids``; the
+    previous sandbox itself was handled above). Leaving the *previous* record
+    unexpired would keep counting against the cap for a sandbox that is gone
+    (a phantom slot), so the record is settled here: removed when nothing is
+    unconfirmed, otherwise written **expired** with every unconfirmed identity
+    (plus this sandbox if its own destroy fails) for the sweep to retry —
+    never a resume target, never a counted slot.
+    """
+    outcome = _destroy_outcome(handle, reason)
+    pending = [*lease.retired_sandbox_ids]
+    if not outcome.destroyed:
+        pending.insert(0, lease.sandbox_id)
+    try:
+        if not pending:
+            remove_lease(conversation_dir)
+        else:
+            now = time.time()
+            write_lease(conversation_dir, replace(
+                lease,
+                sandbox_id=pending[0],
+                retired_sandbox_ids=tuple(pending[1:]),
+                paused_at=now,
+                expires_at=now,
+            ))
+    except Exception:  # noqa: BLE001 - the identities are logged, the outcome stands
+        logger.warning("超限拒绝泊车后未能记录待清理沙箱 %s", pending, exc_info=True)
+    return outcome
 
 
 def _live_parked_elsewhere(conversation_dir: Path) -> int:

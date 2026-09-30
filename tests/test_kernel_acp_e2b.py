@@ -27,6 +27,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -1447,3 +1448,43 @@ def test_the_sandbox_pump_applies_backpressure_instead_of_buffering_everything(
     process.kill()
     assert process.wait(timeout=10) == 0
     assert process.poll() == 0
+
+
+def test_the_real_sdk_handle_does_not_retain_the_whole_stream(tmp_path: Path) -> None:
+    """原义务：有界队列只限制 SDK→读取线程的缓冲；真实 e2b ``CommandHandle`` 自身把
+    每块 stdout/stderr 追加进 ``_stdout_chunks``/``_stderr_chunks``，结束时再拼出一份
+    同体量的 ``CommandResult.stdout``——agent 输出总量仍全部驻留宿主内存。
+    新义务：宿主只读退出码；泵转交每块后清空 SDK 累计缓存，结果不携带整段输出。
+    （只替换线上事件输入，``CommandHandle`` 是已安装 SDK 的真实实现。）"""
+    pb = pytest.importorskip("e2b.envd.process.process_pb")
+    from e2b.sandbox_sync.commands.command_handle import CommandHandle
+    from protobuf import Oneof
+
+    record = (json.dumps({"type": "probe", "text": "x" * 4000}) + "\n").encode()
+    count = 600
+
+    def events():
+        for index in range(count):
+            field = "stdout" if index % 3 else "stderr"
+            yield pb.StartResponse(event=pb.ProcessEvent(event=Oneof(
+                field="data", value=pb.ProcessEvent.DataEvent(output=Oneof(field=field, value=record)))))
+        yield pb.StartResponse(event=pb.ProcessEvent(event=Oneof(
+            field="end", value=pb.ProcessEvent.EndEvent(exit_code=0, exited=True))))
+
+    handle = CommandHandle(pid=1, handle_kill=lambda: True, events=events())
+    process = SandboxCommandProcess(handle)
+    stderr_lines: list[bytes] = []
+    reader = threading.Thread(target=lambda: stderr_lines.extend(process.stderr), daemon=True)
+    reader.start()
+    consumed = 0
+    while True:
+        data = process.stdout.read(65536)
+        if not data:
+            break
+        consumed += len(data)
+    assert process.wait(timeout=10) == 0
+    reader.join(10)
+    assert consumed == len(record) * (count - count // 3), "the host still receives every chunk"
+    assert len(stderr_lines) == count // 3
+    retained = sum(len(chunk) for chunk in (*handle._stdout_chunks, *handle._stderr_chunks))
+    assert retained < len(record) * 4, f"SDK retained {retained} bytes of output"
