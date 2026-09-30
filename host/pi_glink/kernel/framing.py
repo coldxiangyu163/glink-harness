@@ -17,6 +17,29 @@ from __future__ import annotations
 from typing import Iterator
 
 
+#: Ceiling on one not-yet-terminated record. A legitimate frame (one agent
+#: message with its cumulative snapshot) is orders of magnitude smaller; a
+#: stream that keeps sending bytes without an LF is a broken or hostile agent,
+#: and holding it unboundedly would exhaust the shared host's memory.
+MAX_RECORD_BYTES = 64 * 1024 * 1024
+
+
+class RecordTooLarge(ValueError):
+    """An incomplete record grew past :data:`MAX_RECORD_BYTES`."""
+
+
+def check_pending_record(remainder: bytes, *, limit: int | None = None) -> None:
+    """Raise :class:`RecordTooLarge` when an unterminated tail exceeds ``limit``.
+
+    ``None`` reads :data:`MAX_RECORD_BYTES` at call time (tests shrink it).
+    """
+    limit = MAX_RECORD_BYTES if limit is None else limit
+    if len(remainder) > limit:
+        raise RecordTooLarge(
+            f"协议帧超过 {limit} 字节仍未结束（缺少 LF）；已中止读取"
+        )
+
+
 def split_lf_records(buffer: bytes) -> tuple[list[bytes], bytes]:
     """Split complete LF-terminated records out of a byte buffer.
 

@@ -507,3 +507,48 @@ def test_missing_state_is_not_a_successful_empty_archive(proxy, tmp_path):
     with pytest.raises(urllib.error.HTTPError) as exc:
         _Probe(proxy).request("GET", f"http://127.0.0.1:{proxy.port}/archive/state", token=grant.token)
     assert exc.value.code == 404
+
+
+def test_incremental_publishes_cannot_grow_state_past_the_total_budget(tmp_path: Path) -> None:
+    """The reconstructed tree, not each transfer, is held to the state budget.
+
+    原义务：只约束单次归档体（``ARCHIVE_MAX_BYTES``）与成员数；连续小增量可以把
+    发布状态重建到超过继承/逐文件回收路径的总量与单文件上限。
+    新义务：manifest 描述的完整状态（文件数、单文件、总量）在重建前按同一预算
+    校验，超限整次拒绝且旧发布状态保持不变。
+    """
+    conversation = tmp_path / "conversations" / "r1"
+    first = b"a" * 60
+    write_archive(tmp_path / "1.tar", full={"s/log": first})
+    publish_archive(tmp_path / "1.tar", conversation, source_run_id="r1",
+                    max_total_bytes=100, max_file_bytes=100)
+    grown = first + b"b" * 60  # the transfer carries 60 bytes, the state is 120
+    write_archive(tmp_path / "2.tar", tails={"s/log": (len(first), grown)})
+    with pytest.raises(ArchiveError, match="单文件上限|总量上限"):
+        publish_archive(tmp_path / "2.tar", conversation, source_run_id="r2",
+                        max_total_bytes=100, max_file_bytes=100)
+    assert (conversation / "state" / "s" / "log").read_bytes() == first
+
+
+def test_state_total_budget_counts_every_listed_file(tmp_path: Path) -> None:
+    conversation = tmp_path / "conversations" / "r1"
+    write_archive(tmp_path / "a.tar", full={"s/a": b"x" * 40, "s/b": b"y" * 40})
+    with pytest.raises(ArchiveError, match="总量上限"):
+        publish_archive(tmp_path / "a.tar", conversation, source_run_id="r1",
+                        max_total_bytes=64, max_file_bytes=64)
+    assert not (conversation / "state").exists()
+
+
+def test_state_file_count_budget_is_enforced(tmp_path: Path) -> None:
+    conversation = tmp_path / "conversations" / "r1"
+    write_archive(tmp_path / "a.tar", full={"s/a": b"x", "s/b": b"y"})
+    with pytest.raises(ArchiveError, match="文件数"):
+        publish_archive(tmp_path / "a.tar", conversation, source_run_id="r1", max_state_files=1)
+
+
+def test_the_default_state_budget_matches_the_inheritance_bounds() -> None:
+    from pi_glink.kernel import acp_env, archive_channel
+
+    assert archive_channel.STATE_MAX_FILES == acp_env.INHERIT_MAX_FILES
+    assert archive_channel.STATE_MAX_FILE_BYTES == acp_env.INHERIT_MAX_FILE_BYTES
+    assert archive_channel.STATE_MAX_TOTAL_BYTES == acp_env.INHERIT_MAX_TOTAL_BYTES

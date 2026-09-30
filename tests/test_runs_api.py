@@ -1016,3 +1016,30 @@ def test_transfer_encoding_is_rejected_before_every_post_route(server, path):
         assert _run_dirs(server) == before
     finally:
         connection.close()
+
+
+def test_a_stalled_request_releases_its_connection(server, monkeypatch):
+    """原义务：普通请求与 body 读取无期限，慢连接可永久占住一个处理线程。
+    新义务：每次 socket 读写有期限（``REQUEST_SOCKET_TIMEOUT_SECONDS``），超时即关闭连接。"""
+    import socket
+
+    from pi_glink import app
+
+    # The shipped handler carries a finite deadline (the stdlib default is None).
+    assert isinstance(app.HostRequestHandler.timeout, (int, float))
+    assert 0 < app.HostRequestHandler.timeout <= 120
+    monkeypatch.setattr(app.HostRequestHandler, "timeout", 0.5)
+    sock = socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=10)
+    try:
+        # Headers promise a body that never arrives.
+        sock.sendall(b"POST /api/runs HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                     b"Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{")
+        started = time.monotonic()
+        data = sock.recv(4096)
+        while data:
+            data = sock.recv(4096)
+        assert time.monotonic() - started < 5, "the host must drop the stalled request"
+    finally:
+        sock.close()
+    status, _, _ = request(server, "/api/health")
+    assert status == 200

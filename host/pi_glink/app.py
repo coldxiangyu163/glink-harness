@@ -50,6 +50,9 @@ from .cli import (  # noqa: E402 - re-export after the composition imports
 
 logger = logging.getLogger("pi_glink.host")
 
+#: See :attr:`HostRequestHandler.timeout`.
+REQUEST_SOCKET_TIMEOUT_SECONDS = 60.0
+
 
 class PiGlinkServer(ThreadingHTTPServer):
     """Threaded HTTP server carrying the frozen config, bus, store and manager.
@@ -130,6 +133,11 @@ class HostRequestHandler(
 
     protocol_version = "HTTP/1.1"
     server_version = "pi-glink"
+    #: Per-socket-operation deadline (``StreamRequestHandler.setup`` applies it):
+    #: an idle keep-alive connection, a slow request line/headers/body, or a
+    #: client that stopped reading an SSE stream releases its thread instead of
+    #: holding it forever. An idle SSE stream writes nothing, so it is not cut.
+    timeout = REQUEST_SOCKET_TIMEOUT_SECONDS
 
     server: PiGlinkServer
 

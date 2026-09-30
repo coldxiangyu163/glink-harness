@@ -262,6 +262,13 @@ class PiSandboxTransfer:
             return _mirror_subagent_data(self.handle, tree, destination)
 
 
+#: Chunks buffered between the SDK stream and each host reader (backpressure
+#: bound; with ~64 KiB SDK events this caps the hand-off at a few tens of MiB).
+_PUMP_QUEUE_CHUNKS = 256
+#: How often a blocked pump re-checks for teardown.
+_PUMP_PUT_POLL_SECONDS = 0.5
+
+
 class SandboxCommandProcess:
     """A ``subprocess.Popen``-shaped facade over one sandbox background command.
 
@@ -282,8 +289,13 @@ class SandboxCommandProcess:
 
     def __init__(self, handle: Any, *, sandbox_id: str = "") -> None:
         self._handle = handle
-        self._stdout: queue.Queue[bytes | None] = queue.Queue()
-        self._stderr: queue.Queue[bytes | None] = queue.Queue()
+        # Bounded hand-off (backpressure): the SDK iterator blocks while the
+        # host's readers are behind, instead of buffering an agent's output in
+        # host memory without limit. Chunk counts, not bytes: one SDK event is
+        # already a bounded message.
+        self._stdout: queue.Queue[bytes | None] = queue.Queue(maxsize=_PUMP_QUEUE_CHUNKS)
+        self._stderr: queue.Queue[bytes | None] = queue.Queue(maxsize=_PUMP_QUEUE_CHUNKS)
+        self._draining = threading.Event()
         self._exited = threading.Event()
         self._exit_code: int | None = None
         self._stream_error: str | None = None
@@ -303,16 +315,43 @@ class SandboxCommandProcess:
         try:
             for stdout, stderr, _pty in self._handle:
                 if stdout:
-                    self._stdout.put(str(stdout).encode("utf-8"))
+                    self._offer(self._stdout, str(stdout).encode("utf-8"))
                 if stderr:
-                    self._stderr.put(str(stderr).encode("utf-8"))
+                    self._offer(self._stderr, str(stderr).encode("utf-8"))
         except Exception as exc:  # noqa: BLE001 - reported through the exit code
             self._stream_error = f"{type(exc).__name__}: {exc}"
         finally:
             self._exit_code = self._resolve_exit_code()
-            self._stdout.put(None)
-            self._stderr.put(None)
+            self._end(self._stdout)
+            self._end(self._stderr)
             self._exited.set()
+
+    def _offer(self, chunks: "queue.Queue[bytes | None]", data: bytes) -> None:
+        """Block while the reader is behind; drop once the command is being torn down.
+
+        After :meth:`kill` nobody may read again, so a full queue must not hold
+        the pump (and with it the exit code) forever.
+        """
+        while not self._draining.is_set():
+            try:
+                chunks.put(data, timeout=_PUMP_PUT_POLL_SECONDS)
+                return
+            except queue.Full:
+                continue
+
+    def _end(self, chunks: "queue.Queue[bytes | None]") -> None:
+        """Deliver EOF; when the queue is full and nobody drains it, make room."""
+        while True:
+            try:
+                chunks.put(None, timeout=_PUMP_PUT_POLL_SECONDS)
+                return
+            except queue.Full:
+                if not self._draining.is_set():
+                    continue
+                try:
+                    chunks.get_nowait()  # torn down: output is discarded anyway
+                except queue.Empty:
+                    pass
 
     def _resolve_exit_code(self) -> int | None:
         """The command's own exit code, or ``None`` when the stream was lost.
@@ -378,6 +417,7 @@ class SandboxCommandProcess:
         hanging. The sandbox teardown (``E2BSandbox.close``) is the release
         authority and applies the same bound.
         """
+        self._draining.set()
         try:
             kill_within_budget(self._handle.kill, what="沙箱命令")
         except Exception as exc:  # noqa: BLE001 - the sandbox is torn down anyway

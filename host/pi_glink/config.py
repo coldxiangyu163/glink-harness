@@ -34,6 +34,9 @@ from .harnesses import (
 #: 的常量对齐断言钉住。
 _DEFAULT_LEASE_TTL_SECONDS = 2 * 60 * 60
 _MAX_LEASE_TTL_SECONDS = 24 * 60 * 60
+#: Host-wide ceiling on live parked sandboxes (docs/adr/0020): the TTL bounds
+#: how long each one stays, this bounds how many exist at once.
+_DEFAULT_MAX_PARKED_SANDBOXES = 32
 
 #: Re-exported from :mod:`pi_glink.harnesses`（清单解析器拥有这套词表）：ACP 权限白名单
 #: 只能命名这些取值，避免拼写错误静默失效。见 ``HarnessCapabilities.permission_allow``。
@@ -255,6 +258,7 @@ class HostConfig:
     #: :data:`~pi_glink.kernel.conversation_lease.MAX_LEASE_TTL_SECONDS`
     #: （24h）在启动校验里拒绝越界值。
     conversation_lease_ttl_seconds: int = _DEFAULT_LEASE_TTL_SECONDS
+    max_parked_sandboxes: int = _DEFAULT_MAX_PARKED_SANDBOXES
     #: Interval of the online resource ledger sweep (seconds). The sweep asks
     #: the execution face whether the resources of an unconfirmed hold still
     #: exist, addressing only the identity persisted with the run. ``0`` disables
@@ -352,6 +356,12 @@ def load_config(
         merged.update(
             {key: value for key, value in os.environ.items() if _looks_configured(key)}
         )
+        # Keys an operator explicitly declared as ACP credentials follow the
+        # same "process environment over .env" precedence (rotation must not
+        # silently keep the file's old value); undeclared variables stay out.
+        for name in _declared_acp_credential_keys(merged):
+            if name in os.environ:
+                merged[name] = os.environ[name]
     else:
         merged.update(env)
     return build_config(merged, root)
@@ -573,6 +583,9 @@ def build_config(values: Mapping[str, str], repo_root: Path) -> HostConfig:
             "PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS",
             _DEFAULT_LEASE_TTL_SECONDS,
         ),
+        max_parked_sandboxes=_positive_integer(
+            values, "PI_GLINK_MAX_PARKED_SANDBOXES", _DEFAULT_MAX_PARKED_SANDBOXES
+        ),
         resource_reconcile_seconds=_non_negative_integer(
             values, "PI_GLINK_RESOURCE_RECONCILE_SECONDS", 60
         ),
@@ -755,6 +768,19 @@ def _acp_credential_files(values: Mapping[str, str]) -> tuple[tuple[str, str], .
         seen.add(dest)
         entries.append((source, dest))
     return tuple(entries)
+
+
+def _declared_acp_credential_keys(values: Mapping[str, str]) -> tuple[str, ...]:
+    """The syntactically valid key names ``PI_GLINK_ACP_CREDENTIAL_ENV`` declares.
+
+    Only selects which process variables ``load_config`` inherits; malformed
+    names are left for :func:`_acp_credential_env` to refuse at startup.
+    """
+    raw = _text(values, "PI_GLINK_ACP_CREDENTIAL_ENV", "")
+    return tuple(
+        name for name in (chunk.strip() for chunk in raw.split(","))
+        if _ENV_KEY_RE.fullmatch(name)
+    )
 
 
 def _acp_credential_env(values: Mapping[str, str]) -> tuple[tuple[str, str], ...]:

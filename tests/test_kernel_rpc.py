@@ -377,3 +377,51 @@ def test_a_short_authoritative_message_carries_no_truncated_flag() -> None:
     ((_kind, payload),) = produced
     assert payload["text"] == "简短回答"
     assert "truncated" not in payload
+
+
+# -- framing bound ------------------------------------------------------------
+
+_FLOOD = (
+    "import sys, time\n"
+    "sys.stdout.buffer.write(b'{\"type\":\"response\",\"id\":\"a\",\"command\":\"x\",\"success\":true}\\n')\n"
+    "sys.stdout.buffer.flush()\n"
+    "chunk = b'x' * 65536\n"
+    "while True:\n"
+    "    sys.stdout.buffer.write(chunk); sys.stdout.buffer.flush()\n"
+)
+
+
+@pytest.mark.parametrize("client_kind", ["pi", "acp"])
+def test_an_unterminated_flood_is_bounded_and_kills_the_agent(
+    client_kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stream that never sends LF must not grow host memory without bound.
+
+    原义务：读取循环对未结束的尾巴无上限（``buffer += chunk``）。
+    新义务：未结束记录超过 ``MAX_RECORD_BYTES`` 即中止读取、杀掉进程并记录
+    ``protocol_error``；完整的合法帧照常处理。
+    """
+    from pi_glink.kernel import acp_rpc, framing, rpc
+
+    monkeypatch.setattr(framing, "MAX_RECORD_BYTES", 256 * 1024)
+    frames: list = []
+    argv = [sys.executable, "-c", _FLOOD]
+    if client_kind == "pi":
+        client: Any = rpc.PiRpcClient(argv, on_event=frames.append)
+    else:
+        client = acp_rpc.AcpRpcClient(argv)
+    client.start()
+    try:
+        assert _wait_for(lambda: client.protocol_error is not None, timeout=10)
+        assert "LF" in client.protocol_error
+        assert _wait_for(lambda: not client.running, timeout=10)
+    finally:
+        client.close(timeout=2)
+
+
+def test_complete_records_never_trip_the_bound() -> None:
+    from pi_glink.kernel.framing import check_pending_record, split_lf_records
+
+    records, tail = split_lf_records(b"a" * 100 + b"\n" + b"b" * 10)
+    check_pending_record(tail, limit=10)  # the complete 100-byte record left the tail
+    assert records == [b"a" * 100]

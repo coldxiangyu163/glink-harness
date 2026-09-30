@@ -445,6 +445,9 @@ class PiExecutionAdapter(ExecutionAdapter):
                         else ""
                     )
                 )
+                protocol_error = getattr(client, "protocol_error", None)
+                if protocol_error:
+                    outcome.error += f"；宿主因协议违规终止了进程：{protocol_error}"
                 break
         if self.sandbox.remote:
             if outcome.cancelled or outcome.timed_out:

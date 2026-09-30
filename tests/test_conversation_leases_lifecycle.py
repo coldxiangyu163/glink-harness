@@ -17,11 +17,15 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 
 from pi_glink.config import build_config
 from pi_glink.events import EventBus
+from pi_glink.kernel.acp_sandbox_park import park_sandbox
 from pi_glink.kernel.conversation_lease import (
     ConversationLease,
     read_lease,
@@ -351,3 +355,57 @@ def test_holding_roots_survive_broken_records(tmp_path: Path) -> None:
         )
         conn.commit()
     assert store.holding_conversation_roots() == {"conv-2"}
+
+
+def _parkable_handle(calls: list[str]) -> SimpleNamespace:
+    return SimpleNamespace(
+        files=SimpleNamespace(write=lambda *_args: None),
+        commands=SimpleNamespace(run=lambda *_args, **_kwargs: None),
+        pause=lambda **_kwargs: calls.append("pause"),
+        kill=lambda: calls.append("kill"),
+    )
+
+
+def test_parked_sandboxes_are_capped_host_wide(tmp_path: Path) -> None:
+    """原义务：TTL 只限制每个暂停沙箱保留多久，不限制累计数量——大量短对话可以
+    在云端堆积任意多个暂停沙箱。
+    新义务：仍有效的租约数达到 ``PI_GLINK_MAX_PARKED_SANDBOXES`` 时不再泊车，
+    本沙箱按冷路径销毁（宿主权威状态不受影响，下一轮走回灌）。"""
+    config = make_config(tmp_path, PI_GLINK_MAX_PARKED_SANDBOXES="1")
+    store = RunStore(config.data_root / "runs")
+    write_lease(store.conversation_dir("other"), a_lease(sandbox_id="sbx-other"))
+    calls: list[str] = []
+    outcome = park_sandbox(
+        _parkable_handle(calls), config=config, conversation_dir=store.conversation_dir("conv-1"),
+        conversation_run="conv-1", sandbox_id="sbx-new", template="glink-acp-worker",
+        pack="dsh", run_id="conv-1", credential_dests=(),
+    )
+    assert not outcome.ok and outcome.destroyed
+    assert "上限" in (outcome.reason or "")
+    assert calls == ["kill"]
+    assert read_lease(store.conversation_dir("conv-1")) is None
+
+
+def test_the_park_cap_ignores_expired_leases_and_this_conversation(tmp_path: Path) -> None:
+    config = make_config(tmp_path, PI_GLINK_MAX_PARKED_SANDBOXES="1")
+    store = RunStore(config.data_root / "runs")
+    # An expired lease is already the sweep's to destroy; it holds no hot slot.
+    write_lease(store.conversation_dir("stale"), a_lease(sandbox_id="sbx-stale", paused_ago=7200, ttl=60))
+    # Re-parking the same conversation replaces its own lease: not an extra slot.
+    write_lease(store.conversation_dir("conv-1"), a_lease(sandbox_id="sbx-prev"))
+    calls: list[str] = []
+    outcome = park_sandbox(
+        _parkable_handle(calls), config=config, conversation_dir=store.conversation_dir("conv-1"),
+        conversation_run="conv-1", sandbox_id="sbx-new", template="glink-acp-worker",
+        pack="dsh", run_id="conv-2", credential_dests=(),
+        kill_by_id=lambda _sandbox_id: (True, "gone"),
+    )
+    assert outcome.ok, outcome.reason
+    assert calls == ["pause"]
+
+
+def test_the_park_cap_must_be_positive(tmp_path: Path) -> None:
+    from pi_glink.config import ConfigError
+
+    with pytest.raises(ConfigError, match="PI_GLINK_MAX_PARKED_SANDBOXES"):
+        make_config(tmp_path, PI_GLINK_MAX_PARKED_SANDBOXES="0")

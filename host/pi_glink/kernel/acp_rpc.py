@@ -31,7 +31,12 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from .framing import split_lf_records, strip_trailing_cr_bytes
+from .framing import (
+    RecordTooLarge,
+    check_pending_record,
+    split_lf_records,
+    strip_trailing_cr_bytes,
+)
 
 logger = logging.getLogger("pi_glink.kernel.acp_rpc")
 
@@ -180,6 +185,8 @@ class AcpRpcClient:
         self._id_counter = 0
         self.notification_count = 0
         self.invalid_frame_count = 0
+        #: Set when the stream violated the framing bound; the process is killed.
+        self.protocol_error: str | None = None
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -383,10 +390,31 @@ class AcpRpcClient:
             records, buffer = split_lf_records(buffer)
             for raw in records:
                 self._handle_line(raw)
+            try:
+                # Only the unterminated tail is held: complete records already
+                # left the buffer above, so a legitimate stream stays far below.
+                check_pending_record(buffer)
+            except RecordTooLarge as exc:
+                self.protocol_error = str(exc)
+                logger.error("ACP agent stdout frame overflow: %s", exc)
+                buffer = b""
+                self._kill_for_protocol_error()
+                break
         if buffer.strip():
             self._handle_line(buffer)
         self._closed.set()
         self._fail_pending(AcpClosed("ACP agent stdout closed"))
+
+    def _kill_for_protocol_error(self) -> None:
+        """Stop a child whose stream broke the framing bound (never read further)."""
+        process = self._process
+        if process is None:
+            return
+        self._stopped_process = True
+        try:
+            process.kill()
+        except Exception:  # noqa: BLE001 - the process may already be gone
+            logger.debug("kill after protocol error failed", exc_info=True)
 
     def _handle_line(self, raw: bytes) -> None:
         text = strip_trailing_cr_bytes(raw).decode("utf-8", errors="replace").strip()

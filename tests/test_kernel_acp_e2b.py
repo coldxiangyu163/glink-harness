@@ -1407,3 +1407,43 @@ def test_the_acp_e2b_template_is_not_the_production_or_pi_template() -> None:
     assert config.e2b_template == "pi-glink-worker"
     assert config.acp_e2b_template == "glink-acp-worker"
     assert config.e2b_template != config.acp_e2b_template
+
+
+def test_the_sandbox_pump_applies_backpressure_instead_of_buffering_everything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """原义务：沙箱 stdout/stderr 走无界队列，远端输出快于宿主消费时全部堆在内存。
+    新义务：队列有界（背压阻塞 SDK 迭代）；kill 之后泵不再阻塞，退出码仍可得。"""
+    from pi_glink.kernel import e2b_env
+
+    monkeypatch.setattr(e2b_env, "_PUMP_QUEUE_CHUNKS", 4, raising=False)
+    monkeypatch.setattr(e2b_env, "_PUMP_PUT_POLL_SECONDS", 0.05, raising=False)
+    produced: list[int] = []
+
+    class _FloodHandle:
+        pid = 7
+
+        def __iter__(self):
+            for index in range(10_000):
+                produced.append(index)
+                yield (b"x" * 1024).decode(), None, None
+
+        def send_stdin(self, data, request_timeout=None) -> None:
+            pass
+
+        def close_stdin(self, request_timeout=None) -> None:
+            pass
+
+        def kill(self) -> bool:
+            return True
+
+        def wait(self):
+            return type("R", (), {"exit_code": 0})()
+
+    process = SandboxCommandProcess(_FloodHandle())
+    time.sleep(0.5)
+    # Nobody reads: the pump is held at the bound, not racing through 10k chunks.
+    assert len(produced) <= 4 + 2
+    process.kill()
+    assert process.wait(timeout=10) == 0
+    assert process.poll() == 0

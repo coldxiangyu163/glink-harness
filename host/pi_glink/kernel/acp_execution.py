@@ -1066,6 +1066,12 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
                     self._outcome.stop_reason,
                 )
                 return
+            protocol_error = getattr(client, "protocol_error", None)
+            if protocol_error:
+                # The host killed the agent for breaking the framing bound: the
+                # status is the host's doing, the violation is the cause.
+                self._outcome.error = f"ACP agent 协议违规，宿主已终止进程：{protocol_error}"
+                return
             if client.stopped_process:
                 return
             stderr_tail = _bounded_stderr_tail(client.stderr_tail(ACP_STDERR_TAIL_LINES))

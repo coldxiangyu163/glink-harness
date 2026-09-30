@@ -38,6 +38,10 @@
 3. **fail-fast**：声明的键名必须是环境变量形态；声明了但 `.env`/环境里没有值 → 拒绝
    启动，绝不渲染空凭据。值存 `HostConfig.acp_credential_env_values`（`repr=False`），
    不进日志与 repr。
+   **进程环境优先**：`load_config` 的进程环境白名单只放行宿主自有键，因此**显式声明**的
+   凭据键另按「进程环境优先于 `.env`」继承（只在进程环境提供时可启动；轮换时导出的新值
+   覆盖 `.env` 旧值），未声明的无关变量仍被过滤。原实现把声明键一并过滤，导致只靠进程
+   环境注入时拒绝启动、`.env` 留旧值时静默沿用旧值。
 4. **政策对齐（ADR 0015 的第三通道）**：`_acp_credentials_follow_policy` 把 ENV 通道与
    另两通道同列——multitenant + `tenant` 整通道拒绝；multitenant + `shared` 视为具名
    共享凭据源（缺源不启动）；单用户模式照常可用。

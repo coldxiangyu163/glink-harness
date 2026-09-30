@@ -67,6 +67,16 @@ ARCHIVE_MAX_BYTES = 256 * 1024 * 1024
 #: Member-count ceiling of one archive (defence against a crafted tar that
 #: expands into endless tiny members). Aligned with the inheritance file bound.
 ARCHIVE_MAX_MEMBERS = 16384
+#: Budget of the **reconstructed** state a manifest describes (not of one
+#: transfer): incremental publishes append onto the previous tree, so each
+#: small body can stay under :data:`ARCHIVE_MAX_BYTES` while the state keeps
+#: growing. The values are the inheritance/files-reclaim bounds of
+#: ``acp_env.INHERIT_MAX_*`` (kept equal by a test; this module is a leaf and
+#: may not import the kernel's ACP modules), so all three state paths refuse
+#: the same runaway session.
+STATE_MAX_FILES = 16384
+STATE_MAX_FILE_BYTES = 128 * 1024 * 1024
+STATE_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 #: Seconds between bytes while receiving one archive body (slow-loris bound).
 ARCHIVE_READ_TIMEOUT_SECONDS = 300
 #: The manifest member every archive must carry exactly once, at the root.
@@ -327,6 +337,9 @@ def publish_archive(
     source_run_id: str,
     credential_dests: tuple[str, ...] = (),
     max_members: int = ARCHIVE_MAX_MEMBERS,
+    max_state_files: int = STATE_MAX_FILES,
+    max_file_bytes: int = STATE_MAX_FILE_BYTES,
+    max_total_bytes: int = STATE_MAX_TOTAL_BYTES,
 ) -> dict[str, Any]:
     """Verify one staged archive and publish it as the conversation's state.
 
@@ -342,6 +355,12 @@ def publish_archive(
     )
     try:
         entries = _manifest_entries(manifest, credential_dests)
+        _check_state_budget(
+            entries,
+            max_files=max_state_files,
+            max_file_bytes=max_file_bytes,
+            max_total_bytes=max_total_bytes,
+        )
         state = conversation_dir / "state"
         staging = conversation_dir / ".state.staging"
         _reset_dir(staging)
@@ -353,15 +372,14 @@ def publish_archive(
             for relative, entry in entries.items():
                 target = staging / relative
                 base = entry.get("base")
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 if isinstance(base, int):
                     base_used = True
-                    data = _concatenate_delta(staging, extracted, relative, base, entry)
+                    _concatenate_delta(staging, extracted, relative, base, entry)
                 else:
-                    data = _member_bytes(extracted, "files", relative, entry)
-                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                target.write_bytes(data)
+                    _write_member(extracted, "files", relative, entry, target)
                 os.chmod(target, 0o600)
-                total += len(data)
+                total += entry["size"]
             _drop_unlisted(staging, entries)
             _verify_unchanged(staging, entries)
             mode = "incremental" if base_used else "full"
@@ -484,6 +502,37 @@ def _manifest_entries(
     return entries
 
 
+def _check_state_budget(
+    entries: dict[str, dict[str, Any]],
+    *,
+    max_files: int,
+    max_file_bytes: int,
+    max_total_bytes: int,
+) -> None:
+    """Refuse a manifest whose complete state exceeds the state budget.
+
+    Checked before anything is rebuilt: the manifest's sizes are the whole
+    files (delta or not), and every member is later verified against them, so
+    a manifest cannot understate what the published tree will hold.
+    """
+    if len(entries) > max_files:
+        raise ArchiveError(
+            f"归档描述的状态文件数 {len(entries)} 超过上限 {max_files}；未发布任何状态"
+        )
+    total = 0
+    for relative, entry in entries.items():
+        size = entry["size"]
+        if size > max_file_bytes:
+            raise ArchiveError(
+                f"归档状态文件超过单文件上限 {max_file_bytes} 字节: {relative[:200]!r}；未发布任何状态"
+            )
+        total += size
+    if total > max_total_bytes:
+        raise ArchiveError(
+            f"归档描述的状态总量 {total} 字节超过总量上限 {max_total_bytes}；未发布任何状态"
+        )
+
+
 def _valid_relative(relative: str) -> bool:
     if not relative or "\\" in relative or "\x00" in relative:
         return False
@@ -491,64 +540,91 @@ def _valid_relative(relative: str) -> bool:
     return all(part not in ("", ".", "..") for part in parts)
 
 
-def _member_bytes(
-    extracted: Path, family: str, relative: str, entry: dict[str, Any]
-) -> bytes:
-    """One full member's bytes, checked against its manifest entry."""
-    path = extracted / family / relative
+#: Chunk size of the streamed member copy (bounded host memory per file).
+_COPY_CHUNK = 1 << 20
+
+
+def _write_member(
+    extracted: Path, family: str, relative: str, entry: dict[str, Any], target: Path
+) -> None:
+    """Stream one full member into ``target``, checked against its manifest entry.
+
+    Copied in bounded chunks with a running digest: a large state file never
+    has to be held in host memory as a whole.
+    """
+    source = extracted / family / relative
+    digest = hashlib.sha256()
     try:
-        data = path.read_bytes()
+        with source.open("rb") as reader, target.open("wb") as writer:
+            written = _stream(reader, writer, digest)
     except OSError as exc:
         raise ArchiveError(f"归档成员读取失败: {relative[:200]!r}") from exc
-    _check_entry(data, entry, relative)
-    return data
+    _check_entry(written, digest, entry, relative)
 
 
 def _concatenate_delta(
     staging: Path, extracted: Path, relative: str, base: int, entry: dict[str, Any]
-) -> bytes:
-    """One delta entry applied onto the staged (previous) prefix.
+) -> None:
+    """Apply one delta entry onto the staged (previous) prefix, in place.
 
     ``base == size`` marks an unchanged file (the packer anchors it, sends no
     member): the staged copy is verified against the manifest instead. Any
     other base appends the ``delta/<rel>`` member's bytes onto the prefix and
     verifies the whole result — a misaligned base can only produce a hash
-    mismatch, which fails the whole archive.
+    mismatch, which fails the whole archive. The prefix is hashed and the
+    tail appended in bounded chunks (no whole-file ``bytes`` in memory).
     """
-    prefix_path = staging / relative
+    target = staging / relative
+    digest = hashlib.sha256()
     try:
-        prefix = prefix_path.read_bytes() if base > 0 else b""
+        if base > 0:
+            with target.open("rb") as prefix:
+                prefix_length = _stream(prefix, None, digest)
+        else:
+            prefix_length = 0
+            target.write_bytes(b"")
     except OSError as exc:
         raise ArchiveError(
             f"增量基线文件缺失或不可读，无法拼接: {relative[:200]!r}"
         ) from exc
-    if len(prefix) != base:
+    if prefix_length != base:
         raise ArchiveError(
-            f"增量基线长度不符（宿主 {len(prefix)} != base {base}），"
+            f"增量基线长度不符（宿主 {prefix_length} != base {base}），"
             f"拒绝拼接: {relative[:200]!r}"
         )
-    if base == entry["size"]:
-        tail = b""
-    else:
+    written = prefix_length
+    if base != entry["size"]:
         tail_path = extracted / "delta" / relative
         try:
-            tail = tail_path.read_bytes()
+            with tail_path.open("rb") as tail, target.open("ab") as writer:
+                written += _stream(tail, writer, digest)
         except OSError as exc:
             raise ArchiveError(
                 f"增量成员缺失或不可读: {relative[:200]!r}"
             ) from exc
-    data = prefix + tail
-    _check_entry(data, entry, relative)
-    return data
+    _check_entry(written, digest, entry, relative)
 
 
-def _check_entry(data: bytes, entry: dict[str, Any], relative: str) -> None:
-    if len(data) != entry["size"]:
+def _stream(reader, writer, digest) -> int:
+    """Copy ``reader`` into ``writer`` (``None`` = hash only); returns the byte count."""
+    count = 0
+    while True:
+        chunk = reader.read(_COPY_CHUNK)
+        if not chunk:
+            return count
+        digest.update(chunk)
+        if writer is not None:
+            writer.write(chunk)
+        count += len(chunk)
+
+
+def _check_entry(size: int, digest, entry: dict[str, Any], relative: str) -> None:
+    if size != entry["size"]:
         raise ArchiveError(
             f"归档成员长度与 manifest 不符: {relative[:200]!r}"
-            f"（{len(data)} != {entry['size']}）"
+            f"（{size} != {entry['size']}）"
         )
-    if hashlib.sha256(data).hexdigest() != entry["sha256"]:
+    if digest.hexdigest() != entry["sha256"]:
         raise ArchiveError(f"归档成员 sha256 校验失败: {relative[:200]!r}")
 
 

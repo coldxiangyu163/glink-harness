@@ -152,6 +152,50 @@ def test_process_environment_inherits_the_pi_model_metadata_keys(
     assert config.max_output_tokens == 4444
 
 
+def test_process_environment_supplies_declared_acp_credential_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A key named by ``PI_GLINK_ACP_CREDENTIAL_ENV`` inherits the process environment.
+
+    原义务：``_looks_configured`` 只放行宿主自有键，声明的凭据键（如
+    ``OPENROUTER_API_KEY``）被 ``load_config`` 过滤——只在进程环境提供时启动失败，
+    ``.env`` 留有旧值时静默沿用旧值（轮换无效）。
+
+    新义务：仅**显式声明**的凭据键额外按"进程环境优先于 ``.env``"继承；未声明
+    的无关变量仍被过滤。
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "PI_GLINK_HARNESS=dsh\nPI_GLINK_ACP_CREDENTIAL_ENV=OPENROUTER_API_KEY\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-env-only")
+    monkeypatch.setenv("JINA_API_KEY", "undeclared")
+    config = load_config(None, REPO_ROOT, env_file=env_file)
+    assert dict(config.acp_credential_env_values) == {"OPENROUTER_API_KEY": "from-env-only"}
+
+    env_file.write_text(
+        "PI_GLINK_HARNESS=dsh\nPI_GLINK_ACP_CREDENTIAL_ENV=OPENROUTER_API_KEY\n"
+        "OPENROUTER_API_KEY=rotated-away\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "rotated-in")
+    config = load_config(None, REPO_ROOT, env_file=env_file)
+    assert dict(config.acp_credential_env_values) == {"OPENROUTER_API_KEY": "rotated-in"}
+
+
+def test_process_environment_can_declare_the_acp_credential_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The declaration itself may come from the process environment too."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("PI_GLINK_HARNESS=dsh\n", encoding="utf-8")
+    monkeypatch.setenv("PI_GLINK_ACP_CREDENTIAL_ENV", "OPENROUTER_API_KEY")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
+    config = load_config(None, REPO_ROOT, env_file=env_file)
+    assert dict(config.acp_credential_env_values) == {"OPENROUTER_API_KEY": "from-env"}
+
+
 def test_public_view_never_leaks_credentials_or_paths() -> None:
     config = build_config(
         {

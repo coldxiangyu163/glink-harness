@@ -128,23 +128,35 @@ def read_lease(conversation_dir: Path) -> ConversationLease | None:
     and the unknown state fail-closed.
     """
     with conversation_guard(conversation_dir):
-        path = Path(conversation_dir) / LEASE_FILENAME
-        try:
-            raw_text = path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return None
-        except OSError as exc:
-            raise LeaseCorruptError(f"对话租约不可读: {type(exc).__name__}: {exc}") from exc
-        try:
-            raw = json.loads(raw_text)
-        except ValueError as exc:
-            raise LeaseCorruptError(f"对话租约不是合法 JSON: {exc}") from exc
-        if not isinstance(raw, dict) or raw.get("version") != LEASE_VERSION:
-            raise LeaseCorruptError("对话租约版本或结构不认识")
-        lease = _lease_from_mapping(raw)
-        if lease is None:
-            raise LeaseCorruptError("对话租约字段校验失败")
-        return lease
+        return peek_lease(conversation_dir)
+
+
+def peek_lease(conversation_dir: Path) -> ConversationLease | None:
+    """:func:`read_lease` without taking the conversation's guard.
+
+    For host-wide counting only (the park cap): the caller already holds its
+    *own* conversation's guard and must never wait on another conversation's
+    (that one may be held across a slow cloud destroy, and waiting on it from
+    inside a guard orders two locks arbitrarily). The record is replaced with
+    ``os.replace``, so an unguarded read sees either version, never a torn one.
+    """
+    path = Path(conversation_dir) / LEASE_FILENAME
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise LeaseCorruptError(f"对话租约不可读: {type(exc).__name__}: {exc}") from exc
+    try:
+        raw = json.loads(raw_text)
+    except ValueError as exc:
+        raise LeaseCorruptError(f"对话租约不是合法 JSON: {exc}") from exc
+    if not isinstance(raw, dict) or raw.get("version") != LEASE_VERSION:
+        raise LeaseCorruptError("对话租约版本或结构不认识")
+    lease = _lease_from_mapping(raw)
+    if lease is None:
+        raise LeaseCorruptError("对话租约字段校验失败")
+    return lease
 
 
 def write_lease(conversation_dir: Path, lease: ConversationLease) -> None:

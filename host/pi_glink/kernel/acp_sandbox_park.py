@@ -35,8 +35,10 @@ from typing import Any
 from ..config import HostConfig
 from .acp_e2b_env import RECLAIM_CLEANUP_COMMAND
 from .conversation_lease import (
+    LEASE_FILENAME,
     ConversationLease,
     LeaseCorruptError,
+    peek_lease,
     read_lease,
     write_lease,
 )
@@ -182,6 +184,14 @@ def park_sandbox(
         if ttl <= 0:
             # 配置禁用热路径：直接销毁（阶段 2 之前的行为）。
             return _destroy_outcome(handle, "租约 TTL 为 0，热路径已禁用")
+        cap = int(config.max_parked_sandboxes)
+        live = _live_parked_elsewhere(conversation_dir)
+        if live >= cap:
+            # TTL 只限保留时长；数量上限防止云端堆积暂停沙箱。超限不泊车，
+            # 按冷路径销毁（宿主权威状态不受影响，下一轮走回灌）。
+            return _destroy_outcome(
+                handle, f"暂停沙箱已达上限 {cap}（其它对话仍有 {live} 个），本轮不泊车"
+            )
         current = None
         try:
             current = read_lease(conversation_dir)
@@ -247,6 +257,36 @@ def park_sandbox(
                 settle_lease_after_destroy(conversation_dir)
             return outcome
         return ParkOutcome(ok=True, lease=lease)
+
+
+def _live_parked_elsewhere(conversation_dir: Path) -> int:
+    """Unexpired leases of *other* conversations under the same conversations root.
+
+    A best-effort local count (no cloud call): the conversations root is the
+    host's own directory, and this conversation's lease is replaced, not added.
+    An unreadable lease counts as occupied (its sandbox may exist).
+    """
+    root = Path(conversation_dir).parent
+    now = time.time()
+    count = 0
+    try:
+        siblings = [entry for entry in root.iterdir() if entry.is_dir() and not entry.is_symlink()]
+    except OSError:
+        return 0
+    for sibling in siblings:
+        if sibling.name == Path(conversation_dir).name:
+            continue
+        if not (sibling / LEASE_FILENAME).is_file():
+            continue
+        try:
+            # Never take another conversation's guard while holding ours.
+            lease = peek_lease(sibling)
+        except LeaseCorruptError:
+            count += 1
+            continue
+        if lease is not None and not lease.is_expired(now):
+            count += 1
+    return count
 
 
 def destroy_sandbox(handle: Any) -> bool:
