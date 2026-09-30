@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import HostConfig
+from .acp_e2b_env import RECLAIM_CLEANUP_COMMAND
 from .conversation_lease import (
     ConversationLease,
     LeaseCorruptError,
@@ -223,6 +224,13 @@ def park_sandbox(
     except Exception as exc:  # noqa: BLE001 - destroy, the failure is a fact
         return _destroy_outcome(handle, f"租约写入失败: {type(exc).__name__}: {exc}")
     try:
+        # Nothing run-scoped may survive into the parked sandbox (cc 终审
+        # S2): the archive token and every transfer scratch file are removed
+        # right before the pause — best-effort, a failed cleanup only logs.
+        try:
+            handle.commands.run(RECLAIM_CLEANUP_COMMAND, timeout=30)
+        except Exception:  # noqa: BLE001 - cleanup never fails the park
+            logger.warning("泊车前清理沙箱 scratch 失败（忽略）", exc_info=True)
         # ``False`` = already paused (idempotent), still a parked sandbox.
         handle.pause(keep_memory=False)
     except Exception as exc:  # noqa: BLE001 - destroy, the failure is a fact

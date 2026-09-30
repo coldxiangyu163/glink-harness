@@ -33,6 +33,7 @@ from pi_glink.kernel.acp_sandbox_park import (
 )
 from pi_glink.kernel.conversation_lease import (
     LeaseCorruptError,
+    claim_lease,
     settle_lease_after_destroy,
     DEFAULT_LEASE_TTL_SECONDS,
     LEASE_FILENAME,
@@ -485,3 +486,33 @@ def test_corrupt_lease_refuses_delete_and_is_kept_by_the_sweep(tmp_path: Path) -
     with pytest.raises(LeaseCorruptError):
         settle_lease_after_destroy(tmp_path)
     assert path.exists(), "损坏文件原样保留，沙箱名字不丢失"
+
+
+# -- 认领（cc 终审 S1）：重连窗内对账不得销毁正被接管的沙箱 ----------------------
+
+
+def test_claim_lease_extends_the_expiry_window(tmp_path: Path) -> None:
+    write_lease(tmp_path, _a_lease())
+    # 认领面对的租约必然未过期（候选判定已拒绝过期租约）：直接认领延长窗口。
+    assert claim_lease(tmp_path, seconds=120.0) is True
+    claimed = read_lease(tmp_path)
+    assert claimed is not None and claimed.expires_at > time.time() + 60, "认领后重连窗内未过期"
+
+
+def test_claim_lease_is_false_for_corrupt_or_absent(tmp_path: Path) -> None:
+    assert claim_lease(tmp_path) is False
+    (tmp_path / LEASE_FILENAME).write_text("{bad", encoding="utf-8")
+    assert claim_lease(tmp_path) is False
+
+
+def test_claim_lease_survives_a_write_failure(tmp_path: Path, monkeypatch) -> None:
+    """认领写入失败不抛：竞态窗口维持原样（best-effort 契约）。"""
+    import pi_glink.kernel.conversation_lease as lease_mod
+
+    write_lease(tmp_path, _a_lease())
+    monkeypatch.setattr(
+        lease_mod, "write_lease", lambda *_a, **_k: (_ for _ in ()).throw(
+            lease_mod.LeaseError("disk full")
+        )
+    )
+    assert claim_lease(tmp_path) is False

@@ -173,6 +173,28 @@ def remove_lease(conversation_dir: Path) -> None:
         pass
 
 
+def claim_lease(conversation_dir: Path, *, seconds: float = 120.0) -> bool:
+    """Extend a lease's expiry to cover an in-flight reconnect (cc 终审 S1).
+
+    The sweep may race a follow-up that sits between the candidate check and
+    ``connect``; claiming pushes the expiry past the reconnect window so the
+    sweep cannot destroy a sandbox the follow-up is about to resume. Best
+    effort: a claim that cannot be read or written leaves the race window as
+    it was (the sweep's holding-run guard above is the second layer).
+    """
+    try:
+        lease = read_lease(conversation_dir)
+    except LeaseCorruptError:
+        return False
+    if lease is None:
+        return False
+    try:
+        write_lease(conversation_dir, replace(lease, expires_at=time.time() + seconds))
+    except LeaseError:
+        return False
+    return True
+
+
 def settle_lease_after_destroy(conversation_dir: Path) -> bool:
     """Clear the lease after its parked sandbox was confirmed destroyed.
 

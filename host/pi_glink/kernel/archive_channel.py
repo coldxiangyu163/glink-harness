@@ -147,6 +147,16 @@ def read_state_manifest(conversation_dir: Path) -> dict[str, Any] | None:
     path = conversation_dir / "state" / MANIFEST_MEMBER
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        # The swap crash window can leave state/ missing with the last good
+        # tree parked as .state.retired (see :func:`_heal_swap_window`): heal
+        # it here too — readers (the follow-up gate, the incremental base)
+        # must not see a "never published" conversation that was.
+        _heal_swap_window(conversation_dir)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
     except (OSError, ValueError):
         return None
     if not isinstance(raw, dict) or raw.get("version") != 1:
@@ -607,6 +617,30 @@ def _write_manifest(
     os.chmod(path, 0o600)
 
 
+def _heal_swap_window(conversation_dir: Path) -> None:
+    """Restore a published state lost in the swap crash window (cc 终审 S4).
+
+    ``_swap_published`` moves the old tree aside before renaming the staged
+    one in; a crash between the two renames leaves ``state/`` missing with
+    ``.state.retired/`` holding the last good tree — without this heal the
+    conversation looks unpublished and every follow-up is refused. The retired
+    tree is moved back (still the old good manifest, still fail-closed on
+    freshness); a stray ``staging`` remnant from the same crash is removed —
+    it was never published.
+    """
+    state = Path(conversation_dir) / "state"
+    retired = state.parent / ".state.retired"
+    staging = state.parent / ".state.staging"
+    if not state.exists() and retired.is_dir():
+        try:
+            os.rename(retired, state)
+        except OSError:
+            return
+        # Only inside the crash window is a stray staging remnant garbage —
+        # outside it the staging tree may be the one a publish is holding.
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def _swap_published(state: Path, staging: Path) -> None:
     """Publish the staged tree with per-directory renames.
 
@@ -615,6 +649,7 @@ def _swap_published(state: Path, staging: Path) -> None:
     never a partial tree — and the follow-up gate's freshness check (manifest
     ``sourceRunId``) keeps a stale manifest unusable.
     """
+    _heal_swap_window(state.parent)
     retired = state.parent / ".state.retired"
     shutil.rmtree(retired, ignore_errors=True)
     if state.exists():

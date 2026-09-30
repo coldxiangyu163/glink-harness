@@ -42,6 +42,7 @@ from ..egress import MODEL_ROUTE, SEARCH_ROUTE, EgressProxy
 from ..kernel.acp_env import credential_destinations
 from ..kernel.archive_channel import ArchiveEndpoint
 from ..kernel.agent_env import RunCredentials
+from ..kernel.conversation_lease import LeaseCorruptError
 from ..kernel.harness_acp import AcpHarnessFamily
 from ..kernel.execution import CleanupReport, ExecutionAdapter, ExecutionSpec
 from ..kernel.harness import (
@@ -244,16 +245,24 @@ class PrepareStage:
         # 若 start 阶段降级，冷路径用阶段 1 的通道回灌补上。无通道（无 public
         # URL）不启用热路径：降级路径必须是完整的阶段 1 回灌，而不是一个已经
         # 跳过了继承的 run。
-        resume_target = (
-            family.sandbox_resume_target(parent)
-            if (
-                isinstance(family, AcpHarnessFamily)
-                and archive is not None
-                and parent is not None
-                and execution.record.spec.executor == "e2b"
-            )
-            else None
-        )
+        resume_target = None
+        if (
+            isinstance(family, AcpHarnessFamily)
+            and archive is not None
+            and parent is not None
+            and execution.record.spec.executor == "e2b"
+        ):
+            try:
+                resume_target = family.sandbox_resume_target(parent)
+            except LeaseCorruptError as exc:
+                # 租约损坏不阻断追问（降级冷路径），但热缓存为何失效必须对
+                # 操作员可见：进事件流而不只是日志（cc 复审 SHOULD）。
+                self.s.channel.warn(
+                    execution,
+                    "对话沙箱租约不可读，追问降级冷路径",
+                    f"热路径候选被拒：{exc}",
+                    label="lease",
+                )
         execution.sandbox_resume = resume_target
         prepared = family.prepare_runtime(
             run_id,

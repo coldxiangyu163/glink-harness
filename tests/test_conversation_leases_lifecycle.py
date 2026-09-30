@@ -280,3 +280,74 @@ def test_conversation_ids_list_only_real_directories(tmp_path: Path) -> None:
     # A stray file (not a directory) is never a conversation.
     (store.conversations_root() / "noise.txt").write_text("x", encoding="utf-8")
     assert store.conversation_ids() == ["conv-1"]
+
+
+# -- 活跃对话保护（cc 终审 S1/S3） --------------------------------------------------
+
+
+def test_sweep_skips_a_conversation_with_a_holding_run(tmp_path: Path) -> None:
+    """过期租约若对话内仍有 run 持有资源：跳过本轮，不销毁热路径正用的沙箱。"""
+    config = make_config(tmp_path)
+    store, conversation = seeded_store(config)
+    # 一个仍持有资源的子 run（追问进行中）：parent 链归根 conv-1。
+    store.create(
+        "追问中",
+        run_id="conv-2",
+        spec=RunSpec(family="acp", pack="dsh", executor="e2b"),
+        parent_run_id="conv-1",
+    )
+    assert store.holding_conversation_roots() == {"conv-1"}
+    write_lease(conversation, a_lease(paused_ago=7200.0, ttl=3600.0))
+    manager = a_manager(config, store)
+    assert manager.reconcile_leases() == [], "对话内有活跃 run：本轮跳过销毁"
+    # 终态释放后，下一轮恢复销毁。
+    finish(store, "conv-2", FINISHED, finished_at=time.time(),
+           cleanup={"released": True, "failures": [], "external": {}})
+    assert store.holding_conversation_roots() == set()
+    assert manager.reconcile_leases() == ["conv-1"]
+
+
+def test_delete_conversation_refuses_while_a_run_holds_resources(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    store, conversation = seeded_store(config)
+    write_lease(conversation, a_lease(retired=("sbx-retired",)))
+    store.create(
+        "追问中",
+        run_id="conv-2",
+        spec=RunSpec(family="acp", pack="dsh", executor="e2b"),
+        parent_run_id="conv-1",
+    )
+    manager = a_manager(config, store)
+    ok, failures = manager._ledger.delete_conversation("conv-1")  # noqa: SLF001
+    assert ok is False and any("运行中的 run" in f for f in failures)
+    assert conversation.exists(), "对话目录与租约原样保留"
+
+
+def test_holding_roots_survive_broken_records(tmp_path: Path) -> None:
+    """损坏 record / 断父链：holding 归属按已知事实回退，不丢不崩（S1/S3 的判定地基）。"""
+    import sqlite3
+
+    config = make_config(tmp_path)
+    store, _conversation = seeded_store(config)
+    store.create(
+        "追问中",
+        run_id="conv-2",
+        spec=RunSpec(family="acp", pack="dsh", executor="e2b"),
+        parent_run_id="conv-1",
+    )
+    assert store.holding_conversation_roots() == {"conv-1"}
+    # 父 record 损坏：链在损坏行断开，holding 归到该行自身的 run id——
+    # 恰是对话根名，sweep/delete 的判定仍然正确。
+    with sqlite3.connect(store.run_dir("conv-1").parent / "runs.db") as conn:
+        conn.execute(
+            "UPDATE runs SET record = '{bad json' WHERE run_id = 'conv-1'"
+        )
+        conn.commit()
+    assert store.holding_conversation_roots() == {"conv-1"}
+    # 自身 record 损坏：归自身为根，绝不静默消失。
+    with sqlite3.connect(store.run_dir("conv-2").parent / "runs.db") as conn:
+        conn.execute(
+            "UPDATE runs SET record = '{bad json' WHERE run_id = 'conv-2'"
+        )
+        conn.commit()
+    assert store.holding_conversation_roots() == {"conv-2"}

@@ -407,3 +407,39 @@ def test_acp_always_verifies_continuation_before_turn(tmp_path: Path) -> None:
     _config, _store, family = make_family(tmp_path)
     # 与 sandbox 无关（S2 起无 executor 参数）。
     assert family.verifies_continuation_before_turn() is True
+
+
+def test_backfill_followup_learns_historical_credential_secrets(tmp_path: Path) -> None:
+    """跳过本地继承的回灌路径仍要认识历史凭据形值（cc 终审 B3）。
+
+    turn 1 的历史状态进了对话权威 state；turn 3 走归档回灌（inherit 被跳过）时，
+    PreparedRuntime 的脱敏边界仍含该值——agent 回显时会被遮蔽。
+    """
+    from pi_glink.kernel.archive_channel import ArchiveEndpoint
+
+    config, store, family = make_family(tmp_path)
+    parent = store.create("第一轮", spec=RunSpec(
+        family="acp", pack="dsh", executor="e2b",
+        credential_origin="host",
+    ))
+    conversation = store.conversation_dir(parent.run_id)
+    state = conversation / "state"
+    state.mkdir(parents=True)
+    (state / "session.jsonl").write_text(
+        "history mentions sk-live-turn1-echo-000000000000\n", encoding="utf-8"
+    )
+
+    class _Remote:
+        kind = "e2b"
+        remote = True
+
+    prepared = family.prepare_runtime(
+        parent.run_id,
+        tmp_path / "runs" / "turn3",
+        parent=parent,
+        session_seed=None,
+        egress=None,
+        sandbox=_Remote(),
+        archive=ArchiveEndpoint(origin="http://127.0.0.1:1", token="pga-unit"),
+    )
+    assert "sk-live-turn1-echo-000000000000" in prepared.secret_values

@@ -404,6 +404,47 @@ class RunStore:
             if child.is_dir() and not child.is_symlink()
         )
 
+    def holding_conversation_roots(self) -> set[str]:
+        """The conversation roots that still have a run holding resources.
+
+        For the lease sweep and the delete-conversation gate (cc 终审 S1/S3):
+        a conversation whose run still holds resources may have a follow-up
+        mid-flight on the hot path — destroying its parked sandbox (or
+        deleting the conversation out from under it) would fail that run. The
+        walk follows ``parent_run_id`` up to each holding run's conversation
+        root; holding runs are few (the admission slots) and conversation
+        chains are bounded, so this stays cheap.
+        """
+        roots: set[str] = set()
+        for row_id, row_record in self._query(
+            "SELECT run_id, record FROM runs WHERE holds = 1"
+        ):
+            run_id = str(row_id)
+            parent: str | None = None
+            try:
+                data = json.loads(row_record)
+            except (TypeError, ValueError):
+                roots.add(run_id)
+                continue
+            if isinstance(data, dict):
+                parent = data.get("parent_run_id")
+            hops = 0
+            while parent is not None and hops < 1024:
+                rows = self._query(
+                    "SELECT run_id, record FROM runs WHERE run_id = ?", (parent,)
+                )
+                if not rows:
+                    break
+                run_id = str(rows[0][0])
+                try:
+                    data = json.loads(rows[0][1])
+                except (TypeError, ValueError):
+                    break
+                parent = data.get("parent_run_id") if isinstance(data, dict) else None
+                hops += 1
+            roots.add(run_id)
+        return roots
+
     def session_dir(self, run_id: str) -> Path:
         """The run's own pi session directory (``runs/<id>/sessions``)."""
         return self.run_dir(run_id) / SESSIONS_DIRNAME

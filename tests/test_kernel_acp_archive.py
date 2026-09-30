@@ -544,3 +544,54 @@ def test_channel_success_without_this_runs_manifest_degrades(
     manifest = json.loads((conversation / "state" / "manifest.json").read_text())
     assert manifest["sourceRunId"] == "r9"
     assert manifest["mode"] == "files-fallback"
+
+
+# -- swap 崩溃窗口自愈（cc 终审 S4） ----------------------------------------------
+
+
+def test_a_crashed_swap_is_healed_on_the_next_read_or_publish(tmp_path: Path) -> None:
+    """state→retired 后、staging→state 前崩溃：下次读取/发布把 retired 还原。"""
+    from pi_glink.kernel.archive_channel import _heal_swap_window, read_state_manifest
+
+    state = tmp_path / "state"
+    retired = tmp_path / ".state.retired"
+    state.mkdir()
+    (state / "manifest.json").write_text(
+        '{"version": 1, "sourceRunId": "r1", "files": {}}', encoding="utf-8"
+    )
+    # 模拟崩溃窗口：旧树已挪走、新树未落位
+    state.rename(retired)
+    assert read_state_manifest(tmp_path) is not None, "读取路径自愈后仍能读到 manifest"
+    assert state.is_dir() and not retired.exists()
+
+    # 同窗口再次出现时，_heal_swap_window 直接还原
+    state.rename(retired)
+    _heal_swap_window(tmp_path)
+    assert state.is_dir()
+
+
+def test_a_failed_token_cleanup_never_fails_the_transfer(tmp_path, proxy) -> None:
+    """token 清理命令失败：只告警，传输/发布不受影响（S2 best-effort 契约）。"""
+    _need_host_tools()
+    runtime = make_runtime(tmp_path)
+    sandbox = RealCommandFakeSandbox(tmp_path / "fake")
+    real_run = sandbox.commands.run
+
+    def run(cmd, timeout=None, **kwargs):
+        if cmd.startswith("rm -f /tmp/pi-glink-archive-token"):
+            raise RuntimeError("cleanup refused")
+        return real_run(cmd, timeout=timeout, **kwargs)
+
+    sandbox.commands.run = run  # type: ignore[method-assign]
+    conversation = tmp_path / "conversations" / "c1"
+    conversation.mkdir(parents=True)
+    transfer = make_transfer(
+        sandbox, runtime, proxy=proxy, conversation=conversation,
+        run_id="r1", workspace=tmp_path / "ws",
+    )
+    seed_state(sandbox, b"zstd-frame-1")
+    recovery = transfer.recover_state()
+    assert recovery.ok, recovery.failures
+    from pi_glink.kernel.archive_channel import read_state_manifest
+
+    assert read_state_manifest(conversation) is not None, "发布不受清理失败影响"

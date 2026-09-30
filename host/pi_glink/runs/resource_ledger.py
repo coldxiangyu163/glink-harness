@@ -361,8 +361,13 @@ class ResourceLedger:
         if not self._resource_sweep_lock.acquire(blocking=False):
             return []
         try:
+            holding_roots = self.store.holding_conversation_roots()
             destroyed: list[str] = []
             for conversation_id in self.store.conversation_ids():
+                if conversation_id in holding_roots:
+                    # 对话内仍有 run 持有资源：热路径可能正在重连这个暂停沙箱，
+                    # 销毁会打断追问（cc 终审 S1）；本轮跳过，终态后自然恢复。
+                    continue
                 conversation_dir = self.store.conversations_root() / conversation_id
                 try:
                     lease = read_lease(conversation_dir)
@@ -463,6 +468,10 @@ class ResourceLedger:
         conversation_dir = self.store.conversations_root() / root_run_id
         if not conversation_dir.is_dir():
             return True, []
+        if root_run_id in self.store.holding_conversation_roots():
+            # 对话内仍有 run 持有资源（可能正走在热路径上）：删除会从脚下抽走
+            # 它的沙箱/状态（cc 终审 S3）；等终态或取消后再删。
+            return False, ["对话内仍有运行中的 run，拒绝删除；请先等待或取消"]
         try:
             lease = read_lease(conversation_dir)
         except LeaseCorruptError as exc:

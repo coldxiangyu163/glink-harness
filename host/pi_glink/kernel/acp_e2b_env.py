@@ -80,6 +80,15 @@ RECLAIM_BASE_PATH = "/tmp/pi-glink-reclaim-base.json"
 RECLAIM_OUT_PATH = "/tmp/pi-glink-reclaim-out"
 RECLAIM_TAR_PATH = "/tmp/pi-glink-archive.tar"
 RECLAIM_TOKEN_PATH = "/tmp/pi-glink-archive-token"
+#: Remove the run-scoped archive **token** right after a transfer (cc 终审
+#: S2): the grant must not outlive its command — a later reader (or a parked
+#: sandbox) finding it could mint state posts for this conversation. The
+#: transport's other scratch files carry no grant and stay until the park-time
+#: sweep below, so a transfer's own artifacts remain inspectable.
+RECLAIM_TOKEN_CLEANUP_COMMAND = "rm -f /tmp/pi-glink-archive-token"
+#: The park-time sweep (before pause): clears every scratch file the archive
+#: paths ever left — nothing run-scoped may survive into a parked sandbox.
+RECLAIM_CLEANUP_COMMAND = "rm -f /tmp/pi-glink-archive-token /tmp/pi-glink-reclaim.mjs /tmp/pi-glink-reclaim-base.json /tmp/pi-glink-reclaim-base.json.tmp /tmp/pi-glink-reclaim-out /tmp/pi-glink-archive.tar /tmp/pi-glink-archive.tar.zst"
 BACKFILL_TAR_PATH = "/tmp/pi-glink-backfill.tar"
 #: One reclaim/backfill command's ceiling (the curl inside gets slightly less,
 #: so the command — not the transport — owns the deadline).
@@ -363,6 +372,11 @@ class AcpSandboxTransfer:
                 _backfill_command(self.archive.url),
                 timeout=ARCHIVE_COMMAND_TIMEOUT_SECONDS,
             )
+            # The grant must not outlive the transfer (cc 终审 S2).
+            try:
+                sandbox.commands.run(RECLAIM_TOKEN_CLEANUP_COMMAND, timeout=30)
+            except Exception:  # noqa: BLE001 - cleanup never fails the backfill
+                logger.warning("回灌后清理沙箱 scratch 失败（忽略）", exc_info=True)
         except Exception as exc:  # noqa: BLE001 - surfaced as a start failure
             raise SandboxError(
                 f"追问状态回灌（归档通道）失败: {type(exc).__name__}: {exc}"
@@ -433,6 +447,10 @@ class AcpSandboxTransfer:
             sandbox.commands.run(
                 command, timeout=ARCHIVE_COMMAND_TIMEOUT_SECONDS
             )
+            try:
+                sandbox.commands.run(RECLAIM_TOKEN_CLEANUP_COMMAND, timeout=30)
+            except Exception:  # noqa: BLE001 - cleanup never fails the reclaim
+                logger.warning("回收后清理沙箱 token 失败（忽略）", exc_info=True)
         except Exception as exc:  # noqa: BLE001 - degrade, the failure is a fact
             logger.warning(
                 "归档通道回收失败，降级 files 逐文件 run=%s: %s: %s",

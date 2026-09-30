@@ -283,8 +283,9 @@ def a_record(run_id: str, *, executor: str = "e2b", pack: str = "dsh") -> RunRec
 def write_a_lease(conversation_dir: Path, *, run_id: str, generation: int = 1,
                   expires_at: float | None = None, pack: str = "dsh",
                   template: str = "glink-acp-worker",
-                  sandbox_id: str = "sbx-lease") -> None:
-    now = time.time()
+                  sandbox_id: str = "sbx-lease",
+                  paused_ago: float = 0.0) -> None:
+    now = time.time() - paused_ago
     write_lease(
         conversation_dir,
         ConversationLease(
@@ -323,7 +324,9 @@ def test_resume_target_matches_a_fresh_lease(tmp_path: Path) -> None:
             id="template-mismatch",
         ),
         pytest.param(
-            lambda c, d: write_a_lease(c, run_id="r1", expires_at=time.time() - 1),
+            lambda c, d: write_a_lease(
+                c, run_id="r1", paused_ago=3600.0, expires_at=time.time() - 1
+            ),
             id="expired",
         ),
         pytest.param(lambda c, d: None, id="no-lease"),
@@ -760,3 +763,4 @@ def test_hot_path_degrades_when_the_lease_sandbox_is_gone(
     lease = read_lease(conversation)
     assert lease is not None and lease.sandbox_id == sandboxes[1].sandbox_id
     assert not sandboxes[1].killed and sandboxes[1].state == "paused"
+

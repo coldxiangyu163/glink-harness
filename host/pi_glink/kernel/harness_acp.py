@@ -262,8 +262,9 @@ class AcpHarnessFamily(HarnessFamily):
         try:
             lease = read_lease(conversation_dir)
         except LeaseCorruptError:
-            # 不可读租约不呈现为候选：降级冷路径（宿主权威状态仍在，追问照常）。
-            return None
+            # 不可读租约不呈现为候选：异常上抛给 Prepare 阶段，由它发
+            # kernel_status 警告（降级对操作员可见，cc 复审 SHOULD）后走冷路径。
+            raise
         if lease is None:
             return None
         if lease.run_id != parent.run_id:
