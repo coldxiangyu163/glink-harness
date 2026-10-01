@@ -43,7 +43,7 @@ function harness({ listRuns = null, getRun = null } = {}) {
   const listCalls = [];
   const api = {
     me: async () => ({ mode: 'local', authenticated: false }),
-    health: async () => ({ pi: { available: true }, configured: { model: true } }),
+    health: async () => ({ harness: { available: true }, configured: { model: true } }),
     config: async () => ({ model: 'test-model' }),
     listRuns: async (options = {}) => {
       listCalls.push(options);

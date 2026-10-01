@@ -1,11 +1,13 @@
 """The host-level harness switch (``GLINK_HARNESS``) and the pack selection.
 
 The deployment selects one harness **pack** at configuration time: no API
-parameter, no per-run choice, no front-end surface; the default stays ``pi`` so
-every existing deployment is unchanged. A pack that cannot run is refused at
-startup rather than falling back to pi (which would mislabel runs). The config
-holds the parsed pack object itself (``config.pack``); there are no ``acp_*``
-fields copied out of the manifest and no legacy knobs are read any more.
+parameter, no per-run choice, no front-end surface. The default is ``dsh``
+since 2026-10-01 (GLINK-HARNESS-DEFAULT-20261001：dsh 是主力接入方案，pi 降级为
+显式选择的扩展包；此前默认为 ``pi``）。A pack that cannot run is refused at
+startup rather than falling back to another pack (which would mislabel runs).
+The config holds the parsed pack object itself (``config.pack``); there are no
+``acp_*`` fields copied out of the manifest and no legacy knobs are read any
+more.
 """
 
 from __future__ import annotations
@@ -34,12 +36,18 @@ def config(values: Mapping[str, str]):
     return build_config(base, REPO_ROOT)
 
 
-def test_the_default_harness_is_the_pi_pack() -> None:
+def test_the_default_harness_is_the_dsh_pack() -> None:
+    """默认包为 dsh（GLINK-HARNESS-DEFAULT-20261001）；pi 包显式选择后行为不变。"""
     default = config({})
-    assert default.harness == "pi" and default.harness_pack == "pi"
-    assert default.pack.command == ("pi",)
-    assert default.pi_bin == "pi"
-    assert default.agent_config_dir == REPO_ROOT / "harnesses" / "pi"
+    assert default.harness == "acp" and default.harness_pack == "dsh"
+    assert default.pack.command == ("dsh", "--profile", "acp")
+    assert default.pi_bin == "dsh"  # pi_bin 缺省跟随包 entry argv[0]
+
+    pi = config({"GLINK_HARNESS": "pi"})
+    assert pi.harness == "pi" and pi.harness_pack == "pi"
+    assert pi.pack.command == ("pi",)
+    assert pi.pi_bin == "pi"
+    assert pi.agent_config_dir == REPO_ROOT / "harnesses" / "pi"
 
 
 def test_an_acp_pack_derives_the_family_command_and_options() -> None:
@@ -211,5 +219,5 @@ def test_the_credential_and_env_knobs_are_refused_when_the_pack_drives_pi() -> N
         ("GLINK_ACP_ENV", "ACME_MODE=workspace"),
     ):
         with pytest.raises(ConfigError) as excinfo:
-            config({key: value})
+            config({"GLINK_HARNESS": "pi", key: value})
         assert "只在 ACP 族" in str(excinfo.value)

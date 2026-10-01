@@ -1,7 +1,7 @@
 [project]
 name = "glink-harness"
 version = "0.1.0"
-description = "harness 无关的本地研究工作台宿主（默认 harness 为 pi）/ harness-agnostic local research workbench host (default harness: pi)"
+description = "harness 无关的本地研究工作台宿主（默认 harness 为 dsh）/ harness-agnostic local research workbench host (default harness: dsh)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []

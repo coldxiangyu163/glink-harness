@@ -50,6 +50,7 @@ def _config(tmp_path: Path, template_dir: Path, **overrides: str):
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "openai/gpt-5.6-sol",
         "PI_CODING_AGENT_DIR": str(template_dir),
+        "GLINK_HARNESS": "pi",
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
     }
     values.update(overrides)

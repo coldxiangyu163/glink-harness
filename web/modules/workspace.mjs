@@ -408,7 +408,7 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
       // for this caller's own tenant credential. The unauthenticated health
       // probe only knows the host-level key, so using it here would tell a
       // tenant with a configured key that no model is configured.
-      if (!health?.pi?.available) message = '研究引擎暂时不可用，暂时无法发起研究。请联系管理员。';
+      if (!health?.harness?.available) message = '研究引擎暂时不可用，暂时无法发起研究。请联系管理员。';
       else if (!config?.configured?.model) message = '模型服务还没有配置，暂时无法发起研究。请联系管理员完成配置。';
     } catch (error) {
       if (identityStale(generation)) return;

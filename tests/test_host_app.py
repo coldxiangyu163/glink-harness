@@ -27,6 +27,7 @@ def server(tmp_path: Path):
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
             "LOCAL_WEB_PORT": "0",  # ephemeral port: tests must not fight over 7860
             "OPENAI_MODEL": "test-model",
+            "GLINK_HARNESS": "pi",
         },
         REPO_ROOT,
     )
@@ -98,22 +99,31 @@ def test_non_loopback_host_is_refused_in_every_mode() -> None:
     unauthenticated public surface.
     """
     with pytest.raises(ConfigError, match="loopback"):
-        build_config({"LOCAL_WEB_HOST": "0.0.0.0"}, REPO_ROOT)
+        build_config({"LOCAL_WEB_HOST": "0.0.0.0", "GLINK_HARNESS": "pi"}, REPO_ROOT)
     with pytest.raises(ConfigError, match="loopback"):
         build_config(
-            {"LOCAL_WEB_HOST": "0.0.0.0", "LOCAL_WEB_ALLOW_REMOTE": "1"}, REPO_ROOT
+            {"LOCAL_WEB_HOST": "0.0.0.0", "LOCAL_WEB_ALLOW_REMOTE": "1", "GLINK_HARNESS": "pi"},
+            REPO_ROOT,
         )
     with pytest.raises(ConfigError, match="loopback"):
-        build_config({"LOCAL_WEB_HOST": "192.168.1.10"}, REPO_ROOT)
-    assert build_config({}, REPO_ROOT).binds_loopback is True
+        build_config({"LOCAL_WEB_HOST": "192.168.1.10", "GLINK_HARNESS": "pi"}, REPO_ROOT)
+    assert build_config(
+        {"OPENAI_MODEL": "test/model", "OPENAI_REASONING_EFFORT": "high"}, REPO_ROOT
+    ).binds_loopback is True
 
 
 def test_defaults_follow_frontier_agent_naming(tmp_path: Path) -> None:
-    config = build_config({}, REPO_ROOT)
+    # 默认包为 dsh（GLINK-HARNESS-DEFAULT-20261001）：dsh 的 session_config 必填
+    # OPENAI_MODEL / OPENAI_REASONING_EFFORT，缺省配置必须带齐才能通过启动校验。
+    config = build_config(
+        {"OPENAI_MODEL": "test/model", "OPENAI_REASONING_EFFORT": "high"}, REPO_ROOT
+    )
     assert config.port == 7860
     assert config.executor == "inproc"
+    assert config.harness_pack == "dsh"
     assert config.e2b_template == "glink-harness-worker"
-    assert config.agent_config_dir == REPO_ROOT / "harnesses" / "pi"
+    assert config.acp_e2b_template == "glink-acp-worker"
+    assert config.agent_config_dir == REPO_ROOT / "harnesses" / "dsh"
     assert config.binds_loopback is True
 
 
@@ -121,7 +131,7 @@ def test_process_environment_wins_over_env_file(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("OPENAI_MODEL=from-file\nLOCAL_WEB_PORT=1\n", encoding="utf-8")
     config = load_config(
-        {"OPENAI_MODEL": "from-env", "LOCAL_WEB_PORT": "9999"},
+        {"OPENAI_MODEL": "from-env", "LOCAL_WEB_PORT": "9999", "GLINK_HARNESS": "pi"},
         REPO_ROOT,
         env_file=env_file,
     )
@@ -147,6 +157,9 @@ def test_process_environment_inherits_the_pi_model_metadata_keys(
     )
     monkeypatch.setenv("OPENAI_CONTEXT_WINDOW", "3333")
     monkeypatch.setenv("OPENAI_MAX_TOKENS", "4444")
+    # 本用例只验证 OPENAI_* 元数据键的继承顺序，与 harness 无关；钉 pi 包
+    # 避免默认 dsh 的 session_config 必填校验抢先失败。
+    monkeypatch.setenv("GLINK_HARNESS", "pi")
     config = load_config(None, REPO_ROOT, env_file=env_file)
     assert config.context_window == 3333
     assert config.max_output_tokens == 4444
@@ -200,12 +213,92 @@ def test_process_environment_can_declare_the_acp_credential_keys(
     assert dict(config.acp_credential_env_values) == {"OPENROUTER_API_KEY": "from-env"}
 
 
+# -- 就绪面族化（GLINK-READY-20261001：configured.model 按族判定）------------------
+
+
+def _dsh_values(tmp_path: Path, **overrides: str) -> dict[str, str]:
+    values = {
+        "GLINK_HARNESS": "dsh",
+        "OPENAI_MODEL": "openai/gpt-5.6-sol",
+        "OPENAI_REASONING_EFFORT": "xhigh",
+        "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
+        "LOCAL_WEB_PORT": "0",
+    }
+    values.update(overrides)
+    return values
+
+
+def test_dsh_pack_reports_model_ready_via_the_acp_credential_channel(tmp_path: Path) -> None:
+    """回归：dsh + 具名凭据通道 + 无 OPENAI_API_KEY 不得误报模型未配置。
+
+    缺口①复现的反面：ACP 族凭据走 GLINK_ACP_CREDENTIAL_ENV（值在启动期解析），
+    不要求 pi 族的 OPENAI_API_KEY。就绪只回答配置齐备，不代表真实模型握手成功。
+    """
+    config = build_config(
+        _dsh_values(
+            tmp_path,
+            GLINK_ACP_CREDENTIAL_ENV="OPENROUTER_API_KEY",
+            OPENROUTER_API_KEY="sk-or-synthetic",
+        ),
+        REPO_ROOT,
+    )
+    assert config.public_view()["configured"]["model"] is True
+
+
+def test_dsh_pack_without_a_credential_channel_reports_not_ready(tmp_path: Path) -> None:
+    """相邻合法输入保护：dsh 只有模型名、没有任何凭据通道时仍报未就绪。"""
+    config = build_config(_dsh_values(tmp_path), REPO_ROOT)
+    assert config.public_view()["configured"]["model"] is False
+
+
+def test_pi_pack_readiness_still_requires_the_openai_key(tmp_path: Path) -> None:
+    config = build_config(
+        {
+            "GLINK_HARNESS": "pi",
+            "OPENAI_MODEL": "test/model",
+            "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
+        },
+        REPO_ROOT,
+    )
+    assert config.public_view()["configured"]["model"] is False
+
+
+def test_health_payload_names_the_selected_pack(tmp_path: Path) -> None:
+    """/api/health 的 harness 块报告所选包名与入口（dsh 默认包的直接断言）。"""
+    config = build_config(
+        _dsh_values(
+            tmp_path,
+            GLINK_ACP_CREDENTIAL_ENV="OPENROUTER_API_KEY",
+            OPENROUTER_API_KEY="sk-or-synthetic",
+            LOCAL_WEB_EXECUTOR="docker",
+        ),
+        REPO_ROOT,
+    )
+    instance = create_server(config)
+    thread = threading.Thread(target=instance.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, _, body = _get(instance, "/api/health")
+        payload = json.loads(body)
+        assert status == 200
+        assert payload["harness"]["pack"] == "dsh"
+        assert payload["harness"]["bin"] == "dsh"
+        # docker 面不探测本机 PATH（镜像内执行，启动校验已把关）
+        assert payload["harness"]["available"] is True
+        assert payload["configured"]["model"] is True
+    finally:
+        instance.shutdown()
+        instance.server_close()
+        thread.join(timeout=5)
+
+
 def test_public_view_never_leaks_credentials_or_paths() -> None:
     config = build_config(
         {
             "OPENAI_API_KEY": "secret-key",
             "OPENAI_BASE_URL": "https://example.invalid/v1",
             "OPENAI_MODEL": "some-model",
+            "GLINK_HARNESS": "pi",
             "E2B_API_KEY": "e2b-secret",
         },
         REPO_ROOT,
@@ -293,13 +386,14 @@ def test_terminal_event_types_are_stable() -> None:
 # -- HTTP surface -------------------------------------------------------------
 
 
-def test_health_reports_executor_and_pi_availability(server: GlinkHarnessServer) -> None:
+def test_health_reports_executor_and_harness_availability(server: GlinkHarnessServer) -> None:
     status, _, body = _get(server, "/api/health")
     payload = json.loads(body)
     assert status == 200
     assert payload["status"] == "ok"
     assert payload["executor"] == "inproc"
-    assert set(payload["pi"]) == {"bin", "available"}
+    assert set(payload["harness"]) == {"pack", "bin", "available"}
+    assert payload["harness"]["pack"] == "pi" and payload["harness"]["bin"] == "pi"
 
 
 def test_config_endpoint_exposes_no_secrets(server: GlinkHarnessServer) -> None:
@@ -385,9 +479,9 @@ def test_out_of_range_integer_configuration_is_refused_with_the_key_name(
 
 
 def test_zero_port_stays_valid_as_the_ephemeral_port_request() -> None:
-    assert build_config({"LOCAL_WEB_PORT": "0"}, REPO_ROOT).port == 0
+    assert build_config({"LOCAL_WEB_PORT": "0", "GLINK_HARNESS": "pi"}, REPO_ROOT).port == 0
     with pytest.raises(ConfigError, match="654?35|65535"):
-        build_config({"LOCAL_WEB_PORT": "65536"}, REPO_ROOT)
+        build_config({"LOCAL_WEB_PORT": "65536", "GLINK_HARNESS": "pi"}, REPO_ROOT)
 
 
 def test_the_cli_revalidates_host_and_port_overrides(
@@ -401,6 +495,7 @@ def test_the_cli_revalidates_host_and_port_overrides(
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
             "LOCAL_WEB_PORT": "0",
             "OPENAI_MODEL": "test-model",
+            "GLINK_HARNESS": "pi",
         },
         REPO_ROOT,
     )
@@ -443,8 +538,9 @@ def test_health_on_a_sandbox_face_does_not_probe_the_local_path(
         payload = json.loads(body)
         assert status == 200
         assert payload["executor"] == "e2b"
-        assert payload["pi"]["bin"] == "dsh"
-        assert payload["pi"]["available"] is True, (
+        assert payload["harness"]["pack"] == "dsh"
+        assert payload["harness"]["bin"] == "dsh"
+        assert payload["harness"]["available"] is True, (
             "沙箱面的执行体在镜像/模板内，本机没有 dsh 不代表引擎不可用"
         )
     finally:

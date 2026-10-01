@@ -38,7 +38,7 @@ from .tenancy import Tenancy, TenantNotConfigured, build_tenancy, load_identity_
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="glink-harness",
-        description="本地工作台宿主 / local workbench host (pi kernel)",
+        description="本地研究工作台宿主（harness 无关，默认 dsh）/ local research workbench host (harness-agnostic, default: dsh)",
     )
     parser.add_argument("--host", help="覆盖 LOCAL_WEB_HOST")
     parser.add_argument("--port", type=int, help="覆盖 LOCAL_WEB_PORT")
@@ -160,23 +160,28 @@ def main(
     url = f"http://{config.host}:{server.server_address[1]}/"
     print(f"glink-harness 宿主已启动 / host listening: {url}")
     print(f"执行面 executor: {config.executor}")
-    # The banner answers "where does the kernel run", not "is it on this
-    # machine's PATH": only inproc runs it locally, so only inproc reports a
-    # local lookup. Docker/E2B run it inside the image/template, where
+    # The banner answers "where does the selected harness run", not "is it on
+    # this machine's PATH": only inproc runs it locally, so only inproc reports
+    # a local lookup. Docker/E2B run it inside the image/template, where
     # "not found" would mislead (the same face-split semantics as
-    # /api/health after its fix).
+    # /api/health after its fix). The entry binary is the pack manifest's
+    # argv[0] (pi 族即 pi_bin)。
+    entry_bin = config.pi_bin if config.pack.family == "pi" else config.pack.command[0]
     if config.executor == "inproc":
-        pi_path = shutil.which(config.pi_bin)
-        print(f"内核 pi: {pi_path or f'未找到 ({config.pi_bin}) / not found'}")
+        entry_path = shutil.which(entry_bin)
+        print(
+            f"harness {config.harness_pack}: "
+            f"{entry_path or f'未找到 ({entry_bin}) / not found'}"
+        )
     else:
         print(
-            f"内核 kernel: {config.pi_bin}（在镜像/沙箱内执行，本机无需安装 / "
+            f"harness {config.harness_pack}: {entry_bin}（在镜像/沙箱内执行，本机无需安装 / "
             f"runs inside the {config.executor} image, no local install needed）"
         )
     print(
         "模型 model: "
         + (config.openai_model or "未配置 / unset")
-        + (" (已配置密钥 / key set)" if config.has_openai_key else " (缺少密钥 / no key)")
+        + (" (已配置凭据 / credentials set)" if config.model_ready else " (缺少凭据 / no credentials)")
     )
     sys.stdout.flush()
     try:

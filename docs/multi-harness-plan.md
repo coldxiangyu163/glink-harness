@@ -55,7 +55,8 @@ run 继承 agent 状态根（有界、拒绝链接、凭据目标排除后重渲
 四条件上增加「父状态根回收成功」，其余维持拒绝；dsh 与 codex-acp 各完成一次 inproc
 「首轮+追问」真实续接。详见 [ACP 集成笔记](acp-integration-notes.md) §14 与
 `docs/evidence/acp-m8-resume-*.txt`。
-宿主默认 harness 仍是 `pi`，ACP 族只在显式配置下启用，执行面已覆盖 inproc / docker / e2b；
+2026-10-01 前宿主默认 harness 为 `pi`；自 2026-10-01 起默认改为 `dsh`（dsh 为主力接入方案），
+pi/codex/opencode 作为扩展包经显式 `GLINK_HARNESS` 选择保留；执行面已覆盖 inproc / docker / e2b；
 「`kernel/` 泛化为 harness 适配层」已落地为**族接口**：`kernel/harness.py` 的
 `HarnessFamily`（职责 (a)-(f)：准入白名单与凭据、追问门禁与续接种子、runtime 渲染与
 projector、adapter 组装、stop 词汇归一化、子代理增强与运行中事实）加 `harness_pi.py` /
@@ -204,7 +205,8 @@ v1 时期的顶层 `command`/`package`/`version`/`session_config`/`permission_al
 
 ### 3.2 选择与族推导
 
-* `GLINK_HARNESS=<pack>`（`pi` | `dsh` | `codex` | `opencode`，默认 `pi`）：一次部署一个，
+* `GLINK_HARNESS=<pack>`（`dsh` | `pi` | `codex` | `opencode`，默认 `dsh`，2026-10-01 起；
+  此前默认 `pi`）：一次部署一个，
   启动冻结，没有 per-run 参数与前端开关。
 * 族由清单的 `family` 推导，`select_family` 按清单构造族实例（`harness_pi.py` /
   `harness_acp.py`）；每个 run 的族取自其记录的 `RunSpec.family`（§3.4），runner 不读

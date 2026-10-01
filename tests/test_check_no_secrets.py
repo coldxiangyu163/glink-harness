@@ -39,7 +39,10 @@ def _repo_root(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
     (root / ".env").write_text(
-        f"OPENAI_API_KEY={SECRET}\nGLINK_HARNESSES_DIR={REPO_ROOT / 'harnesses'}\n",
+        f"OPENAI_API_KEY={SECRET}\nGLINK_HARNESSES_DIR={REPO_ROOT / 'harnesses'}\n"
+        # 与扫描对象无关的 harness 选择钉在 pi 包：dsh 成为默认包后，
+        # 缺省会先撞上 dsh 的 OPENAI_MODEL/effort 必填校验，偏离本测试目的。
+        "GLINK_HARNESS=pi\n",
         encoding="utf-8",
     )
     return root

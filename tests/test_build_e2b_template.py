@@ -62,6 +62,8 @@ def script(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.setenv("E2B_API_KEY", "synthetic-e2b-key")
+    # 既有用例全部覆盖 SDK 构建面：固定选中 pi-worker，不跟随默认包（dsh）。
+    monkeypatch.setenv("GLINK_E2B_TEMPLATE_KEY", "pi-worker")
     return module
 
 
@@ -146,3 +148,44 @@ def test_promotion_confirms_the_result_instead_of_trusting_assign_return(script,
     fake.restore = True
     assert script.main(["--promote-from", "candidate"]) == 0
     assert fake.tags["default"] == "ready-build"
+
+
+# -- 模板选择（GLINK-HARNESS-DEFAULT-20261001：默认包 dsh 起，构建选择跟随包清单）-----
+
+
+def test_default_template_follows_the_default_pack_and_refuses_cli_builder(
+    script, monkeypatch, capsys
+):
+    """缺省包 dsh 的镜像目标是 acp-worker（builder=cli）：SDK 脚本拒绝并指向 CLI 命令。"""
+    monkeypatch.delenv("GLINK_E2B_TEMPLATE_KEY", raising=False)
+    monkeypatch.delenv("GLINK_HARNESS", raising=False)
+    fake = FakeTemplate()
+    monkeypatch.setattr(script, "Template", fake)
+    assert script.main(["--tag", "candidate"]) == 2
+    assert fake.builds == 0
+    err = capsys.readouterr().err
+    assert "builder=cli" in err and "template create" in err
+
+
+def test_default_template_follows_an_explicitly_selected_pack(script, monkeypatch):
+    """GLINK_HARNESS=pi 时缺省模板键解析为 pi-worker（sdk 面），构建照常。"""
+    monkeypatch.delenv("GLINK_E2B_TEMPLATE_KEY", raising=False)
+    monkeypatch.setenv("GLINK_HARNESS", "pi")
+    fake = FakeTemplate(restore=True)
+    monkeypatch.setattr(script, "Template", fake)
+    assert script.main(["--tag", "candidate"]) == 0
+    assert fake.builds == 1
+
+
+def test_explicit_template_flag_selects_the_entry(script, monkeypatch):
+    monkeypatch.delenv("GLINK_E2B_TEMPLATE_KEY", raising=False)
+    fake = FakeTemplate(restore=True)
+    monkeypatch.setattr(script, "Template", fake)
+    assert script.main(["--template", "pi-worker", "--tag", "candidate"]) == 0
+    assert fake.builds == 1
+
+
+def test_unknown_template_key_is_refused(script, monkeypatch):
+    monkeypatch.delenv("GLINK_E2B_TEMPLATE_KEY", raising=False)
+    with pytest.raises(SystemExit):
+        script.main(["--template", "nope", "--tag", "candidate"])

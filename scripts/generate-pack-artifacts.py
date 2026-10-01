@@ -155,7 +155,10 @@ def render_templates(packs: tuple[HarnessPack, ...]) -> str:
                 ]
             )
         else:
-            command = ".venv/bin/python scripts/build-e2b-template.py --tag candidate"
+            command = (
+                f".venv/bin/python scripts/build-e2b-template.py --template {target}"
+                " --tag candidate"
+            )
         templates[target] = {
             "alias": build.e2b_alias,
             "dockerfile": build.e2b_dockerfile,

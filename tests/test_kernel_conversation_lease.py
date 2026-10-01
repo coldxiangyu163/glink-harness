@@ -140,6 +140,7 @@ def test_config_ttl_validation(tmp_path: Path) -> None:
         "OPENAI_API_KEY": "sk-test",
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
+        "GLINK_HARNESS": "pi",
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
     }
     config = build_config(values, REPO_ROOT)
@@ -161,6 +162,7 @@ def make_config(tmp_path: Path, *, ttl: int = 7200):
         "OPENAI_API_KEY": "sk-test",
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
+        "GLINK_HARNESS": "pi",
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "GLINK_CONVERSATION_LEASE_TTL_SECONDS": str(ttl),
     }

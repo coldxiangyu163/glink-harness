@@ -316,6 +316,22 @@ class HostConfig:
         return bool(self.web_search_key)
 
     @property
+    def model_ready(self) -> bool:
+        """Host-level model readiness for the selected pack's family.
+
+        pi 族：OpenAI 兼容 key + 模型 id。ACP 族：模型 id + 已声明的凭据通道
+        （``acp_credential_env`` 的值在启动期解析/缺失即拒绝；``acp_credential_files``
+        的源文件同样在启动期校验），通道在列即值已就位。这只是配置就绪，
+        不等于真实模型握手成功。多租户的每租户口径在
+        ``web_security._public_config`` 按上下文覆盖本值。
+        """
+        if self.pack.family == "acp":
+            return bool(self.openai_model) and bool(
+                self.acp_credential_env_values or self.acp_credential_files
+            )
+        return self.has_openai_key and bool(self.openai_model)
+
+    @property
     def binds_loopback(self) -> bool:
         return self.host in _LOOPBACK_HOSTS
 
@@ -344,7 +360,7 @@ class HostConfig:
             "multiTenant": self.multi_tenant,
             "authMode": self.identity_mode,
             "configured": {
-                "model": self.has_openai_key and bool(self.openai_model),
+                "model": self.model_ready,
                 "e2b": self.has_e2b_key and self.executor == "e2b",
             },
         }
@@ -939,8 +955,10 @@ def _select_harness_pack(values: Mapping[str, str], harnesses_dir: Path) -> Harn
     ``GLINK_HARNESS`` names a pack directory; anything else (including a
     retired value) is refused with the list of available packs. The manifest is
     the single place a harness's entry, capabilities and image pins live.
+    The unset default is ``dsh``（2026-10-01 起；此前为 ``pi``）—— dsh 是当前
+    主力接入方案，pi/codex/opencode 作为扩展包保留并显式选择。
     """
-    requested = _text(values, "GLINK_HARNESS", "pi").lower()
+    requested = _text(values, "GLINK_HARNESS", "dsh").lower()
     try:
         return load_pack(harnesses_dir, requested)
     except HarnessPackError as exc:

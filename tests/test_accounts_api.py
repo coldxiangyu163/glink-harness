@@ -163,6 +163,7 @@ def make_config(tmp_path: Path, tenant_files: tuple[Path, Path], **overrides: st
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
+        "GLINK_HARNESS": "pi",
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_PORT": "0",
         "LOCAL_WEB_EXECUTOR": "docker",
@@ -233,6 +234,7 @@ def local_server(tmp_path: Path):
                 "LOCAL_WEB_DATA_ROOT": str(tmp_path / "local-data"),
                 "LOCAL_WEB_PORT": "0",
                 "OPENAI_MODEL": "test-model",
+                "GLINK_HARNESS": "pi",
             },
             REPO_ROOT,
         )
@@ -1551,6 +1553,7 @@ def test_accounts_mode_configuration_defaults_and_refusals(tmp_path: Path) -> No
         "GLINK_TENANCY_AUDIENCE": AUDIENCE,
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "OPENAI_MODEL": "test/model",
+        "GLINK_HARNESS": "pi",
     }
     config = build_config(base, REPO_ROOT)
     assert config.accounts_db == tmp_path / "data" / "accounts" / "accounts.db"
@@ -1581,6 +1584,7 @@ def test_accounts_mode_does_not_require_a_gateway_secret(tmp_path: Path) -> None
             "GLINK_TENANT_CONFIG_FILE": str(tenants),
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
             "OPENAI_MODEL": "test/model",
+            "GLINK_HARNESS": "pi",
         },
         REPO_ROOT,
     )
@@ -1594,6 +1598,7 @@ def test_accounts_mode_does_not_require_a_gateway_secret(tmp_path: Path) -> None
                 "GLINK_TENANT_CONFIG_FILE": str(tenants),
                 "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data2"),
                 "OPENAI_MODEL": "test/model",
+                "GLINK_HARNESS": "pi",
             },
             REPO_ROOT,
         )

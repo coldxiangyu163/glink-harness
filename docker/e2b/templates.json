@@ -16,7 +16,7 @@
         "PI_WEB_ACCESS_VERSION": "0.31.0"
       },
       "builder": "sdk",
-      "build_command": ".venv/bin/python scripts/build-e2b-template.py --tag candidate"
+      "build_command": ".venv/bin/python scripts/build-e2b-template.py --template pi-worker --tag candidate"
     },
     "acp-worker": {
       "alias": "glink-acp-worker",

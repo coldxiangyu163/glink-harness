@@ -51,7 +51,7 @@ function harness() {
   const toasts = [];
   const api = {
     me: async () => ({ mode: 'local', authenticated: false }),
-    health: async () => ({ pi: { available: true }, configured: { model: true } }),
+    health: async () => ({ harness: { available: true }, configured: { model: true } }),
     config: async () => ({ model: 'test-model' }),
     listRuns: async () => ({ runs: [] }),
     getRun: (runId) => {

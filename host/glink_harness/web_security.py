@@ -361,10 +361,9 @@ class RequestSecurityMixin:
             if self.server.config.shared_model_credentials:
                 view["configured"] = {
                     **view["configured"],
-                    "model": bool(
-                        self.server.config.has_openai_key
-                        and self.server.config.openai_model
-                    ),
+                    # 共享政策下就是宿主冻结的那套凭据：族感知的宿主级就绪
+                    # （pi 族看 OPENAI key；ACP 族看具名凭据通道）。
+                    "model": self.server.config.model_ready,
                 }
             else:
                 credentials = self.server.tenancy.credentials

@@ -3,8 +3,11 @@
 
 用法::
 
-    # 候选构建（不移动生产 default tag）：
+    # 候选构建（不移动生产 default tag；--template 缺省跟随 GLINK_HARNESS 所选包
+    # 的 [image].target，默认包为 dsh → acp-worker）：
     E2B_API_KEY=… .venv/bin/python scripts/build-e2b-template.py --tag candidate
+    # 显式选择模板（sdk 构建方式的条目才可由本脚本构建）：
+    E2B_API_KEY=… .venv/bin/python scripts/build-e2b-template.py --template pi-worker --tag candidate
     # 在候选沙箱内自检通过后，把 default 移到候选 build：
     .venv/bin/python scripts/build-e2b-template.py --promote-from candidate
     # 回滚：把 default 移回候选构建前的那个 build（构建候选时自动打 previous tag）
@@ -13,8 +16,10 @@
 为什么用 Python SDK 而不是 `npx @e2b/cli template create`：
 CLI 基于 Node 的 fetch，不认 socks5 代理；SDK 走 httpx，装上 socksio 即可在
 需要代理的网络里完成构建。别名、Dockerfile 与 CPU / 内存默认值读取生成产物
-docker/e2b/templates.json 的 ``pi-worker`` 条目（由 scripts/generate-pack-artifacts.py
-从 harnesses/pi/harness.toml 生成），不在本脚本里另写一份。
+docker/e2b/templates.json 的所选条目（由 scripts/generate-pack-artifacts.py
+从 harnesses/<包>/harness.toml 生成），不在本脚本里另写一份；``builder=cli``
+的条目（acp-worker）只能用它自己的 build_command（E2B CLI）构建，本脚本
+会拒绝并提示对应命令。
 
 候选流程（GLINK-PKG-01）：E2B 服务端会把最新构建设成 `default`，所以
 ``--tag candidate`` 会先把当前 default build 标成 ``previous``，构建后若
@@ -39,10 +44,35 @@ from e2b.exceptions import SandboxException
 REPO_ROOT = Path(__file__).resolve().parents[1]
 #: 生成产物：E2B 模板参数（清单派生，见 scripts/generate-pack-artifacts.py）。
 TEMPLATES = REPO_ROOT / "docker" / "e2b" / "templates.json"
-_TEMPLATE = json.loads(TEMPLATES.read_text(encoding="utf-8"))["templates"]["pi-worker"]
-DOCKERFILE = REPO_ROOT / _TEMPLATE["dockerfile"]
 #: 候选构建前的生产 build 会带上这个 tag，作为回滚句柄。
 ROLLBACK_TAG = "previous"
+
+
+def _default_template_key() -> str:
+    """跟随所选 harness 包的镜像目标（缺省包为 dsh → acp-worker）。
+
+    只读包清单的 ``[image].target``，不导入宿主模块；包不存在或缺键时
+    回退 pi-worker 由后续校验报出真实错误。
+    """
+    import tomllib
+
+    pack = (os.environ.get("GLINK_HARNESS") or "dsh").strip().lower()
+    manifest = REPO_ROOT / "harnesses" / pack / "harness.toml"
+    try:
+        target = tomllib.loads(manifest.read_text(encoding="utf-8"))["image"]["target"]
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        return "pi-worker"
+    return str(target)
+
+
+def _template_entry(key: str) -> dict:
+    templates = json.loads(TEMPLATES.read_text(encoding="utf-8"))["templates"]
+    if key not in templates:
+        raise SystemExit(
+            f"未知模板 {key!r}；可用：{'、'.join(sorted(templates))}"
+        )
+    return templates[key]
+
 
 
 def _tags(alias: str, *, allow_missing: bool = False) -> dict[str, str]:
@@ -89,9 +119,14 @@ def _promote(alias: str, source_tag: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="构建 glink-harness 的 E2B 模板")
-    parser.add_argument("--alias", default=os.environ.get("GLINK_E2B_TEMPLATE", _TEMPLATE["alias"]))
-    parser.add_argument("--cpu", type=int, default=_TEMPLATE["cpu_count"])
-    parser.add_argument("--memory-mb", type=int, default=_TEMPLATE["memory_mb"])
+    parser.add_argument(
+        "--template",
+        default=os.environ.get("GLINK_E2B_TEMPLATE_KEY") or _default_template_key(),
+        help="templates.json 里的模板键（缺省跟随 GLINK_HARNESS 所选包的镜像目标）",
+    )
+    parser.add_argument("--alias", default="", help="覆盖模板 alias（默认取所选条目的 alias；GLINK_E2B_TEMPLATE 同效）")
+    parser.add_argument("--cpu", type=int, default=0, help="覆盖 CPU 数（默认取所选条目）")
+    parser.add_argument("--memory-mb", type=int, default=0, help="覆盖内存 MB（默认取所选条目）")
     parser.add_argument(
         "--tag",
         default="",
@@ -105,23 +140,36 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--logs", action="store_true", help="打印构建日志")
     args = parser.parse_args(argv)
 
+    entry = _template_entry(args.template)
+    dockerfile = REPO_ROOT / entry["dockerfile"]
+    args.alias = args.alias or os.environ.get("GLINK_E2B_TEMPLATE", entry["alias"])
+    args.cpu = args.cpu or entry["cpu_count"]
+    args.memory_mb = args.memory_mb or entry["memory_mb"]
+
     if not os.environ.get("E2B_API_KEY"):
         print("缺少 E2B_API_KEY", file=sys.stderr)
         return 2
 
     if args.promote_from:
         return _promote(args.alias, args.promote_from)
+    if entry.get("builder") != "sdk":
+        print(
+            f"模板 {args.template} 由 E2B CLI 构建（builder=cli），本脚本只覆盖 SDK 面；"
+            f"请改用生成产物里的 build_command：{entry.get('build_command', '（无）')}",
+            file=sys.stderr,
+        )
+        return 2
     if args.tag in {"default", ROLLBACK_TAG}:
         print("候选 tag 不能覆盖 default 或 previous。", file=sys.stderr)
         return 2
 
-    if not DOCKERFILE.is_file():
-        print(f"缺少 Dockerfile: {DOCKERFILE}", file=sys.stderr)
+    if not dockerfile.is_file():
+        print(f"缺少 Dockerfile: {dockerfile}", file=sys.stderr)
         return 2
 
     proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY")
     print(f"构建模板 alias={args.alias}（cpu={args.cpu}, memory={args.memory_mb}MB）")
-    print(f"Dockerfile: {DOCKERFILE.relative_to(REPO_ROOT)}")
+    print(f"Dockerfile: {dockerfile.relative_to(REPO_ROOT)}")
     if proxy:
         print("代理: 已启用（不输出地址或凭据）")
 
@@ -139,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        builder = Template().from_dockerfile(str(DOCKERFILE))
+        builder = Template().from_dockerfile(str(dockerfile))
         on_logs = (lambda entry: print(f"  [{entry.level}] {entry.message}")) if args.logs else None
         info = Template.build(
             builder, alias=args.alias, tags=[args.tag] if args.tag else None,

@@ -319,6 +319,7 @@ def make_values(tmp_path: Path, **overrides: str) -> dict[str, str]:
     values = {
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
+        "GLINK_HARNESS": "pi",
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "GLINK_TENANCY": "multitenant",
         "LOCAL_WEB_EXECUTOR": "docker",
@@ -368,6 +369,7 @@ def test_local_mode_ignores_the_multitenant_material(tmp_path: Path) -> None:
     config = build_config(
         {
             "OPENAI_MODEL": "test/model",
+            "GLINK_HARNESS": "pi",
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         },
         REPO_ROOT,

@@ -79,7 +79,7 @@ function harness({
       meCalls += 1;
       return me();
     },
-    health: async () => ({ pi: { available: true }, configured: { model: true } }),
+    health: async () => ({ harness: { available: true }, configured: { model: true } }),
     config: async () => ({ model: 'test-model' }),
     listRuns: async () => ({ runs: [] }),
     getRun: async (runId) => ({ run: runView(runId) }),
@@ -266,7 +266,7 @@ test('a live workspace refreshes /api/me after csrf_invalid and retries with the
     calls.push({ url, init });
     const respond = (status, payload) => ({ ok: status === 200, status, text: async () => JSON.stringify(payload) });
     if (url === '/api/me') return respond(200, { ...ACCOUNTS_ME, csrfToken: token });
-    if (url === '/api/health') return respond(200, { pi: { available: true }, configured: { model: true } });
+    if (url === '/api/health') return respond(200, { harness: { available: true }, configured: { model: true } });
     if (url === '/api/config') return respond(200, { model: 'test-model' });
     if (url === '/api/runs' && init.method === 'GET') return respond(200, { runs: [] });
     if (url === '/api/runs' && init.method === 'POST') {
@@ -400,7 +400,7 @@ test('the service alert follows the tenant-aware /api/config, not the host-level
   const configuredTenant = harness({
     me: async () => ({ ...ACCOUNTS_ME }),
     api: {
-      health: async () => ({ pi: { available: true }, configured: { model: false } }),
+      health: async () => ({ harness: { available: true }, configured: { model: false } }),
       config: async () => ({ model: 'tenant-model', configured: { model: true } }),
     },
   });
@@ -412,7 +412,7 @@ test('the service alert follows the tenant-aware /api/config, not the host-level
   const unconfiguredTenant = harness({
     me: async () => ({ ...ACCOUNTS_ME }),
     api: {
-      health: async () => ({ pi: { available: true }, configured: { model: true } }),
+      health: async () => ({ harness: { available: true }, configured: { model: true } }),
       config: async () => ({ model: 'tenant-model', configured: { model: false } }),
     },
   });

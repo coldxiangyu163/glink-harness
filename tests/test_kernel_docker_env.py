@@ -51,6 +51,7 @@ def config(tmp_path: Path):
             "OPENAI_BASE_URL": "https://example.invalid/v1",
             "OPENAI_MODEL": "openai/gpt-5.6-sol",
             "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
+            "GLINK_HARNESS": "pi",
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
             "LOCAL_WEB_EXECUTOR": "docker",
         },
@@ -220,6 +221,7 @@ def test_resource_ceilings_are_configurable_at_startup(tmp_path: Path) -> None:
             "LOCAL_WEB_DOCKER_CPUS": "1.5",
             "LOCAL_WEB_DOCKER_MEMORY": "1g",
             "LOCAL_WEB_DOCKER_PIDS_LIMIT": "128",
+            "GLINK_HARNESS": "pi",
         },
         REPO_ROOT,
     )
@@ -245,6 +247,7 @@ def test_worker_image_is_frozen_at_configuration_time(
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
             "LOCAL_WEB_EXECUTOR": "docker",
             "LOCAL_WEB_WORKER_IMAGE": "glink-harness-worker:pinned",
+            "GLINK_HARNESS": "pi",
         },
         REPO_ROOT,
     )

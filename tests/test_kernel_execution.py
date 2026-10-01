@@ -56,6 +56,7 @@ def make_config(tmp_path: Path, **overrides: str):
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
+        "GLINK_HARNESS": "pi",
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
     }
     values.update(overrides)
