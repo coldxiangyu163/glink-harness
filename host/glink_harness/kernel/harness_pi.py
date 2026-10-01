@@ -16,14 +16,6 @@ from typing import Any, Callable, Mapping, TYPE_CHECKING
 from ..artifacts import ArtifactError, ArtifactTree
 from ..config import ConfigError, is_loopback_hostname
 from ..contracts import FollowupUnavailable, Verdict
-from ..store import (
-    CHILDREN_DIRNAME,
-    FAILED,
-    FINISHED,
-    SESSIONS_DIRNAME,
-    SUBAGENTS_DIRNAME,
-    RunRecord,
-)
 from .agent_env import (
     IMAGE_PACKAGE_GUARD,
     AgentRuntime,
@@ -44,12 +36,23 @@ if TYPE_CHECKING:  # pragma: no cover - annotation only
     from ..redaction import SecretRedactor
     from .agent_env import EgressEndpoint, RunCredentials
     from .archive_channel import ArchiveEndpoint
+    from .run_views import RunRecord  # 记录只读视图类型（协议面沿用共享数据类型）
 
 logger = logging.getLogger("glink_harness.kernel.harness_pi")
 
 #: per-run pi 配置目录名，以及宿主读回产物（含会话种子）的统一上限。
 RUNTIME_DIRNAME = "pi-agent"
 REPORT_MAX_BYTES = 32 * 1024 * 1024
+
+#: 与宿主 ``store.py`` 共享的词汇（唯一真源在 store）：产品终态词
+#: （``Verdict.status`` 的取值）与宿主拥有的 run 目录子布局（子代理镜像与
+#: 子代理文档目录）。R1-2 起族只经 ``SessionSource`` 协议访问宿主事实、
+#: 不再 import store，这些词的逐字相等由 tests/test_kernel_harness_pi.py
+#: 钉住，防止两处定义漂移。
+FINISHED = "finished"
+FAILED = "failed"
+SUBAGENTS_DIRNAME = "subagents"
+CHILDREN_DIRNAME = "children"
 
 #: Bounds for the children enrichment copy (pi-subagents artifacts →
 #: ``children/<n>/``): the sources are already bounded at recovery, the copy
@@ -82,14 +85,16 @@ class PiHarnessFamily(HarnessFamily):
         self, parent: RunRecord, *, redactor: "SecretRedactor"
     ) -> bytes | None:
         # The recorded path is not a capability. It must be a direct file in
-        # that run's own session directory; ArtifactTree refuses links.
+        # that run's own session directory; the SessionSource's bounded read
+        # 拒绝链接（ArtifactTree 语义经协议保留，有界读在本层之下）。
         session_dir = self._store.session_dir(parent.run_id)
         path = Path(parent.session_file or "")
         if path.parent != session_dir or path.suffix != ".jsonl":
             raise FollowupUnavailable("session_unavailable")
         try:
-            with ArtifactTree(session_dir) as tree:
-                seed = tree.read(path.name, max_bytes=REPORT_MAX_BYTES)
+            seed = self._store.read_session_seed(
+                parent.run_id, path.name, max_bytes=REPORT_MAX_BYTES
+            )
         except (ArtifactError, OSError) as exc:
             raise FollowupUnavailable("session_unavailable") from exc
         if not seed.strip() or not parent.session_id:
@@ -149,7 +154,9 @@ class PiHarnessFamily(HarnessFamily):
         runtime = prepare_agent_dir(
             self._config,
             runtime_dir=run_dir / RUNTIME_DIRNAME,
-            session_dir=run_dir / SESSIONS_DIRNAME,
+            # 会话目录的布局事实经 SessionSource 协议取（与 resume_seed 读种子
+            # 的目录同一来源），族不自造 store 布局规则。
+            session_dir=self._store.session_dir(run_id),
             egress=egress,
             # An isolated sandbox runs pi from its image: settings.json names
             # the image-local prebaked packages (the guard verifies them).

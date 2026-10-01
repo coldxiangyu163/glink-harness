@@ -2,7 +2,9 @@
 
 钉住自 runner 搬迁的 pi 族行为：缺模型凭据的准入拒绝
 原文、续接种子值与会话身份校验时机，以及 pi stop 词汇到产品终态词汇的
-逐格映射（oracle 即 runner ``_decide`` 现分支字面量）。
+逐格映射（oracle 即 runner ``_decide`` 现分支字面量）。R1-2 起追加钉住：
+族只经 SessionSource 窄协议访问宿主事实——共享词汇镜像与 store 逐字相等、
+``resume_seed`` 经协议有界读且重脱敏留族侧（各失败点拒绝文本与次序原样）。
 """
 
 from __future__ import annotations
@@ -14,9 +16,20 @@ import pytest
 
 from acp_pack import write_acp_pack
 from glink_harness.config import ConfigError, HostConfig, build_config
+from glink_harness.contracts import FollowupUnavailable
+from glink_harness.kernel import harness_pi
 from glink_harness.kernel.agent_env import RunCredentials
 from glink_harness.kernel.harness import select_family
-from glink_harness.store import CANCELLED, FAILED, FINISHED, RunStore, RunSpec
+from glink_harness.redaction import SecretRedactor
+from glink_harness.store import (
+    CANCELLED,
+    CHILDREN_DIRNAME,
+    FAILED,
+    FINISHED,
+    SUBAGENTS_DIRNAME,
+    RunStore,
+    RunSpec,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"
@@ -99,6 +112,98 @@ def test_continuation_workspace_defaults_to_none(tmp_path: Path) -> None:
     _config, store, family = make_family(tmp_path)
     parent = store.create("第一轮", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     assert family.continuation_workspace(parent) is None
+
+
+# -- R1-2：族经 SessionSource 窄协议访问宿主事实 ----------------------------------
+
+
+def test_pi_family_vocabulary_mirrors_the_store_vocabulary() -> None:
+    """族不再 import store；与宿主共享的词汇（终态词与 run 目录子布局）逐字相等在此钉住。
+
+    唯一真源是 ``store.py``；harness_pi.py 的同名常量只是镜像，漂移即红。
+    """
+    assert harness_pi.FINISHED == FINISHED
+    assert harness_pi.FAILED == FAILED
+    assert harness_pi.SUBAGENTS_DIRNAME == SUBAGENTS_DIRNAME
+    assert harness_pi.CHILDREN_DIRNAME == CHILDREN_DIRNAME
+
+
+def make_parent_with_session(store: RunStore, content: bytes = b'{"k": 1}\n'):
+    """一条带会话文件事实的父 run（合成输入，临时目录）。"""
+    parent = store.create("第一轮", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
+    session_dir = store.session_dir(parent.run_id)
+    session_dir.mkdir(parents=True)
+    session_file = session_dir / "session.jsonl"
+    session_file.write_bytes(content)
+    return store.update(
+        parent.run_id, session_file=str(session_file), session_id="pi-session-1"
+    )
+
+
+def test_pi_resume_seed_reads_via_the_session_source_and_re_redacts(tmp_path: Path) -> None:
+    """种子经协议有界读取出；重脱敏职责留族侧（历史文件按最新规则再脱敏）。"""
+    _config, store, family = make_family(tmp_path)
+    parent = make_parent_with_session(store, b'{"key": "sk-parent-secret-1"}\n')
+    seed = family.resume_seed(parent, redactor=SecretRedactor(["sk-parent-secret-1"]))
+    assert seed is not None
+    assert b"sk-parent-secret-1" not in seed
+    assert seed != b'{"key": "sk-parent-secret-1"}\n'
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"", b"\n"],
+)
+def test_pi_resume_seed_refuses_an_empty_seed(tmp_path: Path, content: bytes) -> None:
+    _config, store, family = make_family(tmp_path)
+    parent = make_parent_with_session(store, content)
+    with pytest.raises(FollowupUnavailable, match="session_unavailable"):
+        family.resume_seed(parent, redactor=SecretRedactor())
+
+
+def test_pi_resume_seed_refuses_a_path_outside_the_session_dir(tmp_path: Path) -> None:
+    """记录的路径不是能力：必须是本 run 会话目录的直系 .jsonl 文件。"""
+    _config, store, family = make_family(tmp_path)
+    parent = store.create("第一轮", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
+    outside = tmp_path / "elsewhere.jsonl"
+    outside.write_bytes(b'{"k": 1}\n')
+    parent = store.update(
+        parent.run_id, session_file=str(outside), session_id="pi-session-1"
+    )
+    with pytest.raises(FollowupUnavailable, match="session_unavailable"):
+        family.resume_seed(parent, redactor=SecretRedactor())
+    session_dir = store.session_dir(parent.run_id)
+    session_dir.mkdir(parents=True)
+    wrong_suffix = session_dir / "session.txt"
+    wrong_suffix.write_bytes(b'{"k": 1}\n')
+    parent = store.update(parent.run_id, session_file=str(wrong_suffix))
+    with pytest.raises(FollowupUnavailable, match="session_unavailable"):
+        family.resume_seed(parent, redactor=SecretRedactor())
+
+
+def test_pi_resume_seed_refuses_a_missing_or_undecodable_file(tmp_path: Path) -> None:
+    _config, store, family = make_family(tmp_path)
+    parent = store.create("第一轮", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
+    session_dir = store.session_dir(parent.run_id)
+    session_dir.mkdir(parents=True)
+    parent = store.update(
+        parent.run_id,
+        session_file=str(session_dir / "missing.jsonl"),
+        session_id="pi-session-1",
+    )
+    with pytest.raises(FollowupUnavailable, match="session_unavailable"):
+        family.resume_seed(parent, redactor=SecretRedactor())
+    parent = make_parent_with_session(store, b"\xff\xfe invalid utf-8\n")
+    with pytest.raises(FollowupUnavailable, match="session_unavailable"):
+        family.resume_seed(parent, redactor=SecretRedactor())
+
+
+def test_pi_resume_seed_refuses_a_parent_without_session_id(tmp_path: Path) -> None:
+    _config, store, family = make_family(tmp_path)
+    parent = make_parent_with_session(store)
+    parent = store.update(parent.run_id, session_id=None)
+    with pytest.raises(FollowupUnavailable, match="session_unavailable"):
+        family.resume_seed(parent, redactor=SecretRedactor())
 
 
 # -- (e) 终态词汇归一化 ----------------------------------------------------------
