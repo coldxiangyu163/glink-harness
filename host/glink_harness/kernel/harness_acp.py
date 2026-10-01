@@ -9,6 +9,10 @@ R1-3 起族只经 :class:`~glink_harness.kernel.run_views.SessionSource` 窄协�
 访问宿主事实（父记录只读视图、父 run 事件扫描/能力矩阵、目录布局推导、
 e2b 租约/泊车候选事实），不再 import store；与宿主共享的终态词以同名常量
 镜像，逐字相等由 tests/test_kernel_harness_acp.py 钉住。
+
+R1-4 起族的 config 读取面收敛为 :class:`AcpFamilyConfig` 族段冻结配置：
+构造点从注入的冻结 HostConfig 一次性提取，运行期只读族段显式字段，
+不回读全局 HostConfig 或环境。
 """
 
 from __future__ import annotations
@@ -18,11 +22,12 @@ import os
 import stat
 import time
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, TYPE_CHECKING
 
 from .. import events
-from ..config import ConfigError
+from ..config import ConfigError, HarnessPack, HostConfig
 from ..contracts import FollowupUnavailable, Verdict, conversation_guard
 from .acp_env import (
     ACP_HOME_DIRNAME,
@@ -48,7 +53,7 @@ from .sandbox import Launch, Mount, Sandbox, SandboxResume
 if TYPE_CHECKING:  # pragma: no cover - annotation only
     from ..redaction import SecretRedactor
     from .agent_env import EgressEndpoint, RunCredentials
-    from .run_views import RunRecord  # 记录只读视图类型（协议面沿用共享数据类型）
+    from .run_views import RunRecord, SessionSource  # 记录只读视图类型（协议面沿用共享数据类型）
 
 logger = logging.getLogger("glink_harness.kernel.harness_acp")
 
@@ -70,10 +75,47 @@ FAILED = "failed"
 CANCELLED = "cancelled"
 
 
+@dataclass(frozen=True, slots=True)
+class AcpFamilyConfig:
+    """ACP 族段冻结配置（R1-4，设计 §2.3 末段）。
+
+    族构造时从注入的冻结 ``HostConfig`` 一次性提取本段；此后族的运行期
+    读取面只有本段的显式字段，不回读全局 ``HostConfig`` 或环境。``host``
+    是同一份冻结 ``HostConfig`` 的渲染底稿句柄，仅供 kernel 渲染 helper
+    （``acp_env`` / ``docker_env`` 的 prepare/render 函数）按既有签名消费；
+    族自身的政策事实（凭据政策、租约 TTL、E2B 模板、包能力）一律读上面
+    的显式字段。所有取值与提取前逐字相等——纯收敛，不改变任何生效值。
+    """
+
+    multi_tenant: bool
+    shared_model_credentials: bool
+    conversation_lease_ttl_seconds: int
+    acp_e2b_template: str
+    pack: HarnessPack
+    host: HostConfig
+
+    @classmethod
+    def from_host(cls, config: HostConfig) -> "AcpFamilyConfig":
+        return cls(
+            multi_tenant=config.multi_tenant,
+            shared_model_credentials=config.shared_model_credentials,
+            conversation_lease_ttl_seconds=int(config.conversation_lease_ttl_seconds),
+            acp_e2b_template=config.acp_e2b_template,
+            pack=config.pack,
+            host=config,
+        )
+
+
 class AcpHarnessFamily(HarnessFamily):
     """ACP 族：agent 自带配置，续接住在父 run 的 agent 状态根。"""
 
     name = "acp"
+
+    def __init__(self, *, config: HostConfig, store: "SessionSource") -> None:
+        # R1-4：族段在构造点冻结（族实例由 select_family 于准入期解析并
+        # 缓存）；此后本族只读 ``self._segment``，不持有全局 HostConfig。
+        self._segment = AcpFamilyConfig.from_host(config)
+        super().__init__(config=config, store=store)
 
     # -- (a) 准入 --------------------------------------------------------------
 
@@ -88,7 +130,8 @@ class AcpHarnessFamily(HarnessFamily):
         通道配置矛盾由 ``_acp_credentials_follow_policy`` 拒绝，这里拒绝的是
         通道未配置但政策不可满足的组合，两层互为纵深。
         """
-        if self._config.multi_tenant and not self._config.shared_model_credentials:
+        segment = self._segment
+        if segment.multi_tenant and not segment.shared_model_credentials:
             raise ConfigError(
                 "多租户 tenant 政策下 ACP 族不可用：租户级凭据注入未实现（M2）；"
                 "SaaS 统一供模型请显式配置 GLINK_MODEL_CREDENTIALS=shared"
@@ -293,7 +336,7 @@ class AcpHarnessFamily(HarnessFamily):
         """
         if parent.spec.executor != "e2b":
             return None
-        if int(self._config.conversation_lease_ttl_seconds) <= 0:
+        if self._segment.conversation_lease_ttl_seconds <= 0:
             return None
         conversation_dir = self._store.conversations_root() / self.conversation_root(parent)
         try:
@@ -311,7 +354,7 @@ class AcpHarnessFamily(HarnessFamily):
             return None
         if lease.pack != parent.spec.pack:
             return None
-        if lease.template != self._config.acp_e2b_template:
+        if lease.template != self._segment.acp_e2b_template:
             return None
         if lease.is_expired(time.time()):
             return None
@@ -367,7 +410,7 @@ class AcpHarnessFamily(HarnessFamily):
                 target = self.sandbox_resume_target(parent)
             except LeaseCorruptError as exc:
                 warning = str(exc)
-        return StateTransfer(directory, credential_destinations(self._config),
+        return StateTransfer(directory, credential_destinations(self._segment.host),
                              backfill, target, warning)
 
     def prepare_runtime(
@@ -414,7 +457,7 @@ class AcpHarnessFamily(HarnessFamily):
             learned_secrets = learn_conversation_state_secrets(source)
         try:
             runtime = prepare_acp_runtime(
-                self._config,
+                self._segment.host,
                 runtime_dir=run_dir / ACP_RUNTIME_DIRNAME,
                 inherit_from=inherit_from,
             )
@@ -446,7 +489,7 @@ class AcpHarnessFamily(HarnessFamily):
     ) -> AcpProjector:
         return AcpProjector(
             redactor,
-            subagent_dispatch=self._config.pack.capabilities.subagent_dispatch,
+            subagent_dispatch=self._segment.pack.capabilities.subagent_dispatch,
             workspace_prefix=agent_workspace,
         )
 

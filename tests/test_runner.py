@@ -1705,6 +1705,59 @@ def test_foreign_parent_stays_unknown_even_when_its_family_is_known(
     assert excinfo.value.code == "unknown_run"
 
 
+# -- R1-4：族 config 冻结收敛与 OwnerRef 抽象身份的导入边界 ------------------------
+
+
+def test_family_modules_have_zero_tenancy_references() -> None:
+    """族模块（harness/harness_pi/harness_acp）对 tenancy 与产品账号类型零引用。
+
+    R1-4 把 kernel 层的身份词汇收敛为抽象 OwnerRef：族模块导入 tenancy /
+    accounts / auth 或引用 TenantContext 都必须变红（AST 导入面与词面双重
+    钉住；kernel 整层的方向规则由 test_repository_boundaries.py 卡住，这里
+    单独钉三个族模块）。
+    """
+    import ast  # noqa: PLC0415
+
+    kernel = REPO_ROOT / "host" / "glink_harness" / "kernel"
+    for name in ("harness.py", "harness_pi.py", "harness_acp.py"):
+        text = (kernel / name).read_text(encoding="utf-8")
+        imported: list[str] = []
+        for node in ast.walk(ast.parse(text, filename=name)):
+            if isinstance(node, ast.Import):
+                imported.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.append(node.module)
+        denied = [
+            module
+            for module in imported
+            if any(tag in module for tag in ("tenancy", "accounts", "auth"))
+        ]
+        assert denied == [], (name, denied)
+        assert "TenantContext" not in text, name
+
+
+def test_owner_ref_is_the_kernels_abstract_identity() -> None:
+    """OwnerRef 定义在 kernel.harness；runs 编排层持有唯一映射点 owner_ref_of。
+
+    映射语义：多租户上下文 → owner_id=tenant_id；本地模式（无上下文）→ 空
+    OwnerRef。owner 匹配/异租户拒绝的行为由上面的门禁次序用例钉住。
+    """
+    from glink_harness.kernel.harness import OwnerRef  # noqa: PLC0415
+    from glink_harness.runs.admission import owner_ref_of  # noqa: PLC0415
+
+    assert OwnerRef.__module__ == "glink_harness.kernel.harness"
+    assert OwnerRef().owner_id is None
+    stranger = TenantContext(
+        tenant_id="tenant-beta",
+        user_id="user-b",
+        role="member",
+        audience="glink-harness-test",
+        expires_at=time.time() + 600,
+    )
+    assert owner_ref_of(stranger).owner_id == "tenant-beta"
+    assert owner_ref_of(None).owner_id is None
+
+
 # -- finalize 编排：拆出的步骤按契约顺序被驱动 ------------------------------------
 
 

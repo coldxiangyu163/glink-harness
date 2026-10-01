@@ -60,6 +60,7 @@ from ..store import (
     RunStore,
 )
 from . import limits
+from .admission import owner_ref_of
 from .errors import EventLogError
 from .state import (
     COMMITTED,
@@ -278,11 +279,14 @@ class PrepareStage:
         secrets: "RunSecretBoundary",
     ) -> EgressEndpoint:
         """Issue the run's egress grant and describe it as the sandbox sees it."""
-        context = execution.context
+        # 身份事实经抽象 OwnerRef 交给凭据签发（R1-4）：TenantContext →
+        # OwnerRef 的映射是 runs 编排层职责（admission.owner_ref_of），
+        # kernel 边界下游只见 owner 标识。
+        owner = owner_ref_of(execution.context)
         egress = self.s.egress
         grant = egress.issue(
             run_id=execution.record.run_id,
-            tenant=context.tenant_id if context is not None else None,
+            tenant=owner.owner_id,
             model_key=credentials.model_api_key,
             model_id=self.s.config.openai_model,
             search_key=credentials.web_search_key,

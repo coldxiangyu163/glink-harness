@@ -4,17 +4,22 @@ pi 族的策略面：宿主模型凭据准入、会话文件种子、
 ``AgentRuntime`` 渲染与 ``Projector``、pi 进程的 :class:`Launch` 描述与
 RPC 驱动（``PiExecutionAdapter``，与 sandbox 正交）、
 pi stop 词汇归一化，以及 pi-subagents 的子代理增强与进度配对。
+
+R1-4 起族的 config 读取面收敛为 :class:`PiFamilyConfig` 族段冻结配置：
+构造点从注入的冻结 HostConfig 一次性提取，运行期只读族段，不回读全局
+HostConfig 或环境。
 """
 
 from __future__ import annotations
 
 import logging
 import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, TYPE_CHECKING
 
 from ..artifacts import ArtifactError, ArtifactTree
-from ..config import ConfigError, is_loopback_hostname
+from ..config import ConfigError, HostConfig, is_loopback_hostname
 from ..contracts import FollowupUnavailable, Verdict
 from .agent_env import (
     IMAGE_PACKAGE_GUARD,
@@ -36,7 +41,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotation only
     from ..redaction import SecretRedactor
     from .agent_env import EgressEndpoint, RunCredentials
     from .archive_channel import ArchiveEndpoint
-    from .run_views import RunRecord  # 记录只读视图类型（协议面沿用共享数据类型）
+    from .run_views import RunRecord, SessionSource  # 记录只读视图类型（协议面沿用共享数据类型）
 
 logger = logging.getLogger("glink_harness.kernel.harness_pi")
 
@@ -63,11 +68,36 @@ _ENRICH_TOTAL_MAX_BYTES = 64 * 1024 * 1024
 _USAGE_FIELDS = ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
 
 
+@dataclass(frozen=True, slots=True)
+class PiFamilyConfig:
+    """pi 族段冻结配置（R1-4，设计 §2.3 末段）。
+
+    pi 族今天没有直接的政策读取面：凭据准入只看注入的 ``RunCredentials``，
+    ``launch`` 读的是 ``ExecutionSpec`` 冻结的 per-run config；构造注入的
+    唯一消费是运行期渲染，经 ``host`` 底稿句柄交给
+    ``agent_env.prepare_agent_dir`` 的既有签名。族不持有全局
+    ``HostConfig`` 的其他字段，也不读环境；取值与提取前逐字相等。
+    """
+
+    host: HostConfig
+
+    @classmethod
+    def from_host(cls, config: HostConfig) -> "PiFamilyConfig":
+        return cls(host=config)
+
+
 class PiHarnessFamily(HarnessFamily):
     """pi 族：宿主渲染配置、宿主凭据准入、会话文件续接。"""
 
     name = "pi"
     uses_egress = True
+
+    def __init__(self, *, config: HostConfig, store: "SessionSource") -> None:
+        # R1-4：族段在构造点冻结（族实例由 select_family 于准入期解析并
+        # 缓存）；此后本族只读 ``self._segment``，不持有全局 HostConfig。
+        # ``config=None`` 只存在于不读配置的用法（投影单测的裸族实例）。
+        self._segment = PiFamilyConfig.from_host(config) if config is not None else None
+        super().__init__(config=config, store=store)
 
     # -- (a) 准入 --------------------------------------------------------------
 
@@ -151,8 +181,10 @@ class PiHarnessFamily(HarnessFamily):
                 "web search via the egress proxy needs an https "
                 "GLINK_EGRESS_PUBLIC_URL on this sandbox"
             )
+        segment = self._segment
+        assert segment is not None  # 构造点冻结的族段；config=None 的裸实例到不了这里
         runtime = prepare_agent_dir(
-            self._config,
+            segment.host,
             runtime_dir=run_dir / RUNTIME_DIRNAME,
             # 会话目录的布局事实经 SessionSource 协议取（与 resume_seed 读种子
             # 的目录同一来源），族不自造 store 布局规则。

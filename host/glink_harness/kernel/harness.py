@@ -84,6 +84,21 @@ class StateTransfer:
     warning: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class OwnerRef:
+    """kernel 层的抽象属主身份（R1-4，设计 §2.3 末段）。
+
+    只承载 owner 标识与必要的准入事实：``owner_id`` 是 run 记录的属主标签
+    （多租户模式为租户 id，本地模式为 ``None``）。kernel 的族接口与协议面
+    只引用本类型，不导入 ``tenancy`` 或任何产品账号类型；宿主租户身份 →
+    ``OwnerRef`` 的映射是 runs 编排层的职责（
+    :func:`glink_harness.runs.admission.owner_ref_of`），身份校验语义
+    （owner 匹配、异租户拒绝）不变。
+    """
+
+    owner_id: str | None = None
+
+
 class HarnessFamily(ABC):
     """One harness family's policy surface. One instance per family name.
 
@@ -93,6 +108,10 @@ class HarnessFamily(ABC):
     RunStore 适配器实现，设计 §2.3）；准入时族名写入 run 的
     ``RunSpec.family``，此后 runner 与族方法只读 ``RunSpec``，不再读
     ``config.harness``/``config.executor`` 做分支。
+
+    R1-4：族不持有全局 ``HostConfig``——构造点把注入的冻结 config 收敛为
+    族段冻结配置（各族 ``__init__`` 里的 ``*FamilyConfig.from_host``），
+    此后族的构造/运行期只读族段的显式字段，不回读全局配置或环境。
     """
 
     name: str = "unknown"  # "pi" | "acp"，与 RunSpec.family 的取值同表
@@ -103,7 +122,9 @@ class HarnessFamily(ABC):
     uses_egress: bool = False
 
     def __init__(self, *, config: HostConfig, store: SessionSource) -> None:
-        self._config = config
+        # R1-4：``config`` 是构造点的一次性输入（族段由子类 ``__init__``
+        # 从它冻结提取），基类不留存全局配置句柄。
+        del config
         # R1-3：过渡兼容退场——注入点只收 SessionSource 窄协议对象，不再把传入
         # 的具体 RunStore 兜底包成适配器。kernel 内唯一接线点是 select_family
         # （统一注入 RunStoreSessionSource），因此族实例不可能持有具体 RunStore；

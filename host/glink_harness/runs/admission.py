@@ -38,7 +38,7 @@ from ..blueprints import (
 from ..config import HostConfig
 from ..contracts import FollowupUnavailable
 from ..kernel.agent_env import RunCredentials
-from ..kernel.harness import HarnessFamily, select_family
+from ..kernel.harness import HarnessFamily, OwnerRef, select_family
 from ..redaction import SecretRedactor
 from ..store import AdmissionCheck, RunRecord, RunSpec, RunStore
 from ..tenancy import TenantContext, TenantCredentialStore, TenantNotConfigured
@@ -47,6 +47,18 @@ from .secrets import RunSecretBoundary
 from .state import LOGGER_NAME, AdmittedRun
 
 logger = logging.getLogger(LOGGER_NAME)
+
+
+def owner_ref_of(context: TenantContext | None) -> OwnerRef:
+    """``TenantContext`` → ``OwnerRef`` 的唯一映射点（R1-4，设计 §2.3 末段）。
+
+    kernel 层（族接口与协议面）只引用抽象
+    :class:`~glink_harness.kernel.harness.OwnerRef`，不导入 tenancy 或
+    产品账号类型；产品侧的已验证租户身份在此收敛为 owner 标识。本地模式
+    （无租户身份）映射为空 OwnerRef。映射本身不做校验——断言/会话的验证
+    发生在 web 入口，owner 匹配与异租户拒绝的语义由下方门禁保持原样。
+    """
+    return OwnerRef(owner_id=context.tenant_id) if context is not None else OwnerRef()
 
 
 def parse_blueprint_command(text: str, allowed: Sequence[str]) -> tuple[str | None, str]:
@@ -77,6 +89,9 @@ class AdmissionRequest:
 
     text: str
     context: TenantContext | None
+    #: ``context`` 的 kernel 侧抽象身份（R1-4）：准入冻结时经
+    #: :func:`owner_ref_of` 映射，写记录与 kernel 边界的身份事实只引用它。
+    owner: OwnerRef
     parent_run_id: str | None
     blueprint: Blueprint | None
     blueprint_prompt: str
@@ -231,8 +246,9 @@ class RunAdmission:
         parent = self.store.get(parent_run_id)
         if parent is None:
             return None
+        owner = owner_ref_of(context)
         if self.config.multi_tenant and (
-            context is None or parent.tenant_id != context.tenant_id
+            owner.owner_id is None or parent.tenant_id != owner.owner_id
         ):
             return None
         return parent
@@ -241,8 +257,9 @@ class RunAdmission:
         """Every run the caller may see (all runs in local mode)."""
         if not self.config.multi_tenant:
             return self.store.list(limit=None)
-        assert context is not None  # 多租户下必须带租户上下文
-        return self.store.list_for(context.tenant_id, limit=None)
+        owner = owner_ref_of(context)
+        assert owner.owner_id is not None  # 多租户下必须带租户上下文
+        return self.store.list_for(owner.owner_id, limit=None)
 
     def resumable_parent(
         self, context: TenantContext | None, parent_run_id: str, spec: RunSpec
@@ -387,6 +404,7 @@ class RunAdmission:
         return AdmissionRequest(
             text=text,
             context=context,
+            owner=owner_ref_of(context),
             parent_run_id=parent_run_id,
             blueprint=blueprint_template,
             blueprint_prompt=blueprint_prompt,
@@ -442,7 +460,7 @@ class RunAdmission:
             workspace_root=(
                 None if continuation_workspace is not None else self.config.workspace_root
             ),
-            tenant_id=context.tenant_id if context is not None else None,
+            tenant_id=request.owner.owner_id,
             creator_user_id=context.user_id if context is not None else None,
             parent_run_id=parent_run_id,
             blueprint_stages=(

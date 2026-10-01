@@ -485,6 +485,7 @@ class _RemoteSandbox:
 def test_prepare_issues_an_archive_grant_for_a_remote_acp_face(tmp_path: Path) -> None:
     from glink_harness.config import build_config
     from glink_harness.kernel.harness_acp import AcpHarnessFamily
+    from glink_harness.kernel.run_views import RunStoreSessionSource
     from glink_harness.redaction import SecretRedactor
     from glink_harness.runs.secrets import RunSecretBoundary
     from glink_harness.runs.state import RunExecution
@@ -506,7 +507,9 @@ def test_prepare_issues_an_archive_grant_for_a_remote_acp_face(tmp_path: Path) -
     config = build_config(values, REPO_ROOT)
 
     store = RunStore(tmp_path / "runs")
-    family = AcpHarnessFamily(config=config, store=store)
+    # R1-3 评审 SHOULD：构造点只收 SessionSource 协议对象（「注入什么持有
+    # 什么」），仓外调用点自己包 RunStoreSessionSource 适配器。
+    family = AcpHarnessFamily(config=config, store=RunStoreSessionSource(store))
     secrets = RunSecretBoundary(SecretRedactor(()), run_id="run000001")
     services = StageServices(
         config=config,
