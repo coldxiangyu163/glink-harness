@@ -1,5 +1,23 @@
 # Per-run ACP profile user layer (harnesses/dsh/home/ overlay).
 #
+# Own Glink's identity without replacing dsh's tool guidance or runtime context.
+# Patch configs replace whole rows, so preserve the ACP workspace suffix.
+- id: system-prompt
+  config:
+    includeHarnessIdentity: false
+    personaPrefix: >-
+      You are Glink, an AI assistant for research, analysis,
+      and document creation.
+    personaSuffix: Your working directory is {{cwd}}.
+
+# Glink feedback must not authorize session uploads to the upstream collector.
+- id: session-telemetry-otel
+  disabled: true
+
+# Keep official attribution badges out of Glink-generated deliverables.
+- id: skill-badge
+  disabled: true
+
 # Jina fetch is configured in its own bundle. This user layer mounts the native
 # present tool left unmounted by dsh-base; the host enforces the same maxFiles
 # bound when it recovers files. The launcher preserves this seeded profile.

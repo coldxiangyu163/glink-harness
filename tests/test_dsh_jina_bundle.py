@@ -1,8 +1,9 @@
 """GLINK-DSH-02：dsh 的 Jina fetch bundle（out-of-tree）与每 run ACP profile 覆盖层。
 
-只读仓库事实：bundle 清单与 cordis patch、每 run `home/` 覆盖层里的 ACP profile 清单、
-两个 ACP Dockerfile 的安装落点与自检。不导入 dsh、不构建镜像、不发网络请求（仓库默认
-环境没有 YAML 解析依赖，patch 按文本结构断言；真实解析与生效证据在
+验证仓库事实与宿主渲染：bundle 清单与 cordis patch、每 run `home/` 覆盖层里的 ACP
+profile 清单、Glink 身份与上游遥测/badge 禁用、两个 ACP Dockerfile 的安装落点与自检。
+不导入或启动 dsh、不构建镜像、不发网络请求（仓库默认环境没有 YAML 解析依赖，
+patch 按文本结构断言；真实解析与生效证据在
 docs/acp-integration-notes.md §18 的镜像/模板与 run 记录里）。
 
 这些断言把「交付方式」钉在代码里：bundle 源码只存在一份（`harnesses/dsh/bundles/`），
@@ -15,6 +16,11 @@ import json
 import re
 import tomllib
 from pathlib import Path
+
+import pytest
+
+from pi_glink.config import build_config
+from pi_glink.kernel.acp_env import prepare_acp_runtime
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BUNDLE_DIR = REPO_ROOT / "harnesses" / "dsh" / "bundles" / "dsh-web-fetch-jina"
@@ -155,6 +161,55 @@ def test_profile_overlay_lists_the_shipped_bundles_plus_the_jina_bundle() -> Non
     ]
     settings_text = (REPO_ROOT / "harnesses" / "dsh" / "home" / ".dsh" / "settings.yaml").read_text(encoding="utf-8")
     assert "apiKeyEnv" in settings_text and "sk-" not in settings_text, "overlay settings 只能携带引用名，不能携带 key 值"
+
+
+def profile_override(text: str, row_id: str) -> str:
+    """读取唯一的顶层用户覆盖行，避免重复覆盖把已禁用的行重新开启。"""
+    rows = [
+        row for row in re.split(r"(?m)(?=^- )", text)
+        if row.startswith(f"- id: {row_id}\n")
+    ]
+    assert len(rows) == 1, f"profile 必须恰好覆盖一次 {row_id}"
+    return rows[0]
+
+
+def test_profile_owns_glink_identity_and_preserves_dsh_tool_guidance() -> None:
+    text = (PROFILE_DIR / "cordis.patch.yml").read_text(encoding="utf-8")
+    prompt = profile_override(text, "system-prompt")
+    assert re.search(r"(?m)^    includeHarnessIdentity: false$", prompt)
+    prefix = re.search(r"(?m)^    personaPrefix: >-\n((?:      [^\n]+\n)+)", prompt)
+    assert prefix is not None
+    assert " ".join(prefix.group(1).split()) == (
+        "You are Glink, an AI assistant for research, analysis, and document creation."
+    )
+    # config 整行替换而非合并，原 ACP workspace suffix 必须一起保留。
+    assert re.search(r"(?m)^    personaSuffix: Your working directory is \{\{cwd\}\}\.$", prompt)
+    assert "includeRuntimeContext: false" not in text
+    assert "complete: true" not in text
+
+
+@pytest.mark.parametrize("row_id", ["session-telemetry-otel", "skill-badge"])
+def test_profile_explicitly_disables_upstream_uploads_and_badges(row_id: str) -> None:
+    text = (PROFILE_DIR / "cordis.patch.yml").read_text(encoding="utf-8")
+    row = profile_override(text, row_id)
+    assert re.search(r"(?m)^  disabled: true$", row)
+
+
+def test_glink_profile_is_delivered_to_a_fresh_run_home(tmp_path: Path) -> None:
+    cfg = build_config({
+        "PI_GLINK_HARNESS": "dsh",
+        "OPENAI_MODEL": "test/model",
+        "OPENAI_REASONING_EFFORT": "high",
+    }, REPO_ROOT)
+    runtime = prepare_acp_runtime(cfg, runtime_dir=tmp_path / "acp-agent")
+    delivered = runtime.home / ".dsh" / "profiles" / "acp" / "cordis.patch.yml"
+    text = delivered.read_text(encoding="utf-8")
+    assert text == (PROFILE_DIR / "cordis.patch.yml").read_text(encoding="utf-8")
+    assert "includeHarnessIdentity: false" in profile_override(text, "system-prompt")
+    for row_id in ("session-telemetry-otel", "skill-badge"):
+        assert "disabled: true" in profile_override(text, row_id)
+    assert delivered.stat().st_mode & 0o777 == 0o600
+    assert runtime.credential_dests == ()
 
 
 def test_both_acp_images_install_the_same_bundle_and_self_check_it() -> None:
