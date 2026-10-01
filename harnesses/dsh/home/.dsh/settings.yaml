@@ -12,8 +12,8 @@ llm-pi-ai:
       # 图像模型（2026-10-01 部署验收实测 openai/gpt-6-sol 匹配 0 广告
       # 路由），文本模型在此声明；升级 pi-ai 后可改为依赖上游目录。
       models:
-        - id: openai/gpt-6-sol
-          name: GPT-6 Sol (OpenRouter)
+        - id: openai/gpt-5.6-sol
+          name: GPT-5.6 Sol (OpenRouter)
           contextWindow: 1050000
           maxTokens: 32768
           reasoningEfforts:
