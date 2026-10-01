@@ -638,6 +638,17 @@ def handle_new_session(request: dict) -> None:
         state = read_state()
         state["sessionId"] = session_id()
         write_state(state)
+        legacy_rows = structured("FAKE_ACP_DSH_WRITE_V3_ROWS", None)
+        if isinstance(legacy_rows, list):
+            import zstandard
+
+            path = Path(home) / ".dsh/sessions/--workspace--" / session_id() / "session.v3.jsonl.zstd"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            records = [{"type": "session", "version": 3, "id": session_id()}, *legacy_rows]
+            path.write_bytes(b"".join(zstandard.ZstdCompressor(write_checksum=True).compress(
+                json.dumps(row).encode() + b"\n"
+            ) for row in records))
+            (path.parent / "session.lock").write_bytes(b"")
     result: dict = {"sessionId": session_id()}
     probe = os.environ.get("FAKE_ACP_ENV_PROBE")
     if probe:
@@ -694,6 +705,28 @@ def handle_resume(request: dict, method: str) -> None:
         stateSessionId=state.get("sessionId"),
         remembered=state.get("remembered"),
     )
+    if flag("FAKE_ACP_DSH_V3_LOG"):
+        # Substitute only the external dsh parser: consume the actual inherited
+        # log, with the released frozen-vocabulary refusal, before accepting
+        # resume or letting the host apply model configuration/send a prompt.
+        import zstandard
+
+        known = set(structured("FAKE_ACP_DSH_KNOWN_EVENTS", ["tool/result"]))
+        candidates = list(Path(os.environ["HOME"]).glob(
+            f".dsh/sessions/*/{target}/session.v3.jsonl.zstd"
+        ))
+        if len(candidates) != 1:
+            respond(request, error={"code": -32602, "message": "session log not found"})
+            return
+        with zstandard.ZstdDecompressor().stream_reader(candidates[0].read_bytes()) as stream:
+            rows = [json.loads(line) for line in stream.read().splitlines()]
+        for event in rows[1:]:
+            if event["type"] not in known and event.get("ignorable") is not True:
+                respond(request, error={
+                    "code": -32603, "message": "Internal error",
+                    "data": {"details": "unknown to this harness and not marked ignorable"},
+                })
+                return
     if flag("FAKE_ACP_RESUME_ERROR"):
         respond(request, error={"code": -32000, "message": "resume refused by fake agent"})
         return

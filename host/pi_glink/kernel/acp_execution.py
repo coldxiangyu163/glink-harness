@@ -95,6 +95,7 @@ from .acp_rpc import (
     AcpRpcClient,
 )
 from .acp_session_config import apply_session_config
+from .acp_state_compat import repair_resume_home
 from .acp_sandbox_park import (
     park_sandbox,
     read_generation_marker,
@@ -511,6 +512,15 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
                 # path the workspace never left — the upload re-delivers the
                 # same bytes and stays the one code path for both.
                 transfer.upload_continuation()
+        if self.spec.resume_session and self.spec.config.harness_pack == "dsh":
+            # ACP-15: target-copy compatibility, after files/archive backfill
+            # (or reboot reconnect) and credential uploads, before any new
+            # agent can acquire a write handle. Never alter the parent's root.
+            repair_resume_home(
+                (sandbox.place("home", self.spec.runtime.home)
+                 if sandbox.remote else self.spec.runtime.home),
+                handle=sandbox.handle if sandbox.remote else None,
+            )
         self._emit_state_threshold_warnings()
         spawn = sandbox.spawn(self.launch)
         client_kwargs: dict[str, Any] = {
