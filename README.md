@@ -31,12 +31,13 @@ harness 无关的研究工作台宿主：[pi](https://www.npmjs.com/package/@ear
 |---|---|---|
 | 本机进程 | `inproc` | 选中的 harness 以子进程运行在宿主机器上，工作区在 `<数据根>/workspaces/<runId>` |
 | 容器 | `docker` | harness 与工作区都在一次性容器内，宿主只做编排与事件投影 |
-| 云沙箱 | `e2b` | harness 与工作区都在 E2B 沙箱内（沙箱后台命令 `stdin=True` 的 RPC 双向 stdio，与另两面同一套 `--mode rpc`）；真实模型/检索 key 不进沙箱，只上传本 run 的出口代理 token（须配置 `GLINK_EGRESS_PUBLIC_URL`） |
+| 云沙箱 | `e2b` | harness 与工作区都在 E2B 沙箱内。pi 族：沙箱后台命令 `stdin=True` 的 RPC 双向 stdio，与另两面同一套 `--mode rpc`，真实模型/检索 key 不进沙箱，只上传本 run 的出口代理 token（须配置 `GLINK_EGRESS_PUBLIC_URL`）；ACP 族：stdio JSON-RPC 双向桥接，凭据按 run 注入只读副本、收尾删除（[ADR 0003](docs/adr/0003-acp-credential-copies-removed-at-close-out.md)/[0015](docs/adr/0015-acp-credential-channels-under-model-credential-policy.md)），出口代理尚未覆盖 ACP 族 |
 
 三面共享同一套输入/事件/收尾契约（`kernel/execution.py` 的 `ExecutionAdapter`）：每个 run 拥有
 自己的运行期配置（`runs/<id>/pi-agent/`，ACP 族为 `acp-agent/`）、session 目录（`runs/<id>/sessions/`）与工作区；
 完成后在同一对话发送追问会提交 `POST /api/runs {"prompt":"…","parentRunId":"<上一轮 runId>"}`，
-返回新 run 的 `parentRunId`。它复制上一轮经安全校验的会话副本，通过 pi 官方 `--session` 续接，
+返回新 run 的 `parentRunId`。它复制上一轮经安全校验的会话副本续接（pi 族走官方 `--session`；
+ACP 族按能力矩阵走 `session/resume` 或 `session/load`），
 不会另起会话或改写旧 run；侧栏按研究汇总，旧报告仍可打开。会话记录不可续接时返回
 `409 session_unavailable`，从旧轮分叉返回 `409 stale_run`。ACP 族的多轮会话状态由宿主持有
 （e2b 面经归档通道增量回收/回灌，上限是异常检测三分支：越过警告线只发 `kernel_status` 警告
@@ -298,7 +299,7 @@ dsh 族不经 pi-web-access：检索由包内 provider 提供（内置 `web_sear
 租户条目的 `webSearchKey`。操作员 `~/.pi/web-search.json` 与旧的 `GLINK_WEB_SEARCH_CONFIG`
 不再读取（不迁移）。Docker 面带检索 key 时需要 https 的 `GLINK_EGRESS_PUBLIC_URL`。
 
-本仓库不包含 Serper / Jina 链路。检索证据见 [docs/evidence/local-web-search.txt](docs/evidence/local-web-search.txt)。
+pi 族的检索链路不包含 Serper / Jina（dsh 族的 Jina fetch provider 见本节开头）。检索证据见 [docs/evidence/local-web-search.txt](docs/evidence/local-web-search.txt)。
 
 ## 委派与子代理
 

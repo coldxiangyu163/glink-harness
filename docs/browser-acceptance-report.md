@@ -1,5 +1,7 @@
 # 浏览器全量验收报告
 
+> **改名说明（2026-10-01）**：本仓库由 `pi-glink` 更名为 `glink-harness`（Python 包 `pi_glink`→`glink_harness`、环境变量 `PI_GLINK_*`→`GLINK_*`、镜像/模板/数据根同步更名）。本文改名前的实测记录保留当时旧名——它们是同一工程的历史标识，与 `docs/evidence/` 原始日志一致；现行命令、路径与变量名以当前源码为准。
+
 ## 2026-09-28 晚间：B2 浏览器行为闭环与全层复验（`6c73023`）
 
 任务 `GLINK-ARCH-BROWSERWIN-20260928`。被测源码为主 checkout `6c73023`；验证 worktree 同 commit，未改产品或测试源码。Node 24.16.0、Python 3.12.10、project-local Playwright 1.58.2 / Chromium；真实宿主为主 checkout 的 local / inproc + 真实模型，参考站为已有 `dist/` 静态产物。隔离 acceptance 使用脚本化执行面。证据与可复现脚本均在 [`docs/evidence/browser-window-2026-09-28/`](evidence/browser-window-2026-09-28/)；各命令退出码留在对应 `*-command.txt`、`tokens.txt` 与 `acceptance-lifecycle.txt`。
@@ -102,7 +104,7 @@ acceptance 直接把 `--out` 指到仓库时会把 fixture state 一并放进仓
 
 - 日期：2026-09-27（CST）
 - 被测基线：`52e622d`（浏览器验收套件本批提交；宿主与前端代码为 `67274a7` + 本批新增文件）
-- 测试对象：`web/`（生产前端，无构建链静态 ESM）+ `host/glink_harness/`（真实宿主 HTTP/SSE/存储）+ 三种身份面
+- 测试对象：`web/`（生产前端，无构建链静态 ESM）+ `host/pi_glink/`（真实宿主 HTTP/SSE/存储）+ 三种身份面
 - 测试工具：`tests/browser/acceptance.mjs`（本次新增，project-local Playwright 1.58.2 / Chromium 145 / Node 24.16.0 / Python 3.12.10）
 - 证据：`docs/evidence/browser-acceptance-2026-09-27/`（合成数据，零真实凭据）
 
@@ -135,7 +137,7 @@ acceptance 直接把 `--out` 指到仓库时会把 fixture state 一并放进仓
 
 ## 2. 环境与隔离方式
 
-`tests/fixtures/accounts_server.py` 起一个**真实宿主**：真实 `RunManager`/`RunStore`/`EventBus`/`Ownership`/`HTTP`/`SSE` 与生产前端，数据根、SQLite 账号库、`HOME`/`XDG` 全部指向本次运行的临时目录；唯一替换的是执行面（`glink_harness.kernel.harness_pi.compose_adapter` → 进程内 `FakeAdapter`），因此**没有任何** pi 进程、容器、沙箱或模型调用。凭据是 fixture 现场写出的合成值（0600），运行结束随临时目录丢弃。
+`tests/fixtures/accounts_server.py` 起一个**真实宿主**：真实 `RunManager`/`RunStore`/`EventBus`/`Ownership`/`HTTP`/`SSE` 与生产前端，数据根、SQLite 账号库、`HOME`/`XDG` 全部指向本次运行的临时目录；唯一替换的是执行面（`pi_glink.kernel.harness_pi.compose_adapter` → 进程内 `FakeAdapter`），因此**没有任何** pi 进程、容器、沙箱或模型调用。凭据是 fixture 现场写出的合成值（0600），运行结束随临时目录丢弃。
 
 每个模式的独立运行都有：OS 分配的 loopback 端口、独立临时数据根、独立浏览器上下文（Cookie 不共享）、按 PID 终止（`host-exit.json` 记录 `{"code": 0}`）。`requests.jsonl` 原样记录请求行与 Referer，用于证明邀请 token 从未进入请求行（`#invite=` 只存在于浏览器 URL hash）。
 
@@ -206,7 +208,7 @@ identity 3（1 跳过）、shell 16（1 跳过：账号区不存在）、compose
 
 - 每次运行创建：一个临时目录（数据根/账号库/HOME/日志/证据）+ 一个隔离宿主进程 + 一个 Chromium 进程；模式之间互不复用。
 - 隔离宿主由调用方按记录的 PID 发 `SIGTERM`，三次运行退出码都是 `0`（`host-exit.json`：accounts pid 64646 / local pid 73905 / gateway pid 80914）。
-- 未使用、未修改、未停止任何既有服务；未写 `~/.pi`、`~/.glink-harness`、仓库 `outputs/`；未发起真实模型调用（也就没有云端费用）。
+- 未使用、未修改、未停止任何既有服务；未写 `~/.pi`、`~/.pi-glink`、仓库 `outputs/`；未发起真实模型调用（也就没有云端费用）。
 - 回退：删除 `tests/browser/`（除历史三个脚本）与 `tests/fixtures/accounts_server.py` 的本批改动即可恢复；`docs/evidence/browser-acceptance-2026-09-27/` 只是证据，可整体删除。
 
 ## 8. 复现

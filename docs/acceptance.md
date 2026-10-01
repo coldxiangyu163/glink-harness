@@ -1,6 +1,8 @@
 # 验收记录
 
-日期：2026-09-22 · 仓库：`~/AI/git/glink-harness` · 基线 pi：0.86.1（升级演练另用 0.87.0）
+> **改名说明（2026-10-01）**：本仓库由 `pi-glink` 更名为 `glink-harness`（Python 包 `pi_glink`→`glink_harness`、环境变量 `PI_GLINK_*`→`GLINK_*`、镜像/模板/数据根同步更名）。本文改名前的实测记录保留当时旧名——它们是同一工程的历史标识，与 `docs/evidence/` 原始日志一致；现行命令、路径与变量名以当前源码为准。
+
+日期：2026-09-22 · 仓库：`~/AI/git/pi-glink` · 基线 pi：0.86.1（升级演练另用 0.87.0）
 
 本记录汇总本次目标（task-1 ~ task-9）的代码范围、实际命令、真实退出状态、证据文件与
 未覆盖项。所有结论都可在本机重跑；证据文件在 `docs/evidence/`。
@@ -37,15 +39,15 @@
 ```bash
 scripts/run-local-web.sh                      # 默认 127.0.0.1:7860；本机 .env 覆盖为 7861
 .venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7861 \
-  --prompt "请阅读 docs/pi-integration-notes.md 与 host/glink_harness/kernel/rpc.py，然后写出 report.md：说明 pi 内核接入的关键约束与三个最容易踩的坑。用中文。"
+  --prompt "请阅读 docs/pi-integration-notes.md 与 host/pi_glink/kernel/rpc.py，然后写出 report.md：说明 pi 内核接入的关键约束与三个最容易踩的坑。用中文。"
 ```
 → finished，45.1s，165 事件，报告 9648B（证据 `local-m1-smoke.txt`）
 
 **Docker**
 
 ```bash
-docker build -t glink-harness-worker:latest -f docker/Dockerfile.worker .        # 镜像 1.09GB
-LOCAL_WEB_EXECUTOR=docker LOCAL_WEB_PORT=7862 .venv/bin/python -m glink_harness.app
+docker build -t pi-glink-worker:latest -f docker/Dockerfile.worker .        # 镜像 1.09GB
+LOCAL_WEB_EXECUTOR=docker LOCAL_WEB_PORT=7862 .venv/bin/python -m pi_glink.app
 .venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7862 \
   --prompt "在本工作区创建 notes.md 写入三行关于容器化执行的事实，然后写出 report.md 总结这次运行。用中文。"
 ```
@@ -60,7 +62,7 @@ E2B_API_KEY=… HTTPS_PROXY=socks5h://127.0.0.1:1080 \
 
 # 宿主：E2B_API_KEY 可只放 .env（修复后已实测）；代理是网络配置，不是凭据
 HTTPS_PROXY=socks5h://127.0.0.1:1080 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 \
-  .venv/bin/python -m glink_harness.app
+  .venv/bin/python -m pi_glink.app
 
 .venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7863 \
   --prompt "先检索 pi-web-access 这个 npm 包的用途（用 web_search），然后在本工作区写出 report.md，给出你实际打开过的来源链接。用中文。"
@@ -125,7 +127,7 @@ HTTPS_PROXY=socks5h://127.0.0.1:1080 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 
    全局安装被外部升级到 `0.87.0`（非本任务所为）。这反而让 task-9 的升级演练成为
    真实场景：宿主、接入层、投影与前端在更高版本下无需改动即通过
    （证据 `docs/evidence/upgrade-drill.txt`）。
-3. **未触发需要暂停的条件**：本次创建的是**新** E2B 模板（`glink-harness-worker`），
+3. **未触发需要暂停的条件**：本次创建的是**新** E2B 模板（`pi-glink-worker`），
    没有重建或覆盖 FrontierAgent 已有的 `glink-frontier-e2b` 模板；沙箱内的
    `web-search.json` 是临时的（随沙箱销毁），不存在凭据长期驻留。
 
@@ -154,9 +156,9 @@ HTTPS_PROXY=socks5h://127.0.0.1:1080 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 
 | `styles.css` 仍含 scenario / tier / task-board / upload / review 规则 | 第三轮裁剪：含 `:has()`/`:not()` 的选择器同样逐类判定，并清理注释里的过时引用 | 实测：`scenario` / `tier` / `task-board` / `upload` / `user-row` / `artifact` / `library` / 独立 `review-*` 选择器均为 0（`review` 的字面命中仅来自 `preview-*` 子串）；93 KB → 21.6 KB；浏览器回归通过 |
 | 历史 run 重放被终态误判截断 | `workspace.mjs` 改按**终态帧类型**关闭 SSE（新增 `TERMINAL_EVENT_TYPES`），不再看模型状态 | 浏览器断言：历史 run 重放 `items=12, tools=3, status=finished` |
 | 报告抽屉缺 `preview-open`，第三列 0px | `openReport` 加类、`closeReport`/`closeCurrent` 移除 | 浏览器断言：`previewOpen=true, previewWidth=563px, scrollWidth==clientWidth`（无横向溢出） |
-| 升级文档把 `GLINK_PI_BIN` 放在 smoke 命令上 | 改为放在宿主启动命令上，并说明宿主与 smoke 客户端的区别 | `docs/pi-boundary.md` §3；宿主启动横幅打印实际 pi 路径 |
-| README 无效命令、不存在的顶层 `kernel/`、Node 版本未固定 | 修正为 `uv pip install -e ".[dev]"`、`host/glink_harness/kernel/`、Node **v24.16.0** + nvm 安装方式 | README |
-| `.env-only` E2B run 无 runId / 证据 / 退出码 | 记录 runId `3fc5c4734713`（26.4s / 143 事件 / sandbox `ipy0uzzdsg4e` / finished / smoke exit 0）与结构化日志路径 `~/.glink-harness/runs/3fc5c4734713/events.jsonl` | `docs/evidence/e2b-run.txt`、`docker-run.txt` |
+| 升级文档把 `PI_GLINK_PI_BIN` 放在 smoke 命令上 | 改为放在宿主启动命令上，并说明宿主与 smoke 客户端的区别 | `docs/pi-boundary.md` §3；宿主启动横幅打印实际 pi 路径 |
+| README 无效命令、不存在的顶层 `kernel/`、Node 版本未固定 | 修正为 `uv pip install -e ".[dev]"`、`host/pi_glink/kernel/`、Node **v24.16.0** + nvm 安装方式 | README |
+| `.env-only` E2B run 无 runId / 证据 / 退出码 | 记录 runId `3fc5c4734713`（26.4s / 143 事件 / sandbox `ipy0uzzdsg4e` / finished / smoke exit 0）与结构化日志路径 `~/.pi-glink/runs/3fc5c4734713/events.jsonl` | `docs/evidence/e2b-run.txt`、`docker-run.txt` |
 
 ### 第三次审计返工（凭据边界）
 
@@ -165,7 +167,7 @@ HTTPS_PROXY=socks5h://127.0.0.1:1080 LOCAL_WEB_EXECUTOR=e2b LOCAL_WEB_PORT=7863 
 
 | 审计缺口 | 返工 | 复验 |
 |---|---|---|
-| 事件投影与事件日志未脱敏 | 新增 `host/glink_harness/redaction.py`（值检测 + 形状检测 + 递归载荷脱敏）；`project_event(frame, redactor)` 投影即脱敏；`runner._emit` 在发布前再兜底一次 | `tests/test_redaction.py` 13 项，含审计复现用例 `test_audit_reproduction_tool_output_is_redacted`；`events.jsonl` 与 SSE 载荷均断言不含 key |
+| 事件投影与事件日志未脱敏 | 新增 `host/pi_glink/redaction.py`（值检测 + 形状检测 + 递归载荷脱敏）；`project_event(frame, redactor)` 投影即脱敏；`runner._emit` 在发布前再兜底一次 | `tests/test_redaction.py` 13 项，含审计复现用例 `test_audit_reproduction_tool_output_is_redacted`；`events.jsonl` 与 SSE 载荷均断言不含 key |
 | 报告下载无脱敏 | `app._send_report` 服务前脱敏并回 `X-Redacted`；`runner._collect_report` 在 run 收尾就地脱敏报告文件，meta 记 `redacted=true` | `test_report_download_is_redacted_and_flagged`、`test_runner_redacts_the_report_in_place_and_marks_the_run` |
 | pi 自写的会话文件可能含工具输出 | `runner._sanitize_session_file` 收尾脱敏（保持合法 JSONL） | `test_session_file_is_redacted_on_the_way_out` |
 | 子进程继承宿主整份环境 | `agent_env._PASSTHROUGH_ENV` 白名单：只放行运行必需项，再显式注入 `PI_*` 与模型凭据 | `test_minimal_child_environment_does_not_inherit_host_credentials`（ANTHROPIC_API_KEY / AWS_SECRET_ACCESS_KEY 不进入子进程） |
@@ -211,7 +213,7 @@ inproc `a6f67fde8e51` / docker `03be2909302e` / e2b `db6a9e83c0b7` 均为 **0**�
 |---|---|---|
 | Docker `sessionFile` 是容器路径 `/sessions/…`，宿主按原样读取不存在 → 收尾脱敏静默跳过，工具回显的密钥可能永久留在会话文件 | 新增 `kernel/docker_env.py::host_session_path / translate_container_path`（纯词法映射，拒绝相对路径、前缀伪装与 `..` 穿越）；`runner._publish_session_ready` 在落库/发事件前映射为宿主路径；`_sanitize_session_file` 读不到文件时显式告警而非静默返回 | 回归：`test_container_session_paths_map_back_to_the_host_mount`、`test_docker_session_file_is_mapped_back_to_the_host_and_sanitized`；真实 Docker run `824fa1975211`（假密钥写入 notes.md）：`meta.redacted=true`，notes.md / events.jsonl / 宿主会话 JSONL 三处均无假密钥原文且含 `[REDACTED]`；宿主日志出现 `session file contained credentials and was redacted` |
 | 文档仍写过时的凭据流（env 注入 / `-e OPENAI_API_KEY` / `Sandbox.create(envs=…)`） | 逐处订正 README、architecture、pi-boundary、验收表与两份证据文件为 `auth.json` 交付：Docker 随 `/config` 挂载、E2B 随运行期配置上传 | 全仓库 grep：`envs=`、`-e OPENAI_API_KEY`、`按变量名转发`、`apiKey: "$OPENAI_API_KEY"` 均无残留（历史审计表除外） |
-| Node 版本未固定（浮动 `node:24-bookworm-slim`；README 本机 v24.16.0 与 E2B 证据 v24.21.0 不一致） | 两个 Dockerfile 固定为 `FROM node:24.21.0-bookworm-slim`；README 明确宿主开发 v24.16.0、镜像/沙箱 v24.21.0 | 重建镜像：`docker run --rm glink-harness-worker:latest node -v` → v24.21.0、`pi --version` → 0.86.1；新镜像真实 run `4c589e0989fa`：报告首行 env 计数 = 0；E2B 沙箱 `99c3367c2a15`：node v24.21.0 / env 计数 0。E2B 模板未重建（覆盖既有 tag 需先确认）；现有模板实测 Node 已与固定版本一致 |
+| Node 版本未固定（浮动 `node:24-bookworm-slim`；README 本机 v24.16.0 与 E2B 证据 v24.21.0 不一致） | 两个 Dockerfile 固定为 `FROM node:24.21.0-bookworm-slim`；README 明确宿主开发 v24.16.0、镜像/沙箱 v24.21.0 | 重建镜像：`docker run --rm pi-glink-worker:latest node -v` → v24.21.0、`pi --version` → 0.86.1；新镜像真实 run `4c589e0989fa`：报告首行 env 计数 = 0；E2B 沙箱 `99c3367c2a15`：node v24.21.0 / env 计数 0。E2B 模板未重建（覆盖既有 tag 需先确认）；现有模板实测 Node 已与固定版本一致 |
 
 回归：Python 97 项 + Node 11 项全绿；`scripts/check-no-secrets.py` 真实命中 0。
 
@@ -325,7 +327,7 @@ inproc `a6f67fde8e51` / docker `03be2909302e` / e2b `db6a9e83c0b7` 均为 **0**�
 
 ## 2026-09-28 UTC / 2026-09-29 本机：E2B H2 live 复验（GLINK-ARCH-E2BLIVE-20260928）
 
-证据入口：[e2b-live-2026-09-28/README.md](evidence/e2b-live-2026-09-28/README.md)。被测主 checkout 与写 worktree 均为 `6c73023`；宿主从主 checkout 启动，`e2b` SDK 2.51.0、现有 `glink-harness-worker:default` 模板，未改产品代码/模板。本次是 `local` 单用户 + E2B 真实模型/出口代理调用，**不是**多租户上线验收。
+证据入口：[e2b-live-2026-09-28/README.md](evidence/e2b-live-2026-09-28/README.md)。被测主 checkout 与写 worktree 均为 `6c73023`；宿主从主 checkout 启动，`e2b` SDK 2.51.0、现有 `pi-glink-worker:default` 模板，未改产品代码/模板。本次是 `local` 单用户 + E2B 真实模型/出口代理调用，**不是**多租户上线验收。
 
 | 验收点 | 实测结果（原始退出状态） | 证据 |
 |---|---|---|

@@ -2,12 +2,14 @@
 
 [多 harness 方案](multi-harness-plan.md) · [pi 接入边界](pi-boundary.md) · [架构](architecture.md)
 
+> **改名说明（2026-10-01）**：本仓库由 `pi-glink` 更名为 `glink-harness`（Python 包 `pi_glink`→`glink_harness`、环境变量 `PI_GLINK_*`→`GLINK_*`、镜像/模板/数据根同步更名）。本文改名前的实测记录保留当时旧名——它们是同一工程的历史标识，与 `docs/evidence/` 原始日志一致；现行命令、路径与变量名以当前源码为准。
+
 本文记录 ACP（Agent Client Protocol）族接入的协议事实与实现口径。**每条标注来源**：
 
 > **GLINK-ARCH-6（2026-09-27）起的现行配置面**：harness 选择与 agent 命令/会话选项/权限白名单
 > 都在 harness 包清单（`harnesses/<pack>/harness.toml`）；本文以下历史章节里的
-> `GLINK_HARNESS=acp`、`GLINK_ACP_COMMAND`、`GLINK_ACP_SESSION_CONFIG`、
-> `GLINK_ACP_PERMISSION_ALLOW` 都是当时实测用的配置面，已由包清单取代（GLINK-ARCH P3 起
+> `PI_GLINK_HARNESS=acp`、`PI_GLINK_ACP_COMMAND`、`PI_GLINK_ACP_SESSION_CONFIG`、
+> `PI_GLINK_ACP_PERMISSION_ALLOW` 都是当时实测用的配置面，已由包清单取代（GLINK-ARCH P3 起
 > 这些变量不再被读取，清单为 `glink-harness/v2`：`[entry].command`、
 > `[capabilities.session_config]`、`[capabilities].permission_allow`；v1 清单不再可读）。
 > 逐 agent 的实测事实与证据不受影响。
@@ -30,7 +32,7 @@
 | `M6 源码` | 只读参考 `@agentclientprotocol/claude-agent-acp@0.81.2` 的安装产物（`dist/acp-agent.js` 的 `claudeCliPath()`、`dist/managed-policy.js` 等）；不作为运行时事实，用于解释真实观测 |
 | `opencode 实测` | M5 的真实 opencode 事实（`docs/evidence/acp-m5-opencode-handshake.txt`、`acp-m5-opencode-smoke.txt`、`acp-m5-opencode-docker-handshake.txt`、`acp-m5-opencode-e2b-handshake.txt`）：钉版入口、能力矩阵、每 run HOME/凭据落点（inproc/docker/e2b）、一次真实模型的 inproc 最小 run 与 0 条权限请求 |
 | `opencode 源码` | 只读参考 opencode 1.18.32 的上游源码（`anomalyco/opencode` v1.18.32 的 `packages/opencode/src/acp/{permission,event,tool}.ts` 等）；不作为运行时事实，用于解释真实观测 |
-| `镜像自检` | `glink-harness-acp-worker` 镜像内各组件的版本输出（构建期日志与本机 `docker run --rm` 复验，M4 起含 claude 双包，M6 起为后继包 claude-agent-acp；证据同 `docker 实测` 与 `docs/evidence/acp-m6-migration-docker-handshake.txt`） |
+| `镜像自检` | `pi-glink-acp-worker` 镜像内各组件的版本输出（构建期日志与本机 `docker run --rm` 复验，M4 起含 claude 双包，M6 起为后继包 claude-agent-acp；证据同 `docker 实测` 与 `docs/evidence/acp-m6-migration-docker-handshake.txt`） |
 | `npm` | npm registry 元数据（`npm view`） |
 | `宿主代码` | 本仓库实现（`host/glink_harness/kernel/`、`config.py`） |
 | `待实测` | 需要真实 agent/授权或其它执行面才能确认 |
@@ -190,7 +192,7 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
 * M1/M2 默认策略是 **fail-closed 全拒**：优先选 `reject_once`，其次 `reject_always`；
   没有可用的拒绝项（或缺 `optionId`）时回 `cancelled`；若 `session/cancel` 已经发出，按规范
   必须回 `cancelled`。（`合成实测`）
-* M2 增加了一个显式配置门控的白名单：`GLINK_ACP_PERMISSION_ALLOW`（option kind，
+* M2 增加了一个显式配置门控的白名单：`PI_GLINK_ACP_PERMISSION_ALLOW`（option kind，
   可选 tool kind）。默认空集不改变 fail-closed 行为；只有配置了 `allow_once`/`allow_always`
   时才会选择匹配的 allow 选项，且当同时配置了 tool kind 时请求的 `toolCall.kind` 必须命中
   （没有 kind 的请求一律拒绝）。决定与策略都进事件流（`acp_permission_allowed` /
@@ -222,7 +224,7 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
 
 | ACP | 产品事件 | 实现口径 |
 |---|---|---|
-| `initialize` 响应 | `session_ready` | payload 带 `harness: "acp"`、`protocolVersion`、`sessionId`、`agentInfo`、`agentCapabilities`、`authMethods`、`cwd`，以及 `session/new` 的 `modes` 与 `configOptions`（会话选项状态，含宿主应用 `GLINK_ACP_SESSION_CONFIG` 后的值）；`sessionFile` 为 null。续接 run 另带 `resumed: true` 与 `resumeMethod`（`session/resume`/`session/load`），`sessionId` 是父 run 的原值（§10.1） |
+| `initialize` 响应 | `session_ready` | payload 带 `harness: "acp"`、`protocolVersion`、`sessionId`、`agentInfo`、`agentCapabilities`、`authMethods`、`cwd`，以及 `session/new` 的 `modes` 与 `configOptions`（会话选项状态，含宿主应用 `PI_GLINK_ACP_SESSION_CONFIG` 后的值）；`sessionFile` 为 null。续接 run 另带 `resumed: true` 与 `resumeMethod`（`session/resume`/`session/load`），`sessionId` 是父 run 的原值（§10.1） |
 | `agent_message_chunk` | `assistant_delta` | 只投影 text 块；其他块型记一次性 `kernel_status`；文本走与 pi 相同的 `StreamRedactor` |
 | `agent_thought_chunk` | `thinking_delta` | 同上 |
 | `tool_call` | `tool_started`（若已含终态再补 `tool_finished`） | `toolName`/`args` 见 §1.5 |
@@ -242,10 +244,10 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
 
 ## 3. M1 集成决定与已知偏差
 
-1. **harness 选择只在配置层**：`GLINK_HARNESS=pi|acp`（默认 `pi`）+
-   `GLINK_ACP_COMMAND`（ACP agent 命令行，`shlex.split` 后直接 exec，不经 shell）。
+1. **harness 选择只在配置层**：`PI_GLINK_HARNESS=pi|acp`（默认 `pi`）+
+   `PI_GLINK_ACP_COMMAND`（ACP agent 命令行，`shlex.split` 后直接 exec，不经 shell）。
    没有 API/前端参数，`public_view()` 不含 harness，现有部署零变化。（与方案 §5/§6 一致）
-2. **执行面**：M1 只接 `inproc`；M3a 起 `GLINK_HARNESS=acp` 同时支持
+2. **执行面**：M1 只接 `inproc`；M3a 起 `PI_GLINK_HARNESS=acp` 同时支持
    `LOCAL_WEB_EXECUTOR=inproc|docker`，M3b 起再加上 `e2b`（§6；沙箱后台命令的
    `stdin=True` + `send_stdin` 承载同一份 stdio）。三个执行面共用同一个 ACP 适配器与
    `AcpRpcClient`，不为 e2b 另写协议代码。
@@ -256,8 +258,8 @@ v1 完整变体集（`docs`/`schema`）：`user_message_chunk`、`agent_message_
    agent 可按 §10.3 的条件受理，`session/resume`/`session/load` 的选择与状态继承见 §10。
 4. **状态目录**：每 run 渲染 `<run_dir>/acp-agent/home` 并作为子进程 `HOME`，agent 的
    `~/.claude`、`~/.codex`、dsh sessions 与 npm 状态都落在本 run 内；环境沿用 pi 面的最小
-   透传清单。M2 补上显式凭据注入：`GLINK_ACP_CREDENTIAL_FILES` 把 `source=dest` 的源
-   文件**只读复制**进 run HOME（父目录 0700、文件 0600），`GLINK_ACP_ENV` 注入显式 env
+   透传清单。M2 补上显式凭据注入：`PI_GLINK_ACP_CREDENTIAL_FILES` 把 `source=dest` 的源
+   文件**只读复制**进 run HOME（父目录 0700、文件 0600），`PI_GLINK_ACP_ENV` 注入显式 env
    （不允许覆盖 `HOME`）；注入值抽入该 run 的 redactor，源文件不被修改（sha256 前后一致）。
    逐 agent 实测落点见 §4.4。（`宿主代码`/`dsh 实测`/`codex-acp 实测`）
 5. **未投影不等于丢失**：`max_turn_requests` 目前在记录里保留原词，前端尚无对应提示
@@ -343,13 +345,13 @@ support），不依赖可选能力位、不依赖任何 agent 私有扩展；围
 | codex-acp | `~/.codex/auth.json`（ChatGPT 登录） | `HOME/.codex/auth.json`（0600） | 无该文件时 `session/new` 报 “Authentication required”；注入后握手成功并完成真实 run；`~/.codex` 状态（cache/config.toml/sqlite）均落在 run HOME，真实目录未被修改 |
 | dsh | `~/.dsh/.credentials.yaml`（harness home 凭据） | `HOME/.dsh/.credentials.yaml`（0600） | harness home 默认 `$DSH_HOME` 或 `~/.dsh`（dsh docs）；实测 profiles/sessions/storages 都落在 run HOME/.dsh，真实 `~/.dsh` 未被修改 |
 
-* 注入用 `GLINK_ACP_CREDENTIAL_FILES`（`;` 分隔的 `source=dest`）：源文件只读，目标必须是
+* 注入用 `PI_GLINK_ACP_CREDENTIAL_FILES`（`;` 分隔的 `source=dest`）：源文件只读，目标必须是
   run HOME 内相对路径；目标文件 0600、父目录 0700，已存在或为符号链接则失败（不覆盖、不
   跟随）。（`宿主代码`/`合成实测`）
 * 本机 dsh 的真实状态目录是 `~/.dsh`（`$DSH_HOME` 未设置时的默认值），**`~/.config/dsh`
   不存在**（`ls` 实测）；任务描述里的 `~/.config/dsh` 在本机不是 dsh 的读写路径，两种路径
   都未被本实现或冒烟修改。（`dsh 实测`）
-* `GLINK_ACP_ENV` 提供命令级 env（`NAME=value`），不允许覆盖 `HOME`（隔离边界）。（`宿主代码`）
+* `PI_GLINK_ACP_ENV` 提供命令级 env（`NAME=value`），不允许覆盖 `HOME`（隔离边界）。（`宿主代码`）
 * 注入值抽取（JSON 凭据键、YAML 标量行、provider shape）并入**该 run** 的 redactor：
   两个真实 run 的 events/report/API 下载对真实凭据值 0 命中；源文件 sha256 前后一致。
   （`合成实测`/`dsh 实测`/`codex-acp 实测`）
@@ -373,7 +375,7 @@ support），不依赖可选能力位、不依赖任何 agent 私有扩展；围
   `mode=auto`（workspace-write，会话配置显式指定）运行，编辑/命令/内置 web 搜索未触发审批；
   dsh 的默认组合是 `workspace-write + approval=ask`（dsh 源码），实测 web_search、web_fetch、
   write、bash、edit、read 也都未被要求审批。（`dsh 实测`/`codex-acp 实测`）
-* **决定**：默认继续全拒；不启用任何白名单。`GLINK_ACP_PERMISSION_ALLOW` 作为配置级
+* **决定**：默认继续全拒；不启用任何白名单。`PI_GLINK_ACP_PERMISSION_ALLOW` 作为配置级
   门控已实现并有合成回归（默认空集 = 原行为），留给将来某个 agent 在真实 run 证明全拒不可
   用时按最小集合启用，并须回写本节。**M4 满足了启用条件**：claude-code-acp 的安全写入
   （Write/Edit）与 WebFetch 会逐次询问，研究 run 无法在 fail-closed 下产出 report.md；
@@ -386,7 +388,7 @@ support），不依赖可选能力位、不依赖任何 agent 私有扩展；围
 
 ### 4.7 会话配置与模式
 
-* `GLINK_ACP_SESSION_CONFIG`（`id=value`）在 `session/new` 后应用；agent 未声明该选项或
+* `PI_GLINK_ACP_SESSION_CONFIG`（`id=value`）在 `session/new` 后应用；agent 未声明该选项或
   取值不在其声明集合内则 run 失败闭环，不静默忽略。（`宿主代码`/`合成实测`）
 * 真实应用记录：codex-acp `mode=auto`（`modes.currentModeId` 同步为 auto），dsh
   `reasoning_effort=low`（握手时验证）。冒烟 run 使用 codex-acp `mode=auto`、dsh 默认。
@@ -424,7 +426,7 @@ ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现
   并声明 `sessionCapabilities`（`docker 实测`）；本次只验证握手，真实模型 run 仍列在 §12。
 * 镜像默认命令即自检：`dsh --version && codex-acp --version`；构建期还用 ARG 精确比对
   两个 `--version` 输出（不一致即构建失败），因此“镜像里装的是声明版本”是可复核事实
-  （`镜像自检`/`宿主代码`）。实测：`glink-harness-acp-worker:latest`（sha256:4268dca9d9ed…，
+  （`镜像自检`/`宿主代码`）。实测：`pi-glink-acp-worker:latest`（sha256:4268dca9d9ed…，
   linux/arm64，1.37 GB）默认 CMD 输出 `0.1.5-rc.3` 与
   `@agentclientprotocol/codex-acp 1.13.1`，镜像内 `node -v` = v24.21.0（`docker 实测`）。
   构建日志出现 npm 11 的 install-scripts 警告（dsh-subprocess-local/koffi/node-pty 等
@@ -432,7 +434,7 @@ ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现
   必须在 ARG 层显式 `--allow-scripts` 并重建（`docker 实测`/`npm`）。M4 新增的 claude CLI
   就属于这种情况：npm 11 默认没跑它的 postinstall，构建里显式执行了包内的 `install.cjs`
   放置原生二进制（§7.5），并保留“四个组件版本精确比对”的自检。
-* 命名与冻结：`LOCAL_WEB_ACP_WORKER_IMAGE`（默认 `glink-harness-acp-worker:latest`）与 pi 面的
+* 命名与冻结：`LOCAL_WEB_ACP_WORKER_IMAGE`（默认 `pi-glink-acp-worker:latest`）与 pi 面的
   `LOCAL_WEB_WORKER_IMAGE`分开；值在配置期冻结，运行期不再读环境（`宿主代码`/`合成实测`）。
   升级路径：改 ARG → 重建 → 边界测试（ARG 必须重新等于 §5.1 记录值）→ 重建后的容器内
   握手/最小 run。M4 把默认 CMD 从「两个 `--version` 的 `sh -c` 一行」换成镜像内自检脚本
@@ -452,7 +454,7 @@ ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现
 * 凭据形态：沿用 M2 的“只读复制进 run HOME”，再在容器内对每个凭据文件做**嵌套只读挂载**
   （`-v <run-home>/<dest>:/home/acp/<dest>:ro`）。HOME 本身保持可写（agent 必须能写会话与
   缓存），但凭据文件在容器内不可改写/删除（`宿主代码`/`合成实测`/`docker 实测`）。
-* `GLINK_ACP_ENV`：按**名字**传（`-e NAME`），值放在 docker CLI 自己的环境里，不进 argv
+* `PI_GLINK_ACP_ENV`：按**名字**传（`-e NAME`），值放在 docker CLI 自己的环境里，不进 argv
   （进程列表）；这是与文件注入并列的显式进程环境通道（`宿主代码`/`合成实测`）。
 * 容器身份与对账：容器名、停止、对账完全复用 pi 面的 `container_name_for` / `stop_argv` /
   `confirm_absent` 约定；名字在 `docker run` 执行前持久化到 run 记录，在线 ledger 只按
@@ -496,7 +498,7 @@ ACP 客户端、投影、生命周期判定继续复用 M1/M2 的同一份实现
 * **环境约束（Colima/本机）**：Colima 只把 home 树共享给 VM；数据根/工作区放在 `/tmp`
   时，绑定的文件与目录会被静默创建成空目录（首次探针即复现：容器内凭据变成目录，
   `session/new` 因缺少凭据失败）。本机验证因此全部放在 `$HOME` 下的临时目录；该约束对
-  pi docker 面同样适用（它一直靠默认数据根 `~/.glink-harness` 在 home 下而没暴露）。
+  pi docker 面同样适用（它一直靠默认数据根 `~/.pi-glink` 在 home 下而没暴露）。
   约束本身不是代码行为，但会把“静默空挂载”变成运行期失败，因此写在这里（`docker 实测`）。
 
 ### 5.5 与 M2 的差异与风险
@@ -547,7 +549,7 @@ E2B SDK 不给双向管道，只有 `commands.run(background=True, stdin=True)` 
 
 新增 `docker/e2b/Dockerfile.acp-e2b`，构建**独立 dev 模板** `glink-acp-worker`；生产模板
 `glink-frontier-e2b` 与其任何 tag 均未被读取写入（只有 `template list` 的只读列出），
-pi 面模板 `glink-harness-worker` 也未动（`e2b 模板实测`）。
+pi 面模板 `pi-glink-worker` 也未动（`e2b 模板实测`）。
 
 * 钉版与 M3a 镜像一致：`@deepseek-ai/dsh@0.1.5-rc.3`、
   `@agentclientprotocol/codex-acp@1.13.1`，`FROM node:24.21.0-bookworm-slim`；构建期用
@@ -583,7 +585,7 @@ pi 面模板 `glink-harness-worker` 也未动（`e2b 模板实测`）。
   （凭据源只读复制、0600），再上传到沙箱状态根 `/home/user/acp/home`：先把状态根
   `chmod 0700` 再上传（不让文件落在可遍历目录里），上传后把创建的目录 `chmod 0700`、
   每个文件 `chmod 0600`；agent 命令的 `HOME` 指向该根，
-  `GLINK_ACP_ENV` 作为显式进程环境通道（值不进命令行），凭据值并入该 run 的 redactor
+  `PI_GLINK_ACP_ENV` 作为显式进程环境通道（值不进命令行），凭据值并入该 run 的 redactor
   （`宿主代码`/`合成实测`/`e2b 实测`）。
 * **stdio 桥接**：`SandboxCommandProcess` 把 `CommandHandle` 适配成 `subprocess` 形状
   （`send_stdin`/`close_stdin`/分块读/`poll`/`wait`/`kill`），`AcpRpcClient` 新增可注入的
@@ -681,7 +683,7 @@ pi 面模板 `glink-harness-worker` 也未动（`e2b 模板实测`）。
 
 inproc 面的钉版调用是 `npx -y @zed-industries/claude-code-acp@0.16.2`（不全局安装；M6 起
 为 `npx -y @agentclientprotocol/claude-agent-acp@0.81.2`，见 §9）；因为
-每 run 的 `HOME` 是新的，npx 缓存也随 run 新建，探针用 `GLINK_ACP_ENV` 注入
+每 run 的 `HOME` 是新的，npx 缓存也随 run 新建，探针用 `PI_GLINK_ACP_ENV` 注入
 `npm_config_cache` 共享一份缓存，避免冷下载超过 initialize 的 60s 上限（`宿主代码`/`claude 实测`）。
 
 ### 7.2 能力矩阵（initialize / session/new 响应原文）
@@ -696,7 +698,7 @@ inproc 面的钉版调用是 `npx -y @zed-industries/claude-code-acp@0.16.2`（�
 | `mcpCapabilities` | `{http: true}` | `{http, sse, acp 各布尔}` | `{http: true, sse: true}` | `{http: true, sse: true}`（无 `acp` 键）（`opencode 实测`） |
 | `authMethods` | `[]` | api-key / chat-gpt（env_var） | `[claude-login]`（描述为“Run `claude /login` in the terminal”） | `[opencode-login]`（描述为“Run `opencode auth login` in the terminal”）（`opencode 实测`） |
 | `session/new` 返回 | `sessionId` + `configOptions`（model、reasoning_effort） | `sessionId` + `modes` + `configOptions`（5 项） | `sessionId` + `models`（default/opus/opus[1m]/haiku）+ `modes`（default/acceptEdits/plan/dontAsk/bypassPermissions）；**`configOptions` 为空数组** | `sessionId` + `modes`（空对象）+ `configOptions`（`model`、`mode`；选中具体模型后联出 `effort`）（`opencode 实测`） |
-| 会话配置面 | `session/set_config_option` 可用 | `session/set_config_option` 可用 | 无 `configOptions`：`GLINK_ACP_SESSION_CONFIG` 对它不适用（配了会失败闭环，缺省不配即是无操作）（`claude 实测`） | `session/set_config_option` 可用；实测 `model=openai/gpt-5.6-sol-fast` 生效，`model=…` 后 `configOptions` 多出 `effort`（`opencode 实测`） |
+| 会话配置面 | `session/set_config_option` 可用 | `session/set_config_option` 可用 | 无 `configOptions`：`PI_GLINK_ACP_SESSION_CONFIG` 对它不适用（配了会失败闭环，缺省不配即是无操作）（`claude 实测`） | `session/set_config_option` 可用；实测 `model=openai/gpt-5.6-sol-fast` 生效，`model=…` 后 `configOptions` 多出 `effort`（`opencode 实测`） |
 
 补充实测（M4 钉版 0.16.2 的记录；M6 后继包 0.81.2 的逐条差异见 §9.2）：
 
@@ -725,7 +727,7 @@ inproc 面的钉版调用是 `npx -y @zed-industries/claude-code-acp@0.16.2`（�
 3. **真实 settings.json 不能整文件复制进 run。** 它含约 30 条 hooks（Muxy/Otty/Orca/Herdr/
    harness notify）、`enabledPlugins` 与 `statusLine`；实测整文件复制后，SessionStart hook 立即在
    宿主上拉起 `~/.harness/cli/notify.mjs` 并把操作员真实的 `~/.claude/projects` 等目录传进去。
-   正确形态是只把 `env` 块抽成一份运行期 settings（0600），经 `GLINK_ACP_CREDENTIAL_FILES`
+   正确形态是只把 `env` 块抽成一份运行期 settings（0600），经 `PI_GLINK_ACP_CREDENTIAL_FILES`
    只读复制进 `HOME/.claude/settings.json`（`source=dest`），源文件 sha256 前后一致。
 4. **`~/.claude.json` 不需要复制。** 全新 HOME 首次启动时 CLI 自行创建 `.claude.json` 与
    `.claude.json.backup.*`（含 firstStartTime/userID/GrowthBook 缓存），不依赖预先存在的文件；
@@ -741,7 +743,7 @@ inproc 面的钉版调用是 `npx -y @zed-industries/claude-code-acp@0.16.2`（�
    0600 加固（§5.2/§6.3 的同一机制）（`claude 实测`/`docker 实测`/`e2b 握手实测`）。
 
 结论：inproc 形态 = **运行期 `.claude/settings.json`（env 块，CREDENTIAL_FILES 0600 复制）+
-`CLAUDE_CODE_EXECUTABLE` 指向宿主 claude CLI**；`GLINK_ACP_ENV` 的
+`CLAUDE_CODE_EXECUTABLE` 指向宿主 claude CLI**；`PI_GLINK_ACP_ENV` 的
 `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` 是等价的环境变量通道（值同样并入 redactor，见 §7.7）。
 macOS Keychain 只在 inproc 面存在，docker/e2b 没有它——那两面的真实模型 run 需要宿主显式提供
 API key，否则属预期阻塞。
@@ -752,7 +754,7 @@ API key，否则属预期阻塞。
   （选项 `allow_always`/`allow_once`/`reject_once`），但请求的 `toolCall` **不带** `kind`
   （适配器源码只传 `toolCallId`/`rawInput`/`title`；`claude 实测`/`npm`）。M2 的
   “无 kind 即拒绝”门控因此会让研究 run 写不出 report.md。
-* **决策**：给 ACP 族定义最小白名单 `GLINK_ACP_PERMISSION_ALLOW=allow_once,read,search,fetch,edit`
+* **决策**：给 ACP 族定义最小白名单 `PI_GLINK_ACP_PERMISSION_ALLOW=allow_once,read,search,fetch,edit`
   ——只放行研究 run 需要的 read/search/fetch 与写（edit）四类工具，且只用一次性放行
   （`allow_once`）；`execute`/`think`/`switch_mode`/`other` 保持拒绝，未分类请求（请求与
   `tool_call` 通知都没有 kind）仍拒绝。默认（未配置）行为不变：fail-closed 全拒。
@@ -785,7 +787,7 @@ API key，否则属预期阻塞。
   构建 1m43s）；构建期与 finalize 的 start command 都跑了 `acp-self-check`，四个组件版本正确；
   真实沙箱内 claude-code-acp 完成 initialize + session/new（cwd `/home/user/workspace`，
   `authMethods=[claude-login]`，`configOptions` 空），沙箱按 id 终止无残留；生产模板
-  `glink-frontier-e2b` 与 pi 模板 `glink-harness-worker` 未被触碰（`e2b 模板实测`/`e2b 握手实测`）。
+  `glink-frontier-e2b` 与 pi 模板 `pi-glink-worker` 未被触碰（`e2b 模板实测`/`e2b 握手实测`）。
 * CMD/自检形态的既有断言按新义务更新（`tests/test_kernel_acp_docker.py` 注释写明原义务：
   两个 `--version`；新义务：脚本覆盖四组件），ARG 钉版边界测试扩展到 claude 双包（`合成实测`）。
 
@@ -818,7 +820,7 @@ API key，否则属预期阻塞。
 * 权限 kind 关联（§1.7/§7.4）：`AcpExecutionAdapter` 记住每个 `toolCallId` 的 kind（上限 512），
   `acp_permission` 帧加 `toolKindSource`；合成回归用 fake agent 复刻 claude-code-acp 的
   “先 `tool_call` 通知、后无 kind 权限请求”顺序（`FAKE_ACP_PERMISSION_AFTER_TOOL_CALL`）。
-* `GLINK_ACP_ENV` 里凭据形状的取值并入该 run 的 redactor（`_env_credential_values`）：
+* `PI_GLINK_ACP_ENV` 里凭据形状的取值并入该 run 的 redactor（`_env_credential_values`）：
   兑现 §4.5/方案 §4.5 已声明的“注入值并入 redactor”，只按变量名（`key/token/secret/…`）
   认定，普通旋钮（如 `ACME_MODE=workspace`）不参与脱敏（`宿主代码`/`合成实测`）。
 * live 探针：`scripts/spikes/acp_inproc/{handshake,smoke_host}.py`、
@@ -878,7 +880,7 @@ API key，否则属预期阻塞。
 
 ### 8.3 凭据与状态目录（inproc 面实测）
 
-* **注入**：`GLINK_ACP_CREDENTIAL_FILES=~/.local/share/opencode/auth.json=.local/share/opencode/auth.json`
+* **注入**：`PI_GLINK_ACP_CREDENTIAL_FILES=~/.local/share/opencode/auth.json=.local/share/opencode/auth.json`
   ——源只读（探针前后 sha256 一致）、目标文件 0600、父目录 0700（`opencode 实测`）。
 * **redactor**：opencode 的 OAuth 字段名是 `access`/`refresh`（不带 `token` 后缀），通用规则
   抓不到；M5 按**精确字段名**扩充（`openai.access` 命中、`openai.accessMode` 不命中），本次
@@ -908,7 +910,7 @@ API key，否则属预期阻塞。
 
 * **实测**：一次真实 run 的 53 条事件里 `acp_permission_*` 0 条；两次 `webfetch` 与一次
   `apply_patch`（写 `report.md`）都直接执行，opencode 没有发 `session/request_permission`。
-  该 run 虽然按 M4 最小集合传了 `GLINK_ACP_PERMISSION_ALLOW=allow_once,read,search,fetch,edit`，
+  该 run 虽然按 M4 最小集合传了 `PI_GLINK_ACP_PERMISSION_ALLOW=allow_once,read,search,fetch,edit`，
   但**白名单从未被引用**（没有请求就没有决策）：run 的成功不依赖它（`opencode 实测`）。
   这与 claude-code-acp（§7.4 逐次询问）形成对照，与 dsh/codex-acp 同类。
 * **源码形态**（只读参考上溯版本）：请求选项固定为 `once`(allow_once)/`always`(allow_always)/
@@ -917,7 +919,7 @@ API key，否则属预期阻塞。
   task→think、其余 other），客户端未声明 `requestPermission` 时 opencode 自行按 reject 处理
   （fail-closed）。因此若将来出现请求，宿主的 tool-kind 白名单会以 `toolKindSource=request`
   分类，不需要 M4 那种按 `toolCallId` 回查通知（`opencode 源码`/`宿主代码`）。
-* **决策**：**不为 opencode 启用白名单**；`GLINK_ACP_PERMISSION_ALLOW` 默认空集不变，M4 的
+* **决策**：**不为 opencode 启用白名单**；`PI_GLINK_ACP_PERMISSION_ALLOW` 默认空集不变，M4 的
   最小集合仍然只属于 claude-code-acp 的运行配置。哪些工具会触发 prompt（源码里的 `bash`、
   外部目录路径等）本轮未在真实 run 观测到，记入 §12（`opencode 实测`/`opencode 源码`）。
 
@@ -949,7 +951,7 @@ API key，否则属预期阻塞。
   `npm install -g`，安装后显式再跑包内 `postinstall.mjs`（npm 11 的 install-scripts 策略会跳过
   它，构建日志里点名的就有 `opencode-ai (postinstall: node ./postinstall.mjs)`），并保留五组件的
   构建期版本比对；默认 CMD/`acp-self-check` 增至五个组件（`opencode --version`）。
-* **本地重建实测**（Docker 29.2.1 / Colima）：镜像 `glink-harness-acp-worker:latest` =
+* **本地重建实测**（Docker 29.2.1 / Colima）：镜像 `pi-glink-acp-worker:latest` =
   `sha256:fbf2707319e664ab91e8ecf5c23a2bfa9f42890da4acbba7dc53ef736fcb40e3`（linux/arm64，
   `docker inspect` 527357716 字节），构建期自检输出五组件版本且 `grep -qx "${OPENCODE_AI_VERSION}"`
   通过。本机到官方 deb/npm 源很慢（apt 阶段 8 分钟、npm 约 60 KB/s），按 Dockerfile 已声明的
@@ -957,7 +959,7 @@ API key，否则属预期阻塞。
   官方源构建在 npm 阶段中止、未产出镜像（`docker 实测`/`镜像自检`）。
 * **容器内握手**（生产装配路径，不发 prompt）：`opencode acp` 在容器里完成 initialize +
   session/new，`cwd=/workspace`、`agentInfo={"name":"OpenCode","version":"1.18.32"}`、
-  `GLINK_ACP_SESSION_CONFIG=model=openai/gpt-5.6-sol-fast` 生效（`configOptions` 联动出
+  `PI_GLINK_ACP_SESSION_CONFIG=model=openai/gpt-5.6-sol-fast` 生效（`configOptions` 联动出
   `effort`）；容器按持久化名字对账无残留（`docker 实测`）。
 * **凭据只读契约**（同一 plan 的挂载参数）：容器内 `HOME/.local/share/opencode/auth.json`
   0600、4285 字节、sha256 与宿主副本一致；追加写失败（`Read-only file system`，exit 2）、
@@ -970,7 +972,7 @@ API key，否则属预期阻塞。
   补跑。真实沙箱内 opencode 完成 initialize + session/new（`cwd=/home/user/workspace`、
   `authMethods=[opencode-login]`、`configOptions` = model/mode），每 run HOME 的 auth.json
   上传后 sha256 与源一致、沙箱按 id 终止无残留；生产模板 `glink-frontier-e2b` 与 pi 模板
-  `glink-harness-worker` 未被触碰（`e2b 模板实测`/`e2b 握手实测`）。
+  `pi-glink-worker` 未被触碰（`e2b 模板实测`/`e2b 握手实测`）。
 
 ### 8.7 docker 面一次最小真实冒烟
 
@@ -990,7 +992,7 @@ API key，否则属预期阻塞。
   provider 装的依赖）、`.local/share/opencode/{auth.json, log, opencode.db*}`、
   `.local/state/opencode/locks/**`；workspace 里是 `report.md`；都随 run 销毁（`opencode 实测`）。
 * 清理：宿主 PID `terminate()`（exit -15）；`cleanup.released=true`、
-  `external.container=glink-harness-960dd5f9958e`；`docker ps -a` 无 `glink-harness-*` 残留；未用
+  `external.container=pi-glink-960dd5f9958e`；`docker ps -a` 无 `pi-glink-*` 残留；未用
   `pkill -f`/通配；数据根经 `scripts/check-no-secrets.py` 扫描 0 命中（`opencode 实测`）。
 
 ### 8.8 宿主侧实现变更（M5）
@@ -1055,7 +1057,7 @@ claude-agent-acp 走的仍是同一份 `AcpRpcClient`、投影与生命周期判
 | `sessionCapabilities` | fork/list/resume | additionalDirectories/close/delete/fork/list/resume/subagents |
 | 其他新增能力位 | — | `_meta.claudeCode.promptQueueing=true`、`_meta.authStatus`、`auth={logout}`、`providers={}` |
 | `session/new` | sessionId + models + modes（default/acceptEdits/plan/dontAsk/bypassPermissions）+ **`configOptions` 空数组** | sessionId + modes（default/acceptEdits/plan/auto/bypassPermissions；`dontAsk`→`auto`）+ **`configOptions` = mode/model/effort**（容器/沙箱另有第 4 项 fast）；不再单列 models |
-| `GLINK_ACP_SESSION_CONFIG` | 不适用（无 configOptions，配了会失败闭环） | 适用：`mode=plan` 生效（modes.currentModeId 与 configOptions 同步） |
+| `PI_GLINK_ACP_SESSION_CONFIG` | 不适用（无 configOptions，配了会失败闭环） | 适用：`mode=plan` 生效（modes.currentModeId 与 configOptions 同步） |
 | `available_commands` | 47 条 | 45 条（宿主门禁仍拒绝 `/` 开头 prompt） |
 | 每 run HOME 落点（握手期观测） | `.claude/{backups,debug,sessions,projects}` + `.claude.json` + `Library/Caches` | `.claude/{backups,sessions}` + `.claude.json`（debug/projects 握手期未创建，落点全在 run HOME 内） |
 | 权限请求 `kind` | 请求不带 kind（宿主按同 `toolCallId` 回查，`toolKindSource=tool_call`） | 请求自带 kind（冒烟 `toolKindSource=request`） |
@@ -1072,7 +1074,7 @@ claude-agent-acp 走的仍是同一份 `AcpRpcClient`、投影与生命周期判
 绕行；该通道也仍受支持（两次冒烟各走一条，见 §9.6）。
 
 * 派生方式不变：只取 `~/.claude/settings.json` 的 `env` 块（本次 11 个键）写成运行期
-  settings（0600，经 `GLINK_ACP_CREDENTIAL_FILES` 复制进 `HOME/.claude/settings.json`），
+  settings（0600，经 `PI_GLINK_ACP_CREDENTIAL_FILES` 复制进 `HOME/.claude/settings.json`），
   真实文件全程只读（sha256 前后一致）；hooks/plugins/statusLine 不进入 run。
 * 新版 SDK 0.3.280 的原生 cli 2.1.280 在同一份派生 settings 下 `auth status --json` 报
   `loggedIn=true / authMethod=oauth_token`，空 HOME 报 `loggedIn=false`；M4 的 vendor
@@ -1089,14 +1091,14 @@ claude-agent-acp 走的仍是同一份 `AcpRpcClient`、投影与生命周期判
 * 白名单沿用 M4 最小集合 `allow_once,read,search,fetch,edit`：两次冒烟都只放行
   fetch/edit，本次未出现 execute 类请求（execute 仍由合成回归钉住拒绝）。
 * 会话模式选项变化（`dontAsk` → `auto`）对宿主是数据面差异：宿主只透传
-  `configOptions`，不按取值分支；`GLINK_ACP_SESSION_CONFIG` 只按 id=value 应用。
+  `configOptions`，不按取值分支；`PI_GLINK_ACP_SESSION_CONFIG` 只按 id=value 应用。
 
 ### 9.5 镜像与 dev 模板（后继钉版层）
 
 * `docker/Dockerfile.acp-worker`：claude 层换 `@agentclientprotocol/claude-agent-acp@0.81.2`，
   ARG 改名 `CLAUDE_AGENT_ACP_VERSION`，自检改用 `claude-agent-acp --version`（新入口
   自带）；dsh/codex/opencode/claude CLI 四个钉版不变。重建实测（mirrors.aliyun.com +
-  registry.npmmirror.com）：`glink-harness-acp-worker:latest` =
+  registry.npmmirror.com）：`pi-glink-acp-worker:latest` =
   `sha256:fb0b9c40f065…`（linux/arm64，`docker inspect` 599274932 字节）；默认 CMD 输出
   五组件版本（0.1.5-rc.3 / `@agentclientprotocol/codex-acp` 1.13.1 / 2.1.282
   (Claude Code) / 1.18.32 / 0.81.2），镜像内 `node -v` = v24.21.0（`docker 实测`/`镜像自检`）。
@@ -1109,7 +1111,7 @@ claude-agent-acp 走的仍是同一份 `AcpRpcClient`、投影与生命周期判
   `oen0rq47o2sizakry5v3`，新 Build ID `b39f87fc-e829-4c67-8e9d-0bff53b8c8f5`，1m53s），
   构建期与 finalize 的 start command 都输出五组件版本；真实沙箱内 claude-agent-acp 完成
   initialize + session/new（`cwd=/home/user/workspace`，configOptions mode/model/effort/fast），
-  沙箱按 id 终止无残留；生产模板 `glink-frontier-e2b` 与 pi 模板 `glink-harness-worker` 未被
+  沙箱按 id 终止无残留；生产模板 `glink-frontier-e2b` 与 pi 模板 `pi-glink-worker` 未被
   触碰（`e2b 模板实测`/`e2b 握手实测`）。
 * 钉版边界回归同步：docker 与 e2b 测试的 claude 断言改到后继包/新 ARG/`--version`
   自检（注释写明原义务/新义务），dsh/codex/opencode 与自检形态断言不变（`合成实测`）。
@@ -1139,7 +1141,7 @@ HTTP API 创建 run，SSE 与终态从 HTTP 面核对（证据 `acp-m6-migration
 
 * **零行为改动**：新适配器在协议面满足同一份 `AcpRpcClient`/投影/生命周期契约
   （inproc 握手 + 两次真实冒烟 + 容器/沙箱握手直接复用生产装配路径），`kernel/` 只更新
-  了注释里的 agent 名单；`GLINK_ACP_COMMAND` 等配置面不变（命令仍是显式配置）。
+  了注释里的 agent 名单；`PI_GLINK_ACP_COMMAND` 等配置面不变（命令仍是显式配置）。
 * inproc/docker/e2b 三个 live 探针的默认 claude 入口改到 `claude-agent-acp@0.81.2`
   （docker/e2b 面命令名为 `claude-agent-acp`），e2b 模板自检增加 claude 组件版本断言。
 
@@ -1151,7 +1153,7 @@ HTTP API 创建 run，SSE 与终态从 HTTP 面核对（证据 `acp-m6-migration
 * **docker/e2b 面真实模型 run 仍未实测**：两面没有 Keychain，宿主未提供
   `ANTHROPIC_API_KEY`；M6 只做无模型握手（延续 M4 的预期阻塞口径，见 §12）。
 * **会话选项面扩大**：`configOptions` 现在有 mode/model/effort(/fast)，
-  `GLINK_ACP_SESSION_CONFIG` 对 claude 从“不适用”变为“可用”，但宿主不校验取值域
+  `PI_GLINK_ACP_SESSION_CONFIG` 对 claude 从“不适用”变为“可用”，但宿主不校验取值域
   （agent 拒绝即失败闭环）；路径级权限策略仍属后续能力。
 * **版本跨度大**：0.16.2 → 0.81.2 的其余未观测行为（`session/cancel`、e2b/docker 真实
   run）按 §12 继续待实测；续接已在 M7 用后继包实测（§10.5）。
@@ -1201,7 +1203,7 @@ HTTP API 创建 run，SSE 与终态从 HTTP 面核对（证据 `acp-m6-migration
   文件、不能逃出各自根）；三个上限（4096 文件 / 单文件 8 MiB / 总量 64 MiB，单文件上限
   对齐 e2b 上传上限），任一越界让追问**失败闭环**而不是用半份状态续接；空目录不复制
   （agent 需要时自建）。
-* 凭据边界（`宿主代码`/`合成实测`）：本配置的凭据目标（`GLINK_ACP_CREDENTIAL_FILES` 的
+* 凭据边界（`宿主代码`/`合成实测`）：本配置的凭据目标（`PI_GLINK_ACP_CREDENTIAL_FILES` 的
   dest）**排除在继承之外**，由 `prepare_acp_runtime` 重新只读复制源文件——子 run 的 redactor
   按自己的注入值构建，不会拿到它不知道的凭据副本；继承文本里发现的凭据形状值并入该 run 的
   redactor（合成回归：首轮把 `sk-live-…` 形状代号写进状态文件，子 run 复述时被 mask）。
@@ -1328,7 +1330,7 @@ fixture 为 `tests/fixtures/fake_acp.py`（真实子进程、真实 stdio）：
 
 M3a 新增 `tests/test_kernel_acp_docker.py`（无 daemon）：ACP docker plan 组合（`docker run -i`、
 `/workspace` 与 `HOME=/home/acp` 挂载、凭据嵌套只读挂载、资源限制与 pi 面逐项相等、
-`GLINK_ACP_ENV` 按名字传且值不进 argv）、ACP worker 镜像的钉版边界
+`PI_GLINK_ACP_ENV` 按名字传且值不进 argv）、ACP worker 镜像的钉版边界
 （Dockerfile ARG == 本笔记记录的实测版本，浮动/缺失声明直接失败）、acp+e2b 在装配层交给沙箱
 面（M3b 起）、容器身份在启动前持久化与按名对账。真实容器行为不在这个文件里，见 §5 与证据文件。
 
@@ -1389,7 +1391,7 @@ ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上
 ### 13.1 通道判定：ACP e2b 的 prompt 不在命令串里
 
 * ACP e2b 的沙箱命令串只有 agent argv：`cd /home/user/workspace && exec <shlex.join(argv)>`
-  （`E2BAcpSandboxClient.command()`）；argv 来自冻结配置 `GLINK_ACP_COMMAND`，不含题面、
+  （`E2BAcpSandboxClient.command()`）；argv 来自冻结配置 `PI_GLINK_ACP_COMMAND`，不含题面、
   工作约定或蓝图渲染。（`宿主代码`；装配见 §6.3）
 * prompt 走 ACP 的 `session/prompt` 文本块：`runner._system_prompt_text()` 把工作约定与
   `render_blueprint()` 拼成 system prompt，`compose_prompt()` 包成前置围栏块，
@@ -1537,7 +1539,7 @@ ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上
   `loadSession: true` + `sessionCapabilities: {resume, list, close, delete, fork,
   additionalDirectories, subagents}`；会话模式取值变为 `read-only / agent / agent-full-access`
   （默认 `agent`），M2 的 `mode=auto` 是该包旧版取值，本任务不用
-  `GLINK_ACP_SESSION_CONFIG` 纠偏（`codex-acp 实测`）。
+  `PI_GLINK_ACP_SESSION_CONFIG` 纠偏（`codex-acp 实测`）。
 * 真实「首轮+追问」：父 run `finished`/report 200（406 bytes）；追问 `finished`/report 200
   （427 bytes，末行 `代号 = KNGQK-2694`）、`sessionId` 与父相同、`resumeMethod=session/resume`；
   追问 HOME 81→82 文件，68 个与父内容一致（含
@@ -1607,10 +1609,10 @@ ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上
 
 ### 15.1 docker 面 ACP 续接（dsh，首轮 + 追问）
 
-* 事实（`docker 实测`，`acp-m9-docker-resume-dsh.txt`；镜像 `glink-harness-acp-worker:latest`
+* 事实（`docker 实测`，`acp-m9-docker-resume-dsh.txt`；镜像 `pi-glink-acp-worker:latest`
   sha256:fb0b9c40f065…，未重建）：父 run `finished`/report 200（967 B），追问 `finished`/
-  report 200（988 B，末尾 `代号 = ODOPA-6785`）；两轮容器名 `glink-harness-5e7a4bef2ea2` →
-  `glink-harness-efda45c14262`（**新容器**）；`sessionId` 两轮相同
+  report 200（988 B，末尾 `代号 = ODOPA-6785`）；两轮容器名 `pi-glink-5e7a4bef2ea2` →
+  `pi-glink-efda45c14262`（**新容器**）；`sessionId` 两轮相同
   （3c113656-6f28-46d1-8f66-d53c524448f7）、`session_ready.resumed=true`、
   `resumeMethod=session/resume`、`cwd=/workspace`，事件流有 `acp_session_resumed`。
 * 状态继承（`docker 实测`）：父/子 run 的宿主可见 HOME 各 8 个文件、6 个内容一致，其中
@@ -1620,7 +1622,7 @@ ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上
   文件嵌套 `:ro`；容器内 `session/resume` 成功并复述首轮代号，即“继承状态根经挂载进入
   容器”的直接观测（挂载契约本身见 §5.2/§5.4）。
 * 清理（`docker 实测`）：两轮 `cleanup.released=true`，`confirm_absent` 都按**精确容器名**
-  确认不存在，`docker ps -a` 无 `glink-harness-` 前缀容器；宿主只按脚本持有的 PID `terminate`
+  确认不存在，`docker ps -a` 无 `pi-glink-` 前缀容器；宿主只按脚本持有的 PID `terminate`
   （exit=-15），后代只按已知 PID 记录。没有 `pkill`、没有名字通配。
 * 模型调用：2 轮（首轮 + 追问）。
 
@@ -1682,7 +1684,7 @@ ACP e2b 面的 prompt 到底走哪条通道、E2B 对该通道有没有体积上
 3. `count` 轴代价：逐文件流式读取（实测约 0.25s/文件）让 4096 文件的触顶耗时 1026.73s；
    本任务把它跑完并记录，而不是用更小的合成上限替代真实上限。
 4. 本任务新增两个探针（§15.2/§15.3）与一个 docker 续接探针（§15.1）；**没有**改
-   `tests/` 里的既有断言，也没有改 `host/glink_harness/kernel/`。
+   `tests/` 里的既有断言，也没有改 `host/pi_glink/kernel/`。
 
 ### 15.5 M9 与既有面的差异与风险
 
@@ -1734,7 +1736,7 @@ p4 方案（GLINK-SUB 可见性）遗留的未验证项：ACP 面是否暴露子
   pi 的会话目录仍整体重写；ACP 的两个状态根（`home`、E2B 回收的 `recovered`）声明为**只读
   扫描**——凭据形状值并入本 run 的脱敏边界，文件字节不改写（与 §10.2/§14.1 的「agent 会话
   存储不重写」同一义务）；缺失的根按「无可扫之物」处理。
-* 注入凭据副本（`GLINK_ACP_CREDENTIAL_FILES` 的 dest，如 `.dsh/.credentials.yaml`）的
+* 注入凭据副本（`PI_GLINK_ACP_CREDENTIAL_FILES` 的 dest，如 `.dsh/.credentials.yaml`）的
   收尾处置已定：扫描之后删除（用户决定 C，见 §18.4；pi 面曾按同一口径处理，见 §18.5，现已被
   ADR 0008 出口代理取代）。
 * 回归：`tests/test_kernel_sweep.py`（旧机制直接变红、状态文件字节不变、pi 声明与行为不变）。
@@ -1790,7 +1792,7 @@ p4 方案（GLINK-SUB 可见性）遗留的未验证项：ACP 面是否暴露子
 * 原义务：注入的凭据副本随 run 目录生命周期保留（§6.6 原文），收尾只扫描其值并入本 run
   脱敏边界、不改写文件（§18.1）。
 * 新义务（用户决定 C）：run 收尾在只读扫描之后，按 `credential_dests`
-  （`GLINK_ACP_CREDENTIAL_FILES` 的 dest）**删除**宿主注入的凭据副本，`home` 与 E2B
+  （`PI_GLINK_ACP_CREDENTIAL_FILES` 的 dest）**删除**宿主注入的凭据副本，`home` 与 E2B
   回收的 `recovered` 两处都删。理由：追问由 `prepare_acp_runtime` 从源重新渲染
   （§10.2/§14.2），继承时 `inherit_acp_state` 已 skip `credential_dests`，副本收尾后没有
   用途；删除缩小 0600 明文在宿主磁盘上的驻留面。
@@ -1907,7 +1909,7 @@ uncaught exception，dsh 进程 exit 1。0.1.5-rc.3 ~ 0.1.7-rc.2 未修复。本
   * 覆盖层目录含 `settings.yaml`（模型对齐，实验用）时也一并渲染，机制不变。
 * **E2B 模板**：`glink-acp-worker`（Template ID `oen0rq47o2sizakry5v3`）用 E2B CLI 重建，
   Build ID `95014ccd-2cfe-4fb5-865a-b4073dc647ff`；构建上下文为仓库根（`-p .`），COPY 成功。
-  生产模板 `glink-frontier-e2b`、pi 面模板 `glink-harness-worker` 未触碰。
+  生产模板 `glink-frontier-e2b`、pi 面模板 `pi-glink-worker` 未触碰。
 
 ### 19.3 验证证据
 
@@ -1919,7 +1921,7 @@ uncaught exception，dsh 进程 exit 1。0.1.5-rc.3 ~ 0.1.7-rc.2 未修复。本
   覆盖层清单、两个 Dockerfile 的安装落点/自检、`scripts/check.sh` 入口钉住；
   `scripts/check.sh` 新增「Node（dsh fetch bundle 单元测试）」一行，`tests/test_check_entrypoint.py`
   同步覆盖「缺 bundle 测试集/替身注册」的空测试集失败面。
-* **本机 Docker**（`glink-harness-acp-worker:latest`，构建参数 `DEBIAN_MIRROR=mirrors.aliyun.com`
+* **本机 Docker**（`pi-glink-acp-worker:latest`，构建参数 `DEBIAN_MIRROR=mirrors.aliyun.com`
   `NPM_REGISTRY=https://registry.npmmirror.com`，与 Dockerfile 注释的受限网络路径一致）：
   * 自检输出 `0.1.5-rc.3 / @agentclientprotocol/codex-acp 1.13.1 / 1.18.32 / jina-bundle=present`；
   * 用与宿主同形的每 run HOME（覆盖层 + 0600 凭据副本）跑 `dsh --profile acp --dump-config`：
@@ -1951,7 +1953,7 @@ uncaught exception，dsh 进程 exit 1。0.1.5-rc.3 ~ 0.1.7-rc.2 未修复。本
 * 每次 `web_fetch` 把**目标 URL** 与 `JINA_API_KEY` 发给 `r.jina.ai`；页面内容经 Jina 返回
   dsh 进程。用户已接受该研究 URL 外发面；`baseURL` 可指向自建 Reader。
 * 凭据只在每 run 的宿主 0600 临时合并文件 → 注入的 `.dsh/.credentials.yaml` 内存在；不写
-  `~/.dsh`、`~/.config/glink-harness-secrets`、仓库或日志；key 的值在报告/证据里 0 命中。
+  `~/.dsh`、`~/.config/pi-glink-secrets`、仓库或日志；key 的值在报告/证据里 0 命中。
 * 真实调用额度：模型 run 2 次（E2B，均在 6 次授权内）；Jina Reader 直接探针（无模型）共 10 次
   （文档核对的 GET/POST 7 次 + 容器内真实 key 探针 3 次），远低于 30 次上限。
 

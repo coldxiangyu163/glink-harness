@@ -1,5 +1,7 @@
 # pi 集成实测笔记（0.86.1）
 
+> **改名说明（2026-10-01）**：本仓库由 `pi-glink` 更名为 `glink-harness`（Python 包 `pi_glink`→`glink_harness`、环境变量 `PI_GLINK_*`→`GLINK_*`、镜像/模板/数据根同步更名）。本文改名前的实测记录保留当时旧名——它们是同一工程的历史标识，与 `docs/evidence/` 原始日志一致；现行命令、路径与变量名以当前源码为准。
+
 本文件记录**实测得到**的 pi 行为事实。每条都有可复现的命令或证据来源；架构决策引用这里的结论，而不是推测。
 
 测试基线：宿主 pi `0.86.1`（升级演练到 `0.87.0`）、宿主开发 Node `v24.16.0`、Docker / E2B 镜像与沙箱 Node `v24.21.0`（`node:24.21.0-bookworm-slim` 精确 tag）、宿主 Python 3.12、上游 OpenRouter（`https://openrouter.ai/api/v1`，模型 `openai/gpt-5.6-sol`）。
@@ -101,7 +103,7 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
   `commands.run(background=True)` 返回的 `CommandHandle` 才是流式接口（迭代它逐块拿到
   stdout；把 `on_stdout` 传给 `run()` 本身不生效，那是早期的用法误判）。
 - **Node 与 pi 固定在两侧镜像**：`node:24.21.0-bookworm-slim` 精确 tag + pi 0.86.1，镜像自包含
-  （无挂载时 `docker run --rm glink-harness-worker:latest pi --version` = 0.86.1）。
+  （无挂载时 `docker run --rm pi-glink-worker:latest pi --version` = 0.86.1）。
 - 证据：`docs/evidence/docker-run.txt`、`docs/evidence/e2b-run.txt`、`docs/evidence/credential-boundary.txt`。
 
 ## 7. 工具输出的流式语义（已实测）
@@ -114,7 +116,7 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
 
 ```
 seq=86  len=0
-seq=87  len=53   '/Users/coldxiangyu/.glink-harness/workspaces/ebf75f590601\n'
+seq=87  len=53   '/Users/coldxiangyu/.pi-glink/workspaces/ebf75f590601\n'
 seq=88  len=495  同前 53 字符 + '\nPI vars:\nPI_CODING_AGENT_DIR=…'
 ```
 
