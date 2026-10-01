@@ -30,25 +30,25 @@ from typing import Any
 
 import pytest
 
-from pi_glink.config import build_config
-from pi_glink.events import EventBus
-from pi_glink.kernel.acp_e2b_env import BACKFILL_TAR_PATH
-from pi_glink.kernel.acp_projection import AcpProjector
-from pi_glink.kernel.acp_sandbox_park import (
+from glink_harness.config import build_config
+from glink_harness.events import EventBus
+from glink_harness.kernel.acp_e2b_env import BACKFILL_TAR_PATH
+from glink_harness.kernel.acp_projection import AcpProjector
+from glink_harness.kernel.acp_sandbox_park import (
     read_generation_marker,
     write_generation_marker,
 )
-from pi_glink.kernel.conversation_lease import (
+from glink_harness.kernel.conversation_lease import (
     ConversationLease,
     read_lease,
     write_lease,
 )
-from pi_glink.kernel.execution import ExecutionSpec
-from pi_glink.kernel.harness_acp import AcpHarnessFamily
-from pi_glink.kernel.sandbox import SandboxResume, open_sandbox
-from pi_glink.redaction import SecretRedactor
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import FINISHED, RunRecord, RunSpec, RunStore
+from glink_harness.kernel.execution import ExecutionSpec
+from glink_harness.kernel.harness_acp import AcpHarnessFamily
+from glink_harness.kernel.sandbox import SandboxResume, open_sandbox
+from glink_harness.redaction import SecretRedactor
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import FINISHED, RunRecord, RunSpec, RunStore
 
 from acp_pack import apply_acp_pack
 from harness_helpers import family
@@ -216,7 +216,7 @@ def make_config(tmp_path: Path, **overrides: str):
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_EXECUTOR": "e2b",
         "E2B_API_KEY": "e2b-secret-key",
-        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
+        "GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
         "TEST_ACP_COMMAND": "dsh --profile acp",
     }
     values.update(overrides)
@@ -348,7 +348,7 @@ def test_resume_target_refused_without_the_e2b_face_or_ttl(tmp_path: Path) -> No
     conversation = store.conversation_dir("r1")
     write_a_lease(conversation, run_id="r1")
     assert family.sandbox_resume_target(a_record("r1", executor="docker")) is None
-    disabled = make_config(tmp_path, PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS="0")
+    disabled = make_config(tmp_path, GLINK_CONVERSATION_LEASE_TTL_SECONDS="0")
     family_off = a_family(disabled, store)
     assert family_off.sandbox_resume_target(a_record("r1")) is None
 
@@ -428,7 +428,7 @@ def test_adapter_degrades_when_the_marker_disagrees(tmp_path: Path) -> None:
 def test_adapter_degrades_when_connect_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import pi_glink.kernel.acp_execution as acp_execution
+    import glink_harness.kernel.acp_execution as acp_execution
 
     config = make_config(tmp_path)
     gone = ParkableSandbox(tmp_path, sandbox_id="sbx-gone")
@@ -465,7 +465,7 @@ class _CleanReclaimTransfer:
     """Parks now require a post-close reclaim; this one always publishes OK."""
 
     def recover_state(self):
-        from pi_glink.kernel.acp_e2b_env import AcpStateRecovery
+        from glink_harness.kernel.acp_e2b_env import AcpStateRecovery
 
         return AcpStateRecovery(ok=True, failures=())
 
@@ -541,7 +541,7 @@ def test_close_does_not_park_an_unpublished_run(tmp_path: Path) -> None:
 
 def test_e2b_discard_survives_a_failed_kill(tmp_path: Path) -> None:
     """discard 的 kill 失败不抛：交对账兜底，返回 False 让调用方按 id 销毁。"""
-    from pi_glink.kernel.sandbox import Launch
+    from glink_harness.kernel.sandbox import Launch
 
     config = make_config(tmp_path)
     stuck = ParkableSandbox(tmp_path, sandbox_id="sbx-stuck-handle")
@@ -599,7 +599,7 @@ def fake_kill_by_id(monkeypatch: pytest.MonkeyPatch) -> None:
     gone). Patched at the adapter module because both the degrade path and the
     parking retire path reach it through the same global name.
     """
-    import pi_glink.kernel.acp_execution as acp_execution
+    import glink_harness.kernel.acp_execution as acp_execution
 
     def confirm(sandbox_id: str, **_kwargs: Any):
         if ParkableSandbox.REGISTRY.get(sandbox_id) is None:
@@ -618,7 +618,7 @@ def test_first_run_parks_and_followup_takes_the_hot_path(
     config = make_config(
         tmp_path,
         TEST_ACP_COMMAND=fake_agent_command(tmp_path, settings),
-        PI_GLINK_ACP_CREDENTIAL_FILES=f"{tmp_path / 'cred.yaml'}=.dsh/.credentials.yaml",
+        GLINK_ACP_CREDENTIAL_FILES=f"{tmp_path / 'cred.yaml'}=.dsh/.credentials.yaml",
     )
     (tmp_path / "cred.yaml").write_text("DEEPSEEK_API_KEY: sk-live-cred-1234567890\n")
     store = RunStore(config.data_root / "runs")
@@ -773,7 +773,7 @@ def test_non_archive_parent_keeps_its_admitted_state_when_archive_is_enabled(
     """Exercise both real runs; only SDK/agent external inputs are fake."""
     fake_kill_by_id(monkeypatch)
     command = fake_agent_command(tmp_path, {})
-    config = make_config(tmp_path, TEST_ACP_COMMAND=command, PI_GLINK_EGRESS_PUBLIC_URL="",
+    config = make_config(tmp_path, TEST_ACP_COMMAND=command, GLINK_EGRESS_PUBLIC_URL="",
                          LOCAL_WEB_EXECUTOR=parent_executor)
     store = RunStore(config.data_root / "runs")
     sandboxes = []
@@ -812,7 +812,7 @@ def test_non_archive_parent_keeps_its_admitted_state_when_archive_is_enabled(
 @pytest.mark.parametrize("third_has_channel", [False, True])
 def test_archive_then_files_only_recovery_can_be_followed_again(tmp_path, monkeypatch, third_has_channel):
     """Three real runs must resume the newest turn, not the stale root archive."""
-    from pi_glink.kernel.archive_channel import read_state_manifest
+    from glink_harness.kernel.archive_channel import read_state_manifest
 
     fake_kill_by_id(monkeypatch)
     command = fake_agent_command(tmp_path, {})
@@ -829,7 +829,7 @@ def test_archive_then_files_only_recovery_can_be_followed_again(tmp_path, monkey
 
     def run_turn(prompt, parent_id, public_url):
         configuration = make_config(tmp_path, TEST_ACP_COMMAND=command,
-                                    PI_GLINK_EGRESS_PUBLIC_URL=public_url)
+                                    GLINK_EGRESS_PUBLIC_URL=public_url)
         manager = RunManager(configuration, EventBus(), store, sandbox_factory=factory)
         try:
             record = manager.start(prompt, parent_run_id=parent_id)

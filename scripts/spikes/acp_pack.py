@@ -5,11 +5,11 @@ The live probes take an arbitrary agent command line — often an npx-pinned
 version that deliberately differs from the image ARG. Since GLINK-ARCH-6 the
 host selects a harness by pack name only (the pack manifest is the single
 source of a harness's entry, capabilities and image pins), so a probe
-materializes the same facts as a temporary ``pi-glink-harness/v2``
-``harness.toml`` and selects it with ``PI_GLINK_HARNESS``.
+materializes the same facts as a temporary ``glink-harness/v2``
+``harness.toml`` and selects it with ``GLINK_HARNESS``.
 
 ``write_probe_pack`` returns the temporary harnesses root; callers set
-``PI_GLINK_HARNESS=<name>`` and ``PI_GLINK_HARNESSES_DIR=<returned path>``.
+``GLINK_HARNESS=<name>`` and ``GLINK_HARNESSES_DIR=<returned path>``.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def write_probe_pack(
     if not argv:
         raise ValueError("probe command must not be empty")
     lines = [
-        'format = "pi-glink-harness/v2"',
+        'format = "glink-harness/v2"',
         f"name = {json.dumps(name)}",
         'family = "acp"',
         "",

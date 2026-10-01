@@ -54,7 +54,7 @@ async function start() {
     await workspace.init();
     // Exposed for the browser regression (tests/browser/*.mjs) and for manual
     // inspection; nothing in production code reads it back.
-    globalThis.__piGlink = workspace;
+    globalThis.__glinkHarness = workspace;
   } catch (error) {
     console.error('[workbench] bootstrap failed', error);
     showBootFailure();

@@ -1,6 +1,6 @@
 # harnesses/pi —— pi 包（配置模板 + 扩展本体 + 能力提示）
 
-本目录是一个 **harness 包**：`harness.toml` 声明 `family = "pi"`，它是选择依据（`PI_GLINK_HARNESS=pi`，默认）；其余目录内容是 pi 的**模板**，不是 pi 的运行期目录。
+本目录是一个 **harness 包**：`harness.toml` 声明 `family = "pi"`，它是选择依据（`GLINK_HARNESS=pi`，默认）；其余目录内容是 pi 的**模板**，不是 pi 的运行期目录。
 
 每个 run 开始时，宿主把这里的文件复制/渲染到该 run 自己的目录 `runs/<runId>/pi-agent/`
 （仓库外），再把 `PI_CODING_AGENT_DIR` 指向那个目录，于是 pi 读取的是这份配置，而不是用户
@@ -12,13 +12,13 @@
 1. **可复现**：本机、容器、E2B 三种执行面拿到同一份内核配置。
 2. **可升级**：对 pi 的一切定制都落在这个包（以及 `kernel/` 的协议消费层），内核包保持原样，升级 pi 只需要换版本号。
 
-切换 harness 只改包名（`PI_GLINK_HARNESS=dsh|codex|opencode`）；宿主、事件契约、HTTP/SSE 与前端不随包改变（见 [多 harness 计划](../../docs/multi-harness-plan.md) §3）。
+切换 harness 只改包名（`GLINK_HARNESS=dsh|codex|opencode`）；宿主、事件契约、HTTP/SSE 与前端不随包改变（见 [多 harness 计划](../../docs/multi-harness-plan.md) §3）。
 
 ## 允许放什么
 
 | 位置 | 用途 |
 |---|---|
-| `harness.toml` | 包清单（`pi-glink-harness/v2`）：`[entry]`、`[capabilities]`、`[image]`（fail-closed 解析，未知键拒绝） |
+| `harness.toml` | 包清单（`glink-harness/v2`）：`[entry]`、`[capabilities]`、`[image]`（fail-closed 解析，未知键拒绝） |
 | `capabilities.md` | 能力提示：拼进系统提示（工作约定之后、蓝图之前）；只写已知成立的事实 |
 | `settings.json` | pi 的官方设置（模型、思考档位、工具开关等） |
 | `AGENTS.md` | 目录级运行约定：工作区路径、报告产出位置、检索纪律 |
@@ -32,13 +32,13 @@
 - **不放置密钥。** 真实模型/检索 key 只留在宿主凭据出口代理（docs/adr/0008-egress-proxy.md）：
   宿主把本 run 的短期代理 token 渲染进运行期目录 `runs/<runId>/pi-agent/` 的 `auth.json` /
   `web-search.json`（0600，仓库外），`models.json` 的 `baseUrl` 指向代理；本目录下的文件会进版本库。
-- **不放置宿主实现。** 宿主逻辑在 `host/pi_glink/`，这里只描述内核侧行为。
+- **不放置宿主实现。** 宿主逻辑在 `host/glink_harness/`，这里只描述内核侧行为。
 
 本目录当前包含：
 
 | 文件 | 内容 |
 |---|---|
-| `harness.toml` | 包清单：`format = "pi-glink-harness/v2"`、`name = "pi"`、`family = "pi"`；`[entry].command = ["pi"]`、`[capabilities].resume = true`；`[image]` 的 `[[image.packages]]` 是 pi 内核与预装包版本的唯一真源（Dockerfile ARG 与本目录 `settings.json` 的 `packages` 由 `scripts/generate-pack-artifacts.py` 生成） |
+| `harness.toml` | 包清单：`format = "glink-harness/v2"`、`name = "pi"`、`family = "pi"`；`[entry].command = ["pi"]`、`[capabilities].resume = true`；`[image]` 的 `[[image.packages]]` 是 pi 内核与预装包版本的唯一真源（Dockerfile ARG 与本目录 `settings.json` 的 `packages` 由 `scripts/generate-pack-artifacts.py` 生成） |
 | `capabilities.md` | pi 包能力提示（拼进系统提示，不落进运行期目录）：`subagent` / `researcher` 委派与子代理结论亲自核实 |
 | `settings.json` | `defaultThinkingLevel`、两个精确 pin 的包声明（`npm:pi-web-access@0.31.0`、`npm:pi-subagents@0.40.0`）与关闭的 watchdog 设置 `subagents.watchdog`。本机（inproc）面按此在 run 启动时安装到运行期配置目录；Docker/E2B 面由宿主渲染成镜像内本地包 `/opt/pi-packages/node_modules/<name>`（`docs/architecture.md` §5.3），不在 run 里联网安装 |
 | `agents/researcher.md` | 取证子代理定义：自包含任务、一手来源优先、打开原文核对、产物落工作区约定文件名、只回报要点与来源；`tools` 白名单里没有委派工具，子代理不得再派 |
@@ -69,5 +69,5 @@
   其余 `400 unsupported_command`，见 architecture.md §4 与 pi-integration-notes.md §10.4）。
 
 `models.json`、`auth.json` 与 `web-search.json` 不在本目录：它们含运行期值与本 run 的代理 token，由宿主渲染到
-每个 run 自己的 `runs/<runId>/pi-agent/`（见 `host/pi_glink/kernel/agent_env.py`）。本目录里的
+每个 run 自己的 `runs/<runId>/pi-agent/`（见 `host/glink_harness/kernel/agent_env.py`）。本目录里的
 文件都是常量，渲染时原样复制（先删再拷）。

@@ -1,7 +1,7 @@
 # 0009 run 记录、事件与资源台账迁入 SQLite
 
 - 状态：已接受（2026-09-28，架构重设计 P1；部分替代 [0001](0001-required-run-admission-facts.md) 的读取与裁决口径）
-- 范围：`host/pi_glink/store.py`、`runs/admission.py`、`runs/resource_ledger.py`、`runs/runner.py`、
+- 范围：`host/glink_harness/store.py`、`runs/admission.py`、`runs/resource_ledger.py`、`runs/runner.py`、
   `runs/stages.py`、`web_sse.py`、`kernel/harness_pi.py`（会话目录）、`config.py`
 
 ## 背景

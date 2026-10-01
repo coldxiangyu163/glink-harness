@@ -9,7 +9,7 @@ stdin」已被 ACP 面实测推翻（docs/evidence/acp-m3-e2b-framing.txt），p
 方法（尽量走生产路径）：
 
 * ``build_config``（--env-file）→ ``prepare_agent_dir`` 渲染真实 runtime；
-* ``E2BSandbox`` 起 ``pi-glink-worker`` 模板沙箱并上传配置（生产
+* ``E2BSandbox`` 起 ``glink-harness-worker`` 模板沙箱并上传配置（生产
   上传路径原样）；
 * 沙箱内以 ``background=True, stdin=True`` 启动 ``pi --mode rpc``，用仓库自己的
   ``PiRpcClient`` 驱动——``subprocess.Popen`` 在注入点替换为
@@ -35,19 +35,19 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "host"))
 
-from pi_glink.config import build_config  # noqa: E402
-from pi_glink.kernel import rpc as rpc_module  # noqa: E402
-from pi_glink.kernel.agent_env import EgressEndpoint, prepare_agent_dir  # noqa: E402
-from pi_glink.kernel.e2b_env import (  # noqa: E402
+from glink_harness.config import build_config  # noqa: E402
+from glink_harness.kernel import rpc as rpc_module  # noqa: E402
+from glink_harness.kernel.agent_env import EgressEndpoint, prepare_agent_dir  # noqa: E402
+from glink_harness.kernel.e2b_env import (  # noqa: E402
     SANDBOX_WORKSPACE,
     PiSandboxTransfer,
     SandboxCommandProcess,
 )
-from pi_glink.kernel.execution import ExecutionSpec  # noqa: E402
-from pi_glink.kernel.harness_pi import PiHarnessFamily  # noqa: E402
-from pi_glink.kernel.sandbox import E2BSandbox  # noqa: E402
-from pi_glink.store import RunStore  # noqa: E402
-from pi_glink.kernel.rpc import PiRpcClient, wait_for_idle  # noqa: E402
+from glink_harness.kernel.execution import ExecutionSpec  # noqa: E402
+from glink_harness.kernel.harness_pi import PiHarnessFamily  # noqa: E402
+from glink_harness.kernel.sandbox import E2BSandbox  # noqa: E402
+from glink_harness.store import RunStore  # noqa: E402
+from glink_harness.kernel.rpc import PiRpcClient, wait_for_idle  # noqa: E402
 
 RESULTS: list[tuple[str, bool, str]] = []
 

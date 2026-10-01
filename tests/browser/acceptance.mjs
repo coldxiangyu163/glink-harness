@@ -49,7 +49,7 @@ const only = argValue('--only', '')
   .filter(Boolean);
 const wanted = (name) => only.length === 0 || only.includes(name);
 
-const outDir = argValue('--out', mkdtempSync(join(tmpdir(), `pi-glink-acceptance-${mode}-`)));
+const outDir = argValue('--out', mkdtempSync(join(tmpdir(), `glink-harness-acceptance-${mode}-`)));
 mkdirSync(outDir, { recursive: true });
 const stateDir = join(outDir, 'state');
 mkdirSync(stateDir, { recursive: true });

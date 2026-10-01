@@ -25,9 +25,9 @@ from typing import Any, Mapping
 
 import pytest
 
-from pi_glink import events
-from pi_glink.kernel import projection as pi_projection
-from pi_glink.kernel.acp_projection import (
+from glink_harness import events
+from glink_harness.kernel import projection as pi_projection
+from glink_harness.kernel.acp_projection import (
     ACP_STOP_REASONS,
     COMMAND_LIMIT,
     COMMAND_NAME_LIMIT,
@@ -37,7 +37,7 @@ from pi_glink.kernel.acp_projection import (
     TOOL_TEXT_LIMIT,
     AcpProjector,
 )
-from pi_glink.redaction import SecretRedactor
+from glink_harness.redaction import SecretRedactor
 
 
 def _notification(update: Mapping[str, Any]) -> dict[str, Any]:

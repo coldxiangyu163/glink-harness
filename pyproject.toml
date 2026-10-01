@@ -1,7 +1,7 @@
 [project]
-name = "pi-glink"
+name = "glink-harness"
 version = "0.1.0"
-description = "以 pi 为内核的本地研究工作台宿主 / local research workbench host driven by the pi kernel"
+description = "harness 无关的本地研究工作台宿主（默认 harness 为 pi）/ harness-agnostic local research workbench host (default harness: pi)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
@@ -18,7 +18,7 @@ e2b = ["e2b>=2.0", "httpx[socks]>=0.27"]
 acp-progress = ["zstandard>=0.22"]
 
 [project.scripts]
-pi-glink = "pi_glink.app:main"
+glink-harness = "glink_harness.app:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -28,10 +28,10 @@ build-backend = "setuptools.build_meta"
 package-dir = {"" = "host"}
 
 # 部署单位是整个仓库目录（web/、harnesses/、scripts/ 都按仓库相对路径定位）；下面的包声明只保证
-# 宿主代码可导入，包含 pi_glink、pi_glink.kernel 与 pi_glink.runs（编排层）。独立安装 wheel 不是受支持形态。
+# 宿主代码可导入，包含 glink_harness、glink_harness.kernel 与 glink_harness.runs（编排层）。独立安装 wheel 不是受支持形态。
 [tool.setuptools.packages.find]
 where = ["host"]
-include = ["pi_glink*"]
+include = ["glink_harness*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -54,27 +54,27 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "B"]
 
-# 类型检查：范围是 host/pi_glink。当前（除下方显式豁免外）零错误。
+# 类型检查：范围是 host/glink_harness。当前（除下方显式豁免外）零错误。
 # check_untyped_defs：无类型注解的函数体也检查（cc 实测开启前后均 0 错误；
 # 只拦真问题，不把注解变成强制义务）。
 [tool.mypy]
 python_version = "3.12"
-files = ["host/pi_glink"]
+files = ["host/glink_harness"]
 check_untyped_defs = true
 # e2b 等可选执行面的第三方包不必在门禁环境全部安装；缺包不算类型错误。
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 # 组合式 mixin：HttpPlumbingMixin / RequestSecurityMixin / SseMixin / RoutesMixin 的
-# 方法依赖 PiGlinkServer 组合后的属性（wfile、server、headers、_send_json 等）。mypy
+# 方法依赖 GlinkHarnessServer 组合后的属性（wfile、server、headers、_send_json 等）。mypy
 # 看不到那个组合类，逐行 type: ignore 反而会埋没真实错误，因此只关掉 attr-defined；
 # 这几个文件的 arg-type/assignment/override 等类别仍受检。残留风险：这 4 个文件里跨
 # mixin 的属性拼写错误不会被类型检查发现，由 pytest 全量回归兜底。
 module = [
-    "pi_glink.web_http",
-    "pi_glink.web_security",
-    "pi_glink.web_sse",
-    "pi_glink.web_routes",
+    "glink_harness.web_http",
+    "glink_harness.web_security",
+    "glink_harness.web_sse",
+    "glink_harness.web_routes",
 ]
 disable_error_code = ["attr-defined"]
 

@@ -1,4 +1,4 @@
-// 生成文件，勿手改。来源：host/pi_glink/event_schema.py
+// 生成文件，勿手改。来源：host/glink_harness/event_schema.py
 // 重新生成：python scripts/gen-event-schema.py；scripts/check.sh 以 --check 校验它是最新的。
 
 /**

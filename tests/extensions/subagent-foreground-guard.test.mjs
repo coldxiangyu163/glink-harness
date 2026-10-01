@@ -1,5 +1,5 @@
 /**
- * GLINK-SUB-02：pi-glink 自有扩展把 pi-subagents 的派发强制在前台同步执行。
+ * GLINK-SUB-02：glink-harness 自有扩展把 pi-subagents 的派发强制在前台同步执行。
  *
  * 这里直接对扩展导出的纯判定函数做正反例（每个 detach 入口都要有放行/改写或阻止的
  * 断言），并用一个假的 ExtensionAPI 走一遍真实注册路径：
@@ -26,7 +26,7 @@ import factory, {
   safeGuardSubagentCall,
 } from "../../harnesses/pi/extensions/subagent-foreground-guard.ts";
 
-const WORKSPACE = "/tmp/pi-glink-guard-workspace";
+const WORKSPACE = "/tmp/glink-harness-guard-workspace";
 const HOME = "/Users/example";
 const OPTIONS = { workspace: WORKSPACE, home: HOME };
 

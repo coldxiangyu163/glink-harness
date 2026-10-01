@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.config import build_config
-from pi_glink.kernel.acp_env import prepare_acp_runtime
+from glink_harness.config import build_config
+from glink_harness.kernel.acp_env import prepare_acp_runtime
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BUNDLE_DIR = REPO_ROOT / "harnesses" / "dsh" / "bundles" / "dsh-web-fetch-jina"
@@ -36,7 +36,7 @@ CHECK_SH = REPO_ROOT / "scripts" / "check.sh"
 
 #: 镜像内安装落点：dsh 全局安装自身的依赖目录，`resolveBundleDir` 的第一个解析锚点。
 INSTALL_ROOT = (
-    "/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@pi-glink/dsh-web-fetch-jina"
+    "/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@glink-harness/dsh-web-fetch-jina"
 )
 COPY_SOURCE = "harnesses/dsh/bundles/dsh-web-fetch-jina"
 #: bundle 运行时依赖的上游锚点（与镜像内实测一致；dsh 0.1.5-rc.3 的 cordis 版本）。
@@ -62,7 +62,7 @@ def bundle_patch_text() -> str:
 
 def test_bundle_manifest_is_an_out_of_tree_dsh_bundle() -> None:
     manifest = load_json(BUNDLE_MANIFEST)
-    assert manifest["name"] == "@pi-glink/dsh-web-fetch-jina"
+    assert manifest["name"] == "@glink-harness/dsh-web-fetch-jina"
     assert manifest["private"] is True
     assert manifest["type"] == "module"
     assert manifest["main"] == "lib/index.js"
@@ -136,7 +136,7 @@ def test_profile_overlay_lists_the_shipped_bundles_plus_the_jina_bundle() -> Non
     assert bundles == [
         "@deepseek-ai/dsh-base",
         "@deepseek-ai/dsh-acp-app",
-        "@pi-glink/dsh-web-fetch-jina",
+        "@glink-harness/dsh-web-fetch-jina",
     ]
     assert manifest["dsh"]["profile"]["patchReload"] == "startup"
     # 覆盖层只带清单、用户层与默认 settings（部署偏好版本化，ADR 0016；
@@ -197,7 +197,7 @@ def test_profile_explicitly_disables_upstream_uploads_and_badges(row_id: str) ->
 
 def test_glink_profile_is_delivered_to_a_fresh_run_home(tmp_path: Path) -> None:
     cfg = build_config({
-        "PI_GLINK_HARNESS": "dsh",
+        "GLINK_HARNESS": "dsh",
         "OPENAI_MODEL": "test/model",
         "OPENAI_REASONING_EFFORT": "high",
     }, REPO_ROOT)

@@ -60,5 +60,5 @@ bash scripts/spikes/pi_subagents/audit_async_switch.sh "$fx"   # 应退出 1 并
 
 brief 的门禁规定：没有可靠开关即标 BLOCKER、停止后续深挖。禁用 async 是后续
 （凭据继承、取消传播、事件投影、产物目录）验证的前提，因此没有构建 mock 模型服务。
-若后续改用 pi-glink 自有扩展（`tool_call` 钩子）强制改写 `async: false`，再补
+若后续改用 glink-harness 自有扩展（`tool_call` 钩子）强制改写 `async: false`，再补
 loopback 合成 OpenAI 兼容 mock、临时 `PI_CODING_AGENT_DIR` 与 RPC 驱动。

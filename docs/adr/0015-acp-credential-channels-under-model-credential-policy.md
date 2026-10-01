@@ -1,15 +1,15 @@
 # 0015 ACP 凭据通道纳入模型凭据政策
 
 - 状态：已接受（2026-09-29，凭据边界收口）
-- 范围：`host/pi_glink/config.py`（`_acp_credentials_follow_policy`、shared 三件套按族分流）、
-  `host/pi_glink/kernel/harness_acp.py`（`validate_credentials` 政策分流）、
+- 范围：`host/glink_harness/config.py`（`_acp_credentials_follow_policy`、shared 三件套按族分流）、
+  `host/glink_harness/kernel/harness_acp.py`（`validate_credentials` 政策分流）、
   `tests/test_acp_credential_policy.py`、`tests/test_kernel_harness_pi.py`、
   `docs/multitenancy-plan.md`、`docs/architecture.md`、`docs/engineering.md`、`README.md`
 
 ## 背景
 
-`PI_GLINK_ACP_ENV` / `PI_GLINK_ACP_CREDENTIAL_FILES` 把运营方配置的凭据（环境变量与凭据文件
-副本）注入**每个** ACP run，与租户身份无关。它们此前游离在 `PI_GLINK_MODEL_CREDENTIALS` 政策
+`GLINK_ACP_ENV` / `GLINK_ACP_CREDENTIAL_FILES` 把运营方配置的凭据（环境变量与凭据文件
+副本）注入**每个** ACP run，与租户身份无关。它们此前游离在 `GLINK_MODEL_CREDENTIALS` 政策
 之外：
 
 - multitenant + `tenant`（默认政策）：任何租户的 ACP run 都静默使用运营方凭据——绕过

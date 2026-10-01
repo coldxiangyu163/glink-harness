@@ -28,15 +28,15 @@ from typing import Any
 
 import pytest
 
-from pi_glink.egress import EgressProxy
-from pi_glink.kernel.acp_e2b_env import (
+from glink_harness.egress import EgressProxy
+from glink_harness.kernel.acp_e2b_env import (
     BACKFILL_TAR_PATH,
     RECLAIM_TAR_PATH,
     SANDBOX_ACP_HOME,
     AcpSandboxTransfer,
 )
-from pi_glink.kernel.acp_env import AcpRuntime
-from pi_glink.kernel.archive_channel import ArchiveEndpoint
+from glink_harness.kernel.acp_env import AcpRuntime
+from glink_harness.kernel.archive_channel import ArchiveEndpoint
 
 pytestmark = pytest.mark.usefixtures("clean_reclaim_scratch")
 
@@ -409,7 +409,7 @@ def test_backfill_pulls_the_published_state_into_the_sandbox(
 
 def test_real_archive_backfill_repairs_only_the_target_copy(tmp_path, conversation, proxy) -> None:
     """Actual tar/curl channel → copied HOME → real codec/atomic rename."""
-    from pi_glink.kernel.acp_state_compat import repair_resume_home
+    from glink_harness.kernel.acp_state_compat import repair_resume_home
     from test_kernel_acp_state_compat import decoded, rows, seed
 
     _need_host_tools()
@@ -449,7 +449,7 @@ def test_backfill_failure_fails_the_run(
         run_id="r2", workspace=tmp_path / "ws",
     )
     proxy.close()  # the follow-up was admitted against state it can no longer reach
-    from pi_glink.kernel.e2b_env import SandboxError
+    from glink_harness.kernel.e2b_env import SandboxError
 
     with pytest.raises(SandboxError, match="回灌"):
         transfer.backfill_state()
@@ -476,20 +476,20 @@ class _RemoteSandbox:
 
     def egress_origin(self, port: int) -> str:
         if self._origin is None:
-            from pi_glink.config import ConfigError
+            from glink_harness.config import ConfigError
 
             raise ConfigError("no public url")
         return self._origin
 
 
 def test_prepare_issues_an_archive_grant_for_a_remote_acp_face(tmp_path: Path) -> None:
-    from pi_glink.config import build_config
-    from pi_glink.kernel.harness_acp import AcpHarnessFamily
-    from pi_glink.redaction import SecretRedactor
-    from pi_glink.runs.secrets import RunSecretBoundary
-    from pi_glink.runs.state import RunExecution
-    from pi_glink.runs.stages import PrepareStage, StageServices
-    from pi_glink.store import RunRecord, RunSpec, RunStore
+    from glink_harness.config import build_config
+    from glink_harness.kernel.harness_acp import AcpHarnessFamily
+    from glink_harness.redaction import SecretRedactor
+    from glink_harness.runs.secrets import RunSecretBoundary
+    from glink_harness.runs.state import RunExecution
+    from glink_harness.runs.stages import PrepareStage, StageServices
+    from glink_harness.store import RunRecord, RunSpec, RunStore
 
     from acp_pack import apply_acp_pack
 
@@ -499,7 +499,7 @@ def test_prepare_issues_an_archive_grant_for_a_remote_acp_face(tmp_path: Path) -
         "OPENAI_MODEL": "test/model",
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_EXECUTOR": "inproc",
-        "PI_GLINK_HARNESS": "acp",
+        "GLINK_HARNESS": "acp",
         "TEST_ACP_COMMAND": "dsh --profile acp",
     }
     apply_acp_pack(values, tmp_path)
@@ -573,7 +573,7 @@ def test_channel_success_without_this_runs_manifest_degrades(
     transfer.archive = ArchiveEndpoint(
         origin=transfer.archive.origin, token=transfer.archive.token
     )
-    from pi_glink.egress import EgressProxy as _Proxy  # noqa: F401 - clarity
+    from glink_harness.egress import EgressProxy as _Proxy  # noqa: F401 - clarity
     grant = proxy.archive.grant_for(transfer.archive.token)
     assert grant is not None
     proxy.revoke_archive(grant.token)
@@ -600,7 +600,7 @@ def test_channel_success_without_this_runs_manifest_degrades(
 
 def test_a_crashed_swap_is_healed_on_the_next_read_or_publish(tmp_path: Path) -> None:
     """state→retired 后、staging→state 前崩溃：下次读取/发布把 retired 还原。"""
-    from pi_glink.kernel.archive_channel import _heal_swap_window, read_state_manifest
+    from glink_harness.kernel.archive_channel import _heal_swap_window, read_state_manifest
 
     state = tmp_path / "state"
     retired = tmp_path / ".state.retired"
@@ -627,7 +627,7 @@ def test_a_failed_token_cleanup_never_fails_the_transfer(tmp_path, proxy) -> Non
     real_run = sandbox.commands.run
 
     def run(cmd, timeout=None, **kwargs):
-        if cmd.startswith("rm -f /tmp/pi-glink-archive-token"):
+        if cmd.startswith("rm -f /tmp/glink-harness-archive-token"):
             raise RuntimeError("cleanup refused")
         return real_run(cmd, timeout=timeout, **kwargs)
 
@@ -641,6 +641,6 @@ def test_a_failed_token_cleanup_never_fails_the_transfer(tmp_path, proxy) -> Non
     seed_state(sandbox, b"zstd-frame-1")
     recovery = transfer.recover_state()
     assert recovery.ok, recovery.failures
-    from pi_glink.kernel.archive_channel import read_state_manifest
+    from glink_harness.kernel.archive_channel import read_state_manifest
 
     assert read_state_manifest(conversation) is not None, "发布不受清理失败影响"

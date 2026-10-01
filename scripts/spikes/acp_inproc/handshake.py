@@ -39,13 +39,13 @@ sys.path.insert(0, str(REPO_ROOT / "host"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "spikes"))
 from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 
-from pi_glink import __version__ as HOST_VERSION  # noqa: E402
-from pi_glink.config import build_config  # noqa: E402
-from pi_glink.kernel.acp_env import prepare_acp_runtime  # noqa: E402
-from pi_glink.kernel.execution import ExecutionSpec  # noqa: E402
-from pi_glink.kernel.harness_acp import AcpHarnessFamily  # noqa: E402
-from pi_glink.kernel.sandbox import InprocSandbox  # noqa: E402
-from pi_glink.store import RunStore  # noqa: E402
+from glink_harness import __version__ as HOST_VERSION  # noqa: E402
+from glink_harness.config import build_config  # noqa: E402
+from glink_harness.kernel.acp_env import prepare_acp_runtime  # noqa: E402
+from glink_harness.kernel.execution import ExecutionSpec  # noqa: E402
+from glink_harness.kernel.harness_acp import AcpHarnessFamily  # noqa: E402
+from glink_harness.kernel.sandbox import InprocSandbox  # noqa: E402
+from glink_harness.store import RunStore  # noqa: E402
 
 DEFAULT_COMMAND = "dsh --profile acp"
 
@@ -119,15 +119,15 @@ def main(argv: list[str] | None = None) -> int:
         permission_allow=args.permission_allow,
     )
     values = {
-        "PI_GLINK_HARNESS": PROBE_PACK_NAME,
-        "PI_GLINK_HARNESSES_DIR": str(packs),
+        "GLINK_HARNESS": PROBE_PACK_NAME,
+        "GLINK_HARNESSES_DIR": str(packs),
         "LOCAL_WEB_DATA_ROOT": str(workdir / "data"),
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": str(args.timeout),
     }
     if credentials:
-        values["PI_GLINK_ACP_CREDENTIAL_FILES"] = ";".join(credentials)
+        values["GLINK_ACP_CREDENTIAL_FILES"] = ";".join(credentials)
     if env_entries:
-        values["PI_GLINK_ACP_ENV"] = ";".join(env_entries)
+        values["GLINK_ACP_ENV"] = ";".join(env_entries)
 
     config = build_config(values, REPO_ROOT)
     runtime = prepare_acp_runtime(config, runtime_dir=workdir / "data" / "acp-agent")
@@ -135,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     print("ACP inproc 握手实测（不消耗模型调用）")
     print("=" * 44)
     print(f"日期: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"宿主: {sys.platform} / Python {sys.version.split()[0]} / host pi-glink {HOST_VERSION}")
+    print(f"宿主: {sys.platform} / Python {sys.version.split()[0]} / host glink-harness {HOST_VERSION}")
     print(f"agent 命令: {args.command}")
     print(f"命令级 env 名: {', '.join(name for name, _ in config.acp_env) or '（无）'}")
     session_config = "; ".join(

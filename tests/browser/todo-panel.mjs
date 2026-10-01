@@ -38,7 +38,7 @@ async function loopbackPort() {
 }
 function measure(selector) {
   const panel = document.querySelector(selector);
-  const list = panel.querySelector('ol.pi-todo-list') ?? panel.querySelector('ul');
+  const list = panel.querySelector('ol.glink-todo-list') ?? panel.querySelector('ul');
   const rows = [...list.children];
   const style = (node, fields) => Object.fromEntries(fields.map(field => [field, getComputedStyle(node)[field]]));
   const styles = style(panel, ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'borderRadius', 'borderWidth', 'backgroundColor', 'boxShadow']);
@@ -110,9 +110,9 @@ createRoot(document.getElementById('root')).render(React.createElement(ProgressP
   await page.goto(host.baseUrl);
   await page.waitForSelector('#app-shell:not([hidden])');
   await start(page, '工作台任务展示验收 [scenario:todo]');
-  await page.waitForFunction(() => document.querySelectorAll('.pi-plan-update').length > 0);
+  await page.waitForFunction(() => document.querySelectorAll('.glink-plan-update').length > 0);
   const closed = await page.evaluate(() => ({
-    tasks: document.querySelectorAll('#chat-view .pi-todo-list, #chat-view .pi-todo-panel').length,
+    tasks: document.querySelectorAll('#chat-view .glink-todo-list, #chat-view .glink-todo-panel').length,
     open: document.querySelector('#progress-layer').dataset.open,
     inaccessible: document.querySelector('#progress-layer').inert && document.querySelector('#progress-layer').getAttribute('aria-hidden') === 'true',
     questionY: document.querySelector('#run-question').getBoundingClientRect().y,
@@ -122,30 +122,30 @@ createRoot(document.getElementById('root')).render(React.createElement(ProgressP
     && closed.questionY - closed.headerBottom <= 24, closed);
   await page.screenshot({ path: join(out, 'conversation.png') });
   await openProgress(page);
-  await page.waitForSelector('.pi-todo-item');
+  await page.waitForSelector('.glink-todo-item');
   const head = page.locator('.progress-section-steps .progress-section-head');
   await head.focus(); await page.keyboard.press('Enter');
   await page.waitForFunction(() => /2 项进行中/.test(document.querySelector('.progress-section-meta').textContent));
   check('新整表到达仍保持用户折叠', await head.getAttribute('aria-expanded') === 'false'
     && await page.locator('.progress-steps-body').isHidden());
   await page.keyboard.press('Space');
-  await page.waitForSelector('.pi-todo-list:not([hidden])');
+  await page.waitForSelector('.glink-todo-list:not([hidden])');
   check('键盘焦点使用可见的中性2px环', await head.evaluate(node => {
     const style = getComputedStyle(node); return style.outlineWidth === '2px' && style.outlineStyle === 'solid';
   }));
   await page.screenshot({ path: join(out, 'keyboard-focus.png'), animations: 'disabled' });
   await page.click('#run-question');
-  check('任务整表唯一地出现在进度浮层，而非对话中', await page.locator('#progress-panel .pi-todo-item').count() === 4
-    && await page.locator('#chat-view .pi-todo-item').count() === 0);
+  check('任务整表唯一地出现在进度浮层，而非对话中', await page.locator('#progress-panel .glink-todo-item').count() === 4
+    && await page.locator('#chat-view .glink-todo-item').count() === 0);
   await ref.goto(`http://127.0.0.1:${reference.httpServer.address().port}/task-parity`);
   await ref.waitForSelector('.demo-progress-panel li'); await settled(ref);
   const actual = await page.evaluate(measure, '#progress-panel');
   const expected = await ref.evaluate(measure, '.demo-progress-panel');
   check('对齐实际工作台：浮层/时间轴三态/行距/字号/关闭键逐值一致', JSON.stringify(actual) === JSON.stringify(expected), { actual, expected });
-  const arcs = await Promise.all([page.evaluate(() => [...document.querySelector('.pi-todo-item [role="progressbar"]').querySelectorAll('circle')].map(c => [c.getAttribute('stroke'), c.getAttribute('stroke-dasharray')])),
+  const arcs = await Promise.all([page.evaluate(() => [...document.querySelector('.glink-todo-item [role="progressbar"]').querySelectorAll('circle')].map(c => [c.getAttribute('stroke'), c.getAttribute('stroke-dasharray')])),
     ref.evaluate(() => [...document.querySelector('[role="progressbar"]').querySelectorAll('circle')].map(c => [c.getAttribute('stroke'), c.getAttribute('stroke-dasharray')]))]);
   check('相同的22px黑色运行环，不伪造百分比', JSON.stringify(arcs[0]) === JSON.stringify(arcs[1])
-    && await page.locator('.pi-todo-item [role="progressbar"]').first().getAttribute('aria-valuenow') === null, arcs);
+    && await page.locator('.glink-todo-item [role="progressbar"]').first().getAttribute('aria-valuenow') === null, arcs);
   await page.screenshot({ path: join(out, 'progress.png'), animations: 'disabled' });
   await ref.screenshot({ path: join(out, 'reference.png'), animations: 'disabled' });
 
@@ -158,7 +158,7 @@ createRoot(document.getElementById('root')).render(React.createElement(ProgressP
         head: rect('.progress-section-steps .progress-section-head'), close: rect('.progress-close'),
         scrollWidth: panel.scrollWidth, clientWidth: panel.clientWidth,
         metaFits: meta.getBoundingClientRect().right <= document.querySelector('.progress-section-steps .progress-section-head').getBoundingClientRect().right,
-        listGap: document.querySelector('.pi-todo-list').getBoundingClientRect().top - document.querySelector('.progress-section-steps .progress-section-head').getBoundingClientRect().bottom };
+        listGap: document.querySelector('.glink-todo-list').getBoundingClientRect().top - document.querySelector('.progress-section-steps .progress-section-head').getBoundingClientRect().bottom };
     });
     check(`${width}×${height}: 右侧浮层、不给对话加卡、不挡输入器或关闭键`,
       Math.abs(boxes.panel.width - (width >= 1250 ? 340 : width >= 721 ? 308 : boxes.pane.width - 16)) <= 1
@@ -180,8 +180,8 @@ createRoot(document.getElementById('root')).render(React.createElement(ProgressP
   await openProgress(page);
   await stop(page);
   await page.waitForFunction(() => document.querySelector('.progress-card').dataset.status === 'cancelled');
-  check('停止不冒充计划完成，也不残留运行环', await page.locator('.pi-todo-item[data-status="stopped"]').count() === 2
-    && await page.locator('.pi-todo-item [role="progressbar"]').count() === 0
+  check('停止不冒充计划完成，也不残留运行环', await page.locator('.glink-todo-item[data-status="stopped"]').count() === 2
+    && await page.locator('.glink-todo-item [role="progressbar"]').count() === 0
     && !/进行中/.test(await page.locator('.progress-section-steps .progress-section-meta').innerText()));
   await page.waitForSelector('#pane-preview-toggle:not([hidden])');
   await page.click('#pane-preview-toggle');
@@ -189,7 +189,7 @@ createRoot(document.getElementById('root')).render(React.createElement(ProgressP
   check('报告打开让进度退场，不增加第三列', await page.locator('#progress-layer').getAttribute('data-open') === 'false');
   await openProgress(page);
   check('进度打开让报告退场，任务计划仍在', await page.locator('#preview-drawer').isHidden()
-    && await page.locator('.pi-todo-item').count() === 4);
+    && await page.locator('.glink-todo-item').count() === 4);
   await page.locator('.segmented-item').nth(1).focus(); await page.keyboard.press('ArrowLeft');
   check('上下文页签键盘合同保持', await page.locator('#progress-outputs').isVisible());
   await page.screenshot({ path: join(out, 'stopped.png'), animations: 'disabled' });
@@ -198,19 +198,19 @@ createRoot(document.getElementById('root')).render(React.createElement(ProgressP
   await page.click(`#run-list [data-run-id="${firstId}"]`);
   await page.waitForSelector('#run-view[data-status="cancelled"]');
   await openProgress(page);
-  check('历史回放恢复该轮最新整表', await page.locator('.pi-todo-item').count() === 4);
+  check('历史回放恢复该轮最新整表', await page.locator('.glink-todo-item').count() === 4);
   await start(page, '追加一个无计划的追问 [scenario:tools]');
   await page.waitForSelector('#run-view[data-status="finished"]');
   await openProgress(page);
-  check('追问无任务源不继承父计划，历史对话也不堆任务卡', await page.locator('.pi-todo-list').isHidden()
-    && await page.locator('#earlier-turns .pi-todo-item, #chat-view .pi-todo-panel').count() === 0
-    && await page.locator('#earlier-turns .pi-plan-update').count() > 0);
+  check('追问无任务源不继承父计划，历史对话也不堆任务卡', await page.locator('.glink-todo-list').isHidden()
+    && await page.locator('#earlier-turns .glink-todo-item, #chat-view .glink-todo-panel').count() === 0
+    && await page.locator('#earlier-turns .glink-plan-update').count() > 0);
   check('无计划时仍显示实际执行步骤，保留失败文字', await page.locator('.progress-step[data-status="failed"]').count() > 0);
   await page.click('#new-research');
   await start(page, '长任务计划 [scenario:todolong]'); await openProgress(page);
-  await page.waitForFunction(() => document.querySelectorAll('.pi-todo-item').length === 20);
+  await page.waitForFunction(() => document.querySelectorAll('.glink-todo-item').length === 20);
   const long = await page.evaluate(() => {
-    const panel = document.querySelector('#progress-panel'), list = document.querySelector('.pi-todo-list');
+    const panel = document.querySelector('#progress-panel'), list = document.querySelector('.glink-todo-list');
     return { scrollable: panel.scrollHeight > panel.clientHeight, listOverflow: getComputedStyle(list).overflowY,
       textHeight: list.querySelector('.progress-step-text').clientHeight, lineClamp: getComputedStyle(list.querySelector('.progress-step-text')).webkitLineClamp };
   });
@@ -224,10 +224,10 @@ createRoot(document.getElementById('root')).render(React.createElement(ProgressP
   await page.screenshot({ path: join(out, 'long.png'), animations: 'disabled' });
   await stop(page);
   await page.click('#new-research'); await start(page, '清空任务计划 [scenario:todoempty]'); await openProgress(page);
-  await page.waitForFunction(() => document.querySelector('.pi-todo-list').children.length === 4);
-  await page.waitForFunction(() => document.querySelector('.pi-todo-list').children.length === 0);
-  check('最新空表清除旧计划，不把计划调用重复列为任务', await page.locator('.pi-todo-list').isHidden()
-    && !/更新计划/.test(await page.locator('.progress-steps:not(.pi-todo-list)').innerText()));
+  await page.waitForFunction(() => document.querySelector('.glink-todo-list').children.length === 4);
+  await page.waitForFunction(() => document.querySelector('.glink-todo-list').children.length === 0);
+  check('最新空表清除旧计划，不把计划调用重复列为任务', await page.locator('.glink-todo-list').isHidden()
+    && !/更新计划/.test(await page.locator('.progress-steps:not(.glink-todo-list)').innerText()));
   await stop(page);
   check('生产前端无脚本错误', errors.length === 0, errors);
 } finally {

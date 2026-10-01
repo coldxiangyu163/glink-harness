@@ -7,7 +7,7 @@
       "bundles": [
         "@deepseek-ai/dsh-base",
         "@deepseek-ai/dsh-acp-app",
-        "@pi-glink/dsh-web-fetch-jina"
+        "@glink-harness/dsh-web-fetch-jina"
       ],
       "patchReload": "startup"
     }

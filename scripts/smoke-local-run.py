@@ -42,7 +42,7 @@ def _request(base_url: str, path: str, *, method: str = "GET", body: dict | None
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="pi-glink 真实 run 冒烟 / real run smoke")
+    parser = argparse.ArgumentParser(description="glink-harness 真实 run 冒烟 / real run smoke")
     parser.add_argument("--base-url", default="http://127.0.0.1:7860")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--timeout", type=float, default=_TIMEOUT_SECONDS)

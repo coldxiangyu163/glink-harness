@@ -15,7 +15,7 @@ import json
 import time
 from typing import Any, Mapping
 
-from pi_glink.store import RunRecord, RunStore
+from glink_harness.store import RunRecord, RunStore
 
 _TERMINAL_TYPE = {"finished": "run_finished", "failed": "run_failed", "cancelled": "run_cancelled"}
 

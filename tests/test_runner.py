@@ -12,29 +12,29 @@ from typing import Any, Mapping
 
 import pytest
 
-from pi_glink.config import HostConfig, build_config
+from glink_harness.config import HostConfig, build_config
 
 from acp_pack import apply_acp_pack
-from pi_glink.events import EventBus
-from pi_glink.kernel.rpc import PiRpcClient
+from glink_harness.events import EventBus
+from glink_harness.kernel.rpc import PiRpcClient
 
 from e2b_fake import FakeSandbox
-from pi_glink.contracts import FollowupUnavailable, Verdict
-from pi_glink.kernel.execution import (
+from glink_harness.contracts import FollowupUnavailable, Verdict
+from glink_harness.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
     ExecutionAdapter,
     ExecutionOutcome,
     SessionInfo,
 )
-from pi_glink.runs.runner import (
+from glink_harness.runs.runner import (
     RunBusy,
     RunManager,
     UnsupportedCommand,
     parse_blueprint_command,
 )
-from pi_glink.store import CANCELLED, FAILED, FINISHED, RUNNING, RunStore, RunSpec
-from pi_glink.tenancy import TenantContext
+from glink_harness.store import CANCELLED, FAILED, FINISHED, RUNNING, RunStore, RunSpec
+from glink_harness.tenancy import TenantContext
 from store_helpers import events_text, finish, stored_record
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -190,7 +190,7 @@ def test_docker_session_file_is_mapped_back_to_the_host_and_sanitized(
     found nothing and the closing sanitise pass returned silently, leaving a
     tool-echoed credential in the host session log.
     """
-    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
+    monkeypatch.setattr("glink_harness.kernel.sandbox.docker_available", lambda: True)
 
     secret = "sk-test-0123456789abcdef"
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker", OPENAI_API_KEY=secret)
@@ -203,7 +203,7 @@ def test_docker_session_file_is_mapped_back_to_the_host_and_sanitized(
         # pi writes its own session log into the mounted directory; the stand-in
         # does the same. The run's directory is identified the way the runtime
         # does it: by the run id carried in the container/name arguments.
-        match = re.search(r"pi-glink-([0-9a-f]{12})", " ".join(argv))
+        match = re.search(r"glink-harness-([0-9a-f]{12})", " ".join(argv))
         assert match is not None, argv
         session_dir = config.data_root / "runs" / match.group(1) / "sessions"
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -237,7 +237,7 @@ def test_subagent_files_in_the_session_dir_are_sanitized_too(
 ) -> None:
     """Branched sessions and subagent artifacts share the session directory on
     the host-side faces; the closing sweep covers them, not just the main file."""
-    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
+    monkeypatch.setattr("glink_harness.kernel.sandbox.docker_available", lambda: True)
 
     secret = "sk-subagent-0123456789abcdef"
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker", OPENAI_API_KEY=secret)
@@ -247,7 +247,7 @@ def test_subagent_files_in_the_session_dir_are_sanitized_too(
         merged = dict(env or {})
         merged["FAKE_PI_WRITE_REPORT"] = "0"
         merged["FAKE_PI_SESSION_FILE"] = "/sessions/fake-session.jsonl"
-        match = re.search(r"pi-glink-([0-9a-f]{12})", " ".join(argv))
+        match = re.search(r"glink-harness-([0-9a-f]{12})", " ".join(argv))
         assert match is not None, argv
         session_dir = config.data_root / "runs" / match.group(1) / "sessions"
         (session_dir / "subagent-artifacts").mkdir(parents=True, exist_ok=True)
@@ -407,7 +407,7 @@ def _run_dirs(config: HostConfig) -> list[str]:
 def _write_blueprint(directory: Path, name: str) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     (directory / f"{name}.md").write_text(
-        '+++\nformat = "pi-glink-blueprint/v1"\n'
+        '+++\nformat = "glink-harness-blueprint/v1"\n'
         f'name = "{name}"\ndescription = "合成蓝图"\n\n'
         '[[stages]]\nid = "one"\ntitle = "阶段"\ngoal = "目标"\n'
         'deliverable = "产出"\ncheckpoint = "检查点"\n+++\n\n正文。\n',
@@ -522,7 +522,7 @@ def test_the_blueprint_command_names_come_from_the_blueprint_directory(tmp_path:
     """命令名单不硬编码：蓝图目录里有什么，就放行什么。"""
     blueprints = tmp_path / "blueprints"
     _write_blueprint(blueprints, "synthetic")
-    manager, _store = build_manager(tmp_path, PI_GLINK_BLUEPRINTS_DIR=str(blueprints))
+    manager, _store = build_manager(tmp_path, GLINK_BLUEPRINTS_DIR=str(blueprints))
 
     record = manager.start("/synthetic 题目")
     assert manager.wait(record.run_id, timeout=30).status == FINISHED
@@ -554,7 +554,7 @@ def test_two_runs_do_not_share_runtime_configuration_or_credentials(tmp_path: Pa
         }
         return fake_factory(write_report=True)(argv, cwd=cwd, env=env, on_event=on_event)
 
-    with_key = make_config(tmp_path, PI_GLINK_WEB_SEARCH_KEY="exa-secret-key-1234567890")
+    with_key = make_config(tmp_path, GLINK_WEB_SEARCH_KEY="exa-secret-key-1234567890")
     manager_a = RunManager(with_key, EventBus(), store, client_factory=capturing_factory)
     run_a = manager_a.start("第一个 run 带搜索凭据")
     final_a = manager_a.wait(run_a.run_id, timeout=30)
@@ -621,8 +621,8 @@ def test_process_death_after_the_prompt_converges_quickly(tmp_path: Path) -> Non
 
 def test_usage_is_summed_across_requests_and_not_double_counted(tmp_path: Path) -> None:
     """100 + 200 tokens must add up to 300; a repeated identity counts once."""
-    from pi_glink.kernel.projection import Projector  # noqa: PLC0415
-    from pi_glink.runs.state import RunExecution as _Execution  # noqa: PLC0415 - private unit under test
+    from glink_harness.kernel.projection import Projector  # noqa: PLC0415
+    from glink_harness.runs.state import RunExecution as _Execution  # noqa: PLC0415 - private unit under test
 
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
@@ -680,7 +680,7 @@ def test_cleanup_failure_is_recorded_not_hidden(tmp_path: Path) -> None:
         tmp_path,
         LOCAL_WEB_EXECUTOR="e2b",
         E2B_API_KEY="e2b-secret",
-        PI_GLINK_EGRESS_PUBLIC_URL="https://egress.example.test",
+        GLINK_EGRESS_PUBLIC_URL="https://egress.example.test",
     )
     sandbox = _PoorlyClosingSandbox(tmp_path / "sandbox")
     store = RunStore(config.data_root / "runs")
@@ -779,7 +779,7 @@ def scripted_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter: S
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter)
+    monkeypatch.setattr("glink_harness.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter)
     return config, store, manager
 
 
@@ -830,7 +830,7 @@ def test_an_unconfirmed_release_keeps_capacity_until_an_operator_adjudicates(
     assert type(again.value).__name__ == "ResourcesUnreleased"
 
     # Only an explicit operator decision, made while owning the data root, frees it.
-    from pi_glink.ownership import DataRootOwnership, OwnershipRequired  # noqa: PLC0415
+    from glink_harness.ownership import DataRootOwnership, OwnershipRequired  # noqa: PLC0415
 
     with pytest.raises(OwnershipRequired):
         restarted.adjudicate_release(first.run_id, "未持有所有权")
@@ -976,7 +976,7 @@ def test_a_tail_withheld_during_finalization_is_released_before_the_verdict(
         return original_recover(destination)
 
     adapter.recover_artifacts = recover_with_late_frame  # type: ignore[method-assign]
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", build)
+    monkeypatch.setattr("glink_harness.kernel.harness_pi.PiExecutionAdapter", build)
     record = manager.start("收尾期间到达的帧")
     manager.wait(record.run_id, timeout=30)
     events = read_events(store, record.run_id)
@@ -1018,23 +1018,23 @@ def test_two_concurrent_followups_of_one_parent_admit_exactly_one_child(
         tmp_path,
         OPENAI_API_KEY=secret,
         LOCAL_WEB_EXECUTOR="docker",
-        PI_GLINK_TENANCY="multitenant",
-        PI_GLINK_MODEL_CREDENTIALS="shared",
-        PI_GLINK_TENANCY_AUDIENCE="pi-glink-test",
-        PI_GLINK_GATEWAY_SECRET_FILE=str(tmp_path / "gateway-secret"),
-        PI_GLINK_MAX_TENANT_RUNS="2",  # 两个并发追问都进得到锁内复核
+        GLINK_TENANCY="multitenant",
+        GLINK_MODEL_CREDENTIALS="shared",
+        GLINK_TENANCY_AUDIENCE="glink-harness-test",
+        GLINK_GATEWAY_SECRET_FILE=str(tmp_path / "gateway-secret"),
+        GLINK_MAX_TENANT_RUNS="2",  # 两个并发追问都进得到锁内复核
     )
     store = RunStore(config.data_root / "runs")
     context = TenantContext(
         tenant_id="tenant-alpha",
         user_id="user-a",
         role="member",
-        audience="pi-glink-test",
+        audience="glink-harness-test",
         expires_at=time.time() + 600,
     )
     manager = RunManager(config, EventBus(), store)
     monkeypatch.setattr(
-        "pi_glink.kernel.harness_pi.PiExecutionAdapter",
+        "glink_harness.kernel.harness_pi.PiExecutionAdapter",
         lambda spec, **kwargs: _ResumingAdapter(spec.expected_session_id),
     )
 
@@ -1147,7 +1147,7 @@ def test_run_data_directories_are_created_private(tmp_path: Path) -> None:
 
 def open_execution(manager: RunManager, store: RunStore, workspace: Path, run_id: str):
     """An open execution without a kernel: the typed-event commit seam."""
-    from pi_glink.runs.state import RunExecution as _Execution  # noqa: PLC0415
+    from glink_harness.runs.state import RunExecution as _Execution  # noqa: PLC0415
 
     # The run's spec is the manager's own admission spec: the family that
     # handles its frames is the one its record names.
@@ -1170,7 +1170,7 @@ def test_pi_subagent_frames_flow_through_the_real_projection_into_documents(
     """End to end through the real projector: raw pi ``tool_execution_*`` frames
     for a ``subagent`` call become typed events, child documents and the
     terminal summary — the generic card and the ``(running...)`` update vanish."""
-    from pi_glink.kernel.projection import Projector  # noqa: PLC0415
+    from glink_harness.kernel.projection import Projector  # noqa: PLC0415
 
     manager, store = build_manager(tmp_path)
     execution = open_execution(manager, store, tmp_path / "ws", "subdoc0")
@@ -1416,7 +1416,7 @@ def test_a_run_without_subagents_carries_an_empty_children_summary(tmp_path: Pat
 
 
 def _pi_runtime(tmp_path: Path, run_id: str):
-    from pi_glink.kernel.agent_env import AgentRuntime  # noqa: PLC0415
+    from glink_harness.kernel.agent_env import AgentRuntime  # noqa: PLC0415
 
     session_dir = tmp_path / "sessions" / run_id
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -1491,7 +1491,7 @@ def test_children_enrichment_marks_unmatched_honestly(tmp_path: Path) -> None:
 
 def test_children_enrichment_skips_the_acp_family(tmp_path: Path) -> None:
     """ACP 族没有 pi-subagents 布局：enrichment 保持 none，目录不被触碰。"""
-    manager, store = build_manager(tmp_path, PI_GLINK_HARNESS="acp", TEST_ACP_COMMAND="true")
+    manager, store = build_manager(tmp_path, GLINK_HARNESS="acp", TEST_ACP_COMMAND="true")
     execution = open_execution(manager, store, tmp_path / "ws", "enrich3")
     execution.runtime = _pi_runtime(tmp_path, "enrich3")
     emit(manager, execution, "subagent_started", {"n": 0, "toolCallId": "call_1", "agent": "", "task": "调研"})
@@ -1582,7 +1582,7 @@ def test_same_family_pi_parent_follow_up_is_admitted_unchanged(
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
     monkeypatch.setattr(
-        "pi_glink.kernel.harness_pi.PiExecutionAdapter",
+        "glink_harness.kernel.harness_pi.PiExecutionAdapter",
         lambda spec, **kwargs: _ResumingAdapter(spec.expected_session_id),
     )
     parent_id = "parentrun001"
@@ -1624,7 +1624,7 @@ def test_known_cross_family_parent_is_refused_before_its_session_is_read(
         admitted.append(spec.run_id)
         return _ResumingAdapter(spec.expected_session_id)
 
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", recording_adapter)
+    monkeypatch.setattr("glink_harness.kernel.harness_pi.PiExecutionAdapter", recording_adapter)
     _write_parent_meta(
         config, store, "parentrun001", family="acp", executor="inproc"
     )
@@ -1674,10 +1674,10 @@ def test_foreign_parent_stays_unknown_even_when_its_family_is_known(
     config = make_config(
         tmp_path,
         LOCAL_WEB_EXECUTOR="docker",
-        PI_GLINK_TENANCY="multitenant",
-        PI_GLINK_MODEL_CREDENTIALS="shared",
-        PI_GLINK_TENANCY_AUDIENCE="pi-glink-test",
-        PI_GLINK_GATEWAY_SECRET_FILE=str(tmp_path / "gateway-secret"),
+        GLINK_TENANCY="multitenant",
+        GLINK_MODEL_CREDENTIALS="shared",
+        GLINK_TENANCY_AUDIENCE="glink-harness-test",
+        GLINK_GATEWAY_SECRET_FILE=str(tmp_path / "gateway-secret"),
     )
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
@@ -1695,7 +1695,7 @@ def test_foreign_parent_stays_unknown_even_when_its_family_is_known(
         tenant_id="tenant-beta",
         user_id="user-b",
         role="member",
-        audience="pi-glink-test",
+        audience="glink-harness-test",
         expires_at=time.time() + 600,
     )
 
@@ -1722,7 +1722,7 @@ def test_finalize_drives_its_steps_in_the_contract_order(
     record = store.create("顺序探针", run_id="orderprobe01", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    from pi_glink.runs.state import ReportFacts, RunExecution  # noqa: PLC0415
+    from glink_harness.runs.state import ReportFacts, RunExecution  # noqa: PLC0415
 
     execution = RunExecution(record=record, workspace=workspace)
     pipeline = manager._pipeline  # noqa: SLF001

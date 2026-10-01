@@ -11,11 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from pi_glink.config import HostConfig
-from pi_glink.kernel.execution import ExecutionSpec
-from pi_glink.kernel.harness import HarnessFamily, select_family
-from pi_glink.kernel.sandbox import Launch, Sandbox, open_sandbox
-from pi_glink.store import RunStore
+from glink_harness.config import HostConfig
+from glink_harness.kernel.execution import ExecutionSpec
+from glink_harness.kernel.harness import HarnessFamily, select_family
+from glink_harness.kernel.sandbox import Launch, Sandbox, open_sandbox
+from glink_harness.store import RunStore
 
 
 def execution_spec(
@@ -80,7 +80,7 @@ def test_egress(
     search: bool = False,
 ):
     """The :class:`EgressEndpoint` a pi render gets (docs/adr/0008)."""
-    from pi_glink.kernel.agent_env import EgressEndpoint
+    from glink_harness.kernel.agent_env import EgressEndpoint
 
     return EgressEndpoint(
         model_base_url=f"{origin}/model",

@@ -14,7 +14,7 @@ export async function run(ctx) {
   await page.waitForTimeout(300);
   await submitPrompt(page, '[scenario:subagent] 浏览器验收 · 子代理派发');
   await page.waitForSelector('#run-view[data-status="running"]', { timeout: 20_000 });
-  await page.waitForSelector('#run-view .pi-child-row', { timeout: 20_000 });
+  await page.waitForSelector('#run-view .glink-child-row', { timeout: 20_000 });
 
   // ── running: cards + progress ─────────────────────────────────────────────
   const sampled = [];
@@ -22,13 +22,13 @@ export async function run(ctx) {
   while (Date.now() < progressDeadline) {
     const sample = await page.evaluate(() => ({
       status: document.querySelector('#run-view')?.dataset.status,
-      cards: [...document.querySelectorAll('#run-view .pi-subagent')].map((node) => ({
+      cards: [...document.querySelectorAll('#run-view .glink-subagent')].map((node) => ({
         text: node.innerText.replace(/\n+/g, ' | '),
         status: node.dataset.status,
-        isToolRow: node.classList.contains('pi-tool'),
+        isToolRow: node.classList.contains('glink-tool'),
       })),
-      panelTitle: document.querySelector('#run-view .pi-children .pi-output-title')?.textContent,
-      panelRows: [...document.querySelectorAll('#run-view .pi-child-row')].map((node) => ({
+      panelTitle: document.querySelector('#run-view .glink-children .glink-output-title')?.textContent,
+      panelRows: [...document.querySelectorAll('#run-view .glink-child-row')].map((node) => ({
         text: node.innerText.replace(/\n+/g, ' | '),
         status: node.dataset.status,
       })),
@@ -66,15 +66,15 @@ export async function run(ctx) {
   await page.waitForTimeout(1000);
   const settled = await page.evaluate(() => ({
     status: document.querySelector('#run-view')?.dataset.status,
-    rows: [...document.querySelectorAll('#run-view .pi-child-row')].map((node) => ({
+    rows: [...document.querySelectorAll('#run-view .glink-child-row')].map((node) => ({
       text: node.innerText.replace(/\n+/g, ' | '),
       status: node.dataset.status,
-      artifacts: [...node.querySelectorAll('.pi-child-artifact')].map((link) => ({
+      artifacts: [...node.querySelectorAll('.glink-child-artifact')].map((link) => ({
         name: link.textContent,
         href: link.getAttribute('href'),
       })),
     })),
-    answer: document.querySelector('#run-view .pi-answer-body')?.innerText?.slice(0, 120),
+    answer: document.querySelector('#run-view .glink-answer-body')?.innerText?.slice(0, 120),
   }));
   suite.record(
     '子代理收口：两行转「已完成」并带时长与工具次数',
@@ -90,7 +90,7 @@ export async function run(ctx) {
     settled.rows.map((row) => row.artifacts.map((link) => link.name)),
   );
 
-  const firstArtifactHref = await page.getAttribute('#run-view .pi-child-artifact', 'href');
+  const firstArtifactHref = await page.getAttribute('#run-view .glink-child-artifact', 'href');
   const artifactResponse = await page.request.get(new URL(firstArtifactHref, ctx.baseUrl).toString());
   const artifactBody = artifactResponse.ok() ? await artifactResponse.text() : '';
   suite.record(
@@ -135,10 +135,10 @@ export async function run(ctx) {
   await page.waitForSelector('#run-view[data-status]', { timeout: 15_000 });
   await page.waitForTimeout(1200);
   const replayed = await page.evaluate(() => ({
-    cards: document.querySelectorAll('#run-view .pi-subagent').length,
-    panelTitle: document.querySelector('#run-view .pi-children .pi-output-title')?.textContent,
-    rows: [...document.querySelectorAll('#run-view .pi-child-row')].map((node) => node.dataset.status),
-    artifacts: document.querySelectorAll('#run-view .pi-child-artifact').length,
+    cards: document.querySelectorAll('#run-view .glink-subagent').length,
+    panelTitle: document.querySelector('#run-view .glink-children .glink-output-title')?.textContent,
+    rows: [...document.querySelectorAll('#run-view .glink-child-row')].map((node) => node.dataset.status),
+    artifacts: document.querySelectorAll('#run-view .glink-child-artifact').length,
   }));
   suite.record(
     '子代理历史重放：卡片、面板、产物链接都从落盘记录重建',

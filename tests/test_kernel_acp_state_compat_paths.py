@@ -6,11 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from pi_glink.events import EventBus
-from pi_glink.kernel.acp_e2b_env import SANDBOX_ACP_HOME
-from pi_glink.kernel.acp_state_compat import AcpStateCompatError, repair_resume_home
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import FAILED, FINISHED, RunStore
+from glink_harness.events import EventBus
+from glink_harness.kernel.acp_e2b_env import SANDBOX_ACP_HOME
+from glink_harness.kernel.acp_state_compat import AcpStateCompatError, repair_resume_home
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import FAILED, FINISHED, RunStore
 from test_dsh_session_config import MODEL_OPTIONS, REASONING_OPTION, wired_config
 from test_kernel_acp_hot_path import ParkableFiles, ParkableSandbox
 from test_kernel_acp_runner import read_log
@@ -62,8 +62,8 @@ def test_hot_manager_rejects_linked_home_before_external_io_and_spawn(tmp_path, 
         "FAKE_ACP_CONFIG_OPTIONS": MODEL_OPTIONS + [REASONING_OPTION],
     }, env={
         "LOCAL_WEB_EXECUTOR": "e2b", "E2B_API_KEY": "e2b-synthetic-key",
-        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
-        "PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS": "7200",
+        "GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
+        "GLINK_CONVERSATION_LEASE_TTL_SECONDS": "7200",
     })
     sandboxes = []
 

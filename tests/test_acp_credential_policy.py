@@ -1,7 +1,7 @@
 """GLINK-ACP-CRED：ACP 凭据通道服从模型凭据政策（ADR 0015）。
 
-``PI_GLINK_ACP_ENV`` / ``PI_GLINK_ACP_CREDENTIAL_FILES`` 是运营方注入每个 ACP
-run 的共享凭据通道，自 ADR 0015 起纳入 ``PI_GLINK_MODEL_CREDENTIALS`` 政策管辖：
+``GLINK_ACP_ENV`` / ``GLINK_ACP_CREDENTIAL_FILES`` 是运营方注入每个 ACP
+run 的共享凭据通道，自 ADR 0015 起纳入 ``GLINK_MODEL_CREDENTIALS`` 政策管辖：
 
 * 单用户（``local``）：通道照常——运营方自己的凭据给自己的 run，本地入口不变；
 * multitenant + ``tenant``：配置任一通道即拒绝启动——那是未经声明的共享凭据，
@@ -29,10 +29,10 @@ from typing import Any
 import pytest
 
 from acp_pack import write_acp_pack
-from pi_glink.config import ConfigError, HostConfig, build_config
-from pi_glink.kernel.agent_env import RunCredentials
-from pi_glink.kernel.harness import select_family
-from pi_glink.store import RunStore
+from glink_harness.config import ConfigError, HostConfig, build_config
+from glink_harness.kernel.agent_env import RunCredentials
+from glink_harness.kernel.harness import select_family
+from glink_harness.store import RunStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -77,8 +77,8 @@ def _acp_values(
     """Values for an ACP-host config; multitenant needs the gateway material."""
     values: dict[str, str] = {
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_HARNESS": "dsh",
-        "PI_GLINK_HARNESSES_DIR": str(
+        "GLINK_HARNESS": "dsh",
+        "GLINK_HARNESSES_DIR": str(
             write_acp_pack(tmp_path, [sys.executable, "-c", "pass"])
         ),
     }
@@ -93,16 +93,16 @@ def _acp_values(
     if tenancy == "multitenant":
         values.update(
             {
-                "PI_GLINK_TENANCY": "multitenant",
+                "GLINK_TENANCY": "multitenant",
                 "LOCAL_WEB_EXECUTOR": "docker",
-                "PI_GLINK_GATEWAY_SECRET_FILE": _gateway_secret(tmp_path),
-                "PI_GLINK_TENANCY_AUDIENCE": "https://example.invalid/id",
+                "GLINK_GATEWAY_SECRET_FILE": _gateway_secret(tmp_path),
+                "GLINK_TENANCY_AUDIENCE": "https://example.invalid/id",
             }
         )
         if policy == "tenant":
-            values["PI_GLINK_TENANT_CONFIG_FILE"] = _tenants_file(tmp_path)
+            values["GLINK_TENANT_CONFIG_FILE"] = _tenants_file(tmp_path)
         else:
-            values["PI_GLINK_MODEL_CREDENTIALS"] = "shared"
+            values["GLINK_MODEL_CREDENTIALS"] = "shared"
     return values
 
 
@@ -119,8 +119,8 @@ def _family(
 
 def test_single_user_keeps_acp_env_and_credential_files(tmp_path: Path) -> None:
     values = _acp_values(tmp_path)
-    values["PI_GLINK_ACP_ENV"] = "ANTHROPIC_API_KEY=sk-acp-local-000000"
-    values["PI_GLINK_ACP_CREDENTIAL_FILES"] = f"{_acp_source_file(tmp_path)}=a/key"
+    values["GLINK_ACP_ENV"] = "ANTHROPIC_API_KEY=sk-acp-local-000000"
+    values["GLINK_ACP_CREDENTIAL_FILES"] = f"{_acp_source_file(tmp_path)}=a/key"
     config = build_config(values, REPO_ROOT)
     assert config.acp_env == (("ANTHROPIC_API_KEY", "sk-acp-local-000000"),)
     assert config.acp_credential_files == (
@@ -133,17 +133,17 @@ def test_single_user_keeps_acp_env_and_credential_files(tmp_path: Path) -> None:
 
 def test_multitenant_tenant_refuses_acp_env(tmp_path: Path) -> None:
     values = _acp_values(tmp_path, tenancy="multitenant", policy="tenant")
-    values["PI_GLINK_ACP_ENV"] = "SOME_PROXY_VAR="
+    values["GLINK_ACP_ENV"] = "SOME_PROXY_VAR="
     with pytest.raises(ConfigError) as excinfo:
         build_config(values, REPO_ROOT)
     message = str(excinfo.value)
     assert "tenant 政策下不允许" in message
-    assert "PI_GLINK_MODEL_CREDENTIALS=shared" in message
+    assert "GLINK_MODEL_CREDENTIALS=shared" in message
 
 
 def test_multitenant_tenant_refuses_credential_files(tmp_path: Path) -> None:
     values = _acp_values(tmp_path, tenancy="multitenant", policy="tenant")
-    values["PI_GLINK_ACP_CREDENTIAL_FILES"] = f"{_acp_source_file(tmp_path)}=a/key"
+    values["GLINK_ACP_CREDENTIAL_FILES"] = f"{_acp_source_file(tmp_path)}=a/key"
     with pytest.raises(ConfigError) as excinfo:
         build_config(values, REPO_ROOT)
     assert "tenant 政策下不允许" in str(excinfo.value)
@@ -164,7 +164,7 @@ def test_multitenant_shared_requires_a_channel(tmp_path: Path) -> None:
     with pytest.raises(ConfigError) as excinfo:
         build_config(values, REPO_ROOT)
     message = str(excinfo.value)
-    assert "PI_GLINK_MODEL_CREDENTIALS=shared" in message
+    assert "GLINK_MODEL_CREDENTIALS=shared" in message
     assert "缺源不启动" in message
 
 
@@ -173,7 +173,7 @@ def test_multitenant_shared_accepts_acp_env_without_openai_trio(tmp_path: Path) 
     values = _acp_values(
         tmp_path, tenancy="multitenant", policy="shared", openai_trio=False
     )
-    values["PI_GLINK_ACP_ENV"] = "ANTHROPIC_API_KEY=sk-acp-shared-000000"
+    values["GLINK_ACP_ENV"] = "ANTHROPIC_API_KEY=sk-acp-shared-000000"
     config = build_config(values, REPO_ROOT)
     assert config.multi_tenant and config.shared_model_credentials
     assert config.acp_env == (("ANTHROPIC_API_KEY", "sk-acp-shared-000000"),)
@@ -182,7 +182,7 @@ def test_multitenant_shared_accepts_acp_env_without_openai_trio(tmp_path: Path) 
 def test_multitenant_shared_accepts_credential_files(tmp_path: Path) -> None:
     values = _acp_values(tmp_path, tenancy="multitenant", policy="shared")
     source = _acp_source_file(tmp_path)
-    values["PI_GLINK_ACP_CREDENTIAL_FILES"] = f"{source}=credentials/api_key"
+    values["GLINK_ACP_CREDENTIAL_FILES"] = f"{source}=credentials/api_key"
     config = build_config(values, REPO_ROOT)
     assert config.acp_credential_files == ((source, "credentials/api_key"),)
 
@@ -192,12 +192,12 @@ def test_shared_pi_family_still_requires_openai_trio(tmp_path: Path) -> None:
     values = _acp_values(
         tmp_path, tenancy="multitenant", policy="shared", openai_trio=False
     )
-    values["PI_GLINK_HARNESS"] = "pi"
-    values["PI_GLINK_HARNESSES_DIR"] = str(REPO_ROOT / "harnesses")
-    values.pop("PI_GLINK_ACP_ENV", None)
+    values["GLINK_HARNESS"] = "pi"
+    values["GLINK_HARNESSES_DIR"] = str(REPO_ROOT / "harnesses")
+    values.pop("GLINK_ACP_ENV", None)
     with pytest.raises(ConfigError) as excinfo:
         build_config(values, REPO_ROOT)
-    assert "PI_GLINK_MODEL_CREDENTIALS=shared 需要宿主冻结" in str(excinfo.value)
+    assert "GLINK_MODEL_CREDENTIALS=shared 需要宿主冻结" in str(excinfo.value)
 
 
 # -- 族准入：同一政策分流 --------------------------------------------------------
@@ -210,7 +210,7 @@ def test_acp_family_validate_credentials_noop_for_single_user(tmp_path: Path) ->
 
 def test_acp_family_validate_credentials_noop_for_shared(tmp_path: Path) -> None:
     values = _acp_values(tmp_path, tenancy="multitenant", policy="shared")
-    values["PI_GLINK_ACP_ENV"] = "ANTHROPIC_API_KEY=sk-acp-shared-000000"
+    values["GLINK_ACP_ENV"] = "ANTHROPIC_API_KEY=sk-acp-shared-000000"
     _config, family = _family(tmp_path, values)
     family.validate_credentials(RunCredentials(model_api_key=""))
 
@@ -222,18 +222,18 @@ def test_acp_family_validate_credentials_refused_under_tenant(tmp_path: Path) ->
         family.validate_credentials(RunCredentials(model_api_key=""))
     message = str(excinfo.value)
     assert "tenant 政策下 ACP 族不可用" in message
-    assert "PI_GLINK_MODEL_CREDENTIALS=shared" in message
+    assert "GLINK_MODEL_CREDENTIALS=shared" in message
 
 
 def test_multitenant_tenant_refuses_credential_env(tmp_path: Path) -> None:
-    """PI_GLINK_ACP_CREDENTIAL_ENV 同样是运营方凭据通道，tenant 政策下整通道拒绝（ADR 0015/0016）。"""
+    """GLINK_ACP_CREDENTIAL_ENV 同样是运营方凭据通道，tenant 政策下整通道拒绝（ADR 0015/0016）。"""
     values = _acp_values(tmp_path, tenancy="multitenant", policy="tenant")
-    values["PI_GLINK_ACP_CREDENTIAL_ENV"] = "OPENROUTER_API_KEY"
+    values["GLINK_ACP_CREDENTIAL_ENV"] = "OPENROUTER_API_KEY"
     values["OPENROUTER_API_KEY"] = "sk-or-shared-0001"
     with pytest.raises(ConfigError) as excinfo:
         build_config(values, REPO_ROOT)
     assert "tenant 政策下不允许" in str(excinfo.value)
-    assert "PI_GLINK_ACP_CREDENTIAL_ENV" in str(excinfo.value)
+    assert "GLINK_ACP_CREDENTIAL_ENV" in str(excinfo.value)
 
 
 def test_multitenant_shared_accepts_credential_env_as_named_source(
@@ -243,7 +243,7 @@ def test_multitenant_shared_accepts_credential_env_as_named_source(
     values = _acp_values(
         tmp_path, tenancy="multitenant", policy="shared", openai_trio=False
     )
-    values["PI_GLINK_ACP_CREDENTIAL_ENV"] = "OPENROUTER_API_KEY"
+    values["GLINK_ACP_CREDENTIAL_ENV"] = "OPENROUTER_API_KEY"
     values["OPENROUTER_API_KEY"] = "sk-or-shared-0002"
     config = build_config(values, REPO_ROOT)
     assert config.acp_credential_env == ("OPENROUTER_API_KEY",)
@@ -255,14 +255,14 @@ def test_multitenant_shared_accepts_credential_env_as_named_source(
 def test_pi_pack_refuses_the_credential_env_knob(tmp_path: Path) -> None:
     """pi 包配置 CREDENTIAL_ENV 拒绝启动，与 FILES/ENV 通道同一 fail-closed 口径。"""
     values = _acp_values(tmp_path)
-    values["PI_GLINK_HARNESS"] = "pi"
-    values["PI_GLINK_HARNESSES_DIR"] = str(REPO_ROOT / "harnesses")
-    values["PI_GLINK_ACP_CREDENTIAL_ENV"] = "OPENROUTER_API_KEY"
+    values["GLINK_HARNESS"] = "pi"
+    values["GLINK_HARNESSES_DIR"] = str(REPO_ROOT / "harnesses")
+    values["GLINK_ACP_CREDENTIAL_ENV"] = "OPENROUTER_API_KEY"
     values["OPENROUTER_API_KEY"] = "sk-or-knob-00000000000000000"
     with pytest.raises(ConfigError) as excinfo:
         build_config(values, REPO_ROOT)
     assert "只在 ACP 族" in str(excinfo.value)
-    assert "PI_GLINK_ACP_CREDENTIAL_ENV" in str(excinfo.value)
+    assert "GLINK_ACP_CREDENTIAL_ENV" in str(excinfo.value)
 
 
 def test_nondsh_acp_pack_refuses_the_credential_env_knob(tmp_path: Path) -> None:
@@ -271,9 +271,9 @@ def test_nondsh_acp_pack_refuses_the_credential_env_knob(tmp_path: Path) -> None
         tmp_path, [sys.executable, "-c", "pass"], name="codex"
     )
     values = _acp_values(tmp_path)
-    values["PI_GLINK_HARNESSES_DIR"] = str(packs)
-    values["PI_GLINK_HARNESS"] = "codex"
-    values["PI_GLINK_ACP_CREDENTIAL_ENV"] = "OPENROUTER_API_KEY"
+    values["GLINK_HARNESSES_DIR"] = str(packs)
+    values["GLINK_HARNESS"] = "codex"
+    values["GLINK_ACP_CREDENTIAL_ENV"] = "OPENROUTER_API_KEY"
     values["OPENROUTER_API_KEY"] = "sk-or-knob-00000000000000000"
     with pytest.raises(ConfigError) as excinfo:
         build_config(values, REPO_ROOT)

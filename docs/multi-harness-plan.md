@@ -65,7 +65,7 @@ projector、adapter 组装、stop 词汇归一化、子代理增强与运行中�
 **GLINK-ARCH-6（2026-09-27，§1–§3 已按新模型重写）定下方法论与 harness 的最后一层解耦**：
 run 的系统提示与 agent 环境由三层内容组成——工作约定 / 方法论蓝图 / harness 包；前两层
 harness 无关、各自唯一，harness 的差异全部收进 `harnesses/<pack>/`。选择改为包名
-（`PI_GLINK_HARNESS=pi|dsh|codex|opencode`），族由包清单的 `family` 推导；云端保留
+（`GLINK_HARNESS=pi|dsh|codex|opencode`），族由包清单的 `family` 推导；云端保留
 pi、dsh、codex（codex-acp）、opencode（均开源），**Claude（claude-agent-acp + claude CLI）
 从产品中移除**——M4/M6 章节保留为历史实测记录（见
 [ACP 集成笔记](acp-integration-notes.md)）。
@@ -151,17 +151,17 @@ harnesses/<pack>/
 └─ …                   # pi 包：settings.json / extensions/ / agents/ / skills/
 ```
 
-清单格式 `format = "pi-glink-harness/v2"`（GLINK-ARCH P3 起；解析全有或全无，任何层级的未知键即拒绝）。
-**v1 清单不再可读**（[ADR 0012](adr/0012-pack-manifest-v2-single-source.md)）：`format = "pi-glink-harness/v1"` 启动即拒绝（「旧格式不再可读，不做迁移」），
+清单格式 `format = "glink-harness/v2"`（GLINK-ARCH P3 起；解析全有或全无，任何层级的未知键即拒绝）。
+**v1 清单不再可读**（[ADR 0012](adr/0012-pack-manifest-v2-single-source.md)）：`format = "glink-harness/v1"` 启动即拒绝（「旧格式不再可读，不做迁移」），
 v1 时期的顶层 `command`/`package`/`version`/`session_config`/`permission_allow`/`subagent_dispatch`
 全部移入下表的分组，没有兼容读取。
 
 | 字段 | 出现于 | 规则 |
 |---|---|---|
-| `format` | 所有包 | 固定 `"pi-glink-harness/v2"`；其他取值（含 v1）拒绝 |
+| `format` | 所有包 | 固定 `"glink-harness/v2"`；其他取值（含 v1）拒绝 |
 | `name` | 所有包 | 非空 slug，必须等于目录名（标识与目录不允许漂移） |
 | `family` | 所有包 | `pi` 或 `acp`；`select_family` 据此构造族实例 |
-| `[entry].command` | 所有包（必填） | argv 数组（非空字符串）。ACP：agent 的 argv，直接 exec、不经 shell。pi：只有一项，即镜像内的内核可执行名（宿主拼 `--mode rpc` 等参数；`PI_GLINK_PI_BIN` 缺省取它） |
+| `[entry].command` | 所有包（必填） | argv 数组（非空字符串）。ACP：agent 的 argv，直接 exec、不经 shell。pi：只有一项，即镜像内的内核可执行名（宿主拼 `--mode rpc` 等参数；`GLINK_PI_BIN` 缺省取它） |
 | `[capabilities].resume` | 所有包（必填 bool） | `false`：准入层对该包的每个追问一律 `session_unavailable`，不读父会话；`true`：继续交给族的运行期事实（ACP 还要看协商出的 `sessionCapabilities.resume`/`loadSession`）。四个随仓库包都声明 `true` |
 | `[capabilities].subagent_dispatch` | ACP 包（可选） | `sync`（缺省：派发调用的终态即子代理结果）或 `async`（派发被接受即 completed，子代理继续运行，由 run 终帧收口；dsh 声明）；投影据此判定，不识别 agent 回复措辞 |
 | `[capabilities].child_progress` | ACP 包（可选） | 运行中子代理进度源；目前只有 `dsh-session-zstd`（状态根下 `.dsh/sessions` 的私有会话文件，dsh 声明）。未声明 = 该包如实没有进度源，族代码不按包名或目录猜 |
@@ -199,23 +199,23 @@ v1 时期的顶层 `command`/`package`/`version`/`session_config`/`permission_al
   检索路由或请求归属头，也不改写既有会话状态/热沙箱；追问继承旧状态时可能仍沿用旧 profile。
   回归见 `tests/test_dsh_jina_bundle.py`（文本配置与宿主渲染，不代表真实 dsh/E2B 已验收）。
   codex/opencode 覆盖层仍为空，机制由回归证明。
-* 包目录与清单在启动时读取并冻结（`PI_GLINK_HARNESSES_DIR` 可覆盖，默认 `<repo>/harnesses`）；
+* 包目录与清单在启动时读取并冻结（`GLINK_HARNESSES_DIR` 可覆盖，默认 `<repo>/harnesses`）；
   目录缺失、选中包不存在或清单不合契约都拒绝启动——这是运营方的部署选择，不是按 run 的请求参数。
 
 ### 3.2 选择与族推导
 
-* `PI_GLINK_HARNESS=<pack>`（`pi` | `dsh` | `codex` | `opencode`，默认 `pi`）：一次部署一个，
+* `GLINK_HARNESS=<pack>`（`pi` | `dsh` | `codex` | `opencode`，默认 `pi`）：一次部署一个，
   启动冻结，没有 per-run 参数与前端开关。
 * 族由清单的 `family` 推导，`select_family` 按清单构造族实例（`harness_pi.py` /
   `harness_acp.py`）；每个 run 的族取自其记录的 `RunSpec.family`（§3.4），runner 不读
   harness 字符串做分支，也不导入具体族（导入白名单见 `tests/test_repository_boundaries.py`）。
-* **旧变量不再读取**（P3 起删除专用拒绝分支，不做兼容映射）：`PI_GLINK_HARNESS=acp` 只是一个
-  不存在的包名，按「不可用」拒绝并列出可用包；`PI_GLINK_ACP_COMMAND` /
-  `PI_GLINK_ACP_SESSION_CONFIG` / `PI_GLINK_ACP_PERMISSION_ALLOW` 不再是配置面，设置了也不会
+* **旧变量不再读取**（P3 起删除专用拒绝分支，不做兼容映射）：`GLINK_HARNESS=acp` 只是一个
+  不存在的包名，按「不可用」拒绝并列出可用包；`GLINK_ACP_COMMAND` /
+  `GLINK_ACP_SESSION_CONFIG` / `GLINK_ACP_PERMISSION_ALLOW` 不再是配置面，设置了也不会
   覆盖包清单（对应写法是 `[entry].command`、`[capabilities.session_config]`、
   `[capabilities].permission_allow`）。
 
-* `PI_GLINK_ACP_CREDENTIAL_FILES` 与 `PI_GLINK_ACP_ENV` 是**部署秘密**，仍留在环境配置：
+* `GLINK_ACP_CREDENTIAL_FILES` 与 `GLINK_ACP_ENV` 是**部署秘密**，仍留在环境配置：
   只有选中包的族是 ACP 时才生效，非 ACP 族下设置即拒绝启动（沿用现有非空即报错的语义）。
 
 ### 3.3 斜杠命令（宿主统一解释，harness 无关）
@@ -293,7 +293,7 @@ run 生命周期、终帧即终态、提交先于发布等全部沿用架构 §3
 沙箱/无人场景没有人应答权限询问。默认 **fail-closed 全拒**；拒绝本身必须进入事件流
 （`kernel_status`），不允许静默。M2 实测：dsh 0.1.5-rc.3 与 codex-acp 0.16.0 在
 workspace-write 会话模式下跑完两个最小真实研究 run，均未发出权限请求，因此**保持默认、
-不启用白名单**；配置级门控（当时是 `PI_GLINK_ACP_PERMISSION_ALLOW`，GLINK-ARCH-6 起
+不启用白名单**；配置级门控（当时是 `GLINK_ACP_PERMISSION_ALLOW`，GLINK-ARCH-6 起
 是包清单的 `permission_allow`）（option kind，可选 tool kind）
 已实现并默认空集。M5 接入 opencode 时反向确认了"先实测再决定"：opencode 的真实 run 在
 `webfetch`/`apply_patch` 上 0 条请求，**不为它启用白名单**（默认 fail-closed 不变），
@@ -336,16 +336,16 @@ GLINK-ARCH-6 从产品移除，**现有包的 `permission_allow` 全部为空**�
 
 沿用 `agent_env.py` 模式：每 run 渲染独立配置目录，凭据写文件或注入命令级 env，
 不进宿主进程环境，全部出站过 `redaction.py`。ACP 族的 M2 实现：
-`PI_GLINK_ACP_CREDENTIAL_FILES` 把 `source=dest` 源文件**只读复制**进每 run HOME
-（父目录 0700、文件 0600），`PI_GLINK_ACP_ENV` 注入显式 env（不允许覆盖 `HOME`），
+`GLINK_ACP_CREDENTIAL_FILES` 把 `source=dest` 源文件**只读复制**进每 run HOME
+（父目录 0700、文件 0600），`GLINK_ACP_ENV` 注入显式 env（不允许覆盖 `HOME`），
 注入值抽入该 run 的 redactor。已实测：codex-acp 读 `$HOME/.codex/auth.json`、dsh 读
 `$HOME/.dsh/.credentials.yaml`（dsh harness home 默认 `$DSH_HOME` 或 `~/.dsh`）；两者都
 尊重每 run `HOME`，真实用户目录未被修改。逐 agent 落点与证据见
 [ACP 集成笔记](acp-integration-notes.md) §4.4。Docker 面沿用同一“只读复制进 run HOME”，
 再在容器内对每个凭据文件加嵌套只读挂载（HOME 本身可写，agent 要写会话/缓存）；
-`PI_GLINK_ACP_ENV` 在 docker 面按名字传给容器，值不进 argv（见集成笔记 §5.2）。E2B 面
+`GLINK_ACP_ENV` 在 docker 面按名字传给容器，值不进 argv（见集成笔记 §5.2）。E2B 面
 没有宿主挂载，改为把同一份 run HOME 上传进沙箱状态根并在沙箱内重新施加 0700/0600，
-`HOME` 指向该根、`PI_GLINK_ACP_ENV` 作为命令环境通道（值不进命令行；见集成笔记 §6.3）。
+`HOME` 指向该根、`GLINK_ACP_ENV` 作为命令环境通道（值不进命令行；见集成笔记 §6.3）。
 system prompt 的通道也已在 M2 定下：
 作为 `session/prompt` 的首个围栏文本块送达（ACP v1 无 system role；见集成笔记 §4.3）。
 该通道现在也承载宿主侧、harness 无关的**会话蓝图**：同一份渲染文本对 pi 面走
@@ -407,7 +407,7 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 
 ### M1 落地偏差（相对 §3–§4；详细口径见 [ACP 集成笔记](acp-integration-notes.md)）
 
-* **配置开关**：`PI_GLINK_HARNESS=pi|acp`（默认 `pi`）+ `PI_GLINK_ACP_COMMAND`；只在配置层，
+* **配置开关**：`GLINK_HARNESS=pi|acp`（默认 `pi`）+ `GLINK_ACP_COMMAND`；只在配置层，
   无 API/前端参数，`public_view()` 不暴露 harness。M1 落地时 ACP 只接 `inproc`；M3a 起
   （GLINK-ARCH-6 起由包清单取代这两个变量，见 §3.2。）
   `docker` 组合可用（镜像走独立的 `LOCAL_WEB_ACP_WORKER_IMAGE`，见 §5），`e2b` 组合继续在

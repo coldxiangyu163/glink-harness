@@ -1,4 +1,4 @@
-# pi-glink ACP 沙箱模板（E2B）：沙箱内自包含 ACP agent 运行时。
+# glink-harness ACP 沙箱模板（E2B）：沙箱内自包含 ACP agent 运行时。
 #
 # 设计边界（对应 GLINK-ACP-04 / M3b 定下、GLINK-ACP-05 / M4 扩展的验收契约）：
 #   * 与 docker/Dockerfile.acp-worker 同一批钉版（Node tag、dsh、codex-acp、
@@ -7,7 +7,7 @@
 #     `send_stdin` 承载同一份 stdio；帧完整性已先在真实沙箱实测
 #     （docs/evidence/acp-m3-e2b-framing.txt）。
 #   * 这是**独立 dev 模板**（默认名 glink-acp-worker）：不移动任何已有模板的
-#     tag，尤其不触碰生产模板 glink-frontier-e2b 与 pi 面模板 pi-glink-worker。
+#     tag，尤其不触碰生产模板 glink-frontier-e2b 与 pi 面模板 glink-harness-worker。
 #   * 镜像内自检：构建期校验三个组件的版本（含与 ARG 的精确比对），
 #     默认 CMD 也能直接复验。
 #
@@ -62,7 +62,7 @@ RUN if [ "${DEBIAN_MIRROR}" != "deb.debian.org" ]; then \
 # 装进 dsh 安装自身的 node_modules，每 run 的 ACP profile 覆盖层只提供一个小清单。
 # 该 COPY 要求构建上下文是仓库根目录（E2B CLI 默认用命令执行目录作上下文；
 # 模板构建示例在 README/notes 中固定为仓库根执行）。
-COPY harnesses/dsh/bundles/dsh-web-fetch-jina /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@pi-glink/dsh-web-fetch-jina
+COPY harnesses/dsh/bundles/dsh-web-fetch-jina /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@glink-harness/dsh-web-fetch-jina
 
 # 模板自检脚本：构建期（E2B finalize 的 start command）与运行期都用它复验组件可执行。
 # 两个坑都踩过，写在这里：
@@ -81,7 +81,7 @@ RUN { \
       echo 'dsh --version'; \
       echo 'codex-acp --version'; \
       echo 'opencode --version'; \
-      echo 'test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@pi-glink/dsh-web-fetch-jina/package.json'; \
+      echo 'test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@glink-harness/dsh-web-fetch-jina/package.json'; \
       echo 'echo jina-bundle=present'; \
     } > /usr/local/bin/acp-self-check \
     && chmod 0755 /usr/local/bin/acp-self-check \

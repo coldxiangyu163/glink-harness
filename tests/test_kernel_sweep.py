@@ -22,15 +22,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pi_glink.config import build_config
-from pi_glink.events import EventBus
-from pi_glink.kernel.acp_env import ACP_HOME_DIRNAME, ACP_RECOVERED_DIRNAME, AcpRuntime
-from pi_glink.kernel.agent_env import AgentRuntime
-from pi_glink.redaction import REPLACEMENT, SecretRedactor
-from pi_glink.runs.runner import RunManager
-from pi_glink.runs.secrets import RunSecretBoundary
-from pi_glink.runs.state import RunExecution as _Execution
-from pi_glink.store import RunRecord, RunStore, RunSpec
+from glink_harness.config import build_config
+from glink_harness.events import EventBus
+from glink_harness.kernel.acp_env import ACP_HOME_DIRNAME, ACP_RECOVERED_DIRNAME, AcpRuntime
+from glink_harness.kernel.agent_env import AgentRuntime
+from glink_harness.redaction import REPLACEMENT, SecretRedactor
+from glink_harness.runs.runner import RunManager
+from glink_harness.runs.secrets import RunSecretBoundary
+from glink_harness.runs.state import RunExecution as _Execution
+from glink_harness.store import RunRecord, RunStore, RunSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

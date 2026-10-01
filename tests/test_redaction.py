@@ -19,15 +19,15 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.app import PiGlinkServer, create_server
-from pi_glink.config import build_config
-from pi_glink.events import EventBus
-from pi_glink.kernel.projection import project_event
-from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.runs.runner import RunManager
-from pi_glink.runs.secrets import RunSecretBoundary
-from pi_glink.redaction import REPLACEMENT, SecretRedactor, redactor_from_config
-from pi_glink.store import RunStore, RunSpec
+from glink_harness.app import GlinkHarnessServer, create_server
+from glink_harness.config import build_config
+from glink_harness.events import EventBus
+from glink_harness.kernel.projection import project_event
+from glink_harness.kernel.rpc import PiRpcClient
+from glink_harness.runs.runner import RunManager
+from glink_harness.runs.secrets import RunSecretBoundary
+from glink_harness.redaction import REPLACEMENT, SecretRedactor, redactor_from_config
+from glink_harness.store import RunStore, RunSpec
 from store_helpers import events_text, finish, stored_record, stored_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -318,7 +318,7 @@ def test_overlapping_repeats_are_masked_as_one_region() -> None:
 
 def test_projector_passes_raw_deltas_to_one_stream() -> None:
     """Per-delta redaction must not hide the raw text the stream needs."""
-    from pi_glink.kernel.projection import Projector  # noqa: PLC0415
+    from glink_harness.kernel.projection import Projector  # noqa: PLC0415
 
     secret = "abcdEFGHabcd"
     projector = Projector(SecretRedactor([secret]))
@@ -481,7 +481,7 @@ def test_minimal_child_environment_does_not_inherit_host_credentials(
 ) -> None:
     """The pi process gets a whitelisted environment, not the operator's shell."""
     from harness_helpers import compose_launch, execution_spec, test_egress
-    from pi_glink.kernel import agent_env
+    from glink_harness.kernel import agent_env
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-host-secret-0123456789")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-host-secret-0123456789")
@@ -640,7 +640,7 @@ def test_run_error_in_metadata_is_redacted(tmp_path: Path) -> None:
 # -- report download ----------------------------------------------------------
 
 
-def _get(server: PiGlinkServer, path: str):
+def _get(server: GlinkHarnessServer, path: str):
     port = server.server_address[1]
     request = urllib.request.Request(f"http://127.0.0.1:{port}{path}")
     try:
@@ -739,13 +739,13 @@ def test_report_download_refuses_paths_outside_the_run_directory(tmp_path: Path)
 
 
 def test_config_repr_hides_all_credentials(tmp_path: Path) -> None:
-    config = make_config(tmp_path, E2B_API_KEY="e2b-secret-key-1234567890", PI_GLINK_WEB_SEARCH_KEY="exa-secret-key-1234567890")
+    config = make_config(tmp_path, E2B_API_KEY="e2b-secret-key-1234567890", GLINK_WEB_SEARCH_KEY="exa-secret-key-1234567890")
     rendered = repr(config)
     for secret in (AUDIT_SECRET, "e2b-secret-key-1234567890", "exa-secret-key-1234567890"):
         assert secret not in rendered
 
 
-# -- the hold bound (PI-GLINK-STREAM-DURABILITY-20260923) ----------------------
+# -- the hold bound (GLINK-HARNESS-STREAM-DURABILITY-20260923) ----------------------
 #
 # A stream holds undecided text only up to HOLD_CAP characters. The earlier
 # overflow branch released the whole window once the hold passed the bound,
@@ -761,7 +761,7 @@ def _long_secret(length: int) -> str:
 
 def _pushes(redactor: SecretRedactor, text: str, cuts: list[int]) -> tuple[str, int]:
     """Stream ``text`` split at ``cuts``; return the output and the peak hold."""
-    from pi_glink.redaction import HOLD_CAP  # noqa: PLC0415
+    from glink_harness.redaction import HOLD_CAP  # noqa: PLC0415
 
     stream = redactor.stream()
     emitted: list[str] = []
@@ -779,7 +779,7 @@ def _pushes(redactor: SecretRedactor, text: str, cuts: list[int]) -> tuple[str, 
 
 @pytest.mark.parametrize("length", [8192, 8193, 8194, 20000])
 def test_a_long_known_value_never_leaves_the_stream_raw(length: int) -> None:
-    from pi_glink.redaction import HOLD_CAP  # noqa: PLC0415
+    from glink_harness.redaction import HOLD_CAP  # noqa: PLC0415
     import random  # noqa: PLC0415
 
     secret = _long_secret(length)
@@ -833,8 +833,8 @@ def test_the_stream_recovers_after_a_fail_closed_block() -> None:
 @pytest.mark.parametrize("length", [8193, 8194])
 def test_runner_never_emits_a_long_known_value(tmp_path: Path, length: int) -> None:
     """Real path: fake pi deltas → Projector → RunManager → stored events, bus, SSE."""
-    from pi_glink.app import PiGlinkServer  # noqa: PLC0415
-    from pi_glink.static_files import WebAssets  # noqa: PLC0415
+    from glink_harness.app import GlinkHarnessServer  # noqa: PLC0415
+    from glink_harness.static_files import WebAssets  # noqa: PLC0415
 
     secret = _long_secret(length)
     pieces = ["前文，", secret[:-1], secret[-1:], "，后文"]
@@ -851,7 +851,7 @@ def test_runner_never_emits_a_long_known_value(tmp_path: Path, length: int) -> N
         )
 
     manager = RunManager(config, bus, store, client_factory=factory)
-    server = PiGlinkServer(config, bus, store, manager, WebAssets(config.web_root))
+    server = GlinkHarnessServer(config, bus, store, manager, WebAssets(config.web_root))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -899,7 +899,7 @@ def test_the_hold_and_the_output_stay_bounded_for_an_arbitrarily_long_value() ->
     """Memory and output bound: a one-million-character value streamed in small
     deltas never makes the stream hold more than HOLD_CAP, and once the block
     failed closed nothing further is buffered or emitted."""
-    from pi_glink.redaction import HOLD_CAP  # noqa: PLC0415
+    from glink_harness.redaction import HOLD_CAP  # noqa: PLC0415
 
     secret = _long_secret(1_000_000)
     stream = SecretRedactor([secret]).stream()

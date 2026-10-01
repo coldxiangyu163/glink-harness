@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink import accounts
-from pi_glink.accounts import (
+from glink_harness import accounts
+from glink_harness.accounts import (
     DEFAULT_SCRYPT,
     MIN_PASSWORD_CHARS,
     TENANT_ACTIVE,

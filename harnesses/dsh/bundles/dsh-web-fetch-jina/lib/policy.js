@@ -5,7 +5,7 @@
  * The provider never connects to the target itself — Jina does — but an internal or
  * non-public destination must not leave the process either: the URL is the payload we hand
  * to a third party, so it is validated and refused here before any request is sent.
- * @module @pi-glink/dsh-web-fetch-jina/policy
+ * @module @glink-harness/dsh-web-fetch-jina/policy
  */
 
 import { isIP } from 'node:net'

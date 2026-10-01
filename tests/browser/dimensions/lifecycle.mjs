@@ -21,8 +21,8 @@ export async function run(ctx) {
     sendHidden: document.querySelector('#send-button')?.hidden,
     readOnly: document.querySelector('#prompt-input')?.readOnly,
     placeholder: document.querySelector('#prompt-input')?.placeholder,
-    foldExpanded: document.querySelector('.pi-process-toggle')?.getAttribute('aria-expanded'),
-    processLabel: document.querySelector('.pi-process-label')?.textContent,
+    foldExpanded: document.querySelector('.glink-process-toggle')?.getAttribute('aria-expanded'),
+    processLabel: document.querySelector('.glink-process-label')?.textContent,
     marked: document.querySelectorAll('#run-list [aria-current="page"]').length,
     dock: getComputedStyle(document.querySelector('#conversation-pane')).getPropertyValue('--composer-dock').trim(),
   }));
@@ -51,7 +51,7 @@ export async function run(ctx) {
   const resumed = await page.evaluate(() => ({
     status: document.querySelector('#run-view')?.dataset.status,
     stopVisible: !document.querySelector('#stop-run')?.hidden,
-    reportEntry: document.querySelector('#run-view .pi-report-button')?.offsetParent !== null,
+    reportEntry: document.querySelector('#run-view .glink-report-button')?.offsetParent !== null,
   }));
   suite.record(
     '运行中刷新：服务端记录让页面恢复运行中（可继续停止），运行中没有报告入口',
@@ -64,9 +64,9 @@ export async function run(ctx) {
   await page.waitForTimeout(600);
   const stopped = await page.evaluate(() => ({
     status: document.querySelector('#run-view')?.dataset.status,
-    tone: document.querySelector('.pi-outcome')?.dataset.tone,
-    text: document.querySelector('.pi-outcome')?.innerText?.replace(/\n+/g, ' | '),
-    icon: document.querySelector('.pi-outcome-icon .icon')?.dataset.icon,
+    tone: document.querySelector('.glink-outcome')?.dataset.tone,
+    text: document.querySelector('.glink-outcome')?.innerText?.replace(/\n+/g, ' | '),
+    icon: document.querySelector('.glink-outcome-icon .icon')?.dataset.icon,
     stopHidden: document.querySelector('#stop-run')?.hidden,
     sendVisible: !document.querySelector('#send-button')?.hidden,
     editable: !document.querySelector('#prompt-input')?.readOnly,
@@ -90,13 +90,13 @@ export async function run(ctx) {
   const defaultRun = await page.evaluate(() => ({
     status: document.querySelector('#run-view')?.dataset.status,
     question: document.querySelector('#run-question')?.innerText?.trim(),
-    outcomeHidden: document.querySelector('.pi-outcome')?.hidden,
-    answer: document.querySelector('#run-view .pi-answer-body')?.innerText?.slice(0, 200),
-    draft: document.querySelector('#run-view .pi-answer-head .badge')?.textContent,
-    actions: [...document.querySelectorAll('#run-view .pi-answer-actions > *')]
+    outcomeHidden: document.querySelector('.glink-outcome')?.hidden,
+    answer: document.querySelector('#run-view .glink-answer-body')?.innerText?.slice(0, 200),
+    draft: document.querySelector('#run-view .glink-answer-head .badge')?.textContent,
+    actions: [...document.querySelectorAll('#run-view .glink-answer-actions > *')]
       .filter((node) => !node.hidden)
       .map((node) => node.getAttribute('aria-label')),
-    reportButton: !document.querySelector('#run-view .pi-report-button')?.hidden,
+    reportButton: !document.querySelector('#run-view .glink-report-button')?.hidden,
   }));
   suite.record(
     '默认场景：问题进入气泡、回答带待核验草稿、成功不画终态卡',
@@ -120,13 +120,13 @@ export async function run(ctx) {
   await page.waitForTimeout(600);
   const tools = await page.evaluate(() => ({
     status: document.querySelector('#run-view')?.dataset.status,
-    rows: [...document.querySelectorAll('#run-view .pi-tool')].map((node) => ({
-      label: node.querySelector('.pi-tool-name')?.textContent,
-      state: node.querySelector('.pi-tool-state')?.textContent,
+    rows: [...document.querySelectorAll('#run-view .glink-tool')].map((node) => ({
+      label: node.querySelector('.glink-tool-name')?.textContent,
+      state: node.querySelector('.glink-tool-state')?.textContent,
       hasDetail: node.dataset.hasDetail,
     })),
-    processLabel: document.querySelector('#run-view .pi-process-label')?.textContent,
-    foldExpanded: document.querySelector('#run-view .pi-process-toggle')?.getAttribute('aria-expanded'),
+    processLabel: document.querySelector('#run-view .glink-process-label')?.textContent,
+    foldExpanded: document.querySelector('#run-view .glink-process-toggle')?.getAttribute('aria-expanded'),
   }));
   suite.record(
     '工具卡：三条工具行按动作命名（执行/读取/检索），失败行写状态字',
@@ -142,13 +142,13 @@ export async function run(ctx) {
     tools.processLabel,
   );
   const toolDetail = await page.evaluate(async () => {
-    const row = [...document.querySelectorAll('#run-view .pi-tool')].find((node) => node.dataset.hasDetail === 'true');
+    const row = [...document.querySelectorAll('#run-view .glink-tool')].find((node) => node.dataset.hasDetail === 'true');
     if (!row) return null;
-    const head = row.querySelector('.pi-tool-head');
+    const head = row.querySelector('.glink-tool-head');
     const closedHeight = Math.round(row.getBoundingClientRect().height);
     head.click();
     await new Promise((resolve) => setTimeout(resolve, 450));
-    const detail = `${row.querySelector('.pi-tool-output')?.textContent ?? ''}${row.querySelector('.pi-tool-result')?.textContent ?? ''}`;
+    const detail = `${row.querySelector('.glink-tool-output')?.textContent ?? ''}${row.querySelector('.glink-tool-result')?.textContent ?? ''}`;
     const openedHeight = Math.round(row.getBoundingClientRect().height);
     const open = row.open;
     head.click();
@@ -178,10 +178,10 @@ export async function run(ctx) {
   await page.waitForTimeout(600);
   const failed = await page.evaluate(() => ({
     status: document.querySelector('#run-view')?.dataset.status,
-    tone: document.querySelector('.pi-outcome')?.dataset.tone,
-    title: document.querySelector('.pi-outcome-title')?.textContent,
-    actions: [...document.querySelectorAll('.pi-outcome-actions button')].map((node) => node.textContent.trim()),
-    answerKept: /我已经开始了这次研究/.test(document.querySelector('#run-view .pi-answer-body')?.innerText ?? ''),
+    tone: document.querySelector('.glink-outcome')?.dataset.tone,
+    title: document.querySelector('.glink-outcome-title')?.textContent,
+    actions: [...document.querySelectorAll('.glink-outcome-actions button')].map((node) => node.textContent.trim()),
+    answerKept: /我已经开始了这次研究/.test(document.querySelector('#run-view .glink-answer-body')?.innerText ?? ''),
   }));
   suite.record(
     '失败场景：失败卡 + 已交付内容保留 + 重试/查看详情',
@@ -189,10 +189,10 @@ export async function run(ctx) {
       failed.answerKept,
     failed,
   );
-  await page.click('.pi-outcome-actions button:has-text("查看详情")');
+  await page.click('.glink-outcome-actions button:has-text("查看详情")');
   await page.waitForTimeout(400);
   const detail = await page.evaluate(() => {
-    const node = document.querySelector('.pi-outcome-detail');
+    const node = document.querySelector('.glink-outcome-detail');
     return { visible: Boolean(node) && node.offsetParent !== null, text: node?.innerText?.slice(0, 200) };
   });
   suite.record(
@@ -210,8 +210,8 @@ export async function run(ctx) {
   await page.waitForTimeout(600);
   const length = await page.evaluate(() => ({
     status: document.querySelector('#run-view')?.dataset.status,
-    tone: document.querySelector('.pi-outcome')?.dataset.tone,
-    text: document.querySelector('.pi-outcome')?.innerText?.replace(/\n+/g, ' | '),
+    tone: document.querySelector('.glink-outcome')?.dataset.tone,
+    text: document.querySelector('.glink-outcome')?.innerText?.replace(/\n+/g, ' | '),
   }));
   suite.record(
     '截断场景：finished + stopReason=length 显示「交付不完整」',
@@ -238,13 +238,13 @@ export async function run(ctx) {
     await openRunFromList(page, defaultRunId);
     const replay = await page.evaluate(() => ({
       status: document.querySelector('#run-view')?.dataset.status,
-      thinking: document.querySelectorAll('#run-view .pi-thinking').length,
-      answer: document.querySelectorAll('#run-view .pi-answer-body .pi-text').length,
-      answerText: document.querySelector('#run-view .pi-answer-body')?.innerText?.slice(0, 80),
-      // `.pi-output` is also the children panel's class; the file card is the
-      // one without `pi-children`.
-      outputHidden: document.querySelector('#run-view .pi-output:not(.pi-children)')?.hidden,
-      foldExpanded: document.querySelector('#run-view .pi-process-toggle')?.getAttribute('aria-expanded'),
+      thinking: document.querySelectorAll('#run-view .glink-thinking').length,
+      answer: document.querySelectorAll('#run-view .glink-answer-body .glink-text').length,
+      answerText: document.querySelector('#run-view .glink-answer-body')?.innerText?.slice(0, 80),
+      // `.glink-output` is also the children panel's class; the file card is the
+      // one without `glink-children`.
+      outputHidden: document.querySelector('#run-view .glink-output:not(.glink-children)')?.hidden,
+      foldExpanded: document.querySelector('#run-view .glink-process-toggle')?.getAttribute('aria-expanded'),
       distance: (() => {
         const scroll = document.querySelector('#conversation-scroll');
         return Math.round(scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight);
@@ -330,7 +330,7 @@ export async function run(ctx) {
           headers: {
             'Content-Type': 'application/json',
             Origin: location.origin,
-            'X-Pi-Glink-CSRF': token,
+            'X-Glink-Harness-CSRF': token,
           },
           body: JSON.stringify({ prompt: '浏览器验收 · 会话缺失的追问', parentRunId: runId }),
         });
@@ -353,7 +353,7 @@ export async function run(ctx) {
     await openRunFromList(page, rerunTarget);
     const rerunQuestion = await page.evaluate(() => document.querySelector('#run-question')?.innerText?.trim());
     const rowsBeforeRerun = (await listedRunIds(page)).length;
-    await page.click('#run-view .pi-answer-actions button[aria-label="用同一个问题重新研究"]');
+    await page.click('#run-view .glink-answer-actions button[aria-label="用同一个问题重新研究"]');
     await waitRunStatus(page, ['finished'], 30_000);
     await page.waitForTimeout(600);
     const rerun = await page.evaluate(() => ({

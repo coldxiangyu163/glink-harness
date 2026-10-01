@@ -35,7 +35,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "host"))
 
-from pi_glink.kernel.framing import split_lf_records, strip_trailing_cr_bytes  # noqa: E402
+from glink_harness.kernel.framing import split_lf_records, strip_trailing_cr_bytes  # noqa: E402
 
 AGENT_NAME = "rpc_echo_agent.py"
 AGENT_SOURCE = Path(__file__).resolve().parent / AGENT_NAME
@@ -390,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
     print("E2B 双向 stdio 帧完整性实测（GLINK-ACP-04 / M3b）")
     print(f"日期: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"模板: {args.template}（从不触碰 glink-frontier-e2b 及其任何 tag）")
-    print("仓库分帧模块: host/pi_glink/kernel/framing.py（LF-only）")
+    print("仓库分帧模块: host/glink_harness/kernel/framing.py（LF-only）")
     try:
         import importlib.metadata as metadata
 

@@ -19,8 +19,8 @@ import pytest
 # 下面的导入必须晚于 importorskip，因此显式豁免 E402。
 zstandard = pytest.importorskip("zstandard")
 
-from pi_glink.kernel import acp_child_progress as progress  # noqa: E402
-from pi_glink.kernel.acp_child_progress import (  # noqa: E402
+from glink_harness.kernel import acp_child_progress as progress  # noqa: E402
+from glink_harness.kernel.acp_child_progress import (  # noqa: E402
     MAX_SESSION_FILE_BYTES,
     MAX_TARGET_CHARS,
     AcpChildProgressSource,

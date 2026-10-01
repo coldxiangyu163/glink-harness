@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.kernel.child_progress import (
+from glink_harness.kernel.child_progress import (
     E2B_PROGRESS_REQUEST_TIMEOUT_SECONDS,
     PROGRESS_MAX_FILES,
     TOOL_NAME_MAX_CHARS,

@@ -4,7 +4,7 @@
  * The workbench's front-end is deliberately build-free vanilla ESM, so alignment
  * with the standard library cannot be proven by "we import the same components".
  * This harness proves it by measurement instead: it loads a reference screen from
- * the library's full-page demo in one tab and the matching pi-glink screen in
+ * the library's full-page demo in one tab and the matching glink-harness screen in
  * another, then compares computed styles for the same UI roles (app shell, nav
  * row, pane header, prompt input, thinking fold, tool row, …) property by
  * property.
@@ -133,7 +133,7 @@ const measureRoles = (args) => {
         );
       case 'thinkingToggle': {
         // The library's Thinking button is the process fold's toggle on our side.
-        if (q('.pi-process-toggle')) return q('.pi-process-toggle');
+        if (q('.glink-process-toggle')) return q('.glink-process-toggle');
         const labelled = [...main.querySelectorAll('button[aria-expanded]')].find((node) =>
           /已完成|正在|思考|个工作步骤|步骤/.test(node.textContent),
         );
@@ -144,26 +144,26 @@ const measureRoles = (args) => {
         return box ? box.querySelector('button') : null;
       }
       case 'thinkingLabel': {
-        if (q('.pi-process-label')) return q('.pi-process-label');
+        if (q('.glink-process-label')) return q('.glink-process-label');
         const toggle =
           [...main.querySelectorAll('button[aria-expanded]')].find((node) =>
             /已完成|正在|思考|步骤/.test(node.textContent),
           );
         if (!toggle) return null;
-        const own = toggle.querySelector('.pi-thinking-label');
+        const own = toggle.querySelector('.glink-thinking-label');
         if (own) return own;
         const status = toggle.querySelector('span[role="status"]');
         return status ? status.querySelector('span') || status : null;
       }
       case 'toolRow': {
-        if (q('.pi-tool-head')) return q('.pi-tool-head');
+        if (q('.glink-tool-head')) return q('.glink-tool-head');
         const box = [...main.querySelectorAll('div')].find((node) =>
           node.className.toString().includes('max-w-[420px]'),
         );
         return box ? box.querySelector('button') : null;
       }
       case 'toolLabel': {
-        if (q('.pi-tool-name')) return q('.pi-tool-name');
+        if (q('.glink-tool-name')) return q('.glink-tool-name');
         const box = [...main.querySelectorAll('div')].find((node) =>
           node.className.toString().includes('max-w-[420px]'),
         );
@@ -175,7 +175,7 @@ const measureRoles = (args) => {
         );
       }
       case 'toolChip': {
-        if (q('.pi-tool-args')) return q('.pi-tool-args');
+        if (q('.glink-tool-args')) return q('.glink-tool-args');
         return (
           find(
             (node) =>
@@ -207,9 +207,9 @@ const measureRoles = (args) => {
           : null;
       }
       case 'answerAction':
-        return q('.pi-answer-actions .icon-key') || q('.demo-answer-actions button');
+        return q('.glink-answer-actions .icon-key') || q('.demo-answer-actions button');
       case 'outputCard':
-        return q('.pi-output') || q('.demo-output-card');
+        return q('.glink-output') || q('.demo-output-card');
       default:
         return null;
     }
@@ -430,8 +430,8 @@ try {
     await targetPage.click(`#run-list [data-run-id="${candidate.runId}"]`);
     await targetPage.waitForTimeout(2000);
     const probe = await targetPage.evaluate(() => ({
-      thinking: document.querySelectorAll('.pi-thinking').length,
-      tools: document.querySelectorAll('.pi-tool').length,
+      thinking: document.querySelectorAll('.glink-thinking').length,
+      tools: document.querySelectorAll('.glink-tool').length,
     }));
     console.log(`[info] run ${candidate.runId}: 思考 ${probe.thinking} · 工具 ${probe.tools}`);
     if (probe.thinking > 0 && probe.tools > 0) {
@@ -459,7 +459,7 @@ try {
       // The process fold closes itself when a run ends; the reference renders its
       // steps expanded, so open ours before measuring the rows inside it.
       await targetPage.evaluate(() => {
-        const toggle = document.querySelector('.pi-process-toggle');
+        const toggle = document.querySelector('.glink-process-toggle');
         if (toggle?.getAttribute('aria-expanded') === 'false') toggle.click();
       });
       await targetPage.waitForTimeout(700);
@@ -509,7 +509,7 @@ try {
   );
 
   const transcript = [
-    'pi-glink × 百鉴 UI 标准库 · 像素级对齐校验',
+    'glink-harness × 百鉴 UI 标准库 · 像素级对齐校验',
     `日期: ${new Date().toISOString()}`,
     `命令: node tests/browser/ui-parity.mjs --base-url ${baseUrl} --reference-url ${referenceUrl}`,
     `视口: ${VIEWPORT.width}×${VIEWPORT.height}`,

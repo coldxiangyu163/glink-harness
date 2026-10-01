@@ -1,6 +1,6 @@
 """Boundary and gate regressions for the run read model.
 
-:mod:`pi_glink.runs.read_model` is the one place the run detail, child
+:mod:`glink_harness.runs.read_model` is the one place the run detail, child
 documents, child artifact download, report download and event stream take the
 same four steps: owner gate → path resolution → read bound → redaction. These
 tests pin both the coupling (every read endpoint goes through it and no route
@@ -15,10 +15,10 @@ import ast
 import time
 from pathlib import Path
 
-from pi_glink.redaction import SecretRedactor
-from pi_glink.runs import read_model
-from pi_glink.store import RunSpec, RunStore
-from pi_glink.tenancy import TenantContext
+from glink_harness.redaction import SecretRedactor
+from glink_harness.runs import read_model
+from glink_harness.store import RunSpec, RunStore
+from glink_harness.tenancy import TenantContext
 
 from store_helpers import finish
 
@@ -29,14 +29,14 @@ SPEC = RunSpec(family="pi", pack="pi", executor="inproc")
 #: must make. A new read endpoint added here (or a route that stops going
 #: through the model) fails the coupling test below.
 READ_ENDPOINTS: dict[tuple[str, str], dict[str, set[str]]] = {
-    ("host/pi_glink/web_routes.py", "RoutesMixin"): {
+    ("host/glink_harness/web_routes.py", "RoutesMixin"): {
         "_send_run": {"visible_record"},
         "_send_children": {"visible_record", "read_child_documents"},
         "_send_child_file": {"visible_record", "read_child_file"},
         "_send_report": {"visible_record", "read_report"},
         "_report_available": {"report_available"},
     },
-    ("host/pi_glink/web_sse.py", "SseMixin"): {
+    ("host/glink_harness/web_sse.py", "SseMixin"): {
         "_stream_run_events_authorized": {"visible_record"},
     },
 }
@@ -105,7 +105,7 @@ def _context(tenant_id: str, user_id: str = "user-a") -> TenantContext:
         tenant_id=tenant_id,
         user_id=user_id,
         role="member",
-        audience="pi-glink-test",
+        audience="glink-harness-test",
         expires_at=time.time() + 120,
     )
 

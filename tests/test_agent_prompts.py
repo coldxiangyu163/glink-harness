@@ -7,8 +7,8 @@ import re
 from pathlib import Path
 
 from harness_helpers import test_egress
-from pi_glink.config import build_config
-from pi_glink.kernel.agent_env import prepare_agent_dir, template_manifest
+from glink_harness.config import build_config
+from glink_harness.kernel.agent_env import prepare_agent_dir, template_manifest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = REPO_ROOT / "methodology" / "work-agreement.md"
@@ -199,7 +199,7 @@ def test_the_blueprint_is_the_single_methodology_source() -> None:
     text = DEEPRESEARCH_PATH.read_text(encoding="utf-8")
     assert text.startswith("+++\n")
     frontmatter, _, body = text[4:].partition("\n+++\n")
-    assert 'format = "pi-glink-blueprint/v1"' in frontmatter
+    assert 'format = "glink-harness-blueprint/v1"' in frontmatter
     assert 'name = "deepresearch"' in frontmatter
     assert "description" in frontmatter
     # 结构化的阶段契约与正文方法论。
@@ -218,7 +218,7 @@ def test_researcher_definition_uses_only_the_runtime_tool_surface() -> None:
     """The researcher agent is the only delegated role, with an explicit allowlist.
 
     pi-subagents turns ``tools`` into ``--tools`` for the child process, so this
-    list is what the subagent can actually call: pi-glink's built-ins plus
+    list is what the subagent can actually call: glink-harness's built-ins plus
     pi-web-access. No dispatch tool ⇒ a child cannot spawn another child, and
     ``maxSubagentDepth: 1`` keeps the nesting guard as the second layer.
     """

@@ -1,9 +1,9 @@
 """Materialize a temporary harness pack for tests.
 
-The host selects a harness by pack name (``PI_GLINK_HARNESS``) and an ACP pack's
+The host selects a harness by pack name (``GLINK_HARNESS``) and an ACP pack's
 entry argv and capability matrix (session options, permission allowlist,
 subagent dispatch, child-progress source, resume) live in its ``harness.toml``
-(``pi-glink-harness/v2``). Tests that drive the ACP family with a fake agent
+(``glink-harness/v2``). Tests that drive the ACP family with a fake agent
 therefore write a throwaway pack here.
 
 :func:`apply_acp_pack` reads test-only ``TEST_ACP_*`` keys from a test's env
@@ -20,7 +20,7 @@ import re
 import shlex
 from pathlib import Path
 
-PACK_FORMAT = "pi-glink-harness/v2"
+PACK_FORMAT = "glink-harness/v2"
 #: Fixed image requirement for a test pack; the generator never reads it.
 TEST_ARG = "TEST_AGENT_VERSION"
 TEST_PACKAGE = "test-package"
@@ -92,7 +92,7 @@ def write_acp_pack(root: Path, command: str | list[str], *, name: str = "dsh", *
 def apply_acp_pack(values: dict, tmp_path: Path) -> dict:
     """Turn the test-only ``TEST_ACP_*`` keys in ``values`` into a temporary pack.
 
-    Selects the pack (``PI_GLINK_HARNESS=dsh``) and removes the test keys.
+    Selects the pack (``GLINK_HARNESS=dsh``) and removes the test keys.
     """
     command = values.pop("TEST_ACP_COMMAND", "")
     session = values.pop("TEST_ACP_SESSION_CONFIG", "")
@@ -111,8 +111,8 @@ def apply_acp_pack(values: dict, tmp_path: Path) -> dict:
         child_progress=progress,
         resume=resume != "false",
     )
-    values["PI_GLINK_HARNESS"] = "dsh"
-    values["PI_GLINK_HARNESSES_DIR"] = str(packs)
+    values["GLINK_HARNESS"] = "dsh"
+    values["GLINK_HARNESSES_DIR"] = str(packs)
     return values
 
 

@@ -21,21 +21,21 @@ from typing import Any
 
 import pytest
 
-from pi_glink import event_schema
-from pi_glink.config import HostConfig, build_config
-from pi_glink.events import EventBus
-from pi_glink.kernel import docker_env, e2b_env
-from pi_glink.kernel.execution import (
+from glink_harness import event_schema
+from glink_harness.config import HostConfig, build_config
+from glink_harness.events import EventBus
+from glink_harness.kernel import docker_env, e2b_env
+from glink_harness.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
     ExecutionAdapter,
     ExecutionOutcome,
     SessionInfo,
 )
-from pi_glink.runs.runner import ResourcesUnreleased, RunManager, RunQuotaExceeded
-from pi_glink.ownership import DataRootOwnership
-from pi_glink.store import FAILED, FINISHED, RUNNING, RunSpec, RunStore, StoreError
-from pi_glink.tenancy import TenantContext
+from glink_harness.runs.runner import ResourcesUnreleased, RunManager, RunQuotaExceeded
+from glink_harness.ownership import DataRootOwnership
+from glink_harness.store import FAILED, FINISHED, RUNNING, RunSpec, RunStore, StoreError
+from glink_harness.tenancy import TenantContext
 from store_helpers import finish
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -57,9 +57,9 @@ def make_multitenant_config(tmp_path: Path, **overrides: str) -> HostConfig:
     """Multi-tenant Docker config; the identity entry does not affect the ledger."""
     values = {
         "LOCAL_WEB_EXECUTOR": "docker",
-        "PI_GLINK_TENANCY": "multitenant",
-        "PI_GLINK_AUTH_MODE": "accounts",
-        "PI_GLINK_MODEL_CREDENTIALS": "shared",
+        "GLINK_TENANCY": "multitenant",
+        "GLINK_AUTH_MODE": "accounts",
+        "GLINK_MODEL_CREDENTIALS": "shared",
     }
     values.update(overrides)
     return make_config(tmp_path, **values)
@@ -69,8 +69,8 @@ def make_e2b_config(tmp_path: Path, **overrides: str) -> HostConfig:
     values = {
         "LOCAL_WEB_EXECUTOR": "e2b",
         "E2B_API_KEY": "e2b-secret-key",
-        "LOCAL_WEB_E2B_TEMPLATE": "pi-glink-worker",
-        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
+        "LOCAL_WEB_E2B_TEMPLATE": "glink-harness-worker",
+        "GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
     }
     values.update(overrides)
     return make_config(tmp_path, **values)
@@ -106,12 +106,12 @@ def record_hold(
 
 def test_a_leak_consumes_its_tenant_and_the_global_slots(tmp_path: Path) -> None:
     config = make_multitenant_config(
-        tmp_path, PI_GLINK_MAX_TENANT_RUNS="2", PI_GLINK_MAX_GLOBAL_RUNS="4"
+        tmp_path, GLINK_MAX_TENANT_RUNS="2", GLINK_MAX_GLOBAL_RUNS="4"
     )
     store = RunStore(config.data_root / "runs")
-    record_hold(store, "leak-a1", tenant_id="tenant-a", container="pi-glink-leak-a1")
-    record_hold(store, "leak-a2", tenant_id="tenant-a", container="pi-glink-leak-a2")
-    record_hold(store, "leak-legacy", container="pi-glink-leak-legacy")
+    record_hold(store, "leak-a1", tenant_id="tenant-a", container="glink-harness-leak-a1")
+    record_hold(store, "leak-a2", tenant_id="tenant-a", container="glink-harness-leak-a2")
+    record_hold(store, "leak-legacy", container="glink-harness-leak-legacy")
     manager = RunManager(config, EventBus(), store)
 
     with pytest.raises(RunQuotaExceeded) as tenant_hit:
@@ -121,7 +121,7 @@ def test_a_leak_consumes_its_tenant_and_the_global_slots(tmp_path: Path) -> None
     # Another tenant is not blocked by tenant A's leftovers: global 3/4 is free.
     manager._check_admission(context("tenant-b"), manager.store.holding_records())  # noqa: SLF001
 
-    record_hold(store, "leak-b1", tenant_id="tenant-b", container="pi-glink-leak-b1")
+    record_hold(store, "leak-b1", tenant_id="tenant-b", container="glink-harness-leak-b1")
     with pytest.raises(RunQuotaExceeded) as global_hit:
         manager._check_admission(context("tenant-b"), manager.store.holding_records())  # noqa: SLF001
     assert (global_hit.value.scope, global_hit.value.limit) == ("global", 4)
@@ -141,9 +141,9 @@ def test_local_mode_still_refuses_on_any_hold(tmp_path: Path) -> None:
 
 
 def test_the_ledger_survives_a_restart(tmp_path: Path) -> None:
-    config = make_multitenant_config(tmp_path, PI_GLINK_MAX_GLOBAL_RUNS="1")
+    config = make_multitenant_config(tmp_path, GLINK_MAX_GLOBAL_RUNS="1")
     store = RunStore(config.data_root / "runs")
-    record_hold(store, "leak", tenant_id="tenant-a", container="pi-glink-leak")
+    record_hold(store, "leak", tenant_id="tenant-a", container="glink-harness-leak")
 
     restarted = RunManager(config, EventBus(), RunStore(config.data_root / "runs"))
     with pytest.raises(RunQuotaExceeded):
@@ -198,7 +198,7 @@ def test_adjudicating_a_readable_record_still_uses_the_record_path(tmp_path: Pat
 def test_a_confirmed_probe_releases_capacity(tmp_path: Path) -> None:
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
     store = RunStore(config.data_root / "runs")
-    record_hold(store, "leak", container="pi-glink-leak")
+    record_hold(store, "leak", container="glink-harness-leak")
     calls: list[str] = []
 
     def probe(name: str) -> tuple[bool, str]:
@@ -207,7 +207,7 @@ def test_a_confirmed_probe_releases_capacity(tmp_path: Path) -> None:
 
     manager = RunManager(config, EventBus(), store, docker_probe=probe)
     assert manager.reconcile_resources() == ["leak"]
-    assert calls == ["pi-glink-leak"], "探测只使用 meta 中持久化的身份"
+    assert calls == ["glink-harness-leak"], "探测只使用 meta 中持久化的身份"
     record = store.get("leak")
     assert record.resource_adjudication["source"] == "auto-verified"
     assert record.resource_adjudication["method"] == "docker-inspect"
@@ -217,14 +217,14 @@ def test_a_confirmed_probe_releases_capacity(tmp_path: Path) -> None:
     assert store.holding_records() == []
     assert manager.unreleased_resources() == []
     assert manager.reconcile_resources() == [], "已释放的持有不再重复探测"
-    assert calls == ["pi-glink-leak"]
+    assert calls == ["glink-harness-leak"]
 
 
 @pytest.mark.parametrize("mode", ["uncertain", "error", "timeout"])
 def test_a_probe_that_cannot_confirm_keeps_the_hold(tmp_path: Path, mode: str) -> None:
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
     store = RunStore(config.data_root / "runs")
-    record_hold(store, "leak", container="pi-glink-leak")
+    record_hold(store, "leak", container="glink-harness-leak")
 
     def probe(_name: str) -> tuple[bool, str]:
         if mode == "uncertain":
@@ -247,7 +247,7 @@ def test_a_probe_never_guesses_a_missing_identity(
     config = make_config(
         tmp_path,
         LOCAL_WEB_EXECUTOR="e2b",
-        PI_GLINK_EGRESS_PUBLIC_URL="https://egress.example.test",
+        GLINK_EGRESS_PUBLIC_URL="https://egress.example.test",
     )
     store = RunStore(config.data_root / "runs")
     record_hold(store, "no-identity")
@@ -258,7 +258,7 @@ def test_a_probe_never_guesses_a_missing_identity(
         store,
         sandbox_probe=lambda sandbox_id: (calls.append(sandbox_id) or True, "fake"),
     )
-    with caplog.at_level(logging.INFO, logger="pi_glink.runs.resource_ledger"):
+    with caplog.at_level(logging.INFO, logger="glink_harness.runs.resource_ledger"):
         assert manager.reconcile_resources() == []
     assert calls == [], "没有持久化身份时不得猜测或批量操作"
     assert "缺少持久化的执行身份" in caplog.text
@@ -271,12 +271,12 @@ def test_the_probe_face_follows_the_persisted_identity(tmp_path: Path) -> None:
         config = make_config(
             tmp_path / executor,
             LOCAL_WEB_EXECUTOR=executor,
-            PI_GLINK_EGRESS_PUBLIC_URL="https://egress.example.test",
+            GLINK_EGRESS_PUBLIC_URL="https://egress.example.test",
         )
         store = RunStore(config.data_root / "runs")
-        record_hold(store, "container-hold", container="pi-glink-container-hold")
+        record_hold(store, "container-hold", container="glink-harness-container-hold")
         record_hold(store, "sandbox-hold", sandbox="sbx-hold")
-        record_hold(store, "both-hold", container="pi-glink-both", sandbox="sbx-both")
+        record_hold(store, "both-hold", container="glink-harness-both", sandbox="sbx-both")
         record_hold(store, "no-identity")
         docker_calls: list[str] = []
         sandbox_calls: list[str] = []
@@ -293,7 +293,7 @@ def test_the_probe_face_follows_the_persisted_identity(tmp_path: Path) -> None:
             "container-hold",
             "sandbox-hold",
         ]
-        assert sorted(docker_calls) == ["pi-glink-both", "pi-glink-container-hold"]
+        assert sorted(docker_calls) == ["glink-harness-both", "glink-harness-container-hold"]
         assert sorted(sandbox_calls) == ["sbx-both", "sbx-hold"]
         assert [record.run_id for record in store.holding_records()] == ["no-identity"]
 
@@ -301,7 +301,7 @@ def test_the_probe_face_follows_the_persisted_identity(tmp_path: Path) -> None:
 def test_a_record_with_two_identities_needs_all_of_them_confirmed(tmp_path: Path) -> None:
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
     store = RunStore(config.data_root / "runs")
-    record_hold(store, "both", container="pi-glink-both", sandbox="sbx-both")
+    record_hold(store, "both", container="glink-harness-both", sandbox="sbx-both")
     manager = RunManager(
         config,
         EventBus(),
@@ -413,7 +413,7 @@ def test_a_real_sdk_not_found_type_confirms_the_release(
         monkeypatch, errors=[e2b.SandboxNotFoundException("sandbox not found")]
     )
     monkeypatch.setattr(
-        "pi_glink.kernel.e2b_env._not_found_types",
+        "glink_harness.kernel.e2b_env._not_found_types",
         lambda: (e2b.SandboxNotFoundException, e2b.NotFoundException),
     )
     config = make_e2b_config(tmp_path)
@@ -440,19 +440,19 @@ def test_the_probe_only_touches_the_persisted_container_name(tmp_path: Path) -> 
         present["value"] = False  # docker rm -f
         return subprocess.CompletedProcess(argv, 0, "x\n", "")
 
-    confirmed, detail = docker_env.confirm_absent("pi-glink-run1", runner=runner)
+    confirmed, detail = docker_env.confirm_absent("glink-harness-run1", runner=runner)
     assert (confirmed, "不存在" in detail) == (True, True)
     assert calls[0] == [
-        "docker", "inspect", "--type", "container", "--format", "{{.Id}}", "pi-glink-run1",
+        "docker", "inspect", "--type", "container", "--format", "{{.Id}}", "glink-harness-run1",
     ]
-    assert calls[1] == ["docker", "rm", "-f", "pi-glink-run1"]
-    assert all("pi-glink-run1" in argv for argv in calls)
+    assert calls[1] == ["docker", "rm", "-f", "glink-harness-run1"]
+    assert all("glink-harness-run1" in argv for argv in calls)
 
     # A daemon that cannot answer keeps the hold instead of assuming release.
     def broken(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess:
         raise OSError("docker CLI 不可用")
 
-    assert docker_env.confirm_absent("pi-glink-run1", runner=broken)[0] is False
+    assert docker_env.confirm_absent("glink-harness-run1", runner=broken)[0] is False
     assert docker_env.confirm_absent("", runner=broken)[0] is False
 
 
@@ -461,7 +461,7 @@ def test_the_sweep_never_probes_a_run_that_is_still_in_flight(
 ) -> None:
     config = make_multitenant_config(tmp_path)
     store = RunStore(config.data_root / "runs")
-    record_hold(store, "finished-leak", tenant_id="tenant-a", container="pi-glink-finished-leak")
+    record_hold(store, "finished-leak", tenant_id="tenant-a", container="glink-harness-finished-leak")
     calls: list[str] = []
     manager = RunManager(
         config,
@@ -470,23 +470,23 @@ def test_the_sweep_never_probes_a_run_that_is_still_in_flight(
         docker_probe=lambda name: (calls.append(name) or True, "fake docker: 不存在"),
     )
     adapter = _BlockingAdapter()
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter)
-    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
+    monkeypatch.setattr("glink_harness.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter)
+    monkeypatch.setattr("glink_harness.kernel.sandbox.docker_available", lambda: True)
 
     run_id = manager.start("进行中", context("tenant-a")).run_id
     assert store.get(run_id).holds_resources is True, "运行中的 run 也是持有"
     assert manager.reconcile_resources() == ["finished-leak"]
-    assert calls == ["pi-glink-finished-leak"], "在途 run 由自己的执行面负责"
+    assert calls == ["glink-harness-finished-leak"], "在途 run 由自己的执行面负责"
     manager.stop(run_id, context("tenant-a"))
     assert manager.wait(run_id, timeout=30).status in {"cancelled", "failed"}
 
 
 def test_the_watch_thread_sweeps_once_after_startup_and_stops(tmp_path: Path) -> None:
     config = make_config(
-        tmp_path, LOCAL_WEB_EXECUTOR="docker", PI_GLINK_RESOURCE_RECONCILE_SECONDS="1"
+        tmp_path, LOCAL_WEB_EXECUTOR="docker", GLINK_RESOURCE_RECONCILE_SECONDS="1"
     )
     store = RunStore(config.data_root / "runs")
-    record_hold(store, "leak", container="pi-glink-leak")
+    record_hold(store, "leak", container="glink-harness-leak")
     probed = threading.Event()
     calls: list[str] = []
 
@@ -503,13 +503,13 @@ def test_the_watch_thread_sweeps_once_after_startup_and_stops(tmp_path: Path) ->
     manager.stop_resource_watch()
     assert not thread.is_alive()
     assert store.holding_records() == []
-    assert calls == ["pi-glink-leak"]
+    assert calls == ["glink-harness-leak"]
 
     # inproc has no external resource, and 0 disables the sweep entirely.
     inproc = RunManager(make_config(tmp_path / "other"), EventBus(), RunStore(tmp_path / "other" / "runs"))
     assert inproc.start_resource_watch() is None
     disabled = RunManager(
-        make_config(tmp_path / "off", LOCAL_WEB_EXECUTOR="docker", PI_GLINK_RESOURCE_RECONCILE_SECONDS="0"),
+        make_config(tmp_path / "off", LOCAL_WEB_EXECUTOR="docker", GLINK_RESOURCE_RECONCILE_SECONDS="0"),
         EventBus(),
         RunStore(tmp_path / "off" / "runs"),
     )
@@ -573,9 +573,9 @@ def test_the_docker_face_persists_the_container_name_before_start(
 ) -> None:
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
     store = RunStore(config.data_root / "runs")
-    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
+    monkeypatch.setattr("glink_harness.kernel.sandbox.docker_available", lambda: True)
     monkeypatch.setattr(
-        "pi_glink.kernel.sandbox.subprocess.run",
+        "glink_harness.kernel.sandbox.subprocess.run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args, 1, "", "Error: No such container"
         ),
@@ -633,7 +633,7 @@ class _BlockingAdapter(ExecutionAdapter):
 
 def test_the_run_state_helper_keeps_its_meaning() -> None:
     """Guard the assumption this file builds on: a running record holds."""
-    from pi_glink.store import RunRecord
+    from glink_harness.store import RunRecord
 
     record = RunRecord(
         run_id="x", prompt="p", status=RUNNING, created_at=time.time(), workspace="/tmp/x",

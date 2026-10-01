@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DEFAULT_PROMPT =
-  '先在本工作区创建 notes.md，写入三行关于 pi-glink 的事实，然后基于它写出 report.md。';
+  '先在本工作区创建 notes.md，写入三行关于 glink-harness 的事实，然后基于它写出 report.md。';
 const TERMINAL_TIMEOUT = 300_000;
 
 function findPlaywright() {
@@ -75,37 +75,37 @@ try {
 
   await page.waitForSelector('#run-view[data-status="finished"]', { timeout: TERMINAL_TIMEOUT });
   await page.waitForTimeout(400);
-  const status = (await page.textContent('.pi-process-label'))?.trim();
+  const status = (await page.textContent('.glink-process-label'))?.trim();
   console.log(`[ok] run 收尾：${status}`);
   // 过程折叠在收尾后自动收起；展开它再统计（标准库 Thinking：跑完收起、永远可再展开）。
-  if ((await page.getAttribute('.pi-process-toggle', 'aria-expanded')) !== 'true') {
-    await page.click('.pi-process-toggle');
+  if ((await page.getAttribute('.glink-process-toggle', 'aria-expanded')) !== 'true') {
+    await page.click('.glink-process-toggle');
     await page.waitForTimeout(600);
   }
 
   const counts = await page.evaluate(() => ({
-    thinking: document.querySelectorAll('.pi-thinking').length,
-    thinkingOpen: document.querySelectorAll('.pi-thinking[open]').length,
-    tools: document.querySelectorAll('.pi-tool').length,
-    toolsDone: document.querySelectorAll('.pi-tool[data-status="done"]').length,
-    toolsWithText: [...document.querySelectorAll('.pi-tool')].filter((node) => {
-      const output = node.querySelector('.pi-tool-output')?.textContent.trim() ?? '';
-      const result = node.querySelector('.pi-tool-result')?.textContent.trim() ?? '';
+    thinking: document.querySelectorAll('.glink-thinking').length,
+    thinkingOpen: document.querySelectorAll('.glink-thinking[open]').length,
+    tools: document.querySelectorAll('.glink-tool').length,
+    toolsDone: document.querySelectorAll('.glink-tool[data-status="done"]').length,
+    toolsWithText: [...document.querySelectorAll('.glink-tool')].filter((node) => {
+      const output = node.querySelector('.glink-tool-output')?.textContent.trim() ?? '';
+      const result = node.querySelector('.glink-tool-result')?.textContent.trim() ?? '';
       return output !== '' || result !== '';
     }).length,
-    toolsRenderingTextTwice: [...document.querySelectorAll('.pi-tool')].filter((node) => {
+    toolsRenderingTextTwice: [...document.querySelectorAll('.glink-tool')].filter((node) => {
       // After the terminal frame the streamed preview is dropped when it repeats
       // the result; a card must never show the same text in both fields.
-      const output = node.querySelector('.pi-tool-output')?.textContent.trim() ?? '';
-      const result = node.querySelector('.pi-tool-result')?.textContent.trim() ?? '';
+      const output = node.querySelector('.glink-tool-output')?.textContent.trim() ?? '';
+      const result = node.querySelector('.glink-tool-result')?.textContent.trim() ?? '';
       return output !== '' && output === result;
     }).length,
-    texts: document.querySelectorAll('.pi-text').length,
-    textChars: [...document.querySelectorAll('.pi-text')].reduce((total, node) => total + node.textContent.length, 0),
-    turns: document.querySelectorAll('.pi-turn').length,
-    stages: document.querySelectorAll('.pi-stage').length,
-    answer: document.querySelectorAll('.pi-answer-body .pi-text').length,
-    draftBadge: !document.querySelector('.pi-answer-head')?.hidden,
+    texts: document.querySelectorAll('.glink-text').length,
+    textChars: [...document.querySelectorAll('.glink-text')].reduce((total, node) => total + node.textContent.length, 0),
+    turns: document.querySelectorAll('.glink-turn').length,
+    stages: document.querySelectorAll('.glink-stage').length,
+    answer: document.querySelectorAll('.glink-answer-body .glink-text').length,
+    draftBadge: !document.querySelector('.glink-answer-head')?.hidden,
     reportButton: !document.querySelector('[aria-label="生成的文件"]')?.hidden,
     stopHidden: document.querySelector('#stop-run')?.hidden,
     runListEntries: document.querySelectorAll('#run-list [data-run-id]').length,
@@ -114,13 +114,13 @@ try {
 
   // Thinking folds must be expandable and carry text.
   if (counts.thinking > 0) {
-    await page.click('.pi-thinking summary');
-    const thinkingText = (await page.textContent('.pi-thinking-body'))?.trim() ?? '';
+    await page.click('.glink-thinking summary');
+    const thinkingText = (await page.textContent('.glink-thinking-body'))?.trim() ?? '';
     console.log(`[ok] 思考折叠可展开，${thinkingText.length} 字`);
   }
 
   if (!counts.reportButton) throw new Error('报告按钮不可见');
-  await page.click('.pi-report-button');
+  await page.click('.glink-report-button');
   await page.waitForSelector('#preview-article h1', { timeout: 15_000 });
   const previewTitle = (await page.textContent('#preview-article h1'))?.trim();
   console.log(`[ok] 报告预览已打开：${previewTitle}`);
@@ -152,11 +152,11 @@ try {
   await page.waitForSelector('#run-view[data-status="finished"]', { timeout: 30_000 });
   await page.waitForTimeout(1500); // 等重放把剩余帧画完
   const replay = await page.evaluate(() => ({
-    items: document.querySelectorAll('.pi-process-list > *, .pi-answer-body > *').length,
-    tools: document.querySelectorAll('.pi-tool').length,
-    texts: document.querySelectorAll('.pi-text').length,
+    items: document.querySelectorAll('.glink-process-list > *, .glink-answer-body > *').length,
+    tools: document.querySelectorAll('.glink-tool').length,
+    texts: document.querySelectorAll('.glink-text').length,
     status: document.querySelector('#run-view')?.dataset.status,
-    unavailable: document.querySelector('.pi-outcome')?.hidden === false && /读不到/.test(document.querySelector('.pi-outcome')?.textContent ?? ''),
+    unavailable: document.querySelector('.glink-outcome')?.hidden === false && /读不到/.test(document.querySelector('.glink-outcome')?.textContent ?? ''),
   }));
   console.log('[ok] 历史 run 重放', JSON.stringify(replay));
   if (replay.items < 2) throw new Error(`历史重放时间线不完整: ${replay.items} 项`);

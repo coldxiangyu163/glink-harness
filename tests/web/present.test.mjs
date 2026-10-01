@@ -52,7 +52,7 @@ test('research titles are the first clause, at most 20 characters', () => {
 });
 
 test('a delegated batch shows its agents and tasks, not empty strings', () => {
-  // 投影把数组里的对象元素送成紧凑 JSON 文本（host/pi_glink/kernel/projection.py）：
+  // 投影把数组里的对象元素送成紧凑 JSON 文本（host/glink_harness/kernel/projection.py）：
   // 卡片必须解析它并说出派了谁、做什么；这一条是 2026-09-24 E2B 真机 run 里
   // tasks 显示为 ["","","",""] 的回归。
   const batch = describeTool('subagent', {
@@ -81,8 +81,8 @@ test('a delegated batch shows its agents and tasks, not empty strings', () => {
 });
 
 test('workspace paths from every execution surface collapse to 工作区', () => {
-  assert.equal(displayPath('/Users/someone/.pi-glink/workspaces/1ac8777fd709'), '工作区');
-  assert.equal(displayPath('wrote /Users/someone/.pi-glink/workspaces/1ac8777fd709/report.md'), 'wrote 工作区/report.md');
+  assert.equal(displayPath('/Users/someone/.glink-harness/workspaces/1ac8777fd709'), '工作区');
+  assert.equal(displayPath('wrote /Users/someone/.glink-harness/workspaces/1ac8777fd709/report.md'), 'wrote 工作区/report.md');
   assert.equal(displayPath('cd /workspace && ls'), 'cd 工作区 && ls');
   assert.equal(displayPath('/home/user/workspace/notes.md'), '工作区/notes.md');
   assert.equal(displayPath('/workspaces-archive/x'), '/workspaces-archive/x');
@@ -99,7 +99,7 @@ test('tool rows speak in actions and objects, never engine tool names', () => {
   assert.equal(bash.object, 'pwd && ls');
   assert.equal(bash.mono, true);
 
-  const write = describeTool('write', { path: '/Users/a/.pi-glink/workspaces/abcdef123456/report.md', content: '# x' });
+  const write = describeTool('write', { path: '/Users/a/.glink-harness/workspaces/abcdef123456/report.md', content: '# x' });
   assert.equal(write.action, '写入');
   assert.equal(write.object, 'report.md');
 
@@ -135,7 +135,7 @@ test('only unusual tool states get a word', () => {
 });
 
 //: 一帧宿主会真实提交的 run_stage(plan)（投影与字段裁剪见
-//: host/pi_glink/kernel/acp_projection.py `_agent_plan`），按持久化 envelope
+//: host/glink_harness/kernel/acp_projection.py `_agent_plan`），按持久化 envelope
 //: `{type, v, runId, seq, ts, payload}` 经 reducer 施加。计划文案断言必须
 //: 走这条事件 → 状态 → 文案链路：手工构造 stage item 测不出 reducer 丢
 //: entries 的回归（「研究计划已更新」曾在真实链路上永不出现）。
@@ -220,6 +220,6 @@ test('the shipped UI never names the engine or the execution surface', () => {
     .map((match) => match[1] ?? match[2] ?? match[3] ?? '')
     .filter((text) => /[\u4e00-\u9fff]/.test(text));
   for (const text of literals) {
-    assert.ok(!/\bpi\b|pi-glink|inproc|docker|e2b|执行面|内核|宿主|sessionId|session /i.test(text), `user-visible copy leaks internals: ${text}`);
+    assert.ok(!/\bpi\b|glink-harness|inproc|docker|e2b|执行面|内核|宿主|sessionId|session /i.test(text), `user-visible copy leaks internals: ${text}`);
   }
 });

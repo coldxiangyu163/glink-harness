@@ -12,7 +12,7 @@
  *   * `data.httpStatus` is the target's status, so a target 404 stays a *result* (the seam
  *     separates retrieval failure from resource state).
  *
- * @module @pi-glink/dsh-web-fetch-jina/provider
+ * @module @glink-harness/dsh-web-fetch-jina/provider
  */
 
 import { WebError } from '@deepseek-ai/dsh-web'
@@ -23,7 +23,7 @@ import { assertPublicDestination, assertPublicResolution, classifyJinaPayload, v
 export const JINA_FETCH_PROVIDER_ID = 'jina'
 
 /** Default `User-Agent`: an explicit product agent, never a browser disguise. */
-export const DEFAULT_USER_AGENT = 'pi-glink-dsh-web-fetch-jina/0.1.0'
+export const DEFAULT_USER_AGENT = 'glink-harness-dsh-web-fetch-jina/0.1.0'
 
 /** Default Jina Reader base; the target URL travels in the POST body. */
 export const DEFAULT_BASE_URL = 'https://r.jina.ai'

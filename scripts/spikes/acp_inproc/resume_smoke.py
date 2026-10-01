@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ACP inproc 真实续接冒烟（GLINK-ACP-09 / M7）。
 
-一次「首轮 + 追问」：起真实宿主进程（``python -m pi_glink.app``），经宿主
+一次「首轮 + 追问」：起真实宿主进程（``python -m glink_harness.app``），经宿主
 HTTP API 先跑首轮（约定一个随机代号、写 report.md），再对同一个 agent 数据根
 跑追问（``parentRunId`` → 内核走 ``session/resume``）。判据：
 
@@ -252,17 +252,17 @@ def main(argv: list[str] | None = None) -> int:
     env.update(
         {
             "PYTHONPATH": str(REPO_ROOT / "host"),
-            "PI_GLINK_HARNESS": PROBE_PACK_NAME,
-            "PI_GLINK_HARNESSES_DIR": str(packs),
+            "GLINK_HARNESS": PROBE_PACK_NAME,
+            "GLINK_HARNESSES_DIR": str(packs),
             "LOCAL_WEB_DATA_ROOT": str(data_root),
             "LOCAL_WEB_TASK_TIMEOUT_SECONDS": str(args.timeout),
-            "PI_GLINK_RESOURCE_RECONCILE_SECONDS": "0",
+            "GLINK_RESOURCE_RECONCILE_SECONDS": "0",
         }
     )
     if credentials:
-        env["PI_GLINK_ACP_CREDENTIAL_FILES"] = ";".join(credentials)
+        env["GLINK_ACP_CREDENTIAL_FILES"] = ";".join(credentials)
     if env_entries:
-        env["PI_GLINK_ACP_ENV"] = ";".join(env_entries)
+        env["GLINK_ACP_ENV"] = ";".join(env_entries)
 
     code = args.codename or codename()
     first = first_prompt(code)
@@ -276,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"ACP M7 真实续接冒烟（inproc / {args.label}）")
     print("=" * 52)
     print(f"日期: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"宿主命令: python -m pi_glink.app --port {port}（harness=acp, executor=inproc）")
+    print(f"宿主命令: python -m glink_harness.app --port {port}（harness=acp, executor=inproc）")
     print(f"agent 命令: {args.agent}")
     print(f"命令级 env 名: {', '.join(name for name, _ in (e.split('=', 1) for e in env_entries)) or '（无）'}")
     print(f"权限白名单: {args.permission_allow or '（空 = fail-closed）'}")
@@ -291,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
     exit_code: int | None = None
     with log_path.open("w", encoding="utf-8") as log_handle:
         process = subprocess.Popen(
-            [sys.executable, "-m", "pi_glink.app", "--port", str(port)],
+            [sys.executable, "-m", "glink_harness.app", "--port", str(port)],
             cwd=str(REPO_ROOT),
             env=env,
             stdout=log_handle,

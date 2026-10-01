@@ -19,14 +19,14 @@ from typing import Mapping
 import pytest
 
 from acp_pack import apply_acp_pack
-from pi_glink.config import ConfigError, build_config
+from glink_harness.config import ConfigError, build_config
 from harness_helpers import compose_launch, execution_spec
-from pi_glink.kernel.acp_env import (
+from glink_harness.kernel.acp_env import (
     AcpStateInheritError,
     learn_conversation_state_secrets,
     prepare_acp_runtime,
 )
-from pi_glink.redaction import credential_secrets_from_text
+from glink_harness.redaction import credential_secrets_from_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,7 +37,7 @@ def config(values: Mapping[str, str]):
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
-        "PI_GLINK_HARNESS": "acp",
+        "GLINK_HARNESS": "acp",
         "TEST_ACP_COMMAND": "fake-agent --acp",
     }
     base.update(values)
@@ -64,7 +64,7 @@ def test_credential_files_are_copied_private_and_the_source_is_untouched(
 
     result = runtime(
         tmp_path,
-        {"PI_GLINK_ACP_CREDENTIAL_FILES": f"{source}=.codex/auth.json"},
+        {"GLINK_ACP_CREDENTIAL_FILES": f"{source}=.codex/auth.json"},
     )
 
     copied = result.home / ".codex" / "auth.json"
@@ -89,7 +89,7 @@ def test_credential_source_expands_a_leading_tilde_against_the_operator_home(
 
     result = runtime(
         tmp_path,
-        {"PI_GLINK_ACP_CREDENTIAL_FILES": "~/.dsh/.credentials.yaml=.dsh/.credentials.yaml"},
+        {"GLINK_ACP_CREDENTIAL_FILES": "~/.dsh/.credentials.yaml=.dsh/.credentials.yaml"},
         operator_home=operator_home,
     )
     assert (result.home / ".dsh" / ".credentials.yaml").is_file()
@@ -102,7 +102,7 @@ def test_an_unreadable_credential_source_fails_instead_of_running_without_it(
     with pytest.raises(ConfigError):
         runtime(
             tmp_path,
-            {"PI_GLINK_ACP_CREDENTIAL_FILES": f"{tmp_path / 'missing.json'}=.codex/auth.json"},
+            {"GLINK_ACP_CREDENTIAL_FILES": f"{tmp_path / 'missing.json'}=.codex/auth.json"},
         )
 
 
@@ -121,7 +121,7 @@ def test_a_rendered_destination_is_replaced_by_the_credential(tmp_path: Path) ->
     target.write_text("preexisting", encoding="utf-8")
 
     runtime = prepare_acp_runtime(
-        config({"PI_GLINK_ACP_CREDENTIAL_FILES": f"{source}=.codex/auth.json"}),
+        config({"GLINK_ACP_CREDENTIAL_FILES": f"{source}=.codex/auth.json"}),
         runtime_dir=run_dir,
     )
     assert target.read_text(encoding="utf-8") == '{"apiKey": "opaque-value-1234567890"}'
@@ -141,7 +141,7 @@ def test_a_symlinked_destination_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError):
         prepare_acp_runtime(
-            config({"PI_GLINK_ACP_CREDENTIAL_FILES": f"{source}=.codex/auth.json"}),
+            config({"GLINK_ACP_CREDENTIAL_FILES": f"{source}=.codex/auth.json"}),
             runtime_dir=run_dir,
         )
     assert outside.read_text(encoding="utf-8") == "untouched"
@@ -150,7 +150,7 @@ def test_a_symlinked_destination_is_refused(tmp_path: Path) -> None:
 def test_env_entries_are_applied_and_home_stays_the_run_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cfg = config({"PI_GLINK_ACP_ENV": "ACME_MODE=workspace;ACME_EMPTY="})
+    cfg = config({"GLINK_ACP_ENV": "ACME_MODE=workspace;ACME_EMPTY="})
     result = prepare_acp_runtime(cfg, runtime_dir=tmp_path / "acp-agent")
     monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setenv("HOME", "/operator")
@@ -169,7 +169,7 @@ def test_env_entries_are_applied_and_home_stays_the_run_root(
 
 
 def test_env_credential_values_join_the_redaction_boundary(tmp_path: Path) -> None:
-    """A credential-shaped ``PI_GLINK_ACP_ENV`` value is a secret of the run.
+    """A credential-shaped ``GLINK_ACP_ENV`` value is a secret of the run.
 
     The env channel has no file to scan, so the variable name is the hint: a
     credential-looking name adds its value to the run's redaction boundary, an
@@ -178,7 +178,7 @@ def test_env_credential_values_join_the_redaction_boundary(tmp_path: Path) -> No
     """
     cfg = config(
         {
-            "PI_GLINK_ACP_ENV": (
+            "GLINK_ACP_ENV": (
                 "ANTHROPIC_API_KEY=opaque-env-credential-value-1;"
                 "ACME_MODE=workspace;"
                 "EMPTY_TOKEN=;"
@@ -270,7 +270,7 @@ def test_oauth_fields_in_scalar_lines_join_the_redaction_boundary() -> None:
 def test_credential_env_renders_a_private_dsh_credentials_file(
     tmp_path: Path,
 ) -> None:
-    """PI_GLINK_ACP_CREDENTIAL_ENV：.env 单源渲染沙箱凭据（M 系列收尾）。
+    """GLINK_ACP_CREDENTIAL_ENV：.env 单源渲染沙箱凭据（M 系列收尾）。
 
     凭据值只存 ``.env``（0600、git-ignored）；run 准备时宿主渲染一份 dsh 格式的
     ``.dsh/.credentials.yaml`` 进 run HOME：0600、refs 平面映射、值进该 run 的
@@ -280,7 +280,7 @@ def test_credential_env_renders_a_private_dsh_credentials_file(
     result = runtime(
         tmp_path,
         {
-            "PI_GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY,JINA_API_KEY",
+            "GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY,JINA_API_KEY",
             "OPENROUTER_API_KEY": "sk-or-secret-value-0001",
             "JINA_API_KEY": "jina's-secret-0002",
         },
@@ -307,9 +307,9 @@ def test_credential_env_and_credential_files_are_mutually_exclusive() -> None:
     with pytest.raises(ConfigError, match="互斥"):
         config(
             {
-                "PI_GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY",
+                "GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY",
                 "OPENROUTER_API_KEY": "sk-or-value",
-                "PI_GLINK_ACP_CREDENTIAL_FILES": f"{source}=.dsh/creds.yaml",
+                "GLINK_ACP_CREDENTIAL_FILES": f"{source}=.dsh/creds.yaml",
             }
         )
 
@@ -317,11 +317,11 @@ def test_credential_env_and_credential_files_are_mutually_exclusive() -> None:
 def test_credential_env_requires_the_declared_values_to_exist() -> None:
     """声明了键但没有值 → 启动拒绝，绝不渲染空凭据。"""
     with pytest.raises(ConfigError, match="MISSING_PROVIDER_KEY"):
-        config({"PI_GLINK_ACP_CREDENTIAL_ENV": "MISSING_PROVIDER_KEY"})
+        config({"GLINK_ACP_CREDENTIAL_ENV": "MISSING_PROVIDER_KEY"})
     with pytest.raises(ConfigError, match="环境变量名"):
         config(
             {
-                "PI_GLINK_ACP_CREDENTIAL_ENV": "bad-name",
+                "GLINK_ACP_CREDENTIAL_ENV": "bad-name",
                 "bad-name": "v",
             }
         )
@@ -330,7 +330,7 @@ def test_credential_env_requires_the_declared_values_to_exist() -> None:
 def test_credential_env_values_never_reach_the_config_repr() -> None:
     cfg = config(
         {
-            "PI_GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY",
+            "GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY",
             "OPENROUTER_API_KEY": "sk-or-repr-leak-0003",
         }
     )
@@ -346,7 +346,7 @@ def test_failed_inherit_deletes_the_rendered_env_credentials(tmp_path: Path) -> 
     cfg = config(
         {
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-            "PI_GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY",
+            "GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY",
             "OPENROUTER_API_KEY": "sk-or-failed-prepare-0000000",
         }
     )
@@ -369,7 +369,7 @@ def test_failed_inherit_deletes_the_injected_file_copies(tmp_path: Path) -> None
     cfg = config(
         {
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-            "PI_GLINK_ACP_CREDENTIAL_FILES": f"{source}=.codex/auth.json",
+            "GLINK_ACP_CREDENTIAL_FILES": f"{source}=.codex/auth.json",
         }
     )
     runtime_dir = tmp_path / "acp-agent"
@@ -382,14 +382,14 @@ def test_failed_inherit_deletes_the_injected_file_copies(tmp_path: Path) -> None
 
 def test_pi_session_seed_branch_deletes_rendered_copies(tmp_path: Path) -> None:
     """族级 session_seed 拒绝同样发生在渲染之后：副本删除后再抛 FollowupUnavailable。"""
-    from pi_glink.kernel.harness import select_family
-    from pi_glink.contracts import FollowupUnavailable
-    from pi_glink.store import RunStore
+    from glink_harness.kernel.harness import select_family
+    from glink_harness.contracts import FollowupUnavailable
+    from glink_harness.store import RunStore
 
     cfg = config(
         {
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-            "PI_GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY",
+            "GLINK_ACP_CREDENTIAL_ENV": "OPENROUTER_API_KEY",
             "OPENROUTER_API_KEY": "sk-or-seed-branch-00000000000",
         }
     )

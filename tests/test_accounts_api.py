@@ -20,21 +20,21 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.store import RunSpec
-from pi_glink.accounts import AccountsStore
-from pi_glink.app import HostRequestHandler, PiGlinkServer, create_server, main as app_main
-from pi_glink.config import ConfigError, build_config
-from pi_glink.kernel.execution import (
+from glink_harness.store import RunSpec
+from glink_harness.accounts import AccountsStore
+from glink_harness.app import HostRequestHandler, GlinkHarnessServer, create_server, main as app_main
+from glink_harness.config import ConfigError, build_config
+from glink_harness.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
     ExecutionAdapter,
     ExecutionOutcome,
     SessionInfo,
 )
-from pi_glink.tenancy import ASSERTION_HEADER, issue_assertion
+from glink_harness.tenancy import ASSERTION_HEADER, issue_assertion
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-AUDIENCE = "pi-glink-test"
+AUDIENCE = "glink-harness-test"
 SECRET = b"0123456789abcdef0123456789abcdef"
 ALPHA_KEY = "sk-alpha-0000000000000000"
 BETA_KEY = "sk-beta-0000000000000000"
@@ -49,8 +49,8 @@ TENANTS = {
     "tenant-beta": {"modelApiKey": BETA_KEY},
     "tenant-gamma": {"modelApiKey": GAMMA_KEY},
 }
-COOKIE = "pi_glink_session"
-CSRF = "X-Pi-Glink-CSRF"
+COOKIE = "glink_harness_session"
+CSRF = "X-Glink-Harness-CSRF"
 
 
 def assertion(
@@ -138,7 +138,7 @@ def adapters(monkeypatch: pytest.MonkeyPatch) -> AdapterBehavior:
         behavior.created.append(adapter)
         return adapter
 
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", build)
+    monkeypatch.setattr("glink_harness.kernel.harness_pi.PiExecutionAdapter", build)
     return behavior
 
 
@@ -167,37 +167,37 @@ def make_config(tmp_path: Path, tenant_files: tuple[Path, Path], **overrides: st
         "LOCAL_WEB_PORT": "0",
         "LOCAL_WEB_EXECUTOR": "docker",
         # Docker web search goes through an https egress URL (ADR 0008).
-        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
-        "PI_GLINK_TENANCY": "multitenant",
-        "PI_GLINK_AUTH_MODE": "accounts",
-        "PI_GLINK_GATEWAY_SECRET_FILE": str(secret),
-        "PI_GLINK_TENANT_CONFIG_FILE": str(tenants),
-        "PI_GLINK_TENANCY_AUDIENCE": AUDIENCE,
-        "PI_GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts" / "accounts.db"),
-        "PI_GLINK_COOKIE_SECURE": "0",
-        "PI_GLINK_SESSION_ABSOLUTE_SECONDS": "3600",
-        "PI_GLINK_SESSION_IDLE_SECONDS": "600",
-        "PI_GLINK_INVITE_TTL_SECONDS": "3600",
-        "PI_GLINK_LOGIN_MAX_ATTEMPTS": "5",
-        "PI_GLINK_LOGIN_WINDOW_SECONDS": "300",
-        "PI_GLINK_LOGIN_PEER_MAX_ATTEMPTS": "60",
-        "PI_GLINK_LOGIN_PEER_WINDOW_SECONDS": "300",
-        "PI_GLINK_REGISTER_MAX_ATTEMPTS": "50",
-        "PI_GLINK_REGISTER_WINDOW_SECONDS": "60",
-        "PI_GLINK_INVITE_CHECK_MAX_ATTEMPTS": "200",
+        "GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
+        "GLINK_TENANCY": "multitenant",
+        "GLINK_AUTH_MODE": "accounts",
+        "GLINK_GATEWAY_SECRET_FILE": str(secret),
+        "GLINK_TENANT_CONFIG_FILE": str(tenants),
+        "GLINK_TENANCY_AUDIENCE": AUDIENCE,
+        "GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts" / "accounts.db"),
+        "GLINK_COOKIE_SECURE": "0",
+        "GLINK_SESSION_ABSOLUTE_SECONDS": "3600",
+        "GLINK_SESSION_IDLE_SECONDS": "600",
+        "GLINK_INVITE_TTL_SECONDS": "3600",
+        "GLINK_LOGIN_MAX_ATTEMPTS": "5",
+        "GLINK_LOGIN_WINDOW_SECONDS": "300",
+        "GLINK_LOGIN_PEER_MAX_ATTEMPTS": "60",
+        "GLINK_LOGIN_PEER_WINDOW_SECONDS": "300",
+        "GLINK_REGISTER_MAX_ATTEMPTS": "50",
+        "GLINK_REGISTER_WINDOW_SECONDS": "60",
+        "GLINK_INVITE_CHECK_MAX_ATTEMPTS": "200",
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "60",
     }
     values.update(overrides)
     return build_config(values, REPO_ROOT)
 
 
-def start_server(instance: PiGlinkServer) -> threading.Thread:
+def start_server(instance: GlinkHarnessServer) -> threading.Thread:
     thread = threading.Thread(target=instance.serve_forever, daemon=True)
     thread.start()
     return thread
 
 
-def stop_server(instance: PiGlinkServer, thread: threading.Thread) -> None:
+def stop_server(instance: GlinkHarnessServer, thread: threading.Thread) -> None:
     instance.shutdown()
     instance.server_close()
     thread.join(timeout=5)
@@ -216,7 +216,7 @@ def server(tmp_path: Path, tenant_files: tuple[Path, Path], adapters: AdapterBeh
 @pytest.fixture()
 def gateway_server(tmp_path: Path, tenant_files: tuple[Path, Path], adapters: AdapterBehavior):
     instance = create_server(
-        make_config(tmp_path, tenant_files, PI_GLINK_AUTH_MODE="gateway")
+        make_config(tmp_path, tenant_files, GLINK_AUTH_MODE="gateway")
     )
     thread = start_server(instance)
     try:
@@ -248,7 +248,7 @@ def local_server(tmp_path: Path):
 
 
 def raw_request(
-    server: PiGlinkServer,
+    server: GlinkHarnessServer,
     path: str,
     *,
     method: str = "GET",
@@ -273,7 +273,7 @@ def raw_request(
 class Client:
     """A cookie-and-CSRF-aware client, like a logged-in browser tab."""
 
-    def __init__(self, server: PiGlinkServer) -> None:
+    def __init__(self, server: GlinkHarnessServer) -> None:
         self.server = server
         self.cookie: str | None = None
         self.csrf: str | None = None
@@ -326,7 +326,7 @@ class Client:
 
 
 def bootstrap_user(
-    server: PiGlinkServer,
+    server: GlinkHarnessServer,
     *,
     tenant: str = "tenant-alpha",
     tenant_name: str = "组织甲",
@@ -343,7 +343,7 @@ def bootstrap_user(
 
 
 def bootstrap_invitation(
-    server: PiGlinkServer,
+    server: GlinkHarnessServer,
     *,
     tenant: str = "tenant-alpha",
     tenant_name: str = "组织甲",
@@ -359,7 +359,7 @@ def bootstrap_invitation(
     return token
 
 
-def logged_in_client(server: PiGlinkServer, email: str, password: str = PASSWORD) -> Client:
+def logged_in_client(server: GlinkHarnessServer, email: str, password: str = PASSWORD) -> Client:
     client = Client(server)
     status, payload = client.login(email, password)
     assert status == 200, (status, payload)
@@ -396,7 +396,7 @@ def seed_history(server, run_id: str, *, frames: int = 20, tenant: str = "tenant
     )
 
 
-def wait_for_terminal(server: PiGlinkServer, run_id: str, client: Client, timeout: float = 20.0):
+def wait_for_terminal(server: GlinkHarnessServer, run_id: str, client: Client, timeout: float = 20.0):
     deadline = time.monotonic() + timeout
     latest: dict = {}
     while time.monotonic() < deadline:
@@ -411,7 +411,7 @@ def wait_for_terminal(server: PiGlinkServer, run_id: str, client: Client, timeou
 
 
 def read_stream(
-    server: PiGlinkServer,
+    server: GlinkHarnessServer,
     path: str,
     *,
     cookie: str | None,
@@ -430,7 +430,7 @@ def read_stream(
         connection.close()
 
 
-def read_stream_until_eof(server: PiGlinkServer, path: str, *, cookie: str | None, timeout: float = 10.0):
+def read_stream_until_eof(server: GlinkHarnessServer, path: str, *, cookie: str | None, timeout: float = 10.0):
     """Read an SSE stream to its clean end inside a worker thread."""
     result: dict = {}
 
@@ -448,7 +448,7 @@ def read_stream_until_eof(server: PiGlinkServer, path: str, *, cookie: str | Non
 # -- unauthenticated surfaces --------------------------------------------------
 
 
-def test_unauthenticated_requests_are_uniform_401_with_mode(server: PiGlinkServer) -> None:
+def test_unauthenticated_requests_are_uniform_401_with_mode(server: GlinkHarnessServer) -> None:
     for path, method in (
         ("/api/me", "GET"),
         ("/api/config", "GET"),
@@ -465,7 +465,7 @@ def test_unauthenticated_requests_are_uniform_401_with_mode(server: PiGlinkServe
         assert json.loads(raw) == {"error": "unauthenticated", "mode": "accounts"}, path
 
 
-def test_health_stays_public_and_names_no_run(server: PiGlinkServer) -> None:
+def test_health_stays_public_and_names_no_run(server: GlinkHarnessServer) -> None:
     status, _headers, raw = raw_request(server, "/api/health")
     assert status == 200
     payload = json.loads(raw)
@@ -473,7 +473,7 @@ def test_health_stays_public_and_names_no_run(server: PiGlinkServer) -> None:
     assert "activeRunId" not in payload
 
 
-def test_gateway_assertions_are_ignored_in_accounts_mode(server: PiGlinkServer) -> None:
+def test_gateway_assertions_are_ignored_in_accounts_mode(server: GlinkHarnessServer) -> None:
     """No fallback: a signed gateway header is not an account identity."""
     token = assertion("tenant-alpha", "user-a", role="admin")
     for path, method in (("/api/me", "GET"), ("/api/runs", "GET")):
@@ -484,7 +484,7 @@ def test_gateway_assertions_are_ignored_in_accounts_mode(server: PiGlinkServer) 
         assert json.loads(raw) == {"error": "unauthenticated", "mode": "accounts"}
 
 
-def test_gateway_me_returns_the_asserted_identity(gateway_server: PiGlinkServer) -> None:
+def test_gateway_me_returns_the_asserted_identity(gateway_server: GlinkHarnessServer) -> None:
     """The gateway surface still answers ``/api/me`` — display fields only."""
     token = assertion("tenant-alpha", "user-a", role="admin")
     status, _headers, raw = raw_request(
@@ -501,7 +501,7 @@ def test_gateway_me_returns_the_asserted_identity(gateway_server: PiGlinkServer)
 
 
 def test_accounts_endpoints_do_not_exist_outside_accounts_mode(
-    gateway_server: PiGlinkServer, local_server: PiGlinkServer
+    gateway_server: GlinkHarnessServer, local_server: GlinkHarnessServer
 ) -> None:
     for server in (gateway_server, local_server):
         for path, method in (
@@ -517,7 +517,7 @@ def test_accounts_endpoints_do_not_exist_outside_accounts_mode(
             assert json.loads(raw)["error"] == "unknown_endpoint", path
 
 
-def test_accounts_cookies_are_ignored_in_gateway_mode(gateway_server: PiGlinkServer) -> None:
+def test_accounts_cookies_are_ignored_in_gateway_mode(gateway_server: GlinkHarnessServer) -> None:
     """The other direction of the same boundary: a session cookie is not an assertion."""
     status, _headers, raw = raw_request(
         gateway_server, "/api/me", headers={"Cookie": f"{COOKIE}=fabricated-token"}
@@ -529,7 +529,7 @@ def test_accounts_cookies_are_ignored_in_gateway_mode(gateway_server: PiGlinkSer
     assert json.loads(raw)["error"] == "unknown_endpoint"
 
 
-def test_local_mode_me_is_public_and_keeps_the_old_surface(local_server: PiGlinkServer) -> None:
+def test_local_mode_me_is_public_and_keeps_the_old_surface(local_server: GlinkHarnessServer) -> None:
     status, _headers, raw = raw_request(local_server, "/api/me")
     assert status == 200
     assert json.loads(raw) == {"mode": "local", "authenticated": False}
@@ -544,7 +544,7 @@ def test_local_mode_me_is_public_and_keeps_the_old_surface(local_server: PiGlink
 # -- login and session cookies -------------------------------------------------
 
 
-def test_login_unknown_account_and_wrong_password_are_indistinguishable(server: PiGlinkServer) -> None:
+def test_login_unknown_account_and_wrong_password_are_indistinguishable(server: GlinkHarnessServer) -> None:
     bootstrap_user(server, email="known@example.test")
     anonymous = Client(server)
     first = anonymous.post("/api/auth/login", {"email": "known@example.test", "password": "wrong password!"})
@@ -556,7 +556,7 @@ def test_login_unknown_account_and_wrong_password_are_indistinguishable(server: 
     assert "Set-Cookie" not in second[2]
 
 
-def test_login_sets_an_httponly_samesite_cookie_and_returns_identity(server: PiGlinkServer) -> None:
+def test_login_sets_an_httponly_samesite_cookie_and_returns_identity(server: GlinkHarnessServer) -> None:
     user = bootstrap_user(server, email="member@example.test", name="成员", role="member")
     client = Client(server)
     status, payload, headers = client.post(
@@ -594,7 +594,7 @@ def test_secure_cookie_attribute_follows_frozen_config(
     tmp_path: Path, tenant_files: tuple[Path, Path], adapters: AdapterBehavior
 ) -> None:
     instance = create_server(
-        make_config(tmp_path, tenant_files, PI_GLINK_COOKIE_SECURE="1")
+        make_config(tmp_path, tenant_files, GLINK_COOKIE_SECURE="1")
     )
     thread = start_server(instance)
     try:
@@ -608,7 +608,7 @@ def test_secure_cookie_attribute_follows_frozen_config(
         stop_server(instance, thread)
 
 
-def test_logout_revokes_the_server_session(server: PiGlinkServer) -> None:
+def test_logout_revokes_the_server_session(server: GlinkHarnessServer) -> None:
     bootstrap_user(server, email="member@example.test")
     client = logged_in_client(server, "member@example.test")
     stale_cookie = client.cookie
@@ -621,7 +621,7 @@ def test_logout_revokes_the_server_session(server: PiGlinkServer) -> None:
     assert status == 401
 
 
-def test_disabled_user_or_tenant_kills_sessions_immediately(server: PiGlinkServer) -> None:
+def test_disabled_user_or_tenant_kills_sessions_immediately(server: GlinkHarnessServer) -> None:
     user = bootstrap_user(server, email="member@example.test")
     client = logged_in_client(server, "member@example.test")
     assert client.get("/api/me")[0] == 200
@@ -642,7 +642,7 @@ def test_disabled_user_or_tenant_kills_sessions_immediately(server: PiGlinkServe
     assert payload["error"] == "account_disabled"
 
 
-def test_session_absolute_expiry_is_enforced(server: PiGlinkServer) -> None:
+def test_session_absolute_expiry_is_enforced(server: GlinkHarnessServer) -> None:
     bootstrap_user(server, email="member@example.test")
     client = logged_in_client(server, "member@example.test")
 
@@ -659,7 +659,7 @@ def test_session_absolute_expiry_is_enforced(server: PiGlinkServer) -> None:
     assert client.get("/api/me")[0] == 401
 
 
-def test_login_rate_limit_is_enforced_and_resets_on_success(server: PiGlinkServer) -> None:
+def test_login_rate_limit_is_enforced_and_resets_on_success(server: GlinkHarnessServer) -> None:
     bootstrap_user(server, email="limited@example.test")
     anonymous = Client(server)
     for _ in range(5):
@@ -693,14 +693,14 @@ def test_login_across_rotated_emails_is_capped_by_the_peer_budget(
     own it lets an anonymous client trigger one scrypt per request forever. The
     socket-peer budget sits in front of it and refuses before any hashing.
     """
-    from pi_glink import accounts as accounts_module
+    from glink_harness import accounts as accounts_module
 
     config = make_config(
         tmp_path,
         tenant_files,
-        PI_GLINK_LOGIN_PEER_MAX_ATTEMPTS="3",
-        PI_GLINK_LOGIN_PEER_WINDOW_SECONDS="300",
-        PI_GLINK_LOGIN_MAX_ATTEMPTS="100",
+        GLINK_LOGIN_PEER_MAX_ATTEMPTS="3",
+        GLINK_LOGIN_PEER_WINDOW_SECONDS="300",
+        GLINK_LOGIN_MAX_ATTEMPTS="100",
     )
     instance = create_server(config)
     thread = start_server(instance)
@@ -741,14 +741,14 @@ def test_peer_login_budget_recovers_after_its_window(
     adapters: AdapterBehavior,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from pi_glink import accounts as accounts_module
+    from glink_harness import accounts as accounts_module
 
     config = make_config(
         tmp_path,
         tenant_files,
-        PI_GLINK_LOGIN_PEER_MAX_ATTEMPTS="2",
-        PI_GLINK_LOGIN_PEER_WINDOW_SECONDS="1",
-        PI_GLINK_LOGIN_MAX_ATTEMPTS="100",
+        GLINK_LOGIN_PEER_MAX_ATTEMPTS="2",
+        GLINK_LOGIN_PEER_WINDOW_SECONDS="1",
+        GLINK_LOGIN_MAX_ATTEMPTS="100",
     )
     instance = create_server(config)
     thread = start_server(instance)
@@ -783,7 +783,7 @@ def test_peer_login_budget_recovers_after_its_window(
         stop_server(instance, thread)
 
 
-def test_login_rejects_wrong_content_type_oversized_and_malformed_bodies(server: PiGlinkServer) -> None:
+def test_login_rejects_wrong_content_type_oversized_and_malformed_bodies(server: GlinkHarnessServer) -> None:
     bootstrap_user(server, email="member@example.test")
     status, _headers, raw = raw_request(
         server,
@@ -806,7 +806,7 @@ def test_login_rejects_wrong_content_type_oversized_and_malformed_bodies(server:
         assert status != 500
 
 
-def test_cross_site_posts_are_refused_before_credentials_are_checked(server: PiGlinkServer) -> None:
+def test_cross_site_posts_are_refused_before_credentials_are_checked(server: GlinkHarnessServer) -> None:
     bootstrap_user(server, email="member@example.test")
     client = Client(server)
     for headers in (
@@ -837,7 +837,7 @@ def test_trusted_public_origin_is_accepted_for_post_checks(
     tmp_path: Path, tenant_files: tuple[Path, Path], adapters: AdapterBehavior
 ) -> None:
     instance = create_server(
-        make_config(tmp_path, tenant_files, PI_GLINK_PUBLIC_ORIGIN="https://glink.example.test")
+        make_config(tmp_path, tenant_files, GLINK_PUBLIC_ORIGIN="https://glink.example.test")
     )
     thread = start_server(instance)
     try:
@@ -862,7 +862,7 @@ def test_trusted_public_origin_is_accepted_for_post_checks(
 # -- registration --------------------------------------------------------------
 
 
-def test_invitation_check_is_bounded_and_hides_the_token(server: PiGlinkServer) -> None:
+def test_invitation_check_is_bounded_and_hides_the_token(server: GlinkHarnessServer) -> None:
     bootstrap_user(server, tenant="tenant-beta", tenant_name="组织乙", email="other@example.test", name="另一人")
     token = bootstrap_invitation(server, tenant="tenant-beta", email="invitee@example.test", role="admin")
     anonymous = Client(server)
@@ -880,7 +880,7 @@ def test_invitation_check_is_bounded_and_hides_the_token(server: PiGlinkServer) 
         assert payload == {"valid": False}
 
 
-def test_invitation_check_is_post_only_and_never_reads_a_query_token(server: PiGlinkServer) -> None:
+def test_invitation_check_is_post_only_and_never_reads_a_query_token(server: GlinkHarnessServer) -> None:
     token = bootstrap_invitation(server, email="invitee@example.test")
     anonymous = Client(server)
     status, payload, headers = anonymous.get(f"/api/invitations/check?token={token}")
@@ -891,7 +891,7 @@ def test_invitation_check_is_post_only_and_never_reads_a_query_token(server: PiG
     assert status == 200 and payload["valid"] is True
 
 
-def test_invitation_check_enforces_origin_and_json(server: PiGlinkServer) -> None:
+def test_invitation_check_enforces_origin_and_json(server: GlinkHarnessServer) -> None:
     token = bootstrap_invitation(server, email="invitee@example.test")
     anonymous = Client(server)
     status, payload, headers = anonymous.post(
@@ -921,8 +921,8 @@ def test_invitation_check_rate_limit_still_applies(
     config = make_config(
         tmp_path,
         tenant_files,
-        PI_GLINK_INVITE_CHECK_MAX_ATTEMPTS="2",
-        PI_GLINK_INVITE_CHECK_WINDOW_SECONDS="300",
+        GLINK_INVITE_CHECK_MAX_ATTEMPTS="2",
+        GLINK_INVITE_CHECK_WINDOW_SECONDS="300",
     )
     instance = create_server(config)
     thread = start_server(instance)
@@ -939,7 +939,7 @@ def test_invitation_check_rate_limit_still_applies(
 
 
 def test_invitation_tokens_never_reach_a_request_line_or_the_logs(
-    server: PiGlinkServer, monkeypatch: pytest.MonkeyPatch
+    server: GlinkHarnessServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Our own flows must never put the invitation code into an HTTP URL.
 
@@ -964,7 +964,7 @@ def test_invitation_tokens_never_reach_a_request_line_or_the_logs(
             messages.append(record.getMessage())
 
     handler = Capture(level=logging.DEBUG)
-    host_logger = logging.getLogger("pi_glink.host")
+    host_logger = logging.getLogger("glink_harness.host")
     previous_level = host_logger.level
     host_logger.addHandler(handler)
     host_logger.setLevel(logging.DEBUG)
@@ -1001,7 +1001,7 @@ def test_invitation_tokens_never_reach_a_request_line_or_the_logs(
         host_logger.setLevel(previous_level)
 
 
-def test_registration_uses_the_invitation_identity_without_creating_a_session(server: PiGlinkServer) -> None:
+def test_registration_uses_the_invitation_identity_without_creating_a_session(server: GlinkHarnessServer) -> None:
     token = bootstrap_invitation(server, tenant="tenant-beta", email="invitee@example.test", role="member")
     anonymous = Client(server)
     status, payload, headers = anonymous.post(
@@ -1024,7 +1024,7 @@ def test_registration_uses_the_invitation_identity_without_creating_a_session(se
     assert Client(server).login("invitee@example.test")[0] == 200
 
 
-def test_registration_rejects_wrong_email_expired_or_unknown_invitations(server: PiGlinkServer) -> None:
+def test_registration_rejects_wrong_email_expired_or_unknown_invitations(server: GlinkHarnessServer) -> None:
     token = bootstrap_invitation(server, email="invitee@example.test")
     anonymous = Client(server)
     status, payload, _headers = anonymous.post(
@@ -1048,7 +1048,7 @@ def test_registration_rejects_wrong_email_expired_or_unknown_invitations(server:
     assert status == 400 and payload["error"] == "invitation_invalid"
 
 
-def test_registration_enforces_input_bounds(server: PiGlinkServer) -> None:
+def test_registration_enforces_input_bounds(server: GlinkHarnessServer) -> None:
     token = bootstrap_invitation(server, email="invitee@example.test")
     anonymous = Client(server)
     cases = [
@@ -1071,7 +1071,7 @@ def test_registration_enforces_input_bounds(server: PiGlinkServer) -> None:
     assert status == 400 and payload["error"] == "invitation_invalid"
 
 
-def test_registration_refuses_an_email_that_already_has_an_account(server: PiGlinkServer) -> None:
+def test_registration_refuses_an_email_that_already_has_an_account(server: GlinkHarnessServer) -> None:
     token = bootstrap_invitation(server, email="invitee@example.test")
     bootstrap_user(server, email="invitee@example.test", name="先到者")
     anonymous = Client(server)
@@ -1085,7 +1085,7 @@ def test_registration_refuses_an_email_that_already_has_an_account(server: PiGli
 # -- CSRF ----------------------------------------------------------------------
 
 
-def test_authenticated_posts_require_the_csrf_header(server: PiGlinkServer) -> None:
+def test_authenticated_posts_require_the_csrf_header(server: GlinkHarnessServer) -> None:
     bootstrap_user(server, email="member@example.test")
     client = logged_in_client(server, "member@example.test")
     status, payload, _headers = client.post("/api/runs", {"prompt": "没有令牌"}, csrf=None)
@@ -1099,7 +1099,7 @@ def test_authenticated_posts_require_the_csrf_header(server: PiGlinkServer) -> N
     assert status == 403 and payload["error"] == "csrf_invalid"
 
 
-def test_csrf_token_is_bound_to_the_session_not_the_page(server: PiGlinkServer) -> None:
+def test_csrf_token_is_bound_to_the_session_not_the_page(server: GlinkHarnessServer) -> None:
     bootstrap_user(server, email="member@example.test")
     first = logged_in_client(server, "member@example.test")
     second = logged_in_client(server, "member@example.test")
@@ -1113,7 +1113,7 @@ def test_csrf_token_is_bound_to_the_session_not_the_page(server: PiGlinkServer) 
 # -- admin invitations ----------------------------------------------------------
 
 
-def test_only_admins_can_create_invitations_for_their_own_tenant(server: PiGlinkServer) -> None:
+def test_only_admins_can_create_invitations_for_their_own_tenant(server: GlinkHarnessServer) -> None:
     bootstrap_user(server, email="member@example.test", role="member")
     bootstrap_user(server, email="admin@example.test", name="管理员", role="admin")
     member = logged_in_client(server, "member@example.test")
@@ -1149,7 +1149,7 @@ def test_only_admins_can_create_invitations_for_their_own_tenant(server: PiGlink
     assert user.tenant_id == "tenant-alpha" and user.role == "admin"
 
 
-def test_admin_invitation_input_bounds_and_existing_email(server: PiGlinkServer) -> None:
+def test_admin_invitation_input_bounds_and_existing_email(server: GlinkHarnessServer) -> None:
     bootstrap_user(server, email="admin@example.test", role="admin")
     bootstrap_user(server, tenant="tenant-beta", tenant_name="组织乙", email="other@example.test", name="另一人")
     admin = logged_in_client(server, "admin@example.test")
@@ -1164,7 +1164,7 @@ def test_admin_invitation_input_bounds_and_existing_email(server: PiGlinkServer)
         assert payload["error"] == code, body
 
 
-def test_admin_invitations_require_the_csrf_header(server: PiGlinkServer) -> None:
+def test_admin_invitations_require_the_csrf_header(server: GlinkHarnessServer) -> None:
     bootstrap_user(server, email="admin@example.test", role="admin")
     admin = logged_in_client(server, "admin@example.test")
     status, payload, _headers = admin.post(
@@ -1176,7 +1176,7 @@ def test_admin_invitations_require_the_csrf_header(server: PiGlinkServer) -> Non
 # -- runs, reports, SSE and cross-tenant isolation ------------------------------
 
 
-def test_authenticated_run_lifecycle_and_report(server: PiGlinkServer, adapters: AdapterBehavior) -> None:
+def test_authenticated_run_lifecycle_and_report(server: GlinkHarnessServer, adapters: AdapterBehavior) -> None:
     adapters.write_report = True
     bootstrap_user(server, email="member@example.test")
     client = logged_in_client(server, "member@example.test")
@@ -1193,7 +1193,7 @@ def test_authenticated_run_lifecycle_and_report(server: PiGlinkServer, adapters:
     assert report_headers.get("X-Redacted") in {"true", "false"}
 
 
-def test_stop_and_logout_do_not_poison_a_keepalive_connection(server: PiGlinkServer) -> None:
+def test_stop_and_logout_do_not_poison_a_keepalive_connection(server: GlinkHarnessServer) -> None:
     """A POST body a handler ignores must not become the next request line.
 
     Real browsers reuse one HTTP/1.1 connection for logout/stop and the next
@@ -1249,7 +1249,7 @@ def test_stop_and_logout_do_not_poison_a_keepalive_connection(server: PiGlinkSer
 
 
 def test_gateway_stop_with_a_body_keeps_the_connection_usable(
-    gateway_server: PiGlinkServer, adapters: AdapterBehavior
+    gateway_server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     token = assertion("tenant-alpha", "user-a")
     status, _headers, raw = raw_request(
@@ -1299,7 +1299,7 @@ def test_operator_cli_creates_the_first_admin_invitation(
 ) -> None:
     """The offline bootstrap: one tenant, one admin invitation, printed once."""
     config = make_config(tmp_path, tenant_files)
-    monkeypatch.setattr("pi_glink.app.load_config", lambda: config)
+    monkeypatch.setattr("glink_harness.app.load_config", lambda: config)
     code = app_main(
         [
             "--create-invite",
@@ -1347,7 +1347,7 @@ def test_operator_cli_refuses_tenants_without_credentials(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     config = make_config(tmp_path, tenant_files)
-    monkeypatch.setattr("pi_glink.app.load_config", lambda: config)
+    monkeypatch.setattr("glink_harness.app.load_config", lambda: config)
     code = app_main(
         ["--create-invite", "--tenant", "tenant-nokey", "--email", "a@example.test"]
     )
@@ -1357,9 +1357,9 @@ def test_operator_cli_refuses_tenants_without_credentials(
 
 
 def test_operator_cli_refuses_to_race_a_running_host(
-    server: PiGlinkServer, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    server: GlinkHarnessServer, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("pi_glink.app.load_config", lambda: server.config)
+    monkeypatch.setattr("glink_harness.app.load_config", lambda: server.config)
     code = app_main(
         ["--create-invite", "--tenant", "tenant-alpha", "--email", "a@example.test"]
     )
@@ -1375,14 +1375,14 @@ def test_operator_cli_requires_accounts_mode(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    config = make_config(tmp_path, tenant_files, PI_GLINK_AUTH_MODE="gateway")
-    monkeypatch.setattr("pi_glink.app.load_config", lambda: config)
+    config = make_config(tmp_path, tenant_files, GLINK_AUTH_MODE="gateway")
+    monkeypatch.setattr("glink_harness.app.load_config", lambda: config)
     code = app_main(
         ["--create-invite", "--tenant", "tenant-alpha", "--email", "a@example.test"]
     )
     captured = capsys.readouterr()
     assert code == 2
-    assert "PI_GLINK_AUTH_MODE=accounts" in captured.err
+    assert "GLINK_AUTH_MODE=accounts" in captured.err
 
 
 def test_operator_cli_requires_the_target_arguments(
@@ -1393,7 +1393,7 @@ def test_operator_cli_requires_the_target_arguments(
     assert excinfo.value.code == 2
 
 
-def test_missing_tenant_model_key_still_refuses_admission(server: PiGlinkServer) -> None:
+def test_missing_tenant_model_key_still_refuses_admission(server: GlinkHarnessServer) -> None:
     # ``tenant-nokey`` exists in the account store but has no entry in the
     # tenant credential file.
     bootstrap_user(server, tenant="tenant-nokey", tenant_name="无凭据", email="member@example.test")
@@ -1404,7 +1404,7 @@ def test_missing_tenant_model_key_still_refuses_admission(server: PiGlinkServer)
 
 
 def test_cross_tenant_matrix_for_two_logged_in_tenants(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     adapters.write_report = True
     bootstrap_user(server, email="alice@example.test", name="爱丽丝", role="admin")
@@ -1437,7 +1437,7 @@ def test_cross_tenant_matrix_for_two_logged_in_tenants(
     assert status == 200
 
 
-def test_foreign_and_ownerless_records_stay_invisible_in_accounts_mode(server: PiGlinkServer) -> None:
+def test_foreign_and_ownerless_records_stay_invisible_in_accounts_mode(server: GlinkHarnessServer) -> None:
     # Two invisible shapes: an ownerless record (single-user surface), and one
     # whose owner is another tenant.
     store = server.store
@@ -1453,7 +1453,7 @@ def test_foreign_and_ownerless_records_stay_invisible_in_accounts_mode(server: P
     assert client.get("/api/runs/other-tenant-run")[0] == 404
 
 
-def test_sse_replay_from_the_durable_log_with_a_session(server: PiGlinkServer) -> None:
+def test_sse_replay_from_the_durable_log_with_a_session(server: GlinkHarnessServer) -> None:
     bootstrap_user(server, email="member@example.test")
     client = logged_in_client(server, "member@example.test")
     seed_history(server, "history-run", frames=5)
@@ -1466,7 +1466,7 @@ def test_sse_replay_from_the_durable_log_with_a_session(server: PiGlinkServer) -
     assert "frame-1" in text and "run_finished" in text
 
 
-def test_logout_during_a_live_stream_ends_it(server: PiGlinkServer, adapters: AdapterBehavior) -> None:
+def test_logout_during_a_live_stream_ends_it(server: GlinkHarnessServer, adapters: AdapterBehavior) -> None:
     adapters.hold = True
     bootstrap_user(server, email="member@example.test")
     client = logged_in_client(server, "member@example.test")
@@ -1489,7 +1489,7 @@ def test_logout_during_a_live_stream_ends_it(server: PiGlinkServer, adapters: Ad
 
 
 def test_disabling_a_user_during_a_live_stream_ends_it(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     adapters.hold = True
     user = bootstrap_user(server, email="member@example.test")
@@ -1509,7 +1509,7 @@ def test_disabling_a_user_during_a_live_stream_ends_it(
 
 
 def test_session_expiry_during_a_live_stream_ends_it(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     adapters.hold = True
     bootstrap_user(server, email="member@example.test")
@@ -1545,10 +1545,10 @@ def test_session_expiry_during_a_live_stream_ends_it(
 def test_accounts_mode_configuration_defaults_and_refusals(tmp_path: Path) -> None:
     base = {
         "LOCAL_WEB_EXECUTOR": "docker",
-        "PI_GLINK_TENANCY": "multitenant",
-        "PI_GLINK_AUTH_MODE": "accounts",
-        "PI_GLINK_TENANT_CONFIG_FILE": str(tmp_path / "tenants.json"),
-        "PI_GLINK_TENANCY_AUDIENCE": AUDIENCE,
+        "GLINK_TENANCY": "multitenant",
+        "GLINK_AUTH_MODE": "accounts",
+        "GLINK_TENANT_CONFIG_FILE": str(tmp_path / "tenants.json"),
+        "GLINK_TENANCY_AUDIENCE": AUDIENCE,
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "OPENAI_MODEL": "test/model",
     }
@@ -1559,14 +1559,14 @@ def test_accounts_mode_configuration_defaults_and_refusals(tmp_path: Path) -> No
 
     # accounts mode without multitenant is refused, never silently local.
     with pytest.raises(ConfigError) as excinfo:
-        build_config({**base, "PI_GLINK_TENANCY": "local"}, REPO_ROOT)
-    assert "PI_GLINK_TENANCY" in str(excinfo.value)
+        build_config({**base, "GLINK_TENANCY": "local"}, REPO_ROOT)
+    assert "GLINK_TENANCY" in str(excinfo.value)
     # Unknown auth modes are refused.
     with pytest.raises(ConfigError):
-        build_config({**base, "PI_GLINK_AUTH_MODE": "magic"}, REPO_ROOT)
+        build_config({**base, "GLINK_AUTH_MODE": "magic"}, REPO_ROOT)
     # An accounts database inside the repository is refused.
     with pytest.raises(ConfigError):
-        build_config({**base, "PI_GLINK_ACCOUNTS_DB": str(REPO_ROOT / "data" / "x.db")}, REPO_ROOT)
+        build_config({**base, "GLINK_ACCOUNTS_DB": str(REPO_ROOT / "data" / "x.db")}, REPO_ROOT)
 
 
 def test_accounts_mode_does_not_require_a_gateway_secret(tmp_path: Path) -> None:
@@ -1576,9 +1576,9 @@ def test_accounts_mode_does_not_require_a_gateway_secret(tmp_path: Path) -> None
     config = build_config(
         {
             "LOCAL_WEB_EXECUTOR": "docker",
-            "PI_GLINK_TENANCY": "multitenant",
-            "PI_GLINK_AUTH_MODE": "accounts",
-            "PI_GLINK_TENANT_CONFIG_FILE": str(tenants),
+            "GLINK_TENANCY": "multitenant",
+            "GLINK_AUTH_MODE": "accounts",
+            "GLINK_TENANT_CONFIG_FILE": str(tenants),
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
             "OPENAI_MODEL": "test/model",
         },
@@ -1590,8 +1590,8 @@ def test_accounts_mode_does_not_require_a_gateway_secret(tmp_path: Path) -> None
         build_config(
             {
                 "LOCAL_WEB_EXECUTOR": "docker",
-                "PI_GLINK_TENANCY": "multitenant",
-                "PI_GLINK_TENANT_CONFIG_FILE": str(tenants),
+                "GLINK_TENANCY": "multitenant",
+                "GLINK_TENANT_CONFIG_FILE": str(tenants),
                 "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data2"),
                 "OPENAI_MODEL": "test/model",
             },

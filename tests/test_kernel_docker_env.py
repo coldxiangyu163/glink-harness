@@ -14,10 +14,10 @@ from pathlib import Path
 import pytest
 
 from harness_helpers import compose_launch, execution_spec, test_egress
-from pi_glink.config import build_config
-from pi_glink.harnesses import load_pack
-from pi_glink.kernel import agent_env, docker_env
-from pi_glink.kernel.sandbox import DockerSandbox
+from glink_harness.config import build_config
+from glink_harness.harnesses import load_pack
+from glink_harness.kernel import agent_env, docker_env
+from glink_harness.kernel.sandbox import DockerSandbox
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -161,7 +161,7 @@ def test_the_image_guard_covers_every_prebaked_package() -> None:
 
 
 def test_stop_argv_is_a_force_remove() -> None:
-    assert docker_env.stop_argv("pi-glink-abc") == ["docker", "rm", "-f", "pi-glink-abc"]
+    assert docker_env.stop_argv("glink-harness-abc") == ["docker", "rm", "-f", "glink-harness-abc"]
 
 
 def test_container_session_paths_map_back_to_the_run_mount(config, tmp_path: Path) -> None:
@@ -244,28 +244,28 @@ def test_worker_image_is_frozen_at_configuration_time(
             "OPENAI_MODEL": "test/model",
             "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
             "LOCAL_WEB_EXECUTOR": "docker",
-            "LOCAL_WEB_WORKER_IMAGE": "pi-glink-worker:pinned",
+            "LOCAL_WEB_WORKER_IMAGE": "glink-harness-worker:pinned",
         },
         REPO_ROOT,
     )
-    assert docker_env.worker_image(config) == "pi-glink-worker:pinned"
-    assert config.worker_image == "pi-glink-worker:pinned"
+    assert docker_env.worker_image(config) == "glink-harness-worker:pinned"
+    assert config.worker_image == "glink-harness-worker:pinned"
     # Building a plan at run time never re-reads the live environment.
-    monkeypatch.setenv("LOCAL_WEB_WORKER_IMAGE", "pi-glink-worker:something-else")
+    monkeypatch.setenv("LOCAL_WEB_WORKER_IMAGE", "glink-harness-worker:something-else")
     runtime = _prepare(config, tmp_path)
     launch, sandbox, plan = _docker_spawn(
         config, runtime, tmp_path, run_id="abc123", workspace=tmp_path / "ws"
     )
-    assert launch.image == "pi-glink-worker:pinned"
-    assert docker_env.worker_image(config) == "pi-glink-worker:pinned"
+    assert launch.image == "glink-harness-worker:pinned"
+    assert docker_env.worker_image(config) == "glink-harness-worker:pinned"
 
 
 def test_runner_refuses_docker_when_daemon_is_missing(config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from pi_glink.events import EventBus
-    from pi_glink.runs.runner import RunManager
-    from pi_glink.store import RunStore
+    from glink_harness.events import EventBus
+    from glink_harness.runs.runner import RunManager
+    from glink_harness.store import RunStore
 
-    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: False)
+    monkeypatch.setattr("glink_harness.kernel.sandbox.docker_available", lambda: False)
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store)
     record = manager.start("docker 不可用时应当失败")

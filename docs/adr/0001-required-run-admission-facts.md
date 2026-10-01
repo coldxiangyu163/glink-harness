@@ -2,7 +2,7 @@
 
 - 状态：已接受（2026-09-28，架构重设计 S1）；记录形状已被 [0010](0010-harness-sandbox-runspec.md) 替代（`spec` 对象），读取与裁决口径已被 [0009](0009-sqlite-run-store.md) 替代
   （记录迁入 SQLite，缺字段的行 fail-closed，不再计入不可读持有）
-- 范围：`host/pi_glink/store.py`（`RunRecord`、`RunStore.create`、`_load_meta`）
+- 范围：`host/glink_harness/store.py`（`RunRecord`、`RunStore.create`、`_load_meta`）
 
 ## 背景
 

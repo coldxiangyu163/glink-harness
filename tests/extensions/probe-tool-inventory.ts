@@ -5,7 +5,7 @@
  * 钩子把当前进程的工具清单写成一个 JSON 文件，然后请求正常退出。冒烟脚本只读这个
  * 文件与 pi 的 stderr/stdout，不调用模型、不访问网络。
  *
- * 可选：`PI_GLINK_GUARD_MODULE` 指向工作台的前台守卫扩展时，探针还会在同一个 pi
+ * 可选：`GLINK_GUARD_MODULE` 指向工作台的前台守卫扩展时，探针还会在同一个 pi
  * 进程里 import 它并跑三条最小自检（async 改写、控制动作阻止、只读动作放行），
  * 结果写进 `guardSelfCheck`——这样“扩展能被 pi 加载”不只是靠“没有报错”推断。
  */
@@ -23,8 +23,8 @@ type GuardModule = {
 };
 
 async function guardSelfCheck(workspace: string): Promise<Record<string, unknown>> {
-  const modulePath = process.env.PI_GLINK_GUARD_MODULE;
-  if (!modulePath) return { skipped: "PI_GLINK_GUARD_MODULE 未设置" };
+  const modulePath = process.env.GLINK_GUARD_MODULE;
+  if (!modulePath) return { skipped: "GLINK_GUARD_MODULE 未设置" };
   try {
     const guard = (await import(pathToFileURL(modulePath).href)) as GuardModule;
     const forced = { agent: "researcher", task: "t", async: true };
@@ -42,7 +42,7 @@ async function guardSelfCheck(workspace: string): Promise<Record<string, unknown
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
-    const out = process.env.PI_GLINK_PROBE_OUT;
+    const out = process.env.GLINK_PROBE_OUT;
     if (!out) return;
     const inventory = {
       cwd: ctx.cwd,

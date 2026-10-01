@@ -23,17 +23,17 @@ from typing import Any
 import pytest
 
 
-from pi_glink.config import build_config
-from pi_glink.events import EventBus
-from pi_glink.kernel.acp_sandbox_park import park_sandbox
-from pi_glink.kernel.conversation_lease import (
+from glink_harness.config import build_config
+from glink_harness.events import EventBus
+from glink_harness.kernel.acp_sandbox_park import park_sandbox
+from glink_harness.kernel.conversation_lease import (
     ConversationLease,
     read_lease,
     write_lease,
 )
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import FINISHED, RunSpec, RunStore
-from pi_glink.tenancy import TenantContext
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import FINISHED, RunSpec, RunStore
+from glink_harness.tenancy import TenantContext
 
 from store_helpers import finish
 
@@ -59,7 +59,7 @@ def make_config(tmp_path: Path, **overrides: str):
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_EXECUTOR": "e2b",
         "E2B_API_KEY": "e2b-secret-key",
-        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
+        "GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
     }
     values.update(overrides)
     return build_config(values, REPO_ROOT)
@@ -236,9 +236,9 @@ def test_delete_conversation_without_a_lease_just_removes_the_directory(tmp_path
 def test_delete_conversation_gates_on_tenancy(tmp_path: Path) -> None:
     config = make_config(
         tmp_path,
-        PI_GLINK_TENANCY="multitenant",
-        PI_GLINK_AUTH_MODE="accounts",
-        PI_GLINK_MODEL_CREDENTIALS="shared",
+        GLINK_TENANCY="multitenant",
+        GLINK_AUTH_MODE="accounts",
+        GLINK_MODEL_CREDENTIALS="shared",
         OPENAI_API_KEY="sk-test",
     )
     store, conversation = seeded_store(config)
@@ -369,9 +369,9 @@ def _parkable_handle(calls: list[str]) -> SimpleNamespace:
 def test_parked_sandboxes_are_capped_host_wide(tmp_path: Path) -> None:
     """原义务：TTL 只限制每个暂停沙箱保留多久，不限制累计数量——大量短对话可以
     在云端堆积任意多个暂停沙箱。
-    新义务：仍有效的租约数达到 ``PI_GLINK_MAX_PARKED_SANDBOXES`` 时不再泊车，
+    新义务：仍有效的租约数达到 ``GLINK_MAX_PARKED_SANDBOXES`` 时不再泊车，
     本沙箱按冷路径销毁（宿主权威状态不受影响，下一轮走回灌）。"""
-    config = make_config(tmp_path, PI_GLINK_MAX_PARKED_SANDBOXES="1")
+    config = make_config(tmp_path, GLINK_MAX_PARKED_SANDBOXES="1")
     store = RunStore(config.data_root / "runs")
     write_lease(store.conversation_dir("other"), a_lease(sandbox_id="sbx-other"))
     calls: list[str] = []
@@ -387,7 +387,7 @@ def test_parked_sandboxes_are_capped_host_wide(tmp_path: Path) -> None:
 
 
 def test_the_park_cap_ignores_expired_leases_and_this_conversation(tmp_path: Path) -> None:
-    config = make_config(tmp_path, PI_GLINK_MAX_PARKED_SANDBOXES="1")
+    config = make_config(tmp_path, GLINK_MAX_PARKED_SANDBOXES="1")
     store = RunStore(config.data_root / "runs")
     # An expired lease is already the sweep's to destroy; it holds no hot slot.
     write_lease(store.conversation_dir("stale"), a_lease(sandbox_id="sbx-stale", paused_ago=7200, ttl=60))
@@ -405,10 +405,10 @@ def test_the_park_cap_ignores_expired_leases_and_this_conversation(tmp_path: Pat
 
 
 def test_the_park_cap_must_be_positive(tmp_path: Path) -> None:
-    from pi_glink.config import ConfigError
+    from glink_harness.config import ConfigError
 
-    with pytest.raises(ConfigError, match="PI_GLINK_MAX_PARKED_SANDBOXES"):
-        make_config(tmp_path, PI_GLINK_MAX_PARKED_SANDBOXES="0")
+    with pytest.raises(ConfigError, match="GLINK_MAX_PARKED_SANDBOXES"):
+        make_config(tmp_path, GLINK_MAX_PARKED_SANDBOXES="0")
 
 
 def test_concurrent_parks_cannot_both_take_the_last_slot(tmp_path: Path, monkeypatch) -> None:
@@ -417,9 +417,9 @@ def test_concurrent_parks_cannot_both_take_the_last_slot(tmp_path: Path, monkeyp
     不含云调用），上限在并发下仍成立。"""
     import threading
 
-    from pi_glink.kernel import acp_sandbox_park
+    from glink_harness.kernel import acp_sandbox_park
 
-    config = make_config(tmp_path, PI_GLINK_MAX_PARKED_SANDBOXES="1")
+    config = make_config(tmp_path, GLINK_MAX_PARKED_SANDBOXES="1")
     store = RunStore(config.data_root / "runs")
     original = acp_sandbox_park._live_parked_elsewhere
     entered = threading.Event()
@@ -454,7 +454,7 @@ def test_a_refused_park_does_not_leave_a_phantom_slot(tmp_path: Path) -> None:
     """原义务：超限拒绝时只销毁本沙箱，本对话的旧租约仍未到期，继续被计入上限
     （它指向的沙箱已被本轮替换销毁）。新义务：拒绝后本对话的记录已结清——全部确认
     销毁即删除；有未确认身份则以**已过期**记录保留给对账，不再占名额。"""
-    config = make_config(tmp_path, PI_GLINK_MAX_PARKED_SANDBOXES="1")
+    config = make_config(tmp_path, GLINK_MAX_PARKED_SANDBOXES="1")
     store = RunStore(config.data_root / "runs")
     write_lease(store.conversation_dir("other"), a_lease(sandbox_id="sbx-other"))
     write_lease(store.conversation_dir("conv-1"), a_lease(sandbox_id="sbx-prev"))
@@ -471,7 +471,7 @@ def test_a_refused_park_does_not_leave_a_phantom_slot(tmp_path: Path) -> None:
 
 
 def test_a_refused_park_keeps_unconfirmed_identities_expired(tmp_path: Path) -> None:
-    config = make_config(tmp_path, PI_GLINK_MAX_PARKED_SANDBOXES="1")
+    config = make_config(tmp_path, GLINK_MAX_PARKED_SANDBOXES="1")
     store = RunStore(config.data_root / "runs")
     write_lease(store.conversation_dir("other"), a_lease(sandbox_id="sbx-other"))
     write_lease(store.conversation_dir("conv-1"), a_lease(sandbox_id="sbx-prev"))

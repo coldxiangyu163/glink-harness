@@ -1,7 +1,7 @@
 # 每 run HOME 的 provider 接入结构，不声明部署模型或 reasoning effort。
 # OPENAI_MODEL / OPENAI_REASONING_EFFORT 由宿主经 ACP 应用并核验；
-# apiKeyEnv 只是凭据引用名，值经宿主渲染（PI_GLINK_ACP_CREDENTIAL_ENV
-# 或 PI_GLINK_ACP_CREDENTIAL_FILES），永远不进仓库。本机 ~/.dsh/ 互不影响。
+# apiKeyEnv 只是凭据引用名，值经宿主渲染（GLINK_ACP_CREDENTIAL_ENV
+# 或 GLINK_ACP_CREDENTIAL_FILES），永远不进仓库。本机 ~/.dsh/ 互不影响。
 llm-pi-ai:
   providers:
     openrouter:

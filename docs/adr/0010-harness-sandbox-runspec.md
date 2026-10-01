@@ -1,7 +1,7 @@
 # 0010 Harness × Sandbox 正交组合，RunSpec 为准入冻结点
 
 - 状态：已接受（2026-09-28，架构重设计 S2；部分替代 [0001](0001-required-run-admission-facts.md) 的记录形状）
-- 范围：`host/pi_glink/kernel/{sandbox,harness,harness_pi,harness_acp,execution,acp_execution}.py`、
+- 范围：`host/glink_harness/kernel/{sandbox,harness,harness_pi,harness_acp,execution,acp_execution}.py`、
   `store.py::RunSpec`、`runs/admission.py`、`tests/test_repository_boundaries.py`
 
 ## 背景

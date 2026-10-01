@@ -13,7 +13,7 @@
 | `baseUrl` | ❌ 不支持 | 设 `"baseUrl": "$OPENAI_BASE_URL"` 后 `pi --list-models` 能列出模型（不校验 URL），实际请求报 `Invalid URL` |
 | `models[].id` | ❌ 不支持 | `pi --list-models` 原样打印 `$OPENAI_MODEL` 字样 |
 
-**结论**：宿主编译期无法把 endpoint 与模型 id 交给 pi 自己插值，必须由宿主在运行期渲染 `models.json`（见 `host/pi_glink/kernel/agent_env.py`）。密钥**不写进 `models.json`**：宿主把它写入 pi 官方凭据存储 `auth.json`（权限 0600，位于运行期目录），进程环境里不再有该变量，内核的 `env` 类读取拿不到（三面实测 0）；详见 architecture.md §6 与 docs/evidence/credential-boundary.txt。
+**结论**：宿主编译期无法把 endpoint 与模型 id 交给 pi 自己插值，必须由宿主在运行期渲染 `models.json`（见 `host/glink_harness/kernel/agent_env.py`）。密钥**不写进 `models.json`**：宿主把它写入 pi 官方凭据存储 `auth.json`（权限 0600，位于运行期目录），进程环境里不再有该变量，内核的 `env` 类读取拿不到（三面实测 0）；详见 architecture.md §6 与 docs/evidence/credential-boundary.txt。
 
 复现：
 
@@ -62,7 +62,7 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
 ## 5. pi-web-access 接入（已实测）
 
 - **配置目录解析**：pi-web-access 的 `utils.ts` 中 `getWebSearchConfigDir()` **优先读 `process.env.PI_CODING_AGENT_DIR`**，且不检查该目录下是否已有 `web-search.json`。这与 pi 本身的重定向一致，但也意味着：一旦宿主重定向了配置目录，操作员本机 ``~/.pi/agent/web-search.json` 就不再被读到，检索会静默退化成无凭据模式。
-- **凭据装配**：宿主在本 run 的运行期目录渲染 `web-search.json`：优先用 `PI_GLINK_WEB_SEARCH_KEY`（渲染为 `{"exaApiKey": …}`），否则复制操作员本机的 `~/.pi/agent/web-search.json`（或 `~/.pi/web-search.json`）。无凭据不是错误：pi-web-access 仍可用无密钥的 Exa MCP 检索；每次渲染都会重建或删除该文件，所以上一 run 的凭据不会残留。
+- **凭据装配**：宿主在本 run 的运行期目录渲染 `web-search.json`：优先用 `GLINK_WEB_SEARCH_KEY`（渲染为 `{"exaApiKey": …}`），否则复制操作员本机的 `~/.pi/agent/web-search.json`（或 `~/.pi/web-search.json`）。无凭据不是错误：pi-web-access 仍可用无密钥的 Exa MCP 检索；每次渲染都会重建或删除该文件，所以上一 run 的凭据不会残留。
 - **插件安装**：在 `harnesses/pi/settings.json` 的 `packages` 里声明 `npm:pi-web-access@0.31.0`（精确 pin）。inproc 面 pi 启动时把它装到 `<PI_CODING_AGENT_DIR>/npm/`；docker/e2b 面宿主把该声明改写成镜像内本地包 `/opt/pi-packages/node_modules/pi-web-access`，不在 run 里联网安装（实测与机制见 §9）。
 - **工具面**：实测一次检索 run 调用 `web_search`（1 次）+ `fetch_content`（3 次），事件流里以 `tool_started/tool_updated/tool_finished` 正常呈现，报告写入 10 个可核验 URL。见 `docs/evidence/local-web-search.txt`。
 
@@ -101,7 +101,7 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
   `commands.run(background=True)` 返回的 `CommandHandle` 才是流式接口（迭代它逐块拿到
   stdout；把 `on_stdout` 传给 `run()` 本身不生效，那是早期的用法误判）。
 - **Node 与 pi 固定在两侧镜像**：`node:24.21.0-bookworm-slim` 精确 tag + pi 0.86.1，镜像自包含
-  （无挂载时 `docker run --rm pi-glink-worker:latest pi --version` = 0.86.1）。
+  （无挂载时 `docker run --rm glink-harness-worker:latest pi --version` = 0.86.1）。
 - 证据：`docs/evidence/docker-run.txt`、`docs/evidence/e2b-run.txt`、`docs/evidence/credential-boundary.txt`。
 
 ## 7. 工具输出的流式语义（已实测）
@@ -114,7 +114,7 @@ data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant","reasoning
 
 ```
 seq=86  len=0
-seq=87  len=53   '/Users/coldxiangyu/.pi-glink/workspaces/ebf75f590601\n'
+seq=87  len=53   '/Users/coldxiangyu/.glink-harness/workspaces/ebf75f590601\n'
 seq=88  len=495  同前 53 字符 + '\nPI vars:\nPI_CODING_AGENT_DIR=…'
 ```
 
@@ -133,7 +133,7 @@ result 一次；两者不同的工具仍保留两份内容。校验：
 
 结论：**0.40.0 没有配置开关可以禁止 async/detached 子 agent**，也没有相关环境变量；按 spike 门禁
 就此停止，未做凭据继承、取消传播、事件投影/脱敏与产物落点的 live 验证（harnesses/pi/settings.json 未改）。
-该结论仍然成立，也是 GLINK-SUB-02 改用 pi-glink 自有 `tool_call` 守卫的原因；前台强制方案、
+该结论仍然成立，也是 GLINK-SUB-02 改用 glink-harness 自有 `tool_call` 守卫的原因；前台强制方案、
 完整入口清单与配置取值见 §10。
 本节其余事实（配置面键集、行号、参考副本与发布包的差异）继续有效；
 本节的源码行号与事实来自 `npm install --prefix /tmp/glink-sub-spike/prefix pi-subagents@0.40.0`
@@ -203,7 +203,7 @@ pi-web-access 的 `supportsDynamicTools()` 会 `import.meta.resolve` 这份副�
 ## 10. pi-subagents 0.40.0 的前台强制接入（GLINK-SUB-02，离线验证）
 
 §8 的结论继续成立：0.40.0 没有“禁止 async/detached”的包开关。GLINK-SUB-02 因此不依赖包开关，
-而是在 pi-glink 侧用官方 `tool_call` 钩子（`harnesses/pi/extensions/subagent-foreground-guard.ts`）
+而是在 glink-harness 侧用官方 `tool_call` 钩子（`harnesses/pi/extensions/subagent-foreground-guard.ts`）
 把派发收回到主 run 内的**前台同步**调用，并按“最保守取值”固定 pi-subagents 的 extension config。
 原则：**能安全改写就改写（`async:false`、`chainDir` 进工作区），改写了会改变语义／无法保证生命周期
 的就阻止并给出可理解的原因**，未知输入一律 fail-closed。
@@ -277,7 +277,7 @@ watchdog 不在这个文件里：它读 `<PI_CODING_AGENT_DIR>/settings.json` �
 
 pi-subagents 从 `<PI_CODING_AGENT_DIR>/agents` 读 user 作用域定义（`src/agents/agents.ts:1646-1651`，
 `getAgentDir()` 优先 `PI_CODING_AGENT_DIR`）。渲染模板因此把 `agents` 加进 `TEMPLATE_ENTRIES`
-（`host/pi_glink/kernel/agent_env.py`），三个面都会拿到 `runs/<id>/pi-agent/agents/researcher.md`。
+（`host/glink_harness/kernel/agent_env.py`），三个面都会拿到 `runs/<id>/pi-agent/agents/researcher.md`。
 
 发现范围与优先级（`discoverAgents` + `mergeAgentsForScope`，`src/agents/agent-selection.ts:12-24`）：
 

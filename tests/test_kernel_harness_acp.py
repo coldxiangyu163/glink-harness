@@ -15,15 +15,15 @@ from typing import Any, Mapping
 
 import pytest
 
-from pi_glink.config import HostConfig, build_config
+from glink_harness.config import HostConfig, build_config
 
 from acp_pack import apply_acp_pack
-from pi_glink.contracts import FollowupUnavailable
-from pi_glink.kernel.harness import select_family
-from pi_glink.kernel.harness_acp import AcpHarnessFamily
-from pi_glink.kernel.acp_projection import AcpProjector
-from pi_glink.redaction import SecretRedactor
-from pi_glink.store import FINISHED, RunSpec, RunStore
+from glink_harness.contracts import FollowupUnavailable
+from glink_harness.kernel.harness import select_family
+from glink_harness.kernel.harness_acp import AcpHarnessFamily
+from glink_harness.kernel.acp_projection import AcpProjector
+from glink_harness.redaction import SecretRedactor
+from glink_harness.store import FINISHED, RunSpec, RunStore
 
 from store_helpers import finish
 
@@ -39,7 +39,7 @@ def make_config(tmp_path: Path, **overrides: str) -> HostConfig:
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_HARNESS": "acp",
+        "GLINK_HARNESS": "acp",
         "TEST_ACP_COMMAND": f"{sys.executable} {FAKE_ACP} --config settings.json",
     }
     values.update(overrides)
@@ -419,7 +419,7 @@ def test_backfill_followup_learns_historical_credential_secrets(tmp_path: Path) 
     turn 1 的历史状态进了对话权威 state；turn 3 走归档回灌（inherit 被跳过）时，
     PreparedRuntime 的脱敏边界仍含该值——agent 回显时会被遮蔽。
     """
-    from pi_glink.kernel.archive_channel import ArchiveEndpoint
+    from glink_harness.kernel.archive_channel import ArchiveEndpoint
 
     config, store, family = make_family(tmp_path)
     parent = store.create("第一轮", spec=RunSpec(

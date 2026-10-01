@@ -1,5 +1,5 @@
 /**
- * Probe: why is the file card (`.pi-output`) hidden when a finished run is
+ * Probe: why is the file card (`.glink-output`) hidden when a finished run is
  * replayed from history? Dumps the answer region's state right after a live
  * finish and right after a history replay.
  *
@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { startHost } from '../support/host.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const outDir = mkdtempSync(join(tmpdir(), 'pi-glink-probe3-'));
+const outDir = mkdtempSync(join(tmpdir(), 'glink-harness-probe3-'));
 const stateDir = join(outDir, 'state');
 mkdirSync(stateDir, { recursive: true });
 const host = await startHost({ repoRoot: REPO_ROOT, mode: 'accounts', stateDir, logFile: join(outDir, 'fixture.log') });
@@ -31,7 +31,7 @@ await page.waitForTimeout(400);
 
 const dumpAnswer = () =>
   page.evaluate(() => {
-    const outputs = [...document.querySelectorAll('#run-view .pi-output')].map((node) => ({
+    const outputs = [...document.querySelectorAll('#run-view .glink-output')].map((node) => ({
       cls: node.className,
       hidden: node.hidden,
       display: getComputedStyle(node).display,
@@ -41,17 +41,17 @@ const dumpAnswer = () =>
     return {
       status: document.querySelector('#run-view')?.dataset.status,
       answerHead: {
-        exists: Boolean(document.querySelector('#run-view .pi-answer-head')),
-        hidden: document.querySelector('#run-view .pi-answer-head')?.hidden,
+        exists: Boolean(document.querySelector('#run-view .glink-answer-head')),
+        hidden: document.querySelector('#run-view .glink-answer-head')?.hidden,
       },
       actions: {
-        exists: Boolean(document.querySelector('#run-view .pi-answer-actions')),
-        hidden: document.querySelector('#run-view .pi-answer-actions')?.hidden,
-        labels: [...document.querySelectorAll('#run-view .pi-answer-actions > *')].map((node) => node.getAttribute('aria-label')),
+        exists: Boolean(document.querySelector('#run-view .glink-answer-actions')),
+        hidden: document.querySelector('#run-view .glink-answer-actions')?.hidden,
+        labels: [...document.querySelectorAll('#run-view .glink-answer-actions > *')].map((node) => node.getAttribute('aria-label')),
       },
       outputs,
-      answerText: document.querySelector('#run-view .pi-answer-body')?.innerText?.slice(0, 60),
-      reportButtonCount: document.querySelectorAll('#run-view .pi-report-button').length,
+      answerText: document.querySelector('#run-view .glink-answer-body')?.innerText?.slice(0, 60),
+      reportButtonCount: document.querySelectorAll('#run-view .glink-report-button').length,
       viewText: document.querySelector('#run-view')?.innerText?.replace(/\n+/g, ' | ').slice(0, 300),
     };
   });

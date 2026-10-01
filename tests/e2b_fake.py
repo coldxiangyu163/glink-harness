@@ -5,7 +5,7 @@
 并以真实子进程跑 tests/fixtures/fake_pi.py（argv[0] 的字面量 ``"pi"`` 替换
 为 ``sys.executable fake_pi.py``，镜像内的包守卫不模拟），handle 实现
 ``send_stdin``/``close_stdin``/``__iter__``/``wait``/``kill``——即
-:class:`~pi_glink.kernel.e2b_env.SandboxCommandProcess` 依赖的
+:class:`~glink_harness.kernel.e2b_env.SandboxCommandProcess` 依赖的
 ``CommandHandle`` 表面。
 
 ``FakeFiles`` 保持字典语义（凭据/upload/recover 的既有断言原样成立）：
@@ -35,7 +35,7 @@ import threading
 from pathlib import Path
 from typing import Any, Iterator
 
-from pi_glink.kernel.e2b_env import SANDBOX_PACKAGE_GUARD, SANDBOX_WORKSPACE
+from glink_harness.kernel.e2b_env import SANDBOX_PACKAGE_GUARD, SANDBOX_WORKSPACE
 
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
 

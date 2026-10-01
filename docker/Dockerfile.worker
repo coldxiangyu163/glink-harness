@@ -1,4 +1,4 @@
-# pi-glink worker 镜像：容器内自包含 pi 运行时。
+# glink-harness worker 镜像：容器内自包含 pi 运行时。
 #
 # 设计边界（对应 task-6 的验收契约）：
 #   * 镜像自带 Node 与 pi，容器内的执行不依赖宿主安装的运行时；
@@ -7,10 +7,10 @@
 #   * pi 版本在此固定，便于「不改内核、只换版本号」的升级演练（task-9）。
 #
 # 构建：
-#   docker build -t pi-glink-worker:latest -f docker/Dockerfile.worker .
+#   docker build -t glink-harness-worker:latest -f docker/Dockerfile.worker .
 #
 # 网络受限环境（例如中国大陆）可覆盖基础源，仓库默认仍用官方源：
-#   docker build -t pi-glink-worker:latest -f docker/Dockerfile.worker \
+#   docker build -t glink-harness-worker:latest -f docker/Dockerfile.worker \
 #     --build-arg DEBIAN_MIRROR=mirrors.aliyun.com \
 #     --build-arg NPM_REGISTRY=https://registry.npmmirror.com .
 #
@@ -52,7 +52,7 @@ RUN if [ "${DEBIAN_MIRROR}" != "deb.debian.org" ]; then \
          'set -eu' \
          'for pkg in pi-web-access; do' \
          '  if [ ! -f "/opt/pi-packages/node_modules/$pkg/package.json" ]; then' \
-         '    echo "pi-glink: 镜像内预装包缺失: $pkg（宿主与镜像声明不一致，请重建镜像/模板）" >&2' \
+         '    echo "glink-harness: 镜像内预装包缺失: $pkg（宿主与镜像声明不一致，请重建镜像/模板）" >&2' \
          '    exit 78' \
          '  fi' \
          'done' \

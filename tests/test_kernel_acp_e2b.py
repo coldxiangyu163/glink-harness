@@ -7,7 +7,7 @@ Three obligations are pinned here:
   the sandbox state root, and the agent command is the frozen argv running in
   the sandbox workspace with ``stdin=True`` as a background command;
 * **bridging** — the sandbox command handle is handed to the *same*
-  :class:`~pi_glink.kernel.acp_rpc.AcpRpcClient` the in-process and Docker faces
+  :class:`~glink_harness.kernel.acp_rpc.AcpRpcClient` the in-process and Docker faces
   use (the real fake ACP agent runs as a local subprocess behind a stand-in
   ``CommandHandle``), so ``session/new``'s ``cwd`` is the sandbox path, the run
   settles with a stop reason, artifacts are recovered before destruction and the
@@ -35,21 +35,21 @@ from typing import Any
 
 import pytest
 
-from pi_glink.config import ConfigError, build_config
+from glink_harness.config import ConfigError, build_config
 
 from acp_pack import apply_acp_pack
-from pi_glink.events import EventBus
-from pi_glink.kernel.acp_env import prepare_acp_runtime
+from glink_harness.events import EventBus
+from glink_harness.kernel.acp_env import prepare_acp_runtime
 from harness_helpers import compose_launch, family
-from pi_glink.kernel.acp_e2b_env import SANDBOX_ACP_HOME, AcpSandboxTransfer
-from pi_glink.contracts import FollowupUnavailable
-from pi_glink.kernel.acp_execution import RESUME_METHOD, AcpExecutionAdapter
-from pi_glink.kernel.e2b_env import SANDBOX_WORKSPACE, SandboxCommandProcess
-from pi_glink.kernel.execution import ExecutionSpec
-from pi_glink.kernel.sandbox import E2BSandbox, open_sandbox
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import FAILED, FINISHED, RunStore
-from pi_glink.tenancy import TenantContext
+from glink_harness.kernel.acp_e2b_env import SANDBOX_ACP_HOME, AcpSandboxTransfer
+from glink_harness.contracts import FollowupUnavailable
+from glink_harness.kernel.acp_execution import RESUME_METHOD, AcpExecutionAdapter
+from glink_harness.kernel.e2b_env import SANDBOX_WORKSPACE, SandboxCommandProcess
+from glink_harness.kernel.execution import ExecutionSpec
+from glink_harness.kernel.sandbox import E2BSandbox, open_sandbox
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import FAILED, FINISHED, RunStore
+from glink_harness.tenancy import TenantContext
 from store_helpers import events_text, stored_record
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -57,7 +57,7 @@ FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"
 DOCKERFILE = REPO_ROOT / "docker" / "e2b" / "Dockerfile.acp-e2b"
 NOTES = REPO_ROOT / "docs" / "acp-integration-notes.md"
 #: Multi-tenant fixture constants (same shape the inproc continuation tests use).
-AUDIENCE = "pi-glink-test"
+AUDIENCE = "glink-harness-test"
 SECRET = b"0123456789abcdef0123456789abcdef"
 
 
@@ -322,7 +322,7 @@ def make_config(tmp_path: Path, **overrides: str):
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_EXECUTOR": "e2b",
         "E2B_API_KEY": "e2b-secret-key",
-        "PI_GLINK_HARNESS": "acp",
+        "GLINK_HARNESS": "acp",
         "TEST_ACP_COMMAND": "dsh --profile acp",
     }
     values.update(overrides)
@@ -418,7 +418,7 @@ def make_spec(config, runtime, tmp_path: Path, *, prompt: str = "写一份报告
 def test_the_sandbox_uses_the_frozen_acp_template_and_credential(tmp_path: Path) -> None:
     config = make_config(
         tmp_path,
-        PI_GLINK_ACP_CREDENTIAL_FILES=f"{tmp_path / 'operator.json'}=.codex/auth.json",
+        GLINK_ACP_CREDENTIAL_FILES=f"{tmp_path / 'operator.json'}=.codex/auth.json",
     )
     (tmp_path / "operator.json").write_text('{"tokens": {"access_token": "opaque-1234567890"}}', encoding="utf-8")
     runtime = make_runtime(config, tmp_path)
@@ -456,7 +456,7 @@ def test_credentials_are_uploaded_into_the_run_home_and_hardened(tmp_path: Path)
     source.write_text("DEEPSEEK_API_KEY: sk-opaque-credential-1234567890\n", encoding="utf-8")
     config = make_config(
         tmp_path,
-        PI_GLINK_ACP_CREDENTIAL_FILES=f"{source}=.dsh/.credentials.yaml",
+        GLINK_ACP_CREDENTIAL_FILES=f"{source}=.dsh/.credentials.yaml",
     )
     runtime = make_runtime(config, tmp_path)
     sandbox = FakeSandbox(tmp_path)
@@ -490,7 +490,7 @@ def test_the_agent_command_is_the_frozen_argv_in_the_sandbox_workspace(tmp_path:
         TEST_ACP_COMMAND=fake_agent_command(
             tmp_path, {"FAKE_ACP_LOG": str(tmp_path / "agent.jsonl")}
         ),
-        PI_GLINK_ACP_ENV="ACME_MODE=sandbox-mode-value",
+        GLINK_ACP_ENV="ACME_MODE=sandbox-mode-value",
     )
     runtime = make_runtime(config, tmp_path)
     sandbox = FakeSandbox(tmp_path)
@@ -782,7 +782,7 @@ def test_the_sandbox_face_reports_the_agent_stderr_tail_on_a_kernel_exit(
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, EventBus(), store=store, sandbox_factory=lambda **_: sandbox)
 
-    with caplog.at_level(logging.WARNING, logger="pi_glink.runs.runner"):
+    with caplog.at_level(logging.WARNING, logger="glink_harness.runs.runner"):
         record = manager.start("CRASH 掉这个 agent")
         final = manager.wait(record.run_id, timeout=120)
 
@@ -955,7 +955,7 @@ def test_state_recovery_bounds_refuse_the_whole_mirror(
         ("INHERIT_MAX_FILES", 1, {"a.bin": b"a", "b.bin": b"b"}),
         ("INHERIT_MAX_TOTAL_BYTES", 16, {"a.bin": b"a" * 40}),
     ):
-        monkeypatch.setattr(f"pi_glink.kernel.acp_e2b_env.{constant}", value)
+        monkeypatch.setattr(f"glink_harness.kernel.acp_e2b_env.{constant}", value)
         sandboxes: list[FakeSandbox] = []
 
         class SeedingFactory:
@@ -1184,11 +1184,11 @@ def test_acp_followup_refuses_a_parent_owned_by_another_tenant_on_the_sandbox_fa
         TEST_ACP_COMMAND=fake_agent_command(
             tmp_path, {"FAKE_ACP_WRITE_REPORT": True}, name="tenant-settings.json"
         ),
-        PI_GLINK_TENANCY="multitenant",
-        PI_GLINK_MODEL_CREDENTIALS="shared",
-        PI_GLINK_ACP_ENV="FAKE_ACP_KEY=sk-acp-shared-000000000000",
-        PI_GLINK_GATEWAY_SECRET_FILE=str(secret_file),
-        PI_GLINK_TENANCY_AUDIENCE=AUDIENCE,
+        GLINK_TENANCY="multitenant",
+        GLINK_MODEL_CREDENTIALS="shared",
+        GLINK_ACP_ENV="FAKE_ACP_KEY=sk-acp-shared-000000000000",
+        GLINK_GATEWAY_SECRET_FILE=str(secret_file),
+        GLINK_TENANCY_AUDIENCE=AUDIENCE,
         LOCAL_WEB_TASK_TIMEOUT_SECONDS="60",
     )
     sandboxes: list[FakeSandbox] = []
@@ -1231,7 +1231,7 @@ def test_recovery_never_mirrors_a_path_outside_the_state_root() -> None:
     the sandbox state root refuses the whole recovery (``None``) instead of
     being re-interpreted by the host's path model.
     """
-    from pi_glink.kernel.acp_e2b_env import _state_relative
+    from glink_harness.kernel.acp_e2b_env import _state_relative
 
     assert _state_relative(f"{SANDBOX_ACP_HOME}/.dsh/sessions/a.json") == ".dsh/sessions/a.json"
     for hostile in (
@@ -1254,7 +1254,7 @@ def test_the_credential_value_stays_in_the_sandbox_file(tmp_path: Path) -> None:
     config = make_config(
         tmp_path,
         TEST_ACP_COMMAND=fake_agent_command(tmp_path, settings),
-        PI_GLINK_ACP_CREDENTIAL_FILES=f"{source}=.codex/auth.json",
+        GLINK_ACP_CREDENTIAL_FILES=f"{source}=.codex/auth.json",
     )
     sandbox = FakeSandbox(tmp_path)
     store = RunStore(config.data_root / "runs")
@@ -1280,7 +1280,7 @@ def test_a_failed_upload_still_persists_the_sandbox_identity(tmp_path: Path) -> 
     secret.write_text('{"tokens": {"access_token": "opaque-1234567890"}}', encoding="utf-8")
     config = make_config(
         tmp_path,
-        PI_GLINK_ACP_CREDENTIAL_FILES=f"{secret}=.codex/auth.json",
+        GLINK_ACP_CREDENTIAL_FILES=f"{secret}=.codex/auth.json",
     )
     sandbox = FakeSandbox(tmp_path, write_failure="disk full")
     store = RunStore(config.data_root / "runs")
@@ -1403,9 +1403,9 @@ def test_the_acp_e2b_template_is_not_the_production_or_pi_template() -> None:
     # The禁触 note lives in the comments; no build instruction may reference the
     # production template or the pi template.
     assert "glink-frontier-e2b" not in joined
-    assert "pi-glink-worker" not in joined
+    assert "glink-harness-worker" not in joined
     config = make_config(Path("/tmp"))
-    assert config.e2b_template == "pi-glink-worker"
+    assert config.e2b_template == "glink-harness-worker"
     assert config.acp_e2b_template == "glink-acp-worker"
     assert config.e2b_template != config.acp_e2b_template
 
@@ -1415,7 +1415,7 @@ def test_the_sandbox_pump_applies_backpressure_instead_of_buffering_everything(
 ) -> None:
     """原义务：沙箱 stdout/stderr 走无界队列，远端输出快于宿主消费时全部堆在内存。
     新义务：队列有界（背压阻塞 SDK 迭代）；kill 之后泵不再阻塞，退出码仍可得。"""
-    from pi_glink.kernel import e2b_env
+    from glink_harness.kernel import e2b_env
 
     monkeypatch.setattr(e2b_env, "_PUMP_QUEUE_CHUNKS", 4, raising=False)
     monkeypatch.setattr(e2b_env, "_PUMP_PUT_POLL_SECONDS", 0.05, raising=False)

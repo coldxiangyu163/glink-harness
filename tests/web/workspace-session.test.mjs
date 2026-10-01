@@ -279,7 +279,7 @@ test('a live workspace refreshes /api/me after csrf_invalid and retries with the
   t.after(() => h.dom.restore());
   await h.workspace.init();
   await h.workspace.startRun('重试的问题');
-  assert.deepEqual(calls.filter(({ url, init }) => url === '/api/runs' && init.method === 'POST').map(({ init }) => init.headers['X-Pi-Glink-CSRF']), ['old', 'new']);
+  assert.deepEqual(calls.filter(({ url, init }) => url === '/api/runs' && init.method === 'POST').map(({ init }) => init.headers['X-Glink-Harness-CSRF']), ['old', 'new']);
   assert.equal(calls.filter(({ url }) => url === '/api/me').length, 2);
   assert.equal(getCsrfToken(), 'new');
   assert.equal(h.dom.getElement('app-shell').hidden, false);

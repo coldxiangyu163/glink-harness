@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from pi_glink.contracts import FollowupUnavailable
-from pi_glink.events import EventBus
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import RunStore
+from glink_harness.contracts import FollowupUnavailable
+from glink_harness.events import EventBus
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import RunStore
 from test_kernel_acp_hot_path import (
     ParkableSandbox, fake_agent_command, fake_kill_by_id, make_config,
 )
@@ -18,7 +18,7 @@ from test_kernel_acp_hot_path import (
 @pytest.mark.parametrize("operation", ["sweep", "delete"])
 def test_cleanup_and_followup_admission_share_conversation_ownership(tmp_path, monkeypatch, operation):
     """An old holding snapshot must never authorize killing a running follow-up."""
-    import pi_glink.runs.resource_ledger as ledger_module
+    import glink_harness.runs.resource_ledger as ledger_module
 
     ParkableSandbox.REGISTRY.clear()
     fake_kill_by_id(monkeypatch)
@@ -126,7 +126,7 @@ def test_cleanup_and_followup_admission_share_conversation_ownership(tmp_path, m
 
 def test_slow_conversation_cleanup_does_not_lock_unrelated_admission(tmp_path, monkeypatch):
     """A waiting follow-up must not acquire the global lock before its guard."""
-    import pi_glink.runs.resource_ledger as ledger_module
+    import glink_harness.runs.resource_ledger as ledger_module
 
     ParkableSandbox.REGISTRY.clear()
     fake_kill_by_id(monkeypatch)

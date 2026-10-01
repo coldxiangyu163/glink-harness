@@ -57,4 +57,4 @@ E2B_API_KEY=… npx -y @e2b/cli template create glink-acp-worker \
 ```
 
 `glink-acp-worker` 是独立 dev 模板：生产模板 `glink-frontier-e2b` 与其任何 tag、
-pi 面模板 `pi-glink-worker` 都不在本任务的触碰范围内。
+pi 面模板 `glink-harness-worker` 都不在本任务的触碰范围内。

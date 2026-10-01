@@ -83,7 +83,7 @@ E2B 面 ACP/dsh 追问链路是每 run 一次性沙箱 + 有界回收回灌：fi
   兼容回退的继承源（无对话状态根时 `state_home` 回退旧布局），不迁移、不清理。
 - 回收内容不再含凭据副本（旧 `recovered` 镜像含、继承时 skip、收尾删除；
   对话状态根是跨轮 durable 对象，凭据副本进去就没有删除时机）。
-- E2B + ACP 面要获得通道能力需要 `PI_GLINK_EGRESS_PUBLIC_URL`（0008 已要求的
+- E2B + ACP 面要获得通道能力需要 `GLINK_EGRESS_PUBLIC_URL`（0008 已要求的
   部署义务延伸到 ACP 面；未配置时按降级链运行，不拒绝启动）。
 
 ## 理由与残留

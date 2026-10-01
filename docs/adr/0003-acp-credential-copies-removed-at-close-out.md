@@ -8,7 +8,7 @@
 
 ## 背景
 
-此前宿主注入到每 run 状态根的凭据副本（ACP 的 `PI_GLINK_ACP_CREDENTIAL_FILES` 目标、pi 的
+此前宿主注入到每 run 状态根的凭据副本（ACP 的 `GLINK_ACP_CREDENTIAL_FILES` 目标、pi 的
 `auth.json` / `web-search.json`）随 run 目录生命周期保留，收尾只扫描其值并入脱敏边界。
 
 ## 决定

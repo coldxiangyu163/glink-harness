@@ -27,12 +27,12 @@ export async function run(ctx) {
   if (runId) await openRunFromList(page, runId);
   else suite.record('报告入口：至少有一个带报告的研究', false, '没有可用的报告 run');
 
-  const reportButton = await page.$('#run-view .pi-report-button');
+  const reportButton = await page.$('#run-view .glink-report-button');
   if (!reportButton) {
     suite.record('报告入口：已完成的研究给出「打开报告」', false, 'no report button');
     return;
   }
-  await page.click('#run-view .pi-report-button');
+  await page.click('#run-view .glink-report-button');
   await page.waitForSelector('#preview-article h1', { timeout: 15_000 });
   await page.waitForTimeout(600);
   const report = await page.evaluate(() => {
@@ -90,7 +90,7 @@ export async function run(ctx) {
   await page.waitForTimeout(250);
   const dragged = await page.evaluate(() => ({
     paneW: Math.round(document.querySelector('.pane').getBoundingClientRect().width),
-    stored: localStorage.getItem('pi-glink-report-split'),
+    stored: localStorage.getItem('glink-harness-report-split'),
   }));
   suite.record(
     '分割线：可拖改宽并记住（localStorage）',
@@ -116,7 +116,7 @@ export async function run(ctx) {
   await page.waitForTimeout(250);
   const reset = await page.evaluate(() => ({
     paneW: Math.round(document.querySelector('.pane').getBoundingClientRect().width),
-    stored: localStorage.getItem('pi-glink-report-split'),
+    stored: localStorage.getItem('glink-harness-report-split'),
   }));
   suite.record('分割线：双击复位', Math.abs(reset.paneW - report.paneW) <= 2 && reset.stored === null, reset);
 
@@ -222,7 +222,7 @@ export async function run(ctx) {
   // The panel took the slot, so reopen the report and test its close contract
   // on its own.
   if (!escaped.reportStillOpen) {
-    await page.click('#run-view .pi-report-button');
+    await page.click('#run-view .glink-report-button');
     await page.waitForSelector('#preview-article h1', { timeout: 15_000 });
     await page.waitForTimeout(400);
   }

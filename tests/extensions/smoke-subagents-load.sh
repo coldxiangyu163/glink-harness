@@ -6,7 +6,7 @@
 #   3. 守卫扩展在同一个 pi 进程内可 import，且三条最小自检通过（async 改写为前台、
 #      控制动作阻止、只读动作放行）。
 #
-# 不调用模型、不访问网络、不读写用户 ~/.pi 或 ~/.pi-glink：pi-subagents 用
+# 不调用模型、不访问网络、不读写用户 ~/.pi 或 ~/.glink-harness：pi-subagents 用
 # PI_SUBAGENTS_ROOT 指向的本地副本（离线）；模型只用占位 models.json（无 apiKey）。
 #
 # 用法：
@@ -17,12 +17,12 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-pi_bin="${1:-${PI_GLINK_PI_BIN:-$(command -v pi || true)}}"
+pi_bin="${1:-${GLINK_PI_BIN:-$(command -v pi || true)}}"
 subagents_root="${PI_SUBAGENTS_ROOT:-/tmp/glink-sub2/prefix/node_modules/pi-subagents}"
 python="${PYTHON:-$(command -v python3 || true)}"
 
 if [[ -z "$pi_bin" || ! -x "$pi_bin" ]]; then
-  echo "[FAIL] 找不到可执行的 pi（args/PI_GLINK_PI_BIN）；离线冒烟需要本机 pi。" >&2
+  echo "[FAIL] 找不到可执行的 pi（args/GLINK_PI_BIN）；离线冒烟需要本机 pi。" >&2
   exit 2
 fi
 if [[ ! -f "$subagents_root/package.json" ]]; then
@@ -35,7 +35,7 @@ if [[ -z "$python" ]]; then
   exit 2
 fi
 
-scratch="$(mktemp -d "${TMPDIR:-/tmp}/pi-glink-subagents-smoke.XXXXXXXX")"
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/glink-harness-subagents-smoke.XXXXXXXX")"
 probe_pid=""
 cleanup() {
   # 只清理本脚本记录的 PID（禁止宽匹配 pkill）。
@@ -93,8 +93,8 @@ env -i \
   "PI_CODING_AGENT_SESSION_DIR=$scratch/sessions" \
   "PI_SKIP_VERSION_CHECK=1" \
   "PI_TELEMETRY=0" \
-  "PI_GLINK_PROBE_OUT=$scratch/inventory.json" \
-  "PI_GLINK_GUARD_MODULE=$agent_dir/extensions/subagent-foreground-guard.ts" \
+  "GLINK_PROBE_OUT=$scratch/inventory.json" \
+  "GLINK_GUARD_MODULE=$agent_dir/extensions/subagent-foreground-guard.ts" \
   "$pi_bin" --mode rpc --no-session --name smoke --provider frontier --model smoke/model \
   >"$scratch/stdout.txt" 2>"$scratch/stderr.txt" &
 probe_pid=$!

@@ -14,11 +14,11 @@ cd "$REPO_ROOT"
 export PYTHONPATH="$REPO_ROOT/host${PYTHONPATH:+:$PYTHONPATH}"
 
 if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
-  exec "$REPO_ROOT/.venv/bin/python" -m pi_glink.app "$@"
+  exec "$REPO_ROOT/.venv/bin/python" -m glink_harness.app "$@"
 fi
 
 if command -v uv >/dev/null 2>&1; then
-  exec uv run python -m pi_glink.app "$@"
+  exec uv run python -m glink_harness.app "$@"
 fi
 
-exec python3 -m pi_glink.app "$@"
+exec python3 -m glink_harness.app "$@"

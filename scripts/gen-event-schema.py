@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render the product event schema into the front-end's generated module.
 
-Source: ``host/pi_glink/event_schema.py`` (the single declaration).
+Source: ``host/glink_harness/event_schema.py`` (the single declaration).
 Output: ``web/modules/event-schema.gen.mjs`` (never edited by hand).
 
     python scripts/gen-event-schema.py            # rewrite the output
@@ -19,7 +19,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "host"))
 
-from pi_glink import event_schema  # noqa: E402
+from glink_harness import event_schema  # noqa: E402
 
 DEFAULT_OUTPUT = REPO_ROOT / "web/modules/event-schema.gen.mjs"
 
@@ -57,7 +57,7 @@ def render() -> str:
     document = event_schema.schema_document()
     events = document["events"]
     lines = [
-        "// 生成文件，勿手改。来源：host/pi_glink/event_schema.py",
+        "// 生成文件，勿手改。来源：host/glink_harness/event_schema.py",
         "// 重新生成：python scripts/gen-event-schema.py；scripts/check.sh 以 --check 校验它是最新的。",
         "",
     ]

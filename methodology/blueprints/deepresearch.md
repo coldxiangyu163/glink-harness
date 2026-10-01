@@ -2,7 +2,7 @@
 # 方法论蓝图（GLINK-ARCH-6 起是方法论的唯一真源）。原名 deep-research（GLINK-ACP-10），
 # 2026-09-27 改名 deepresearch，与用户已习惯的 /deepresearch 斜杠命令一致；
 # 原 pi 的 prompts/deepresearch.md 模板已删除，规范性要求与本蓝图逐条对应。
-format = "pi-glink-blueprint/v1"
+format = "glink-harness-blueprint/v1"
 name = "deepresearch"
 description = "严格深入研究：按阶段取证与覆盖声明，交付工作区 report.md 与末尾「来源与核查」。"
 

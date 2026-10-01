@@ -34,30 +34,30 @@ from typing import Any, Mapping
 
 import pytest
 
-from pi_glink.config import HostConfig, build_config
+from glink_harness.config import HostConfig, build_config
 
 from acp_pack import apply_acp_pack, write_acp_pack
-from pi_glink.events import EventBus
-from pi_glink.kernel.acp_env import INHERIT_MAX_FILE_BYTES
-from pi_glink.kernel.acp_execution import (
+from glink_harness.events import EventBus
+from glink_harness.kernel.acp_env import INHERIT_MAX_FILE_BYTES
+from glink_harness.kernel.acp_execution import (
     LOAD_METHOD,
     RESUME_METHOD,
     AcpExecutionAdapter,
     acp_resume_method,
 )
-from pi_glink.kernel.acp_rpc import AcpError
-from pi_glink.kernel.execution import ExecutionAdapter, ExecutionSpec, SessionInfo
-from pi_glink.kernel.sandbox import Launch, open_sandbox
-from pi_glink.contracts import FollowupUnavailable
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import FAILED, FINISHED, RunStore, RunSpec
-from pi_glink.tenancy import TenantContext
+from glink_harness.kernel.acp_rpc import AcpError
+from glink_harness.kernel.execution import ExecutionAdapter, ExecutionSpec, SessionInfo
+from glink_harness.kernel.sandbox import Launch, open_sandbox
+from glink_harness.contracts import FollowupUnavailable
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import FAILED, FINISHED, RunStore, RunSpec
+from glink_harness.tenancy import TenantContext
 from store_helpers import events_text, finish
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"
 SESSION_ID = "fake-acp-session"
-AUDIENCE = "pi-glink-test"
+AUDIENCE = "glink-harness-test"
 SECRET = b"0123456789abcdef0123456789abcdef"
 
 
@@ -85,7 +85,7 @@ def make_config(
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_HARNESS": "acp",
+        "GLINK_HARNESS": "acp",
         "TEST_ACP_COMMAND": acp_command(tmp_path, settings or {}),
     }
     values.update(overrides)
@@ -177,7 +177,7 @@ def test_adapter_refuses_a_followup_the_agent_cannot_resume(tmp_path: Path) -> N
     }
     config = make_config(tmp_path, settings)
     runtime_dir = tmp_path / "runtime" / "acp-agent"
-    from pi_glink.kernel.acp_env import prepare_acp_runtime
+    from glink_harness.kernel.acp_env import prepare_acp_runtime
 
     runtime = prepare_acp_runtime(config, runtime_dir=runtime_dir)
     spec = ExecutionSpec(
@@ -426,7 +426,7 @@ def test_acp_inheritance_bound_failure_refuses_the_followup(
     parent = run_first_turn(manager, "第一轮")
     # Shrink the per-file bound so the test does not write 8 MiB: the constant
     # is read at call time, and the production value is asserted separately.
-    monkeypatch.setattr("pi_glink.kernel.acp_env.INHERIT_MAX_FILE_BYTES", 1024)
+    monkeypatch.setattr("glink_harness.kernel.acp_env.INHERIT_MAX_FILE_BYTES", 1024)
     assert INHERIT_MAX_FILE_BYTES > 1024
     (state_home(store, parent.run_id) / "oversized.bin").write_bytes(b"x" * 4096)
 
@@ -538,7 +538,7 @@ def _fake_acp_adapter_factory(created: list[Any]):
             )
 
         def wait(self, *, cancel, deadline):
-            from pi_glink.kernel.execution import ExecutionOutcome
+            from glink_harness.kernel.execution import ExecutionOutcome
 
             return ExecutionOutcome(settled=True)
 
@@ -546,12 +546,12 @@ def _fake_acp_adapter_factory(created: list[Any]):
             pass
 
         def recover_artifacts(self, destination):
-            from pi_glink.kernel.execution import ArtifactRecovery
+            from glink_harness.kernel.execution import ArtifactRecovery
 
             return ArtifactRecovery()
 
         def close(self):
-            from pi_glink.kernel.execution import CleanupReport
+            from glink_harness.kernel.execution import CleanupReport
 
             return CleanupReport(released=True)
 
@@ -581,20 +581,20 @@ def test_acp_followup_refuses_a_parent_owned_by_another_tenant(
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_PORT": "0",
         "LOCAL_WEB_EXECUTOR": "docker",
-        "PI_GLINK_TENANCY": "multitenant",
-        "PI_GLINK_MODEL_CREDENTIALS": "shared",
-        "PI_GLINK_ACP_ENV": "FAKE_ACP_KEY=sk-acp-shared-000000000000",
-        "PI_GLINK_GATEWAY_SECRET_FILE": str(secret_file),
-        "PI_GLINK_TENANCY_AUDIENCE": AUDIENCE,
+        "GLINK_TENANCY": "multitenant",
+        "GLINK_MODEL_CREDENTIALS": "shared",
+        "GLINK_ACP_ENV": "FAKE_ACP_KEY=sk-acp-shared-000000000000",
+        "GLINK_GATEWAY_SECRET_FILE": str(secret_file),
+        "GLINK_TENANCY_AUDIENCE": AUDIENCE,
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "60",
-        "PI_GLINK_HARNESS": "dsh",
-        "PI_GLINK_HARNESSES_DIR": str(write_acp_pack(tmp_path, acp_command(tmp_path, {}))),
+        "GLINK_HARNESS": "dsh",
+        "GLINK_HARNESSES_DIR": str(write_acp_pack(tmp_path, acp_command(tmp_path, {}))),
     }
     config = build_config(values, REPO_ROOT)
     store = RunStore(config.data_root / "runs")
     created: list[Any] = []
     monkeypatch.setattr(
-        "pi_glink.kernel.harness_acp.AcpExecutionAdapter", _fake_acp_adapter_factory(created)
+        "glink_harness.kernel.harness_acp.AcpExecutionAdapter", _fake_acp_adapter_factory(created)
     )
     manager = RunManager(config, EventBus(), store)
     alpha = TenantContext(
@@ -674,14 +674,14 @@ def test_followup_reinjects_a_credential_copy_the_parent_teardown_deleted(
     _config, store, manager = build_manager(
         tmp_path,
         settings,
-        PI_GLINK_ACP_CREDENTIAL_FILES=f"{source}=state/credentials.json",
+        GLINK_ACP_CREDENTIAL_FILES=f"{source}=state/credentials.json",
     )
     parent = run_first_turn(manager, "第一轮：先看一下工作区")
     parent_copy = state_home(store, parent.run_id) / "state" / "credentials.json"
     assert not parent_copy.exists(), "父 run 的注入副本已在收尾删除"
 
     # 子 run 的收尾删除前确认副本存在（即已从源重新注入），同时记录它被删。
-    from pi_glink.artifacts import ArtifactTree
+    from glink_harness.artifacts import ArtifactTree
 
     removals: list[tuple[str, str, bool]] = []
     original_remove = ArtifactTree.remove

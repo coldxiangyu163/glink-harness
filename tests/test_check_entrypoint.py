@@ -154,13 +154,13 @@ def test_checks_use_disposable_environment_and_report_optional_scope(tmp_path: P
     assert calls[1][5:] == ["host", "scripts", "tests"]
     assert calls[2][:3] == ["-m", "mypy", "--cache-dir"]
     assert calls[2][3].endswith("mypy-cache")
-    assert calls[2][4:] == ["host/pi_glink"]
+    assert calls[2][4:] == ["host/glink_harness"]
     assert len(calls) == 5
     assert calls[4] == ["scripts/check-coverage.py"]
     pytest_args = calls[3]
     assert pytest_args[:3] == ["-m", "pytest", "tests"]
     assert "pytest_cov" in pytest_args
-    assert "--cov=host/pi_glink" in pytest_args
+    assert "--cov=host/glink_harness" in pytest_args
     assert "--cov-report=" in pytest_args
     assert "--deselect=tests/test_ui_tokens.py::test_ui_tokens_match_standard_library" in pytest_args
     assert "no:cacheprovider" in pytest_args

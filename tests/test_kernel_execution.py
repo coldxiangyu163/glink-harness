@@ -26,9 +26,9 @@ from typing import Any, Callable, Mapping
 import pytest
 
 from harness_helpers import test_egress
-from pi_glink.config import build_config
-from pi_glink.events import EventBus
-from pi_glink.kernel.execution import (
+from glink_harness.config import build_config
+from glink_harness.events import EventBus
+from glink_harness.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
     ExecutionAdapter,
@@ -37,11 +37,11 @@ from pi_glink.kernel.execution import (
     PiExecutionAdapter,
     SessionInfo,
 )
-from pi_glink.kernel.harness import select_family
-from pi_glink.kernel.sandbox import DockerSandbox, E2BSandbox, open_sandbox
-from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import FINISHED, RunStore
+from glink_harness.kernel.harness import select_family
+from glink_harness.kernel.sandbox import DockerSandbox, E2BSandbox, open_sandbox
+from glink_harness.kernel.rpc import PiRpcClient
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import FINISHED, RunStore
 
 from e2b_fake import FakeSandbox
 from store_helpers import events_text
@@ -116,7 +116,7 @@ def test_the_manager_drives_every_face_through_the_same_protocol(
     config, store, manager = make_manager(tmp_path)
     adapter = RecordingAdapter()
     monkeypatch.setattr(
-        "pi_glink.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter
+        "glink_harness.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter
     )
 
     record = manager.start("统一接口")
@@ -153,7 +153,7 @@ def test_cancellation_goes_through_the_adapter_not_a_face_branch(
 
     adapter.wait = slow_wait  # type: ignore[method-assign]
     monkeypatch.setattr(
-        "pi_glink.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter
+        "glink_harness.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter
     )
 
     record = manager.start("取消走适配器")
@@ -176,7 +176,7 @@ def _run_face(tmp_path: Path, executor: str, monkeypatch: pytest.MonkeyPatch) ->
         # the stand-in CommandHandle (the ACP face's FakeAgentHandle shape);
         # only the carrier differs, the protocol drive is shared.
         overrides["E2B_API_KEY"] = "e2b-secret"
-        overrides["PI_GLINK_EGRESS_PUBLIC_URL"] = "https://egress.example.test"
+        overrides["GLINK_EGRESS_PUBLIC_URL"] = "https://egress.example.test"
         sandbox_factory = lambda **_: FakeSandbox(  # noqa: E731
             tmp_path / "sandbox-root",
             report=None,
@@ -184,9 +184,9 @@ def _run_face(tmp_path: Path, executor: str, monkeypatch: pytest.MonkeyPatch) ->
         )
     else:
         sandbox_factory = None
-        monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
+        monkeypatch.setattr("glink_harness.kernel.sandbox.docker_available", lambda: True)
         monkeypatch.setattr(
-            "pi_glink.kernel.sandbox.subprocess.run",
+            "glink_harness.kernel.sandbox.subprocess.run",
             lambda *args, **kwargs: type("R", (), {"returncode": 0, "stderr": ""})(),
         )
     config = make_config(tmp_path, **overrides)
@@ -201,7 +201,7 @@ def _run_face(tmp_path: Path, executor: str, monkeypatch: pytest.MonkeyPatch) ->
         if executor == "docker":
             # The container face has no host cwd; the stand-in must write into
             # the run's workspace so the recovery path sees a real artifact.
-            match = re.search(r"pi-glink-([0-9a-f]{12})", " ".join(argv))
+            match = re.search(r"glink-harness-([0-9a-f]{12})", " ".join(argv))
             assert match is not None, argv
             cwd = config.workspace_root / match.group(1)
             cwd.mkdir(parents=True, exist_ok=True)
@@ -279,7 +279,7 @@ def test_the_adapter_is_the_family_driver_over_the_frozen_executor_sandbox(
     """
     # The host is configured for docker; the frozen executor decides the face.
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
-    from pi_glink.kernel import agent_env
+    from glink_harness.kernel import agent_env
 
     runtime = agent_env.prepare_agent_dir(
         config,
@@ -310,7 +310,7 @@ def test_the_adapter_is_the_family_driver_over_the_frozen_executor_sandbox(
     assert isinstance(docker, DockerSandbox)
     assert isinstance(adapter, PiExecutionAdapter)
     assert adapter.kind == "docker"
-    assert adapter.identity() == {"container": "pi-glink-abc123"}
+    assert adapter.identity() == {"container": "glink-harness-abc123"}
 
     e2b = sandbox("e2b", sandbox_factory=lambda **_: FakeSandbox())
     e2b_adapter = family.build_adapter(

@@ -34,8 +34,8 @@ import { reportFileName, researchTitle } from './present.mjs';
 const MAX_PROMPT = 32000;
 /** The counter is noise while typing; it appears only near the limit. */
 const COUNT_FROM = 30000;
-const SIDEBAR_KEY = 'pi-glink-sidebar';
-const SPLIT_KEY = 'pi-glink-report-split';
+const SIDEBAR_KEY = 'glink-harness-sidebar';
+const SPLIT_KEY = 'glink-harness-report-split';
 /** A dropped stream gets this long to come back before the reader is told. */
 const RECONNECT_GRACE_MS = 4000;
 const CONVERSATION_MIN = 560;
@@ -624,12 +624,12 @@ export function createWorkspace({ api = createApi(), eventSourceFactory, auth = 
     }
     for (const ancestor of ancestors) {
       const exchange = document.createElement('section');
-      exchange.className = 'pi-exchange';
+      exchange.className = 'glink-exchange';
       const pastQuestion = document.createElement('article');
-      pastQuestion.className = 'pi-question message user-message';
+      pastQuestion.className = 'glink-question message user-message';
       pastQuestion.textContent = ancestor.prompt;
       const pastRoot = document.createElement('div');
-      pastRoot.className = 'pi-run';
+      pastRoot.className = 'glink-run';
       exchange.append(pastQuestion, pastRoot);
       earlierTurns.append(exchange);
       const past = { runId: ancestor.runId, model: createRunState(ancestor), feed: null,

@@ -5,9 +5,9 @@ import json
 
 import pytest
 
-from pi_glink.events import EventBus
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import FAILED, FINISHED, RunStore
+from glink_harness.events import EventBus
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import FAILED, FINISHED, RunStore
 from test_dsh_session_config import (
     DEFAULT_MODEL, MODEL_OPTIONS, REASONING_OPTION, TARGET_MODEL, wired_config,
 )
@@ -101,7 +101,7 @@ def test_repaired_resume_still_applies_model_before_prompt(tmp_path, unknown):
 
 
 def test_annotation_preserves_every_field_and_is_byte_idempotent(tmp_path, caplog, capsys):
-    from pi_glink.kernel.acp_state_compat import annotate_v3_log, repair_resume_home
+    from glink_harness.kernel.acp_state_compat import annotate_v3_log, repair_resume_home
 
     home = tmp_path / "home"
     path, before = seed(home)
@@ -132,7 +132,7 @@ def test_annotation_preserves_every_field_and_is_byte_idempotent(tmp_path, caplo
 
 @pytest.mark.parametrize("case", ["truncated", "checksum", "bad-json", "duplicate", "false-flag", "header-frame"])
 def test_malformed_log_is_not_reinterpreted_or_published(tmp_path, case):
-    from pi_glink.kernel.acp_state_compat import AcpStateCompatError, repair_resume_home
+    from glink_harness.kernel.acp_state_compat import AcpStateCompatError, repair_resume_home
 
     home = tmp_path / "home"
     path, data = seed(home)
@@ -158,7 +158,7 @@ def test_malformed_log_is_not_reinterpreted_or_published(tmp_path, case):
 
 
 def test_decoder_bounds_apply_to_all_concatenated_frames(tmp_path):
-    from pi_glink.kernel.acp_state_compat import AcpStateCompatError, annotate_v3_log
+    from glink_harness.kernel.acp_state_compat import AcpStateCompatError, annotate_v3_log
 
     data = compressed(rows())
     with pytest.raises(AcpStateCompatError, match="上限"):
@@ -168,7 +168,7 @@ def test_decoder_bounds_apply_to_all_concatenated_frames(tmp_path):
 @pytest.mark.parametrize("link_at", [".dsh", ".dsh/sessions", ".dsh/sessions/--workspace--/s",
                                     RELATIVE])
 def test_local_links_never_read_or_rewrite_the_target(tmp_path, link_at, monkeypatch):
-    from pi_glink.kernel import acp_state_compat as compat
+    from glink_harness.kernel import acp_state_compat as compat
 
     outside = tmp_path / "outside"
     target, data = seed(outside)
@@ -182,7 +182,7 @@ def test_local_links_never_read_or_rewrite_the_target(tmp_path, link_at, monkeyp
 
 
 def test_unrelated_formats_and_paths_are_not_repaired(tmp_path, monkeypatch):
-    from pi_glink.kernel import acp_state_compat as compat
+    from glink_harness.kernel import acp_state_compat as compat
 
     home = tmp_path / "home"
     for relative in (".codex/sessions/session.v3.jsonl.zstd", "other/session.v3.jsonl.zstd",
@@ -195,7 +195,7 @@ def test_unrelated_formats_and_paths_are_not_repaired(tmp_path, monkeypatch):
 
 
 def test_non_v3_header_and_already_marked_log_keep_original_bytes():
-    from pi_glink.kernel.acp_state_compat import annotate_v3_log
+    from glink_harness.kernel.acp_state_compat import annotate_v3_log
 
     events = rows()
     events[0]["version"] = 4
@@ -238,8 +238,8 @@ class CompatCommands:
 
 @pytest.mark.parametrize("path_kind", ["files", "archive", "hot"])
 def test_remote_repair_precedes_spawn_for_cold_and_reboot_paths(tmp_path, path_kind):
-    from pi_glink.kernel.acp_e2b_env import SANDBOX_ACP_HOME
-    from pi_glink.kernel.conversation_lease import read_lease
+    from glink_harness.kernel.acp_e2b_env import SANDBOX_ACP_HOME
+    from glink_harness.kernel.conversation_lease import read_lease
     from test_kernel_acp_hot_path import ParkableSandbox
 
     log = tmp_path / "remote-agent.jsonl"
@@ -249,8 +249,8 @@ def test_remote_repair_precedes_spawn_for_cold_and_reboot_paths(tmp_path, path_k
         "FAKE_ACP_CONFIG_OPTIONS": MODEL_OPTIONS + [REASONING_OPTION],
     }, env={
         "LOCAL_WEB_EXECUTOR": "e2b", "E2B_API_KEY": "e2b-synthetic-key",
-        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test" if path_kind != "files" else "",
-        "PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS": "7200" if path_kind == "hot" else "0",
+        "GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test" if path_kind != "files" else "",
+        "GLINK_CONVERSATION_LEASE_TTL_SECONDS": "7200" if path_kind == "hot" else "0",
     })
     store = RunStore(config.data_root / "runs")
     sandboxes = []
@@ -278,7 +278,7 @@ def test_remote_repair_precedes_spawn_for_cold_and_reboot_paths(tmp_path, path_k
     original_manifest = manifest.read_bytes() if manifest.exists() else None
     # Observe the boundary after start's compatibility, before prompt/recovery
     # can normally publish this new run. Authority must still be unchanged.
-    from pi_glink.kernel.acp_execution import AcpExecutionAdapter
+    from glink_harness.kernel.acp_execution import AcpExecutionAdapter
     real_deliver = AcpExecutionAdapter.deliver_input
 
     def deliver(adapter):
@@ -322,12 +322,12 @@ def test_remote_repair_precedes_spawn_for_cold_and_reboot_paths(tmp_path, path_k
 @pytest.mark.parametrize("pack", ["codex", "opencode"])
 def test_other_packs_do_not_run_dsh_compatibility(tmp_path, monkeypatch, pack):
     from acp_pack import write_acp_pack
-    from pi_glink.config import build_config
-    from pi_glink.kernel import acp_execution
+    from glink_harness.config import build_config
+    from glink_harness.kernel import acp_execution
     from test_kernel_acp_runner import acp_command, REPO_ROOT
 
     packs = write_acp_pack(tmp_path, acp_command(tmp_path, {}), name=pack)
-    config = build_config({"PI_GLINK_HARNESS": pack, "PI_GLINK_HARNESSES_DIR": str(packs),
+    config = build_config({"GLINK_HARNESS": pack, "GLINK_HARNESSES_DIR": str(packs),
                            "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data")}, REPO_ROOT)
     monkeypatch.setattr(acp_execution, "repair_resume_home",
                         lambda *_args, **_kw: pytest.fail("non-dsh compatibility"))
@@ -345,8 +345,8 @@ def test_other_packs_do_not_run_dsh_compatibility(tmp_path, monkeypatch, pack):
 
 
 def test_remote_failed_atomic_publish_leaves_original_and_cleans_only_scratch(tmp_path, monkeypatch):
-    from pi_glink.kernel.acp_e2b_env import SANDBOX_ACP_HOME
-    from pi_glink.kernel.acp_state_compat import AcpStateCompatError, repair_resume_home
+    from glink_harness.kernel.acp_e2b_env import SANDBOX_ACP_HOME
+    from glink_harness.kernel.acp_state_compat import AcpStateCompatError, repair_resume_home
     from test_kernel_acp_hot_path import ParkableSandbox
     from test_kernel_acp_e2b import _Result
 
@@ -365,7 +365,7 @@ def test_remote_failed_atomic_publish_leaves_original_and_cleans_only_scratch(tm
 
 def test_codec_failure_discards_process_output_without_logging_payload(monkeypatch, caplog, capsys):
     from types import SimpleNamespace
-    from pi_glink.kernel import acp_state_compat as compat
+    from glink_harness.kernel import acp_state_compat as compat
 
     private = b"session-body-must-not-be-logged https://private.example/source"
     monkeypatch.setattr(compat.subprocess, "run", lambda *_a, **_k:

@@ -15,7 +15,7 @@ from typing import Any, Mapping
 
 import pytest
 
-from pi_glink.kernel import PiRpcClient, PiRpcTimeout, project_event
+from glink_harness.kernel import PiRpcClient, PiRpcTimeout, project_event
 
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
 FRAMING_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "lf-framing.json"
@@ -242,7 +242,7 @@ def test_subagent_tool_card_projects_bounded_args_and_redacts_output() -> None:
     是空白字符串。新义务（2026-09-24 真机 A/B/C 对比发现）：对象元素按**紧凑 JSON 文本**
     投影，仍是「有界字符串数组」契约下的一项，前端据此显示派了哪些 agent、各自做什么。
     """
-    from pi_glink.redaction import SecretRedactor
+    from glink_harness.redaction import SecretRedactor
 
     secret = "sk-subagent0123456789abcdef"
     redactor = SecretRedactor([secret])
@@ -401,7 +401,7 @@ def test_an_unterminated_flood_is_bounded_and_kills_the_agent(
     新义务：未结束记录超过 ``MAX_RECORD_BYTES`` 即中止读取、杀掉进程并记录
     ``protocol_error``；完整的合法帧照常处理。
     """
-    from pi_glink.kernel import acp_rpc, framing, rpc
+    from glink_harness.kernel import acp_rpc, framing, rpc
 
     monkeypatch.setattr(framing, "MAX_RECORD_BYTES", 256 * 1024)
     frames: list = []
@@ -420,7 +420,7 @@ def test_an_unterminated_flood_is_bounded_and_kills_the_agent(
 
 
 def test_complete_records_never_trip_the_bound() -> None:
-    from pi_glink.kernel.framing import check_pending_record, split_lf_records
+    from glink_harness.kernel.framing import check_pending_record, split_lf_records
 
     records, tail = split_lf_records(b"a" * 100 + b"\n" + b"b" * 10)
     check_pending_record(tail, limit=10)  # the complete 100-byte record left the tail

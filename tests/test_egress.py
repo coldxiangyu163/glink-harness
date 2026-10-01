@@ -20,14 +20,14 @@ from typing import Any
 
 import pytest
 
-from pi_glink.config import ConfigError, build_config
-from pi_glink.egress import EgressProxy, EgressQuota, normalize_usage
-from pi_glink.events import EventBus
-from pi_glink.kernel.harness import select_family
-from pi_glink.kernel.sandbox import SANDBOXES
-from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import RunStore
+from glink_harness.config import ConfigError, build_config
+from glink_harness.egress import EgressProxy, EgressQuota, normalize_usage
+from glink_harness.events import EventBus
+from glink_harness.kernel.harness import select_family
+from glink_harness.kernel.sandbox import SANDBOXES
+from glink_harness.kernel.rpc import PiRpcClient
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import RunStore
 
 from harness_helpers import compose_launch, execution_spec, test_egress
 
@@ -239,7 +239,7 @@ def test_a_revoked_token_is_refused_and_the_idle_listener_closes(
 def test_a_fixed_port_rebinds_right_after_the_last_grant_is_revoked(
     upstream: FakeUpstream,
 ) -> None:
-    # A public URL pins PI_GLINK_EGRESS_PORT, so back-to-back runs revoke and
+    # A public URL pins GLINK_EGRESS_PORT, so back-to-back runs revoke and
     # re-issue on the same port; the old socket must be closed by then.
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     probe.bind(("127.0.0.1", 0))
@@ -445,22 +445,22 @@ def _values(tmp_path: Path, **overrides: str) -> dict[str, str]:
 
 
 def test_config_fails_closed_when_a_face_cannot_reach_the_proxy(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="PI_GLINK_EGRESS_PUBLIC_URL"):
+    with pytest.raises(ConfigError, match="GLINK_EGRESS_PUBLIC_URL"):
         build_config(_values(tmp_path, LOCAL_WEB_EXECUTOR="e2b", E2B_API_KEY="e2b-x"), REPO_ROOT)
     with pytest.raises(ConfigError, match="https"):
         build_config(
-            _values(tmp_path, LOCAL_WEB_EXECUTOR="docker", PI_GLINK_WEB_SEARCH_KEY=SEARCH_KEY),
+            _values(tmp_path, LOCAL_WEB_EXECUTOR="docker", GLINK_WEB_SEARCH_KEY=SEARCH_KEY),
             REPO_ROOT,
         )
     with pytest.raises(ConfigError, match="https"):
         build_config(
-            _values(tmp_path, PI_GLINK_EGRESS_PUBLIC_URL="http://egress.example.test"), REPO_ROOT
+            _values(tmp_path, GLINK_EGRESS_PUBLIC_URL="http://egress.example.test"), REPO_ROOT
         )
-    with pytest.raises(ConfigError, match="PI_GLINK_EGRESS_PORT"):
-        build_config(_values(tmp_path, PI_GLINK_EGRESS_PORT="70000"), REPO_ROOT)
-    with pytest.raises(ConfigError, match="PI_GLINK_WEB_SEARCH_UPSTREAM"):
+    with pytest.raises(ConfigError, match="GLINK_EGRESS_PORT"):
+        build_config(_values(tmp_path, GLINK_EGRESS_PORT="70000"), REPO_ROOT)
+    with pytest.raises(ConfigError, match="GLINK_WEB_SEARCH_UPSTREAM"):
         build_config(
-            _values(tmp_path, PI_GLINK_WEB_SEARCH_UPSTREAM="https://user:pw@exa.example"), REPO_ROOT
+            _values(tmp_path, GLINK_WEB_SEARCH_UPSTREAM="https://user:pw@exa.example"), REPO_ROOT
         )
     # Adjacent legal inputs: Docker without a search key, Docker with an https
     # public URL, E2B with one, and a loopback http public URL.
@@ -469,8 +469,8 @@ def test_config_fails_closed_when_a_face_cannot_reach_the_proxy(tmp_path: Path) 
         _values(
             tmp_path,
             LOCAL_WEB_EXECUTOR="docker",
-            PI_GLINK_WEB_SEARCH_KEY=SEARCH_KEY,
-            PI_GLINK_EGRESS_PUBLIC_URL="https://egress.example.test",
+            GLINK_WEB_SEARCH_KEY=SEARCH_KEY,
+            GLINK_EGRESS_PUBLIC_URL="https://egress.example.test",
         ),
         REPO_ROOT,
     )
@@ -479,12 +479,12 @@ def test_config_fails_closed_when_a_face_cannot_reach_the_proxy(tmp_path: Path) 
             tmp_path,
             LOCAL_WEB_EXECUTOR="e2b",
             E2B_API_KEY="e2b-x",
-            PI_GLINK_EGRESS_PUBLIC_URL="https://egress.example.test/",
+            GLINK_EGRESS_PUBLIC_URL="https://egress.example.test/",
         ),
         REPO_ROOT,
     )
     assert e2b.egress_public_url == "https://egress.example.test"
-    local = build_config(_values(tmp_path, PI_GLINK_EGRESS_PUBLIC_URL="http://127.0.0.1:8900"), REPO_ROOT)
+    local = build_config(_values(tmp_path, GLINK_EGRESS_PUBLIC_URL="http://127.0.0.1:8900"), REPO_ROOT)
     assert local.egress_public_url == "http://127.0.0.1:8900"
 
 
@@ -498,10 +498,10 @@ def test_each_face_names_its_own_route_to_the_proxy(tmp_path: Path) -> None:
     assert _sandbox(config, "docker", tmp_path).egress_origin(4321) == "http://host.docker.internal:4321"
     # A config built without the public URL (bypassing the startup gate) still
     # cannot hand an E2B run a route: the sandbox layer refuses on its own.
-    with pytest.raises(ConfigError, match="PI_GLINK_EGRESS_PUBLIC_URL"):
+    with pytest.raises(ConfigError, match="GLINK_EGRESS_PUBLIC_URL"):
         _sandbox(config, "e2b", tmp_path).egress_origin(4321)
     public = build_config(
-        _values(tmp_path, PI_GLINK_EGRESS_PUBLIC_URL="https://egress.example.test"), REPO_ROOT
+        _values(tmp_path, GLINK_EGRESS_PUBLIC_URL="https://egress.example.test"), REPO_ROOT
     )
     for kind in ("inproc", "docker", "e2b"):
         assert _sandbox(public, kind, tmp_path).egress_origin(4321) == "https://egress.example.test"
@@ -513,7 +513,7 @@ def test_the_docker_run_maps_the_host_gateway_and_carries_no_key(tmp_path: Path)
     workspace = tmp_path / "ws"
     workspace.mkdir()
     run_dir = tmp_path / "runs" / "run-1"
-    from pi_glink.kernel.agent_env import prepare_agent_dir
+    from glink_harness.kernel.agent_env import prepare_agent_dir
 
     runtime = prepare_agent_dir(
         config,
@@ -578,8 +578,8 @@ def test_a_run_calls_the_model_and_search_through_the_proxy_end_to_end(
         _values(
             tmp_path,
             OPENAI_BASE_URL=f"{upstream.origin}/v1",
-            PI_GLINK_WEB_SEARCH_KEY=SEARCH_KEY,
-            PI_GLINK_WEB_SEARCH_UPSTREAM=f"{upstream.origin}/exa",
+            GLINK_WEB_SEARCH_KEY=SEARCH_KEY,
+            GLINK_WEB_SEARCH_UPSTREAM=f"{upstream.origin}/exa",
         ),
         REPO_ROOT,
     )

@@ -19,17 +19,17 @@ from typing import Any, Mapping
 
 import pytest
 
-from pi_glink import events
-from pi_glink.config import HostConfig, build_config
+from glink_harness import events
+from glink_harness.config import HostConfig, build_config
 
 from acp_pack import apply_acp_pack
-from pi_glink.events import EventBus
-from pi_glink.kernel.acp_child_progress import AcpChildProgressSource
-from pi_glink.kernel.acp_child_progress import ProgressFact as AcpProgressFact
-from pi_glink.kernel.acp_execution import AcpExecutionAdapter
-from pi_glink.kernel.child_progress import PiChildProgressSource
-from pi_glink.kernel.child_progress import ProgressFact as PiProgressFact
-from pi_glink.kernel.execution import (
+from glink_harness.events import EventBus
+from glink_harness.kernel.acp_child_progress import AcpChildProgressSource
+from glink_harness.kernel.acp_child_progress import ProgressFact as AcpProgressFact
+from glink_harness.kernel.acp_execution import AcpExecutionAdapter
+from glink_harness.kernel.child_progress import PiChildProgressSource
+from glink_harness.kernel.child_progress import ProgressFact as PiProgressFact
+from glink_harness.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
     ExecutionAdapter,
@@ -37,13 +37,13 @@ from pi_glink.kernel.execution import (
     ExecutionSpec,
     PiExecutionAdapter,
 )
-from pi_glink.kernel.sandbox import Launch, Sandbox, open_sandbox
-from pi_glink.kernel.child_progress import E2bChildProgressSource
-from pi_glink.runs import child_progress_observer as observer_module
-from pi_glink.runs.child_progress_observer import ChildProgressObserver
-from pi_glink.runs.runner import RunManager
-from pi_glink.runs.state import RunExecution as _Execution
-from pi_glink.store import RunStore
+from glink_harness.kernel.sandbox import Launch, Sandbox, open_sandbox
+from glink_harness.kernel.child_progress import E2bChildProgressSource
+from glink_harness.runs import child_progress_observer as observer_module
+from glink_harness.runs.child_progress_observer import ChildProgressObserver
+from glink_harness.runs.runner import RunManager
+from glink_harness.runs.state import RunExecution as _Execution
+from glink_harness.store import RunStore
 from store_helpers import events_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -195,7 +195,7 @@ def started(manager: RunManager, execution: _Execution, n: int, call_id: str, ag
 
 def progress_of(manager: RunManager, execution: _Execution) -> Any:
     """The run's progress observer, owned by its ``ChildProgressPlugin``."""
-    from pi_glink.runs.plugins import ChildProgressPlugin  # noqa: PLC0415
+    from glink_harness.runs.plugins import ChildProgressPlugin  # noqa: PLC0415
 
     plugin = next(
         p for p in manager._pipeline.plugins(execution) if isinstance(p, ChildProgressPlugin)  # noqa: SLF001
@@ -324,7 +324,7 @@ def test_acp_adapter_has_no_source_without_zstandard(
 ) -> None:
     """zstandard 缺失时该面如实无进度，不报错（可选依赖降级路径）。"""
     monkeypatch.setattr(
-        "pi_glink.kernel.acp_execution.acp_progress_available", lambda: False
+        "glink_harness.kernel.acp_execution.acp_progress_available", lambda: False
     )
     adapter = _acp_adapter(_acp_spec(tmp_path, SimpleNamespace(home=tmp_path / "acp-home")), "inproc")
 
@@ -583,7 +583,7 @@ def test_a_failing_source_factory_is_one_warning_not_a_crash(tmp_path: Path) -> 
 def test_acp_facts_map_by_call_id(tmp_path: Path) -> None:
     """ACP 族：fact 的 call_id 精确命中 started 事件的 toolCallId 才投影。"""
     manager, store = build_manager(
-        tmp_path, PI_GLINK_HARNESS="acp", TEST_ACP_COMMAND="dsh"
+        tmp_path, GLINK_HARNESS="acp", TEST_ACP_COMMAND="dsh"
     )
     child = "e3282967-2222-4222-8222-222222222222"
     source = FakeSource(

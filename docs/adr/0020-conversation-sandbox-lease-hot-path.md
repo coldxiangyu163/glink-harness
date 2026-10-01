@@ -46,7 +46,7 @@ E2B `pause`/`resume` **原沙箱**（热路径），宿主权威状态仍是真�
 3. **状态代数（generation）双端一致才走热路径**。每轮回收发布成功后对话代数
    +1（无租约从 1 起）；宿主把它写进两处——租约记录
    （`conversations/<根run>/lease.json`）与沙箱内标记文件
-   （`/home/user/.pi-glink-state-generation`，在状态根**外**，回收/回灌不携带）。
+   （`/home/user/.glink-harness-state-generation`，在状态根**外**，回收/回灌不携带）。
    追问重连后读沙箱标记，与租约（对话根、代数）一致才认定热缓存；不一致
    （沙箱被外部替换/重置）→ 降级。候选门禁（`harness_acp.sandbox_resume_target`）
    另要求：租约由父 run 自己泊的（`runId` 匹配，与 0018 的 manifest 新鲜度同
@@ -64,7 +64,7 @@ E2B `pause`/`resume` **原沙箱**（热路径），宿主权威状态仍是真�
    `retiredSandboxIds`（被替换但未能销毁的旧沙箱，挂账重试）。泊车成功 =
    run 的资源职责完结（终帧 `cleanup.released=true` + `cleanup.lease`），
    **不构成 resource hold**：不占并发槽位、不阻塞新 run 受理。闲置 TTL
-   `PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS`（默认 7200s：正常追问间隔分钟级，
+   `GLINK_CONVERSATION_LEASE_TTL_SECONDS`（默认 7200s：正常追问间隔分钟级，
    覆盖午休/会议节奏；0=禁用热路径，收尾直接销毁=旧行为），硬上限 24h
    （对齐 E2B Pro `set_timeout` 上限量级）启动校验拒绝越界。
 6. **对账 fail-closed 销毁**。权威追问准入、租约读改写/泊车、过期销毁与删除共享

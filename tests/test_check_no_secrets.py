@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.store import DATABASE_NAME, _SCHEMA
+from glink_harness.store import DATABASE_NAME, _SCHEMA
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "check-no-secrets.py"
@@ -39,7 +39,7 @@ def _repo_root(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     root.mkdir()
     (root / ".env").write_text(
-        f"OPENAI_API_KEY={SECRET}\nPI_GLINK_HARNESSES_DIR={REPO_ROOT / 'harnesses'}\n",
+        f"OPENAI_API_KEY={SECRET}\nGLINK_HARNESSES_DIR={REPO_ROOT / 'harnesses'}\n",
         encoding="utf-8",
     )
     return root

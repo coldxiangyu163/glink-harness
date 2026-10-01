@@ -2,7 +2,7 @@
 """ACP inproc / docker 面最小真实冒烟（GLINK-ACP-05 / M4 起，M5 扩展）。
 
 一次短题、有界超时、临时数据根、随机端口：起真实宿主进程（``python -m
-pi_glink.app``）→ ``POST /api/runs`` → 同时订阅 SSE 看流式 → 轮询终态 →
+glink_harness.app``）→ ``POST /api/runs`` → 同时订阅 SSE 看流式 → 轮询终态 →
 ``GET /api/runs/<id>/report`` 回收 ``report.md``。
 
 清理只操作已知身份：宿主进程用本脚本持有的 PID（``terminate``）；冒烟期间
@@ -209,11 +209,11 @@ def main(argv: list[str] | None = None) -> int:
     env.update(
         {
             "PYTHONPATH": str(REPO_ROOT / "host"),
-            "PI_GLINK_HARNESS": PROBE_PACK_NAME,
-            "PI_GLINK_HARNESSES_DIR": str(packs),
+            "GLINK_HARNESS": PROBE_PACK_NAME,
+            "GLINK_HARNESSES_DIR": str(packs),
             "LOCAL_WEB_DATA_ROOT": str(data_root),
             "LOCAL_WEB_TASK_TIMEOUT_SECONDS": str(args.timeout),
-            "PI_GLINK_RESOURCE_RECONCILE_SECONDS": "0",
+            "GLINK_RESOURCE_RECONCILE_SECONDS": "0",
         }
     )
     if args.executor == "docker":
@@ -228,14 +228,14 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
     if credentials:
-        env["PI_GLINK_ACP_CREDENTIAL_FILES"] = ";".join(credentials)
+        env["GLINK_ACP_CREDENTIAL_FILES"] = ";".join(credentials)
     if env_entries:
-        env["PI_GLINK_ACP_ENV"] = ";".join(env_entries)
+        env["GLINK_ACP_ENV"] = ";".join(env_entries)
 
     print("ACP M4 最小真实冒烟（inproc）")
     print("=" * 44)
     print(f"日期: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"宿主命令: python -m pi_glink.app --port {port}（harness=acp, executor={args.executor}）")
+    print(f"宿主命令: python -m glink_harness.app --port {port}（harness=acp, executor={args.executor}）")
     print(f"agent 命令: {args.agent}")
     print(f"命令级 env 名: {', '.join(name for name, _ in (e.split('=', 1) for e in env_entries)) or '（无）'}")
     print(f"权限白名单: {args.permission_allow or '（空 = fail-closed）'}")
@@ -246,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with log_path.open("w", encoding="utf-8") as log_handle:
         process = subprocess.Popen(
-            [sys.executable, "-m", "pi_glink.app", "--port", str(port)],
+            [sys.executable, "-m", "glink_harness.app", "--port", str(port)],
             cwd=str(REPO_ROOT),
             env=env,
             stdout=log_handle,

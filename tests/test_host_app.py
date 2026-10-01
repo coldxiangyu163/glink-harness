@@ -11,11 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.app import PiGlinkServer, create_server
-from pi_glink.config import ConfigError, build_config, load_config
-from pi_glink.dotenv import parse_env_file
-from pi_glink.events import RUN_STARTED, TERMINAL_EVENT_TYPES, EventBus
-from pi_glink.static_files import WebAssets
+from glink_harness.app import GlinkHarnessServer, create_server
+from glink_harness.config import ConfigError, build_config, load_config
+from glink_harness.dotenv import parse_env_file
+from glink_harness.events import RUN_STARTED, TERMINAL_EVENT_TYPES, EventBus
+from glink_harness.static_files import WebAssets
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,7 +41,7 @@ def server(tmp_path: Path):
         thread.join(timeout=5)
 
 
-def _get(server: PiGlinkServer, path: str) -> tuple[int, dict[str, str], bytes]:
+def _get(server: GlinkHarnessServer, path: str) -> tuple[int, dict[str, str], bytes]:
     port = server.server_address[1]
     request = urllib.request.Request(f"http://127.0.0.1:{port}{path}")
     try:
@@ -112,7 +112,7 @@ def test_defaults_follow_frontier_agent_naming(tmp_path: Path) -> None:
     config = build_config({}, REPO_ROOT)
     assert config.port == 7860
     assert config.executor == "inproc"
-    assert config.e2b_template == "pi-glink-worker"
+    assert config.e2b_template == "glink-harness-worker"
     assert config.agent_config_dir == REPO_ROOT / "harnesses" / "pi"
     assert config.binds_loopback is True
 
@@ -155,7 +155,7 @@ def test_process_environment_inherits_the_pi_model_metadata_keys(
 def test_process_environment_supplies_declared_acp_credential_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A key named by ``PI_GLINK_ACP_CREDENTIAL_ENV`` inherits the process environment.
+    """A key named by ``GLINK_ACP_CREDENTIAL_ENV`` inherits the process environment.
 
     原义务：``_looks_configured`` 只放行宿主自有键，声明的凭据键（如
     ``OPENROUTER_API_KEY``）被 ``load_config`` 过滤——只在进程环境提供时启动失败，
@@ -166,8 +166,8 @@ def test_process_environment_supplies_declared_acp_credential_keys(
     """
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "PI_GLINK_HARNESS=dsh\nOPENAI_MODEL=test/model\nOPENAI_REASONING_EFFORT=high\n"
-        "PI_GLINK_ACP_CREDENTIAL_ENV=OPENROUTER_API_KEY\n",
+        "GLINK_HARNESS=dsh\nOPENAI_MODEL=test/model\nOPENAI_REASONING_EFFORT=high\n"
+        "GLINK_ACP_CREDENTIAL_ENV=OPENROUTER_API_KEY\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("OPENROUTER_API_KEY", "from-env-only")
@@ -176,8 +176,8 @@ def test_process_environment_supplies_declared_acp_credential_keys(
     assert dict(config.acp_credential_env_values) == {"OPENROUTER_API_KEY": "from-env-only"}
 
     env_file.write_text(
-        "PI_GLINK_HARNESS=dsh\nOPENAI_MODEL=test/model\nOPENAI_REASONING_EFFORT=high\n"
-        "PI_GLINK_ACP_CREDENTIAL_ENV=OPENROUTER_API_KEY\nOPENROUTER_API_KEY=rotated-away\n",
+        "GLINK_HARNESS=dsh\nOPENAI_MODEL=test/model\nOPENAI_REASONING_EFFORT=high\n"
+        "GLINK_ACP_CREDENTIAL_ENV=OPENROUTER_API_KEY\nOPENROUTER_API_KEY=rotated-away\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("OPENROUTER_API_KEY", "rotated-in")
@@ -191,10 +191,10 @@ def test_process_environment_can_declare_the_acp_credential_keys(
     """The declaration itself may come from the process environment too."""
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "PI_GLINK_HARNESS=dsh\nOPENAI_MODEL=test/model\nOPENAI_REASONING_EFFORT=high\n",
+        "GLINK_HARNESS=dsh\nOPENAI_MODEL=test/model\nOPENAI_REASONING_EFFORT=high\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("PI_GLINK_ACP_CREDENTIAL_ENV", "OPENROUTER_API_KEY")
+    monkeypatch.setenv("GLINK_ACP_CREDENTIAL_ENV", "OPENROUTER_API_KEY")
     monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
     config = load_config(None, REPO_ROOT, env_file=env_file)
     assert dict(config.acp_credential_env_values) == {"OPENROUTER_API_KEY": "from-env"}
@@ -293,7 +293,7 @@ def test_terminal_event_types_are_stable() -> None:
 # -- HTTP surface -------------------------------------------------------------
 
 
-def test_health_reports_executor_and_pi_availability(server: PiGlinkServer) -> None:
+def test_health_reports_executor_and_pi_availability(server: GlinkHarnessServer) -> None:
     status, _, body = _get(server, "/api/health")
     payload = json.loads(body)
     assert status == 200
@@ -302,13 +302,13 @@ def test_health_reports_executor_and_pi_availability(server: PiGlinkServer) -> N
     assert set(payload["pi"]) == {"bin", "available"}
 
 
-def test_config_endpoint_exposes_no_secrets(server: PiGlinkServer) -> None:
+def test_config_endpoint_exposes_no_secrets(server: GlinkHarnessServer) -> None:
     status, _, body = _get(server, "/api/config")
     assert status == 200
     assert json.loads(body)["model"] == "test-model"
 
 
-def test_index_and_assets_are_served(server: PiGlinkServer) -> None:
+def test_index_and_assets_are_served(server: GlinkHarnessServer) -> None:
     status, headers, body = _get(server, "/")
     assert status == 200
     assert headers["Content-Type"].startswith("text/html")
@@ -319,20 +319,20 @@ def test_index_and_assets_are_served(server: PiGlinkServer) -> None:
     assert headers["Content-Type"].startswith("text/css")
 
 
-def test_spa_route_falls_back_to_index(server: PiGlinkServer) -> None:
+def test_spa_route_falls_back_to_index(server: GlinkHarnessServer) -> None:
     status, headers, body = _get(server, "/some/client/route")
     assert status == 200
     assert headers["Content-Type"].startswith("text/html")
     assert b"<html" in body.lower()
 
 
-def test_unknown_module_is_a_404_not_html(server: PiGlinkServer) -> None:
+def test_unknown_module_is_a_404_not_html(server: GlinkHarnessServer) -> None:
     status, headers, _ = _get(server, "/modules/missing.mjs")
     assert status == 404
     assert headers["Content-Type"].startswith("application/json")
 
 
-def test_run_event_stream_streams_frames(server: PiGlinkServer) -> None:
+def test_run_event_stream_streams_frames(server: GlinkHarnessServer) -> None:
     bus = server.bus
     bus.open_run("run-x")
     port = server.server_address[1]
@@ -351,7 +351,7 @@ def test_run_event_stream_streams_frames(server: PiGlinkServer) -> None:
         connection.close()
 
 
-def test_event_stream_for_unknown_run_is_404(server: PiGlinkServer) -> None:
+def test_event_stream_for_unknown_run_is_404(server: GlinkHarnessServer) -> None:
     status, _, body = _get(server, "/api/runs/absent/events")
     assert status == 404
     assert json.loads(body)["error"] == "unknown_run"
@@ -365,14 +365,14 @@ def test_event_stream_for_unknown_run_is_404(server: PiGlinkServer) -> None:
     [
         ("LOCAL_WEB_PORT", "-1", "LOCAL_WEB_PORT"),
         ("LOCAL_WEB_PORT", "70000", "LOCAL_WEB_PORT"),
-        ("PI_GLINK_MAX_GLOBAL_RUNS", "0", "PI_GLINK_MAX_GLOBAL_RUNS"),
-        ("PI_GLINK_MAX_TENANT_RUNS", "-1", "PI_GLINK_MAX_TENANT_RUNS"),
+        ("GLINK_MAX_GLOBAL_RUNS", "0", "GLINK_MAX_GLOBAL_RUNS"),
+        ("GLINK_MAX_TENANT_RUNS", "-1", "GLINK_MAX_TENANT_RUNS"),
         ("LOCAL_WEB_TASK_TIMEOUT_SECONDS", "0", "LOCAL_WEB_TASK_TIMEOUT_SECONDS"),
         ("OPENAI_CONTEXT_WINDOW", "0", "OPENAI_CONTEXT_WINDOW"),
         ("OPENAI_MAX_TOKENS", "-5", "OPENAI_MAX_TOKENS"),
-        ("PI_GLINK_LOGIN_MAX_ATTEMPTS", "0", "PI_GLINK_LOGIN_MAX_ATTEMPTS"),
-        ("PI_GLINK_SESSION_IDLE_SECONDS", "0", "PI_GLINK_SESSION_IDLE_SECONDS"),
-        ("PI_GLINK_ASSERTION_SKEW_SECONDS", "-1", "PI_GLINK_ASSERTION_SKEW_SECONDS"),
+        ("GLINK_LOGIN_MAX_ATTEMPTS", "0", "GLINK_LOGIN_MAX_ATTEMPTS"),
+        ("GLINK_SESSION_IDLE_SECONDS", "0", "GLINK_SESSION_IDLE_SECONDS"),
+        ("GLINK_ASSERTION_SKEW_SECONDS", "-1", "GLINK_ASSERTION_SKEW_SECONDS"),
         ("LOCAL_WEB_DOCKER_PIDS_LIMIT", "-1", "LOCAL_WEB_DOCKER_PIDS_LIMIT"),
         ("LOCAL_WEB_E2B_TIMEOUT_SECONDS", "-1", "LOCAL_WEB_E2B_TIMEOUT_SECONDS"),
     ],
@@ -394,7 +394,7 @@ def test_the_cli_revalidates_host_and_port_overrides(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A ``--host``/``--port`` override must pass the same boundary checks."""
-    from pi_glink.app import main as app_main  # noqa: PLC0415
+    from glink_harness.app import main as app_main  # noqa: PLC0415
 
     config = build_config(
         {
@@ -404,7 +404,7 @@ def test_the_cli_revalidates_host_and_port_overrides(
         },
         REPO_ROOT,
     )
-    monkeypatch.setattr("pi_glink.app.load_config", lambda: config)
+    monkeypatch.setattr("glink_harness.app.load_config", lambda: config)
 
     assert app_main(["--host", "0.0.0.0"]) == 2
     assert "loopback" in capsys.readouterr().err
@@ -428,10 +428,10 @@ def test_health_on_a_sandbox_face_does_not_probe_the_local_path(
             "LOCAL_WEB_PORT": "0",
             "OPENAI_MODEL": "test-model",
             "OPENAI_REASONING_EFFORT": "high",
-            "PI_GLINK_HARNESS": "dsh",
+            "GLINK_HARNESS": "dsh",
             "LOCAL_WEB_EXECUTOR": "e2b",
             "E2B_API_KEY": "test-e2b-key",
-            "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
+            "GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
         },
         REPO_ROOT,
     )

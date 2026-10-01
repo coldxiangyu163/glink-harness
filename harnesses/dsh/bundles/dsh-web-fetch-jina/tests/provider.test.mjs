@@ -10,7 +10,7 @@ const BASE_OPTIONS = {
   timeoutMs: 5_000,
   maxResponseBytes: 1_000_000,
   maxBodyChars: 1_000,
-  userAgent: 'pi-glink-test/0.0.1',
+  userAgent: 'glink-harness-test/0.0.1',
 }
 
 function options(overrides = {}) {
@@ -84,7 +84,7 @@ test('a successful fetch returns the seam result shape and posts the target to J
   assert.equal(calls[0].init.headers.authorization, 'Bearer test-key')
   assert.equal(calls[0].init.headers.accept, 'application/json')
   assert.equal(calls[0].init.headers['content-type'], 'application/x-www-form-urlencoded')
-  assert.equal(calls[0].init.headers['user-agent'], 'pi-glink-test/0.0.1')
+  assert.equal(calls[0].init.headers['user-agent'], 'glink-harness-test/0.0.1')
 })
 
 test('a base URL with a path keeps its path and gains one trailing slash', async () => {

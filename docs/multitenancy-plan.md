@@ -14,13 +14,13 @@
 
 | 能力 | 现状 | 实现位置 |
 |---|---|---|
-| 租户身份（gateway） | 本机认证网关注入 `X-Pi-Glink-Identity` 短时效 HMAC-SHA256 断言；宿主验签（constant-time）、校验 audience/过期/寿命 | `host/pi_glink/tenancy.py`、`web_security.py` |
-| 租户身份（accounts） | 邀请注册 + 站内登录 + SQLite 会话（只存摘要），cookie `HttpOnly`/`SameSite`，CSRF 头，停用/注销/过期即时失效；`/api/me` 与账号界面 | `host/pi_glink/accounts.py`、`auth.py`、`web_security.py`、`web/modules/{auth,account}.mjs` |
+| 租户身份（gateway） | 本机认证网关注入 `X-Glink-Harness-Identity` 短时效 HMAC-SHA256 断言；宿主验签（constant-time）、校验 audience/过期/寿命 | `host/glink_harness/tenancy.py`、`web_security.py` |
+| 租户身份（accounts） | 邀请注册 + 站内登录 + SQLite 会话（只存摘要），cookie `HttpOnly`/`SameSite`，CSRF 头，停用/注销/过期即时失效；`/api/me` 与账号界面 | `host/glink_harness/accounts.py`、`auth.py`、`web_security.py`、`web/modules/{auth,account}.mjs` |
 | 请求授权 | 多租户下除健康探测外所有 `/api/*` 验签；未认证 401、权限不足 403、未知/异租户/无 owner 同形 404；SSE 在响应头之前验权并在断言过期时结束 | `web_security.py`（RequestSecurityMixin；`app.py` 的 HostRequestHandler 只是 mixin 组合点，授权判定全部在 web_security） |
 | run 归属 | 受理时原子写 `tenant_id`/`creator_user_id`；`get_for`/`list_for` 按租户过滤；同租户 creator/admin 才能取消 | `store.py`、`runs/runner.py` |
 | 并发准入 | 仅多租户 Docker/E2B 并发，默认全局 4 / 单租户 2，原子检查与预留，超额 429，无队列；未确认释放的持有计入 owner 租户与全局槽位，并可由宿主在线自动对账释放 | `runs/runner.py::RunManager._check_admission`、`runs/resource_ledger.py::ResourceLedger._probe_resource`（_probe_resource 是台账在线对账探测，不在 runner） |
-| 租户凭据 | 默认每租户条目提供 `modelApiKey`（必需）/`webSearchKey`（可选）；显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时改为宿主冻结的一套模型凭据，且不得配置/读取租户凭据文件；ACP 族的注入通道（`PI_GLINK_ACP_ENV` / `PI_GLINK_ACP_CREDENTIAL_FILES`）视同模型凭据服从同一政策：tenant 政策下配置即拒绝启动，shared 下是 ACP 宿主的具名凭据源、缺源不启动（[ADR 0015](adr/0015-acp-credential-channels-under-model-credential-policy.md)） | `tenancy.py`、`kernel/agent_env.py`、`config.py::_acp_credentials_follow_policy` |
-| 凭据出口代理（D4） | pi 族真实 key 只在宿主进程内的出口代理里；每 run 一个绑定 `run_id`+tenant 的内存 token，终帧提交时吊销；代理按上游 `usage` 计量（pi 族权威用量）并执行每租户每 run 配额钩子；E2B 必须配置 `PI_GLINK_EGRESS_PUBLIC_URL`；ACP 族未覆盖 | `egress.py`、`runs/runner.py`、`kernel/agent_env.py`（[ADR 0008](adr/0008-egress-proxy.md)） |
+| 租户凭据 | 默认每租户条目提供 `modelApiKey`（必需）/`webSearchKey`（可选）；显式 `GLINK_MODEL_CREDENTIALS=shared` 时改为宿主冻结的一套模型凭据，且不得配置/读取租户凭据文件；ACP 族的注入通道（`GLINK_ACP_ENV` / `GLINK_ACP_CREDENTIAL_FILES`）视同模型凭据服从同一政策：tenant 政策下配置即拒绝启动，shared 下是 ACP 宿主的具名凭据源、缺源不启动（[ADR 0015](adr/0015-acp-credential-channels-under-model-credential-policy.md)） | `tenancy.py`、`kernel/agent_env.py`、`config.py::_acp_credentials_follow_policy` |
+| 凭据出口代理（D4） | pi 族真实 key 只在宿主进程内的出口代理里；每 run 一个绑定 `run_id`+tenant 的内存 token，终帧提交时吊销；代理按上游 `usage` 计量（pi 族权威用量）并执行每租户每 run 配额钩子；E2B 必须配置 `GLINK_EGRESS_PUBLIC_URL`；ACP 族未覆盖 | `egress.py`、`runs/runner.py`、`kernel/agent_env.py`（[ADR 0008](adr/0008-egress-proxy.md)） |
 | 脱敏边界 | 每 run 一个 redactor（宿主已知秘密 + 本 run 凭据），事件/日志/报告/工作区/会话/下载都经过它 | `runs/runner.py`、`redaction.py` |
 | 执行资源上限 | Docker 容器实例限 cpu/memory/pids 并降权；E2B 只限生命周期（SDK 不暴露 cpu/内存） | `kernel/docker_env.py`、`kernel/e2b_env.py` |
 | 历史数据 | 无 owner 的旧记录在多租户读面完全不可见、不迁移、不改写；本地模式按旧口径读取 | `store.py`、`web_routes.py` |
@@ -31,7 +31,7 @@
 ## 2. 身份与授权（已实现的关键决定）
 
 - **形式**：D1 选择 (a) —— 网关完成登录，宿主只信任注入断言；D1 的扩展（用户批准
-  `docs/account-experience-proposal.md`）允许显式切换 `PI_GLINK_AUTH_MODE=accounts`，由宿主内的
+  `docs/account-experience-proposal.md`）允许显式切换 `GLINK_AUTH_MODE=accounts`，由宿主内的
   邀请注册 + 登录 + 服务端会话承担同一职责。两者互斥、只在服务端生成 `TenantContext`，客户端自报
   owner 在两种模式下都不被接受；账号登录失败不会回退到断言或本地模式。OIDC 仍不在范围内。
 - **断言**：`v1.<base64url(payload)>.<base64url(hmac)>`，payload 至少 `tenantId`、`userId`、`role`、
@@ -80,7 +80,7 @@ fail-closed 且不自动 chmod，操作员需停止宿主后自行迁移与收�
 
 ## 4. 并发与资源（已实现的边界）
 
-- 默认全局 4、单租户 2；`PI_GLINK_MAX_GLOBAL_RUNS` / `PI_GLINK_MAX_TENANT_RUNS` 可调。
+- 默认全局 4、单租户 2；`GLINK_MAX_GLOBAL_RUNS` / `GLINK_MAX_TENANT_RUNS` 可调。
 - 准入检查与槽位预留原子完成；超额立即拒绝（`429 quota_exceeded`，带 scope/limit，不含 run id），
   不设无限队列。
 - **资源持有的口径（已在 GLINK-RES-01 变更）**：未确认释放的终态 run 计入其 owner 租户的槽位与
@@ -93,10 +93,10 @@ fail-closed 且不自动 chmod，操作员需停止宿主后自行迁移与收�
   `--mark-released` 人工裁决。自动对账只按 run 记录里持久化的身份探测（Docker 按容器名 inspect，
   必要时幂等删除后确认；E2B 按 `sandbox_id` 终止/查询，凭据取自冻结配置），不猜名字也不批量
   操作；确认写入 `resource_adjudication{source: "auto-verified", method, at}`，与人工裁决
-  （`source: "operator"`）区分。间隔由 `PI_GLINK_RESOURCE_RECONCILE_SECONDS`（默认 60，0 关闭）
+  （`source: "operator"`）区分。间隔由 `GLINK_RESOURCE_RECONCILE_SECONDS`（默认 60，0 关闭）
   控制，后台线程，不在准入锁内；`inproc` 宿主不启用，遗留外部身份仍走离线人工裁决。
-- **SSE 连接**：全局 `PI_GLINK_MAX_GLOBAL_STREAMS`（默认 64），每租户
-  `PI_GLINK_MAX_TENANT_STREAMS`（默认 16）；超额在写出流响应头之前返回 `429 stream_limit`，
+- **SSE 连接**：全局 `GLINK_MAX_GLOBAL_STREAMS`（默认 64），每租户
+  `GLINK_MAX_TENANT_STREAMS`（默认 16）；超额在写出流响应头之前返回 `429 stream_limit`，
   不含 run id；流结束时归还额度。
 - `inproc` 在两种模式下都维持全局单 run；多租户配置直接拒绝 `inproc`（共享宿主文件系统）。
 - Docker：每个容器实例带 `--cpus`/`--memory`/`--pids-limit`（默认 2 / 2g / 512，可配置）与
@@ -106,26 +106,26 @@ fail-closed 且不自动 chmod，操作员需停止宿主后自行迁移与收�
 
 ## 5. 凭据策略（已实现的最小版本）
 
-默认 `PI_GLINK_MODEL_CREDENTIALS=tenant`：
+默认 `GLINK_MODEL_CREDENTIALS=tenant`：
 
 - 每租户从仓库外 0600 文件读取 `modelApiKey`（必需）与 `webSearchKey`（可选），只放进本 run 的出口
   代理 grant；运行期 `auth.json` / `web-search.json` 只含本 run token 与代理地址（architecture §6）；
   缺模型 key 拒绝准入，缺搜索 key 不签检索授权、走无 key 检索。
 - 无任何回退路径：宿主全局 `.env`、其他租户条目都不会被使用；操作员 `~/.pi/web-search.json` 已不再被读取。
 
-显式 `PI_GLINK_MODEL_CREDENTIALS=shared`（SaaS 统一供模型，已实现）：
+显式 `GLINK_MODEL_CREDENTIALS=shared`（SaaS 统一供模型，已实现）：
 
 - 宿主启动时冻结 `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`，任一缺失即拒绝启动；
 - 每个 run 使用同一套宿主共享凭据（`RunCredentials(origin="shared")`）；共享模式不读取任何租户
-  配置：不得配置 `PI_GLINK_TENANT_CONFIG_FILE`（不设置或留空即为无该入口），设置即拒绝启动，
+  配置：不得配置 `GLINK_TENANT_CONFIG_FILE`（不设置或留空即为无该入口），设置即拒绝启动，
   也不会构造或读取 `TenantCredentialStore`；
-- 可选搜索 key 只来自宿主级 `PI_GLINK_WEB_SEARCH_KEY`（同样只进出口代理 grant）；
+- 可选搜索 key 只来自宿主级 `GLINK_WEB_SEARCH_KEY`（同样只进出口代理 grant）；
 - 每 run 脱敏边界包含共享 key；报告下载的 `redactor_for_record` 在 shared 下走宿主/共享边界，
   不因租户条目无 key 而漏脱敏；owner、配额与审计语义与 tenant 模式完全一致；
 - 这是 SaaS 部署的显式选择，绝不做 tenant/local 的隐式兜底；回退时改回 tenant 并为各租户补回 key。
 - shared 的冻结清单**按族分流**：pi 宿主冻结 `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`
-  三件套；ACP 宿主的具名凭据源是 ACP 注入通道（`PI_GLINK_ACP_ENV` 或
-  `PI_GLINK_ACP_CREDENTIAL_FILES` 至少其一），两通道全空即拒绝启动，不再被迫配置用不上的
+  三件套；ACP 宿主的具名凭据源是 ACP 注入通道（`GLINK_ACP_ENV` 或
+  `GLINK_ACP_CREDENTIAL_FILES` 至少其一），两通道全空即拒绝启动，不再被迫配置用不上的
   OPENAI 键（[ADR 0015](adr/0015-acp-credential-channels-under-model-credential-policy.md)）；
   multitenant tenant 政策下配置任一 ACP 通道同样拒绝启动（未经声明的共享凭据），单用户模式
   通道照常（运营方自己的凭据给自己的 run）。
@@ -146,9 +146,9 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
 ## 7. 行为迁移与回退
 
 - **迁移**：任何模式都不再允许绑定非 loopback：无认证公网模式被移除，历史的 `LOCAL_WEB_ALLOW_REMOTE`
-  不再生效；远端访问必须经过本机认证网关注入身份（`PI_GLINK_TENANCY=multitenant`）。
-- **回退**：关闭 `PI_GLINK_TENANCY` 回到单用户模式，或把 `PI_GLINK_AUTH_MODE` 从 `accounts`
-  切回 `gateway`；如使用 `shared`，也可把 `PI_GLINK_MODEL_CREDENTIALS` 改回 `tenant` 并为每个租户
+  不再生效；远端访问必须经过本机认证网关注入身份（`GLINK_TENANCY=multitenant`）。
+- **回退**：关闭 `GLINK_TENANCY` 回到单用户模式，或把 `GLINK_AUTH_MODE` 从 `accounts`
+  切回 `gateway`；如使用 `shared`，也可把 `GLINK_MODEL_CREDENTIALS` 改回 `tenant` 并为每个租户
   补回 `modelApiKey`。新旧 run 记录都保留，账号库保留只读、不自动改写历史、不降低 owner 校验；
   多租户密钥文件/账号库在切回后不再被读取。
 - **配置范例**：见 `.env.example`，全部使用虚构占位符（含 `accounts` 模式的开关、会话/限速参数与
@@ -161,7 +161,7 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
   usage 计量与每租户每 run 配额钩子，[ADR 0008](adr/0008-egress-proxy.md)）。**仍未裁决**：ACP 族是否
   接入代理（通道政策已裁决：[ADR 0015](adr/0015-acp-credential-channels-under-model-credential-policy.md)，
   但租户级注入点属 M2 未实现）、密钥轮换与告警、跨宿主共享配额与计费口径、是否支持 BYOK、宿主重启时在途
-  run 的 token 失效处置。SaaS 统一共享模型凭据（`PI_GLINK_MODEL_CREDENTIALS=shared`）已按 GLINK-SAAS-01 落地，它不是 BYOK。
+  run 的 token 失效处置。SaaS 统一共享模型凭据（`GLINK_MODEL_CREDENTIALS=shared`）已按 GLINK-SAAS-01 落地，它不是 BYOK。
 - **D6 开通流程**：首位管理员的离线签发与后续管理员邀请已经落地（`--create-invite` /
   `POST /api/admin/invitations`）；**仍未裁决**：租户本身的创建/停用运维入口（当前停用通过账号库
   状态位生效，没有 HTTP 管理接口）、停用后的事件流与运行中 run 处置口径、邮件交付与密码重置。
@@ -189,7 +189,7 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
    `unknown_run`，不建立新 run、不创建会话目录、不改写父会话；无 owner/未知父 run 同理；同租户
    追问保持 owner、私有会话副本与报告种子，旧轮分叉返回 `stale_run`。
 
-**账号模式（`PI_GLINK_AUTH_MODE=accounts`）另有合成矩阵**（`tests/test_accounts.py`、
+**账号模式（`GLINK_AUTH_MODE=accounts`）另有合成矩阵**（`tests/test_accounts.py`、
 `tests/test_accounts_api.py`，以及隔离 fixture 上的手动真实浏览器验收）：
 
 1. **存储与会话**：口令用 scrypt 参数逐行记录、恒时校验；邀请码与会话令牌只存摘要、一次性、过期
@@ -203,11 +203,11 @@ D5 选择 **C（只读保留）**：历史记录不带 owner，在多租户读�
 5. **浏览器**：隔离 fixture（临时账号库 + fake 执行面）上人工用 ego-browser 走过登录/邀请注册/账号
    菜单/运行与报告/跨租户 404/窄栏与注销，证据为用户临时目录中的截图（见 engineering.md 的浏览器段）。
 
-**SaaS 共享模型凭据（`PI_GLINK_MODEL_CREDENTIALS=shared`）的合成矩阵**
+**SaaS 共享模型凭据（`GLINK_MODEL_CREDENTIALS=shared`）的合成矩阵**
 （`tests/test_saas_shared_model.py`）：
 
 1. **配置门禁**：缺 `OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL`、非多租户模式、未知取值一律
-   拒绝启动；shared 与 `PI_GLINK_TENANT_CONFIG_FILE` 同时存在即拒绝，shared 无该文件可用，
+   拒绝启动；shared 与 `GLINK_TENANT_CONFIG_FILE` 同时存在即拒绝，shared 无该文件可用，
    且不构造/不读取 `TenantCredentialStore`；tenant 模式的逐租户 key 语义与文件入口不变。
 2. **凭据交付**：共享 key 只进宿主出口代理 grant，本 run `auth.json` 只含已吊销的 token；Docker
    argv/环境、E2B `Sandbox.create` 环境与命令、沙箱命令环境、上传的运行期配置均不含 key；

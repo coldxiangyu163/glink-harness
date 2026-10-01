@@ -78,7 +78,7 @@ pi 与两个预装包的版本**只在一处声明**：`harnesses/pi/harness.tom
 | `docker/e2b/Dockerfile.e2b` | 同一组生成的 ARG；同一 Node 精确 tag；同一 `/opt/pi-packages` 布局 |
 | `docker/e2b/templates.json` | 生成的 E2B 模板参数（`pi-worker`：别名、Dockerfile、CPU/内存、构建参数、构建命令）；`scripts/build-e2b-template.py` 的缺省值从这里读 |
 | `harnesses/pi/settings.json` | 生成的 `packages`：`npm:pi-web-access@0.31.0` 与 `npm:pi-subagents@0.40.0`。容器面按清单的 `pi-package` 名单把 `npm:` 改写为 `/opt/pi-packages/node_modules/<name>` 本地包 |
-| 本机 inproc 面 | 使用宿主安装的 pi；`PI_GLINK_PI_BIN` 可指向任意版本做隔离演练 |
+| 本机 inproc 面 | 使用宿主安装的 pi；`GLINK_PI_BIN` 可指向任意版本做隔离演练 |
 
 步骤：
 
@@ -86,10 +86,10 @@ pi 与两个预装包的版本**只在一处声明**：`harnesses/pi/harness.tom
    ```bash
    npm install --prefix /tmp/pi-upgrade @earendil-works/pi-coding-agent@<version>
    ```
-2. **用目标版本的 pi 启动宿主**（`PI_GLINK_PI_BIN` 是宿主启动配置；smoke 脚本只发 HTTP 请求，不读它），然后对新宿主跑冒烟：
+2. **用目标版本的 pi 启动宿主**（`GLINK_PI_BIN` 是宿主启动配置；smoke 脚本只发 HTTP 请求，不读它），然后对新宿主跑冒烟：
    ```bash
-   PI_GLINK_PI_BIN=/tmp/pi-upgrade/node_modules/.bin/pi \
-     LOCAL_WEB_PORT=7864 .venv/bin/python -m pi_glink.app &
+   GLINK_PI_BIN=/tmp/pi-upgrade/node_modules/.bin/pi \
+     LOCAL_WEB_PORT=7864 .venv/bin/python -m glink_harness.app &
 
    .venv/bin/python scripts/smoke-local-run.py --base-url http://127.0.0.1:7864 --prompt "…"
    ```
@@ -114,7 +114,7 @@ pi 与两个预装包的版本**只在一处声明**：`harnesses/pi/harness.tom
 find . -path ./.venv -prune -o -path ./node_modules -prune -o -name "*.ts" -print | head
 
 # ② 只通过官方 headless 协议启动 pi
-grep -rn '"--mode"' host/pi_glink/kernel/ | sed 's/^/  /'
+grep -rn '"--mode"' host/glink_harness/kernel/ | sed 's/^/  /'
 
 # ③ 宿主/前端/扩展不 import pi 的内部模块（普通扩展和 .ts 也扫）
 grep -rn "earendil-works" host/ web/ harnesses/ --include="*.py" --include="*.mjs" --include="*.ts" | grep -v "^Binary" | sed 's/^/  /'
@@ -123,7 +123,7 @@ grep -rn "earendil-works" host/ web/ harnesses/ --include="*.py" --include="*.mj
 git grep -nE "(sk-|exa-)[A-Za-z0-9_-]{16,}" -- . ':!*.example' ':!*.txt'
 
 # ⑤ 运行期 token 文件权限为 600 且不在仓库内（每次 run 一个目录；只含已吊销的出口代理 token）
-find ~/.pi-glink/runs -path '*/pi-agent/web-search.json' -maxdepth 4 -exec ls -l {} \;
+find ~/.glink-harness/runs -path '*/pi-agent/web-search.json' -maxdepth 4 -exec ls -l {} \;
 
 # ⑥ 前端无打包依赖树
 ls web/node_modules 2>/dev/null || echo "无前端依赖树（原生 ESM）"
@@ -137,7 +137,7 @@ ls web/node_modules 2>/dev/null || echo "无前端依赖树（原生 ESM）"
 * ④ 空输出 —— 无密钥入库（`docs/evidence/` 已排除，因为日志里可能出现用户级别的占位字符串）；
 * ⑤ `-rw-------`（600）—— 每个 run 的运行期凭据文件权限正确；（⑥ 无前端依赖树。（①③④ 的空输出是预期结果。
 
-本次整改的核验口径变化：原 ⑤ 命令指向共享目录 `~/.pi-glink/pi-agent/`，该目录已不再是运行期配置
+本次整改的核验口径变化：原 ⑤ 命令指向共享目录 `~/.glink-harness/pi-agent/`，该目录已不再是运行期配置
 （每个 run 使用 `runs/<id>/pi-agent/`），命令已同步更新。
 
 GLINK-SUB-02（2026-09-24）复跑：

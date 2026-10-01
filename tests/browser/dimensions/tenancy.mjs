@@ -40,7 +40,7 @@ export async function run(ctx) {
       const post = (path) =>
         fetch(path, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Pi-Glink-CSRF': csrf, Accept: 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-Glink-Harness-CSRF': csrf, Accept: 'application/json' },
           body: JSON.stringify({ prompt: '跨租户追问尝试', parentRunId: runId }),
         });
       const response = (path, options) => fetch(path, options);
@@ -50,7 +50,7 @@ export async function run(ctx) {
       const children = await response(`/api/runs/${runId}/children`, { headers: { Accept: 'application/json' } });
       const stop = await response(`/api/runs/${runId}/stop`, {
         method: 'POST',
-        headers: { 'X-Pi-Glink-CSRF': csrf, Accept: 'application/json' },
+        headers: { 'X-Glink-Harness-CSRF': csrf, Accept: 'application/json' },
       });
       const followup = await post('/api/runs');
       const followupBody = await followup.json().catch(() => ({}));
@@ -104,7 +104,7 @@ export async function run(ctx) {
         const detail = await fetch(`/api/runs/${runId}`, { headers: { Accept: 'application/json' } });
         const stop = await fetch(`/api/runs/${runId}/stop`, {
           method: 'POST',
-          headers: { 'X-Pi-Glink-CSRF': csrf, Accept: 'application/json' },
+          headers: { 'X-Glink-Harness-CSRF': csrf, Accept: 'application/json' },
         });
         return {
           detail: detail.status,

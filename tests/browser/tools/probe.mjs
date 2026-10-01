@@ -15,7 +15,7 @@ import { startHost } from '../support/host.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const mode = process.argv.includes('--mode') ? process.argv[process.argv.indexOf('--mode') + 1] : 'accounts';
-const outDir = mkdtempSync(join(tmpdir(), 'pi-glink-probe-'));
+const outDir = mkdtempSync(join(tmpdir(), 'glink-harness-probe-'));
 const stateDir = join(outDir, 'state');
 mkdirSync(stateDir, { recursive: true });
 
@@ -154,12 +154,12 @@ await snap('defaultRun', () =>
   page.evaluate(() => ({
     status: document.querySelector('#run-view')?.dataset.status,
     question: document.querySelector('#run-question')?.innerText?.slice(0, 200),
-    outcomeHidden: document.querySelector('.pi-outcome')?.hidden,
-    outcomeText: document.querySelector('.pi-outcome')?.innerText,
-    answerText: document.querySelector('.pi-answer-body')?.innerText?.slice(0, 200),
+    outcomeHidden: document.querySelector('.glink-outcome')?.hidden,
+    outcomeText: document.querySelector('.glink-outcome')?.innerText,
+    answerText: document.querySelector('.glink-answer-body')?.innerText?.slice(0, 200),
     outputHidden: document.querySelector('[aria-label="生成的文件"]')?.hidden,
     outputText: document.querySelector('[aria-label="生成的文件"]')?.innerText?.slice(0, 200),
-    actions: [...document.querySelectorAll('.pi-answer-actions > *')]
+    actions: [...document.querySelectorAll('.glink-answer-actions > *')]
       .filter((node) => !node.hidden)
       .map((node) => node.getAttribute('aria-label')),
     runListRows: [...document.querySelectorAll('#run-list [data-run-id]')].map((node) => ({
@@ -181,16 +181,16 @@ await page.waitForTimeout(800);
 await snap('toolsRun', () =>
   page.evaluate(() => ({
     status: document.querySelector('#run-view')?.dataset.status,
-    tools: [...document.querySelectorAll('.pi-tool')].map((node) => ({
-      label: node.querySelector('.pi-tool-name')?.textContent,
-      object: node.querySelector('.pi-tool-object')?.textContent,
-      state: node.querySelector('.pi-tool-state')?.textContent,
+    tools: [...document.querySelectorAll('.glink-tool')].map((node) => ({
+      label: node.querySelector('.glink-tool-name')?.textContent,
+      object: node.querySelector('.glink-tool-object')?.textContent,
+      state: node.querySelector('.glink-tool-state')?.textContent,
       hasDetail: node.dataset.hasDetail,
     })),
-    thinking: document.querySelectorAll('.pi-thinking').length,
-    processLabel: document.querySelector('.pi-process-label')?.textContent,
-    answerText: document.querySelector('.pi-answer-body')?.innerText?.slice(0, 120),
-    foldExpanded: document.querySelector('.pi-process-toggle')?.getAttribute('aria-expanded'),
+    thinking: document.querySelectorAll('.glink-thinking').length,
+    processLabel: document.querySelector('.glink-process-label')?.textContent,
+    answerText: document.querySelector('.glink-answer-body')?.innerText?.slice(0, 120),
+    foldExpanded: document.querySelector('.glink-process-toggle')?.getAttribute('aria-expanded'),
   })),
 );
 await page.screenshot({ path: join(outDir, 'tools-run.png') });
@@ -205,9 +205,9 @@ await page.waitForTimeout(800);
 await snap('failedRun', () =>
   page.evaluate(() => ({
     status: document.querySelector('#run-view')?.dataset.status,
-    outcomeText: document.querySelector('.pi-outcome')?.innerText,
-    outcomeTone: document.querySelector('.pi-outcome')?.dataset.tone,
-    detailsButton: [...document.querySelectorAll('.pi-outcome button')].map((node) => node.textContent.trim()),
+    outcomeText: document.querySelector('.glink-outcome')?.innerText,
+    outcomeTone: document.querySelector('.glink-outcome')?.dataset.tone,
+    detailsButton: [...document.querySelectorAll('.glink-outcome button')].map((node) => node.textContent.trim()),
   })),
 );
 
@@ -221,8 +221,8 @@ await page.waitForTimeout(800);
 await snap('lengthRun', () =>
   page.evaluate(() => ({
     status: document.querySelector('#run-view')?.dataset.status,
-    outcomeText: document.querySelector('.pi-outcome')?.innerText,
-    outcomeHidden: document.querySelector('.pi-outcome')?.hidden,
+    outcomeText: document.querySelector('.glink-outcome')?.innerText,
+    outcomeHidden: document.querySelector('.glink-outcome')?.hidden,
   })),
 );
 
@@ -231,19 +231,19 @@ await page.click('#new-research');
 await page.waitForTimeout(300);
 await page.fill('#prompt-input', '[scenario:subagent] 探测子代理场景');
 await page.press('#prompt-input', 'Enter');
-await page.waitForSelector('.pi-child-row, .pi-child-card', { timeout: 20_000 });
+await page.waitForSelector('.glink-child-row, .glink-child-card', { timeout: 20_000 });
 await page.waitForTimeout(2200);
 await snap('subagentRunning', () =>
   page.evaluate(() => ({
     status: document.querySelector('#run-view')?.dataset.status,
-    childCards: [...document.querySelectorAll('.pi-child-card, .pi-subagent')].map((node) => ({
+    childCards: [...document.querySelectorAll('.glink-child-card, .glink-subagent')].map((node) => ({
       cls: node.className,
       text: node.innerText.replace(/\n/g, ' | ').slice(0, 160),
       status: node.dataset.status,
     })),
-    panelHidden: document.querySelector('.pi-children')?.hidden,
-    panelText: document.querySelector('.pi-children')?.innerText?.replace(/\n/g, ' | ').slice(0, 300),
-    timelineSubagentItems: [...document.querySelectorAll('.pi-step-row')].map((n) => n.className).slice(0, 20),
+    panelHidden: document.querySelector('.glink-children')?.hidden,
+    panelText: document.querySelector('.glink-children')?.innerText?.replace(/\n/g, ' | ').slice(0, 300),
+    timelineSubagentItems: [...document.querySelectorAll('.glink-step-row')].map((n) => n.className).slice(0, 20),
   })),
 );
 await page.screenshot({ path: join(outDir, 'subagent-running.png') });
@@ -252,13 +252,13 @@ await page.waitForTimeout(1200);
 await snap('subagentDone', () =>
   page.evaluate(() => ({
     status: document.querySelector('#run-view')?.dataset.status,
-    panelText: document.querySelector('.pi-children')?.innerText?.replace(/\n/g, ' | ').slice(0, 400),
-    panelRows: [...document.querySelectorAll('.pi-child-row')].map((node) => ({
+    panelText: document.querySelector('.glink-children')?.innerText?.replace(/\n/g, ' | ').slice(0, 400),
+    panelRows: [...document.querySelectorAll('.glink-child-row')].map((node) => ({
       text: node.innerText.replace(/\n/g, ' | '),
       status: node.dataset.status,
-      artifacts: [...node.querySelectorAll('.pi-child-artifact')].map((a) => ({ name: a.textContent, href: a.getAttribute('href') })),
+      artifacts: [...node.querySelectorAll('.glink-child-artifact')].map((a) => ({ name: a.textContent, href: a.getAttribute('href') })),
     })),
-    answerText: document.querySelector('.pi-answer-body')?.innerText?.slice(0, 100),
+    answerText: document.querySelector('.glink-answer-body')?.innerText?.slice(0, 100),
   })),
 );
 await page.screenshot({ path: join(outDir, 'subagent-done.png') });
@@ -267,11 +267,11 @@ await page.screenshot({ path: join(outDir, 'subagent-done.png') });
 await snap('reportClosed', () =>
   page.evaluate(() => ({
     previewOpen: document.querySelector('#app-shell')?.classList.contains('preview-open'),
-    reportButtonVisible: !document.querySelector('.pi-report-button')?.hidden,
+    reportButtonVisible: !document.querySelector('.glink-report-button')?.hidden,
     previewToggleHidden: document.querySelector('#pane-preview-toggle')?.hidden,
   })),
 );
-await page.click('.pi-report-button');
+await page.click('.glink-report-button');
 await page.waitForSelector('#preview-article h1', { timeout: 15_000 });
 await page.waitForTimeout(600);
 await snap('reportOpen', () =>

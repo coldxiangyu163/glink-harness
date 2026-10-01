@@ -60,7 +60,7 @@ export function createProgressMarker(status, label) {
 /** Unboxed TaskRows timeline, owned solely by the progress surface. */
 export function createTodoTimeline() {
   const list = document.createElement('ol');
-  list.className = 'progress-steps pi-todo-list';
+  list.className = 'progress-steps glink-todo-list';
   list.hidden = true;
   let previous = null;
   return {
@@ -74,11 +74,11 @@ export function createTodoTimeline() {
         const status = entry.status === 'done' || entry.status === 'completed' ? 'done'
           : entry.status === 'in_progress' ? running ? 'running' : 'stopped' : 'pending';
         const row = document.createElement('li');
-        row.className = 'progress-step pi-todo-item';
+        row.className = 'progress-step glink-todo-item';
         row.dataset.status = status;
         row.dataset.todoStatus = entry.status;
         const state = document.createElement('span');
-        state.className = 'pi-todo-state sr-only';
+        state.className = 'glink-todo-state sr-only';
         state.textContent = status === 'stopped' ? '未完成' : planStatusLabel(entry.status);
         const content = document.createElement('span');
         content.className = 'progress-step-text';

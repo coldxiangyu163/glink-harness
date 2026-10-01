@@ -1,6 +1,6 @@
 """Harness packs: manifest parsing, selection, the HOME overlay and the record.
 
-A pack (``harnesses/<pack>/harness.toml``, format ``pi-glink-harness/v2``) is
+A pack (``harnesses/<pack>/harness.toml``, format ``glink-harness/v2``) is
 the one place a harness's differences live: family, ``[entry]`` argv, the
 ``[capabilities]`` matrix family code reads, and the ``[image]`` requirement the
 Dockerfile ARGs / E2B template parameters are generated from, plus an optional
@@ -18,18 +18,18 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.config import build_config
-from pi_glink.events import EventBus
-from pi_glink.harnesses import (
+from glink_harness.config import build_config
+from glink_harness.events import EventBus
+from glink_harness.harnesses import (
     HarnessPackError,
     SessionConfigSource,
     load_pack,
     pack_names,
 )
-from pi_glink.kernel.acp_env import ACP_HOME_DIRNAME, prepare_acp_runtime
-from pi_glink.contracts import FollowupUnavailable
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import FINISHED, RunStore, RunSpec
+from glink_harness.kernel.acp_env import ACP_HOME_DIRNAME, prepare_acp_runtime
+from glink_harness.contracts import FollowupUnavailable
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import FINISHED, RunStore, RunSpec
 from store_helpers import finish, stored_record
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -50,7 +50,7 @@ ACP_IMAGE = (
 
 def pi_manifest(name: str = "demo", *, capabilities: str = "", image: str = PI_IMAGE) -> str:
     return (
-        f'format = "pi-glink-harness/v2"\nname = "{name}"\nfamily = "pi"\n'
+        f'format = "glink-harness/v2"\nname = "{name}"\nfamily = "pi"\n'
         '\n[entry]\ncommand = ["pi"]\n'
         f'\n[capabilities]\nresume = true\n{capabilities}'
         f"{image}"
@@ -65,7 +65,7 @@ def acp_manifest(
     image: str = ACP_IMAGE,
 ) -> str:
     return (
-        f'format = "pi-glink-harness/v2"\nname = "{name}"\nfamily = "acp"\n'
+        f'format = "glink-harness/v2"\nname = "{name}"\nfamily = "acp"\n'
         f"\n[entry]\ncommand = {command}\n"
         f"\n[capabilities]\n{capabilities}"
         f"{image}"
@@ -85,7 +85,7 @@ def build_values(tmp_path: Path, harnesses_dir: Path, **overrides: str) -> dict[
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_HARNESSES_DIR": str(harnesses_dir),
+        "GLINK_HARNESSES_DIR": str(harnesses_dir),
     }
     values.update(overrides)
     return values
@@ -178,7 +178,7 @@ def test_a_pack_without_a_prompt_file_has_an_empty_prompt(tmp_path: Path) -> Non
 
 # -- manifest validation ------------------------------------------------------
 
-_V1 = 'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "pi"\n'
+_V1 = 'format = "glink-harness/v1"\nname = "demo"\nfamily = "pi"\n'
 
 
 @pytest.mark.parametrize(
@@ -186,7 +186,7 @@ _V1 = 'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "pi"\n'
     [
         # 退役的 v1 清单：不迁移，直接拒绝。
         (_V1, "旧格式不再可读"),
-        (pi_manifest().replace("pi-glink-harness/v2", "v2"), "format"),
+        (pi_manifest().replace("glink-harness/v2", "v2"), "format"),
         (pi_manifest().replace('name = "demo"', 'name = "other"'), "目录名"),
         (pi_manifest().replace('family = "pi"', 'family = "nope"'), "family"),
         (pi_manifest() + "nope = 1\n", "未知键"),
@@ -195,7 +195,7 @@ _V1 = 'format = "pi-glink-harness/v1"\nname = "demo"\nfamily = "pi"\n'
         (pi_manifest().replace('\n[entry]\ncommand = ["pi"]\n', ""), "[entry]"),
         (pi_manifest(image=""), "[image]"),
         (
-            'format = "pi-glink-harness/v2"\nname = "demo"\nfamily = "pi"\n'
+            'format = "glink-harness/v2"\nname = "demo"\nfamily = "pi"\n'
             '\n[entry]\ncommand = ["pi"]\n' + PI_IMAGE,
             "[capabilities]",
         ),
@@ -256,7 +256,7 @@ def test_the_shipped_manifests_parse_as_toml_and_validate(tmp_path: Path) -> Non
         document = tomllib.loads(
             (REPO_PACKS / name / "harness.toml").read_text(encoding="utf-8")
         )
-        assert document["format"] == "pi-glink-harness/v2"
+        assert document["format"] == "glink-harness/v2"
         assert document["name"] == name
         # resume 在每个随仓库发布的包里都是显式事实，不是默认值。
         assert isinstance(document["capabilities"]["resume"], bool)
@@ -309,7 +309,7 @@ def test_an_acp_pack_declares_its_subagent_dispatch_mode(tmp_path: Path) -> None
     pack = load_pack(tmp_path / "harnesses", "demo")
     assert pack.capabilities.subagent_dispatch == "async"
     config = build_config(
-        build_values(tmp_path, tmp_path / "harnesses", PI_GLINK_HARNESS="demo"), REPO_ROOT
+        build_values(tmp_path, tmp_path / "harnesses", GLINK_HARNESS="demo"), REPO_ROOT
     )
     # 运行期直接引用包对象，配置里不再有抄来的 acp_* 字段。
     assert config.pack == pack
@@ -350,7 +350,7 @@ def test_the_selected_pack_supplies_family_capabilities_and_overlay(tmp_path: Pa
     (pack_dir / "home").mkdir()
     (pack_dir / "home" / "state.txt").write_text("overlay\n", encoding="utf-8")
     config = build_config(
-        build_values(tmp_path, tmp_path / "harnesses", PI_GLINK_HARNESS="demo"),
+        build_values(tmp_path, tmp_path / "harnesses", GLINK_HARNESS="demo"),
         REPO_ROOT,
     )
     assert config.harness == "acp" and config.harness_pack == "demo"
@@ -381,9 +381,9 @@ def make_overlay_config(
     pack_dir = write_manifest(tmp_path, "demo", acp_manifest())
     home = pack_dir / "home"
     home.mkdir()
-    values = build_values(tmp_path, tmp_path / "harnesses", PI_GLINK_HARNESS="demo")
+    values = build_values(tmp_path, tmp_path / "harnesses", GLINK_HARNESS="demo")
     if credential_source is not None:
-        values["PI_GLINK_ACP_CREDENTIAL_FILES"] = (
+        values["GLINK_ACP_CREDENTIAL_FILES"] = (
             f"{credential_source}=.dsh/credentials.yaml"
         )
     return build_config(values, REPO_ROOT), home
@@ -421,7 +421,7 @@ def test_a_run_record_carries_the_pack_and_a_foreign_pack_cannot_continue(
 ) -> None:
     write_manifest(tmp_path, "demo", acp_manifest())
     config = build_config(
-        build_values(tmp_path, tmp_path / "harnesses", PI_GLINK_HARNESS="demo"),
+        build_values(tmp_path, tmp_path / "harnesses", GLINK_HARNESS="demo"),
         REPO_ROOT,
     )
     store = RunStore(config.data_root / "runs")
@@ -463,7 +463,7 @@ def test_a_pack_that_declares_no_resume_refuses_every_followup(tmp_path: Path) -
         tmp_path, "demo", acp_manifest(capabilities="resume = false\n")
     )
     config = build_config(
-        build_values(tmp_path, tmp_path / "harnesses", PI_GLINK_HARNESS="demo"),
+        build_values(tmp_path, tmp_path / "harnesses", GLINK_HARNESS="demo"),
         REPO_ROOT,
     )
     assert config.pack.capabilities.resume is False
@@ -483,7 +483,7 @@ def test_a_pack_that_declares_no_resume_refuses_every_followup(tmp_path: Path) -
     # 相邻合法输入：同一父 run、声明 resume = true 的同名包可以续接。
     write_manifest(tmp_path, "demo", acp_manifest(capabilities="resume = true\n"))
     resumable = build_config(
-        build_values(tmp_path, tmp_path / "harnesses", PI_GLINK_HARNESS="demo"),
+        build_values(tmp_path, tmp_path / "harnesses", GLINK_HARNESS="demo"),
         REPO_ROOT,
     )
     admission = RunManager(resumable, EventBus(), store)._admission  # noqa: SLF001

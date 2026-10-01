@@ -30,23 +30,23 @@ from typing import Any, Mapping
 
 import pytest
 
-from pi_glink import events as events_module
-from pi_glink.app import PiGlinkServer, create_server
-from pi_glink.blueprints import (
+from glink_harness import events as events_module
+from glink_harness.app import GlinkHarnessServer, create_server
+from glink_harness.blueprints import (
     BlueprintError,
     blueprint_names,
     load_blueprint,
     parse_blueprint,
     render_blueprint,
 )
-from pi_glink.config import HostConfig, build_config
+from glink_harness.config import HostConfig, build_config
 
 from acp_pack import apply_acp_pack
-from pi_glink.events import EventBus
-from pi_glink.runs.runner import BlueprintUnavailable, RunManager
-from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.store import RunStore
-from pi_glink.tenancy import TenantContext, TenantCredentialStore
+from glink_harness.events import EventBus
+from glink_harness.runs.runner import BlueprintUnavailable, RunManager
+from glink_harness.kernel.rpc import PiRpcClient
+from glink_harness.store import RunStore
+from glink_harness.tenancy import TenantContext, TenantCredentialStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BLUEPRINTS = REPO_ROOT / "methodology" / "blueprints"
@@ -69,7 +69,7 @@ def pi_system_prompt(*parts: str) -> str:
 def acp_system_prompt(*parts: str) -> str:
     """The ACP test pack carries no capabilities.md: agreement, then the rest."""
     return "\n\n".join(part for part in (agreement_text(), *parts) if part)
-AUDIENCE = "pi-glink-test"
+AUDIENCE = "glink-harness-test"
 
 
 def synthetic_document(
@@ -81,7 +81,7 @@ def synthetic_document(
     """A minimal well-formed blueprint with two stages, for admission tests."""
     return (
         "+++\n"
-        'format = "pi-glink-blueprint/v1"\n'
+        'format = "glink-harness-blueprint/v1"\n'
         f'name = "{name}"\n'
         f'description = "{description or f"合成蓝图 {name}"}"\n'
         "\n"
@@ -119,7 +119,7 @@ def make_config(tmp_path: Path, **overrides: str) -> HostConfig:
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_PORT": "0",
-        "PI_GLINK_BLUEPRINTS_DIR": str(tmp_path / "blueprints"),
+        "GLINK_BLUEPRINTS_DIR": str(tmp_path / "blueprints"),
     }
     values.update(overrides)
     apply_acp_pack(values, tmp_path)
@@ -274,55 +274,55 @@ def test_a_name_outside_the_directory_is_refused(tmp_path: Path) -> None:
             "missing_field:format",
         ),
         (
-            '+++\nformat = "pi-glink-blueprint/v2"\nname = "x"\ndescription = "d"\n'
+            '+++\nformat = "glink-harness-blueprint/v2"\nname = "x"\ndescription = "d"\n'
             '[[stages]]\nid = "a"\ntitle = "t"\ngoal = "g"\ndeliverable = "d"\ncheckpoint = "c"\n'
             "+++\n\nbody\n",
             "unsupported_format",
         ),
         (
-            '+++\nformat = "pi-glink-blueprint/v1"\nname = "other"\ndescription = "d"\n'
+            '+++\nformat = "glink-harness-blueprint/v1"\nname = "other"\ndescription = "d"\n'
             '[[stages]]\nid = "a"\ntitle = "t"\ngoal = "g"\ndeliverable = "d"\ncheckpoint = "c"\n'
             "+++\n\nbody\n",
             "name_mismatch",
         ),
         (
-            '+++\nformat = "pi-glink-blueprint/v1"\nname = "x"\ndescription = "d"\n'
+            '+++\nformat = "glink-harness-blueprint/v1"\nname = "x"\ndescription = "d"\n'
             "stages = []\n+++\n\nbody\n",
             "missing_field:stages",
         ),
         (
-            '+++\nformat = "pi-glink-blueprint/v1"\nname = "x"\ndescription = "d"\n'
+            '+++\nformat = "glink-harness-blueprint/v1"\nname = "x"\ndescription = "d"\n'
             '[[stages]]\nid = "a"\ntitle = "t"\ngoal = "g"\ncheckpoint = "c"\n'
             "+++\n\nbody\n",
             "missing_field:stage 0:deliverable",
         ),
         (
-            '+++\nformat = "pi-glink-blueprint/v1"\nname = "x"\ndescription = "d"\n'
+            '+++\nformat = "glink-harness-blueprint/v1"\nname = "x"\ndescription = "d"\n'
             '[[stages]]\nid = "a"\ntitle = "t"\ngoal = "g"\ndeliverable = "d"\ncheckpoint = "c"\n'
             'outcome = "typo"\n+++\n\nbody\n',
             "unknown_stage_field:outcome",
         ),
         (
-            '+++\nformat = "pi-glink-blueprint/v1"\nname = "x"\ndescription = "d"\n'
+            '+++\nformat = "glink-harness-blueprint/v1"\nname = "x"\ndescription = "d"\n'
             'owner = "typo"\n[[stages]]\nid = "a"\ntitle = "t"\ngoal = "g"\ndeliverable = "d"\n'
             'checkpoint = "c"\n+++\n\nbody\n',
             "unknown_field:owner",
         ),
         (
-            '+++\nformat = "pi-glink-blueprint/v1"\nname = "x"\ndescription = "d"\n'
+            '+++\nformat = "glink-harness-blueprint/v1"\nname = "x"\ndescription = "d"\n'
             '[[stages]]\nid = "a"\ntitle = "t"\ngoal = "g"\ndeliverable = "d"\ncheckpoint = "c"\n'
             '[[stages]]\nid = "a"\ntitle = "t2"\ngoal = "g"\ndeliverable = "d"\ncheckpoint = "c"\n'
             "+++\n\nbody\n",
             "duplicate_stage_id:a",
         ),
         (
-            '+++\nformat = "pi-glink-blueprint/v1"\nname = "x"\ndescription = "d"\n'
+            '+++\nformat = "glink-harness-blueprint/v1"\nname = "x"\ndescription = "d"\n'
             '[[stages]]\nid = "Bad Id"\ntitle = "t"\ngoal = "g"\ndeliverable = "d"\n'
             'checkpoint = "c"\n+++\n\nbody\n',
             "invalid_stage_id:Bad Id",
         ),
         (
-            '+++\nformat = "pi-glink-blueprint/v1"\nname = "x"\ndescription = "d"\n'
+            '+++\nformat = "glink-harness-blueprint/v1"\nname = "x"\ndescription = "d"\n'
             '[[stages]]\nid = "a"\ntitle = "t"\ngoal = "g"\ndeliverable = "d"\ncheckpoint = "c"\n'
             "+++\n",
             "missing_body",
@@ -479,7 +479,7 @@ def test_unknown_and_malformed_blueprints_are_refused_before_any_run(
     overrides: dict[str, str] = {}
     if harness == "acp":
         overrides = {
-            "PI_GLINK_HARNESS": "acp",
+            "GLINK_HARNESS": "acp",
             "TEST_ACP_COMMAND": acp_command(tmp_path, {}),
         }
     config = make_config(tmp_path, **overrides)
@@ -529,7 +529,7 @@ def test_acp_blueprint_run_delivers_the_render_in_the_leading_block(tmp_path: Pa
     write_blueprint(tmp_path / "blueprints", "synthetic")
     config = make_config(
         tmp_path,
-        PI_GLINK_HARNESS="acp",
+        GLINK_HARNESS="acp",
         TEST_ACP_COMMAND=acp_command(
             tmp_path, {"FAKE_ACP_LOG": str(log), "FAKE_ACP_WRITE_REPORT": True}
         ),
@@ -557,7 +557,7 @@ def test_acp_run_without_a_blueprint_delivers_only_the_working_agreement(tmp_pat
     write_blueprint(tmp_path / "blueprints", "synthetic")
     config = make_config(
         tmp_path,
-        PI_GLINK_HARNESS="acp",
+        GLINK_HARNESS="acp",
         TEST_ACP_COMMAND=acp_command(tmp_path, {"FAKE_ACP_LOG": str(log)}),
     )
     store = RunStore(config.data_root / "runs")
@@ -579,7 +579,7 @@ def server(tmp_path: Path):
     # The built-in blueprint directory: the product API is exercised against the
     # same repository content a deployment would offer.
     instance = create_server(
-        make_config(tmp_path, PI_GLINK_BLUEPRINTS_DIR=str(BLUEPRINTS)),
+        make_config(tmp_path, GLINK_BLUEPRINTS_DIR=str(BLUEPRINTS)),
         client_factory=pi_capture_factory({}),
     )
     thread = threading.Thread(target=instance.serve_forever, daemon=True)
@@ -593,7 +593,7 @@ def server(tmp_path: Path):
 
 
 def request(
-    server: PiGlinkServer, path: str, *, method: str = "GET", body: dict | None = None
+    server: GlinkHarnessServer, path: str, *, method: str = "GET", body: dict | None = None
 ) -> tuple[int, bytes]:
     payload = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(
@@ -608,7 +608,7 @@ def request(
         return error.code, error.read()
 
 
-def wait_for_terminal(server: PiGlinkServer, run_id: str, timeout: float = 30.0) -> dict:
+def wait_for_terminal(server: GlinkHarnessServer, run_id: str, timeout: float = 30.0) -> dict:
     deadline = time.monotonic() + timeout
     latest: dict = {}
     while time.monotonic() < deadline:
@@ -620,7 +620,7 @@ def wait_for_terminal(server: PiGlinkServer, run_id: str, timeout: float = 30.0)
     return latest
 
 
-def test_run_api_accepts_a_blueprint_and_records_it(server: PiGlinkServer) -> None:
+def test_run_api_accepts_a_blueprint_and_records_it(server: GlinkHarnessServer) -> None:
     status, raw = request(
         server, "/api/runs", method="POST", body={"prompt": "带蓝图的产品题目", "blueprint": "deepresearch"}
     )
@@ -650,7 +650,7 @@ def test_run_api_accepts_a_blueprint_and_records_it(server: PiGlinkServer) -> No
     assert final["blueprintStages"][0]["checkpoint"]
 
 
-def test_run_api_without_a_blueprint_keeps_the_previous_shape(server: PiGlinkServer) -> None:
+def test_run_api_without_a_blueprint_keeps_the_previous_shape(server: GlinkHarnessServer) -> None:
     status, raw = request(server, "/api/runs", method="POST", body={"prompt": "普通题目"})
     assert status == 201
     run = json.loads(raw)["run"]
@@ -664,7 +664,7 @@ def test_run_api_refuses_unknown_malformed_and_typed_blueprints(tmp_path: Path) 
     sentinel = "SENTINEL-FILE-CONTENT"
     (directory / "broken.md").write_text(
         synthetic_document("broken").replace("正文模板", f"正文模板 {sentinel}").replace(
-            'format = "pi-glink-blueprint/v1"', 'format = "wrong/v1"'
+            'format = "glink-harness-blueprint/v1"', 'format = "wrong/v1"'
         ),
         encoding="utf-8",
     )
@@ -705,7 +705,7 @@ def test_run_api_refuses_unknown_malformed_and_typed_blueprints(tmp_path: Path) 
 
 
 def test_blueprints_api_lists_usable_templates_and_matches_admission(
-    server: PiGlinkServer,
+    server: GlinkHarnessServer,
 ) -> None:
     """The catalogue carries what admission resolved, from the same directory."""
     status, raw = request(server, "/api/blueprints")
@@ -742,12 +742,12 @@ def test_blueprints_api_derives_from_the_directory_and_omits_unusable_candidates
     sentinel = "SENTINEL-BLUEPRINT-BODY"
     (directory / "broken.md").write_text(
         synthetic_document("broken")
-        .replace('format = "pi-glink-blueprint/v1"', 'format = "wrong/v1"')
+        .replace('format = "glink-harness-blueprint/v1"', 'format = "wrong/v1"')
         .replace("正文模板", f"正文模板 {sentinel}"),
         encoding="utf-8",
     )
     instance = create_server(
-        make_config(tmp_path, PI_GLINK_BLUEPRINTS_DIR=str(directory)),
+        make_config(tmp_path, GLINK_BLUEPRINTS_DIR=str(directory)),
         client_factory=pi_capture_factory({}),
     )
     thread = threading.Thread(target=instance.serve_forever, daemon=True)
@@ -785,7 +785,7 @@ def test_blueprints_api_answers_an_empty_list_without_a_directory(tmp_path: Path
         thread.join(timeout=5)
 
 
-def test_blueprints_api_has_no_write_surface(server: PiGlinkServer) -> None:
+def test_blueprints_api_has_no_write_surface(server: GlinkHarnessServer) -> None:
     """只读：上传/编辑没有实现，POST 落到统一的 unknown_endpoint。"""
     status, raw = request(server, "/api/blueprints", method="POST", body={"name": "x"})
     assert status == 404
@@ -802,7 +802,7 @@ def test_blueprint_metadata_stays_inside_its_tenant(tmp_path: Path, monkeypatch:
     path, a second owner or an unnamed resource. A refusal creates no record for
     either tenant.
     """
-    from pi_glink.kernel.execution import (  # noqa: PLC0415
+    from glink_harness.kernel.execution import (  # noqa: PLC0415
         CleanupReport,
         ExecutionAdapter,
         ExecutionOutcome,
@@ -833,14 +833,14 @@ def test_blueprint_metadata_stays_inside_its_tenant(tmp_path: Path, monkeypatch:
             pass
 
         def recover_artifacts(self, destination):
-            from pi_glink.kernel.execution import ArtifactRecovery  # noqa: PLC0415
+            from glink_harness.kernel.execution import ArtifactRecovery  # noqa: PLC0415
 
             return ArtifactRecovery()
 
         def close(self):
             return CleanupReport(released=True)
 
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kw: FakeAdapter(spec, on_frame=kw["on_frame"]))
+    monkeypatch.setattr("glink_harness.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kw: FakeAdapter(spec, on_frame=kw["on_frame"]))
 
     secret_file = tmp_path / "gateway.key"
     secret_file.write_bytes(b"0123456789abcdef0123456789abcdef")
@@ -862,10 +862,10 @@ def test_blueprint_metadata_stays_inside_its_tenant(tmp_path: Path, monkeypatch:
     config = make_config(
         tmp_path,
         LOCAL_WEB_EXECUTOR="docker",
-        PI_GLINK_TENANCY="multitenant",
-        PI_GLINK_GATEWAY_SECRET_FILE=str(secret_file),
-        PI_GLINK_TENANT_CONFIG_FILE=str(tenants_file),
-        PI_GLINK_TENANCY_AUDIENCE=AUDIENCE,
+        GLINK_TENANCY="multitenant",
+        GLINK_GATEWAY_SECRET_FILE=str(secret_file),
+        GLINK_TENANT_CONFIG_FILE=str(tenants_file),
+        GLINK_TENANCY_AUDIENCE=AUDIENCE,
     )
     store = RunStore(config.data_root / "runs")
     credentials = TenantCredentialStore.from_file(tenants_file, repo_root=REPO_ROOT)

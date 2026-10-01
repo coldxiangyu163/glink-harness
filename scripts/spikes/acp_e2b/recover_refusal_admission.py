@@ -40,10 +40,10 @@ sys.path.insert(0, str(REPO_ROOT / "host"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "spikes"))
 from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 
-from pi_glink.kernel.acp_e2b_env import SANDBOX_ACP_HOME  # noqa: E402
-from pi_glink.kernel.acp_env import INHERIT_MAX_FILE_BYTES  # noqa: E402
-from pi_glink.kernel.acp_execution import acp_resume_method  # noqa: E402
-from pi_glink.kernel.e2b_env import confirm_sandbox_absent  # noqa: E402
+from glink_harness.kernel.acp_e2b_env import SANDBOX_ACP_HOME  # noqa: E402
+from glink_harness.kernel.acp_env import INHERIT_MAX_FILE_BYTES  # noqa: E402
+from glink_harness.kernel.acp_execution import acp_resume_method  # noqa: E402
+from glink_harness.kernel.e2b_env import confirm_sandbox_absent  # noqa: E402
 
 TERMINAL = {"finished", "failed", "cancelled"}
 
@@ -193,24 +193,24 @@ def main(argv: list[str] | None = None) -> int:
     env.update(
         {
             "PYTHONPATH": str(REPO_ROOT / "host"),
-            "PI_GLINK_HARNESS": PROBE_PACK_NAME,
-            "PI_GLINK_HARNESSES_DIR": str(packs),
+            "GLINK_HARNESS": PROBE_PACK_NAME,
+            "GLINK_HARNESSES_DIR": str(packs),
             "LOCAL_WEB_EXECUTOR": "e2b",
             "LOCAL_WEB_E2B_ACP_TEMPLATE": args.template,
             "LOCAL_WEB_DATA_ROOT": str(data_root),
             "LOCAL_WEB_TASK_TIMEOUT_SECONDS": str(args.timeout),
-            "PI_GLINK_RESOURCE_RECONCILE_SECONDS": "0",
+            "GLINK_RESOURCE_RECONCILE_SECONDS": "0",
             "E2B_API_KEY": api_key,
-            "PI_GLINK_ACP_CREDENTIAL_FILES": args.credential,
+            "GLINK_ACP_CREDENTIAL_FILES": args.credential,
         }
     )
     if args.env:
-        env["PI_GLINK_ACP_ENV"] = ";".join(args.env)
+        env["GLINK_ACP_ENV"] = ";".join(args.env)
 
     print("ACP M9 E2B 回收失败 → 追问准入拒绝实测")
     print("=" * 48)
     print(f"日期: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"宿主命令: python -m pi_glink.app --port {port}（harness=acp, executor=e2b）")
+    print(f"宿主命令: python -m glink_harness.app --port {port}（harness=acp, executor=e2b）")
     print(f"agent 命令: {args.agent}")
     print(f"模板: {args.template}（dev 模板，未重建）")
     print(f"凭据目标: {args.credential.split('=', 1)[-1]}（只读复制进每 run HOME）")
@@ -233,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
     run_list_after: list[str] = []
     with log_path.open("w", encoding="utf-8") as log_handle:
         process = subprocess.Popen(
-            [sys.executable, "-m", "pi_glink.app", "--port", str(port)],
+            [sys.executable, "-m", "glink_harness.app", "--port", str(port)],
             cwd=str(REPO_ROOT),
             env=env,
             stdout=log_handle,

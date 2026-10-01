@@ -18,7 +18,7 @@ from typing import Any, Mapping
 
 import pytest
 
-from pi_glink.events import (
+from glink_harness.events import (
     ASSISTANT_DELTA,
     KERNEL_STATUS,
     RUN_STAGE,
@@ -30,17 +30,17 @@ from pi_glink.events import (
     TURN_STARTED,
     USAGE_REPORTED,
 )
-from pi_glink.kernel.acp_execution import CLIENT_CAPABILITIES
-from pi_glink.kernel.acp_projection import AcpProjector
-from pi_glink.kernel.acp_rpc import (
+from glink_harness.kernel.acp_execution import CLIENT_CAPABILITIES
+from glink_harness.kernel.acp_projection import AcpProjector
+from glink_harness.kernel.acp_rpc import (
     AcpClosed,
     AcpRequestError,
     REQUEST_ERROR_DETAIL_CHARS,
     AcpRpcClient,
     AcpTimeout,
 )
-from pi_glink.kernel.projection import project_args
-from pi_glink.redaction import SecretRedactor
+from glink_harness.kernel.projection import project_args
+from glink_harness.redaction import SecretRedactor
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"

@@ -15,8 +15,8 @@ from typing import Any
 
 import pytest
 
-from pi_glink import events
-from pi_glink.kernel.projection import (
+from glink_harness import events
+from glink_harness.kernel.projection import (
     ARG_ITEM_LIMIT,
     ARG_LIST_LIMIT,
     ASSISTANT_TEXT_LIMIT,
@@ -32,7 +32,7 @@ from pi_glink.kernel.projection import (
     project_event,
     project_frames,
 )
-from pi_glink.redaction import REPLACEMENT, SecretRedactor
+from glink_harness.redaction import REPLACEMENT, SecretRedactor
 
 
 def _kinds(produced: list[tuple[str, dict[str, Any]]]) -> list[str]:
@@ -438,7 +438,7 @@ def test_assistant_message_embeds_usage_when_present() -> None:
 
 def _accumulate(runner: Any, execution: Any, frame: dict[str, Any]) -> dict[str, Any] | None:
     """Drive one turn_end frame through projection then the run's accumulator."""
-    from pi_glink.runs.channel import accumulate_usage  # noqa: PLC0415
+    from glink_harness.runs.channel import accumulate_usage  # noqa: PLC0415
 
     payload = project_event(frame)[1][1]
     return accumulate_usage(runner._family_of(execution), execution.execution_facts, frame, payload)
@@ -458,7 +458,7 @@ def _bare_runner() -> Any:
     """Just the run's family — no bus, no store, no RunManager instance. 求和
     算法已搬进 pi 族（config/store 在这条路径上不被读取），
     ``accumulate_usage`` 只剩按 run 的族委托。"""
-    from pi_glink.kernel.harness_pi import PiHarnessFamily  # noqa: PLC0415
+    from glink_harness.kernel.harness_pi import PiHarnessFamily  # noqa: PLC0415
 
     family = PiHarnessFamily(config=None, store=None)  # type: ignore[arg-type]
     return SimpleNamespace(_family_of=lambda _execution: family)

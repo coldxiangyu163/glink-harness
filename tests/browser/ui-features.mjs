@@ -142,7 +142,7 @@ try {
     document.body.append(holder);
     const text = clone.innerText;
     holder.remove();
-    return ['pi-glink', '执行面', 'inproc', '内核', '宿主', 'session ', 'openai/'].filter((word) => text.includes(word))
+    return ['glink-harness', '执行面', 'inproc', '内核', '宿主', 'session ', 'openai/'].filter((word) => text.includes(word))
       .concat(/(^|[^a-z])pi([^a-z-]|$)/i.test(text) ? ['pi'] : []);
   });
   record('首页可见文字不暴露内核 / 执行面 / 会话信息', leaks.length === 0, leaks);
@@ -212,8 +212,8 @@ try {
     sendHidden: document.querySelector('#send-button')?.hidden,
     readOnly: document.querySelector('#prompt-input')?.readOnly,
     placeholder: document.querySelector('#prompt-input')?.placeholder,
-    foldOpen: document.querySelector('.pi-process-toggle')?.getAttribute('aria-expanded'),
-    label: document.querySelector('.pi-process-label')?.textContent,
+    foldOpen: document.querySelector('.glink-process-toggle')?.getAttribute('aria-expanded'),
+    label: document.querySelector('.glink-process-label')?.textContent,
     path: document.querySelector('#pane-title')?.textContent,
     marked: document.querySelectorAll('#run-list [aria-current="page"]').length,
     dock: getComputedStyle(document.querySelector('#conversation-pane')).getPropertyValue('--composer-dock').trim(),
@@ -228,13 +228,13 @@ try {
   await page.waitForSelector('#run-view[data-status="cancelled"]', { timeout: 60_000 });
   await page.waitForTimeout(800);
   const stopped = await page.evaluate(() => {
-    const outcome = document.querySelector('.pi-outcome');
+    const outcome = document.querySelector('.glink-outcome');
     return {
       status: document.querySelector('#run-view')?.dataset.status,
       stopHidden: document.querySelector('#stop-run')?.hidden,
-      outcome: outcome && !outcome.hidden ? outcome.querySelector('.pi-outcome-title')?.textContent : null,
+      outcome: outcome && !outcome.hidden ? outcome.querySelector('.glink-outcome-title')?.textContent : null,
       tone: outcome?.dataset.tone,
-      icon: outcome?.querySelector('.pi-outcome-icon .icon')?.dataset.icon,
+      icon: outcome?.querySelector('.glink-outcome-icon .icon')?.dataset.icon,
       toast: document.querySelector('#toast-text')?.textContent,
     };
   });
@@ -248,7 +248,7 @@ try {
     await page.click(`#run-list [data-run-id="${candidate.runId}"]`);
     // A finished REST record paints immediately, then its SSE history replay
     // fills the answer and terminal report fact. The child panel deliberately
-    // reuses `.pi-output` chrome and precedes the file section in DOM order, so
+    // reuses `.glink-output` chrome and precedes the file section in DOM order, so
     // the old generic selector read the hidden child panel even while the
     // archived screenshot showed the report card. Wait on the semantic file
     // section and sample that same reader-visible contract.
@@ -256,15 +256,15 @@ try {
       timeout: TERMINAL_TIMEOUT,
     }).catch(() => {});
     const probe = await page.evaluate(() => ({
-      thinking: document.querySelectorAll('.pi-thinking').length,
-      tools: document.querySelectorAll('.pi-tool').length,
-      answer: document.querySelectorAll('.pi-answer-body .pi-text').length,
+      thinking: document.querySelectorAll('.glink-thinking').length,
+      tools: document.querySelectorAll('.glink-tool').length,
+      answer: document.querySelectorAll('.glink-answer-body .glink-text').length,
       status: document.querySelector('#run-view')?.dataset.status,
-      folded: document.querySelector('.pi-process-toggle')?.getAttribute('aria-expanded') === 'false',
-      draft: !document.querySelector('.pi-answer-head')?.hidden && document.querySelector('.pi-answer-head .badge')?.textContent,
+      folded: document.querySelector('.glink-process-toggle')?.getAttribute('aria-expanded') === 'false',
+      draft: !document.querySelector('.glink-answer-head')?.hidden && document.querySelector('.glink-answer-head .badge')?.textContent,
       output: !document.querySelector('[aria-label="生成的文件"]')?.hidden,
-      actions: [...document.querySelectorAll('.pi-answer-actions > *')].filter((node) => !node.hidden).map((node) => node.getAttribute('aria-label')),
-      unavailable: /读不到/.test(document.querySelector('.pi-outcome')?.textContent ?? ''),
+      actions: [...document.querySelectorAll('.glink-answer-actions > *')].filter((node) => !node.hidden).map((node) => node.getAttribute('aria-label')),
+      unavailable: /读不到/.test(document.querySelector('.glink-outcome')?.textContent ?? ''),
       distance: (() => {
         const scroll = document.querySelector('#conversation-scroll');
         return Math.round(scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight);
@@ -279,35 +279,35 @@ try {
 
   const replayLeaks = await page.evaluate(() => {
     // Interface copy only: the research title and prompt are the user's own words.
-    const chrome = [...document.querySelectorAll('#pane-home, #pane-actions, .pi-process-label, .pi-step-row, .pi-answer-head, .pi-output, .pi-answer-actions, .composer, #sidebar-foot, .nav-label')]
+    const chrome = [...document.querySelectorAll('#pane-home, #pane-actions, .glink-process-label, .glink-step-row, .glink-answer-head, .glink-output, .glink-answer-actions, .composer, #sidebar-foot, .nav-label')]
       .map((node) => `${node.innerText} ${node.getAttribute('aria-label') ?? ''}`).join('\n');
     return ['web_search', 'fetch_content', '执行面', 'session ', 'tokens', '第 1 轮', '本轮 agent'].filter((word) => chrome.includes(word));
   });
   record('对话界面不暴露工具内部名 / 会话 / 轮次记账', replayLeaks.length === 0, replayLeaks);
 
-  await page.click('.pi-process-toggle');
+  await page.click('.glink-process-toggle');
   await page.waitForTimeout(700);
   const fold = await page.evaluate(async () => {
-    const details = document.querySelector('.pi-thinking');
+    const details = document.querySelector('.glink-thinking');
     details.querySelector('summary').click();
     await new Promise((resolve) => setTimeout(resolve, 400));
-    const after = { open: details.open, chars: details.querySelector('.pi-thinking-body')?.textContent.length };
+    const after = { open: details.open, chars: details.querySelector('.glink-thinking-body')?.textContent.length };
     details.querySelector('summary').click();
     await new Promise((resolve) => setTimeout(resolve, 300));
-    return { process: document.querySelector('.pi-process-toggle').getAttribute('aria-expanded'), after, closedAgain: details.open };
+    return { process: document.querySelector('.glink-process-toggle').getAttribute('aria-expanded'), after, closedAgain: details.open };
   });
   record('过程折叠可再展开；思考行可展开看正文再收起', fold.process === 'true' && fold.after.open === true && fold.after.chars > 0 && fold.closedAgain === false, fold);
 
   const tool = await page.evaluate(async () => {
-    const row = [...document.querySelectorAll('.pi-tool')].find((node) => node.dataset.hasDetail === 'true');
+    const row = [...document.querySelectorAll('.glink-tool')].find((node) => node.dataset.hasDetail === 'true');
     if (!row) return null;
-    const head = row.querySelector('.pi-tool-head');
-    const label = row.querySelector('.pi-tool-name')?.textContent;
+    const head = row.querySelector('.glink-tool-head');
+    const label = row.querySelector('.glink-tool-name')?.textContent;
     head.click();
     await new Promise((resolve) => setTimeout(resolve, 500));
     const openedHeight = Math.round(row.getBoundingClientRect().height);
     const open = row.open;
-    const detail = row.querySelector('.pi-tool-output')?.textContent + row.querySelector('.pi-tool-result')?.textContent;
+    const detail = row.querySelector('.glink-tool-output')?.textContent + row.querySelector('.glink-tool-result')?.textContent;
     head.click();
     await new Promise((resolve) => setTimeout(resolve, 500));
     return { label, open, openedHeight, closedHeight: Math.round(row.getBoundingClientRect().height), closedAgain: row.open, hostPath: /\/workspaces\/[0-9a-f]{6,}/.test(detail) };
@@ -338,7 +338,7 @@ try {
   record('进度与上下文：Esc 收起并把焦点还给开关', escaped.open === 'false' && escaped.focus === 'progress-toggle', escaped);
 
   // ── G. report slot ────────────────────────────────────────────────────────
-  await page.click('.pi-report-button');
+  await page.click('.glink-report-button');
   await page.waitForSelector('#preview-article h1', { timeout: 15_000 });
   await page.waitForTimeout(600);
   const report = await page.evaluate(() => {
@@ -393,7 +393,7 @@ try {
   await page.mouse.move(box.x + 120, box.y + 200, { steps: 6 });
   await page.mouse.up();
   await page.waitForTimeout(200);
-  const dragged = await page.evaluate(() => ({ paneW: Math.round(document.querySelector('.pane').getBoundingClientRect().width), stored: localStorage.getItem('pi-glink-report-split') }));
+  const dragged = await page.evaluate(() => ({ paneW: Math.round(document.querySelector('.pane').getBoundingClientRect().width), stored: localStorage.getItem('glink-harness-report-split') }));
   record('分割线：可拖改宽并记住', Math.abs(dragged.paneW - (report.paneW + 120)) <= 4 && Number(dragged.stored) === dragged.paneW, dragged);
   const moved = await handle.boundingBox();
   await page.mouse.move(moved.x + 0.5, moved.y + 200);
@@ -408,7 +408,7 @@ try {
   record('分割线：对话列不窄于 560、报告不窄于 360', clamped.paneW === 560 && clamped.drawerW >= 360, clamped);
   await page.dblclick('#split-handle');
   await page.waitForTimeout(200);
-  const reset = await page.evaluate(() => ({ paneW: Math.round(document.querySelector('.pane').getBoundingClientRect().width), stored: localStorage.getItem('pi-glink-report-split') }));
+  const reset = await page.evaluate(() => ({ paneW: Math.round(document.querySelector('.pane').getBoundingClientRect().width), stored: localStorage.getItem('glink-harness-report-split') }));
   record('分割线：双击复位', Math.abs(reset.paneW - report.paneW) <= 2 && reset.stored === null, reset);
 
   await page.click('#conversation-collapse');
@@ -444,8 +444,8 @@ try {
   const downloadPromise = page.waitForEvent('download', { timeout: 20_000 });
   await page.click('#preview-download');
   const download = await downloadPromise;
-  await download.saveAs('/tmp/pi-glink-ui-features-report.md');
-  const stat = await import('node:fs/promises').then((fs) => fs.stat('/tmp/pi-glink-ui-features-report.md'));
+  await download.saveAs('/tmp/glink-harness-ui-features-report.md');
+  const stat = await import('node:fs/promises').then((fs) => fs.stat('/tmp/glink-harness-ui-features-report.md'));
   record('报告下载：落盘成功、文件名可读', stat.size > 0 && /^研究报告/.test(download.suggestedFilename()), { file: download.suggestedFilename(), bytes: stat.size });
 
   await shot('ui-features-report.png');
@@ -571,16 +571,16 @@ try {
     // contract to settle, while keeping a timeout so a real regression records
     // the assertion below instead of wedging the suite.
     await page.waitForFunction(() => {
-      const outcome = document.querySelector('#run-view .pi-outcome');
+      const outcome = document.querySelector('#run-view .glink-outcome');
       return outcome && !outcome.hidden &&
-        outcome.querySelector('.pi-outcome-title')?.textContent === '过程记录暂时读不到';
+        outcome.querySelector('.glink-outcome-title')?.textContent === '过程记录暂时读不到';
     }, { timeout: 20_000 }).catch(() => {});
     const unreadable = await page.evaluate(() => {
-      const outcome = document.querySelector('.pi-outcome');
+      const outcome = document.querySelector('.glink-outcome');
       return {
         shown: outcome && !outcome.hidden,
-        title: outcome?.querySelector('.pi-outcome-title')?.textContent,
-        actions: [...(outcome?.querySelectorAll('.pi-outcome-actions button') ?? [])].map((node) => node.textContent.trim()),
+        title: outcome?.querySelector('.glink-outcome-title')?.textContent,
+        actions: [...(outcome?.querySelectorAll('.glink-outcome-actions button') ?? [])].map((node) => node.textContent.trim()),
       };
     });
     record('过程记录读不到：给出说明与下一步（重试 / 打开报告），不再无限「重连中」', unreadable.shown && unreadable.title === '过程记录暂时读不到' && unreadable.actions.includes('重试'), unreadable);
@@ -618,7 +618,7 @@ try {
 } finally {
   const passed = checks.filter((check) => check.ok).length;
   const transcript = [
-    'pi-glink UI 全功能自检',
+    'glink-harness UI 全功能自检',
     `日期: ${new Date().toISOString()}`,
     `命令: node tests/browser/ui-features.mjs --base-url ${baseUrl}`,
     `视口: ${VIEWPORT.width}×${VIEWPORT.height}（断点档另测 ${BREAKPOINTS.join(' / ')}）`,

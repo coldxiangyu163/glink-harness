@@ -75,7 +75,7 @@ export async function run(ctx) {
   );
 
   const chrome = await chromeText(page);
-  const leaks = ['pi-glink', 'inproc', '内核', 'session ', 'openai/'].filter((word) => chrome.includes(word));
+  const leaks = ['glink-harness', 'inproc', '内核', 'session ', 'openai/'].filter((word) => chrome.includes(word));
   suite.record('网关入口文字不暴露内核/执行面/会话事实', leaks.length === 0, leaks);
 
   await suite.shot(page, 'gateway-face');

@@ -1,4 +1,4 @@
-# pi-glink 开发指引
+# glink-harness 开发指引
 
 本文件约束开发本仓库的 coding agent；产品内研究 Agent 的指令属于 `methodology/`（工作约定与蓝图）与 `harnesses/<pack>/`（harness 专有配置与扩展），不复制本文件到运行期配置。
 
@@ -16,7 +16,7 @@
 
 ## 实现边界
 
-- pi 是外部内核，定制通过官方协议和扩展点完成；不 fork、patch、vendor 内核，不引入 FrontierAgent runtime。`host/pi_glink/kernel/` 是自有接入层，可以在契约内修改，不按上游源码冻结。
+- pi、dsh、codex、opencode 等原生 harness 都是外部内核，定制通过各自官方协议和扩展点完成；不 fork、patch、vendor 任何内核，不引入 FrontierAgent runtime。`host/glink_harness/kernel/` 是自有接入层，可以在契约内修改，不按上游源码冻结。
 - 迁移前宿主继续负责执行编排、状态、存储和呈现，向 ULegal 转移职责按架构中的接管条件执行。工作约定与蓝图在 `methodology/`，harness 专有配置与扩展在 `harnesses/<pack>/`；保留原生扩展机制与引用前核实原文的底线。前端消费结构化事件，不从终端文本猜状态；累计快照、增量与权威终帧的当前契约在消费者改造验收前有效。
 - 修改前核对工作区、基线和在途文件；保留他人的未提交修改。任务只覆盖所需文件，新增依赖或扩大共享语义前说明消费者影响。多 Agent 仅在获得授权时启用，遵循当前全局策略，不在本仓库复制 launcher 或资源规则。
 - 新实现替代旧实现时，在同一范围核对消费者并删除已失去用途的旧分支、测试与说明；保留独立风险的负例。不以删行数为目标，也不顺手扩展为全仓重构。

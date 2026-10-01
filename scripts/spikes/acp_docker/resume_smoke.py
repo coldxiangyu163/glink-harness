@@ -50,7 +50,7 @@ sys.path.insert(0, str(REPO_ROOT / "host"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "spikes"))
 from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 
-from pi_glink.kernel.docker_env import (  # noqa: E402
+from glink_harness.kernel.docker_env import (  # noqa: E402
     CONTAINER_HOME,
     CONTAINER_WORKSPACE,
     confirm_absent,
@@ -198,7 +198,7 @@ def docker_inspect(container_name: str) -> tuple[dict | None, str]:
     """One container's live facts by its exact name (no pattern, no listing).
 
     Returns ``(facts, failure)``. The environment is recorded by *name only*: the
-    host passes ``PI_GLINK_ACP_ENV`` by name with the values on the docker CLI's
+    host passes ``GLINK_ACP_ENV`` by name with the values on the docker CLI's
     own environment, and this probe must never copy a value into evidence. The
     names are read by a separate template that emits one name per line — a Go
     template array built with ``range`` leaves a trailing comma and is then not
@@ -407,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="ACP docker 面真实续接冒烟（首轮 + 追问）")
     parser.add_argument("--label", default="docker-dsh")
     parser.add_argument("--agent", default="dsh --profile acp")
-    parser.add_argument("--image", default="pi-glink-acp-worker:latest")
+    parser.add_argument("--image", default="glink-harness-acp-worker:latest")
     parser.add_argument(
         "--credential",
         action="append",
@@ -452,18 +452,18 @@ def main(argv: list[str] | None = None) -> int:
     env.update(
         {
             "PYTHONPATH": str(REPO_ROOT / "host"),
-            "PI_GLINK_HARNESS": PROBE_PACK_NAME,
-            "PI_GLINK_HARNESSES_DIR": str(packs),
+            "GLINK_HARNESS": PROBE_PACK_NAME,
+            "GLINK_HARNESSES_DIR": str(packs),
             "LOCAL_WEB_EXECUTOR": "docker",
             "LOCAL_WEB_ACP_WORKER_IMAGE": args.image,
             "LOCAL_WEB_DATA_ROOT": str(data_root),
             "LOCAL_WEB_TASK_TIMEOUT_SECONDS": str(args.timeout),
-            "PI_GLINK_RESOURCE_RECONCILE_SECONDS": "0",
-            "PI_GLINK_ACP_CREDENTIAL_FILES": ";".join(credentials),
+            "GLINK_RESOURCE_RECONCILE_SECONDS": "0",
+            "GLINK_ACP_CREDENTIAL_FILES": ";".join(credentials),
         }
     )
     if args.env:
-        env["PI_GLINK_ACP_ENV"] = ";".join(args.env)
+        env["GLINK_ACP_ENV"] = ";".join(args.env)
 
     code = codename()
     first = first_prompt(code)
@@ -479,7 +479,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"ACP M9 真实续接冒烟（docker / {args.label}）")
     print("=" * 52)
     print(f"日期: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"宿主命令: python -m pi_glink.app --port {port}（harness=acp, executor=docker）")
+    print(f"宿主命令: python -m glink_harness.app --port {port}（harness=acp, executor=docker）")
     print(f"agent 命令: {args.agent}")
     print(f"镜像: {args.image}（{image_id[:19]}…）")
     print(f"命令级 env: {', '.join(item.split('=', 1)[0] for item in args.env) or '（无）'}")
@@ -495,7 +495,7 @@ def main(argv: list[str] | None = None) -> int:
     exit_code: int | None = None
     with log_path.open("w", encoding="utf-8") as log_handle:
         process = subprocess.Popen(
-            [sys.executable, "-m", "pi_glink.app", "--port", str(port)],
+            [sys.executable, "-m", "glink_harness.app", "--port", str(port)],
             cwd=str(REPO_ROOT),
             env=env,
             stdout=log_handle,
@@ -708,9 +708,9 @@ def main(argv: list[str] | None = None) -> int:
         text=True,
         timeout=20,
     ).stdout.strip()
-    glink_names = [name for name in prefix_listing.splitlines() if name.startswith("pi-glink-")]
+    glink_names = [name for name in prefix_listing.splitlines() if name.startswith("glink-harness-")]
     print(f"  docker ps -a 全部容器名: {prefix_listing!r}")
-    print(f"  其中 pi-glink- 前缀容器: {glink_names or '无'}")
+    print(f"  其中 glink-harness- 前缀容器: {glink_names or '无'}")
 
     print()
     print("child report.md（HTTP %s，%s bytes）" % (results["child"]["reportStatus"], len(results["child"]["report"])))

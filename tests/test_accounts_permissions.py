@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.accounts import AccountsError, AccountsStore
+from glink_harness.accounts import AccountsError, AccountsStore
 
 PASSWORD = "correct horse battery"
 

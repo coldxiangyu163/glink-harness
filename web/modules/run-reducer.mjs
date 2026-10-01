@@ -2,7 +2,7 @@
  * Product event stream → run state: the pure reducer.
  *
  * `reduce(state, event)` is the front-end half of the event contract. The host
- * validates every frame against `host/pi_glink/event_schema.py` before it is
+ * validates every frame against `host/glink_harness/event_schema.py` before it is
  * committed; the vocabulary and payload versions here come from the module
  * generated from that schema (`event-schema.gen.mjs`). This module never
  * touches the DOM, the network or the clock, so Node tests drive it with event

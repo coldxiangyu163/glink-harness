@@ -22,27 +22,27 @@ from typing import Any, Mapping
 
 import pytest
 
-from pi_glink.app import create_server
-from pi_glink.config import ConfigError, HostConfig, build_config
+from glink_harness.app import create_server
+from glink_harness.config import ConfigError, HostConfig, build_config
 
 from acp_pack import apply_acp_pack
-from pi_glink.events import EventBus
-from pi_glink.kernel.acp_env import AcpRuntime
-from pi_glink.kernel.acp_execution import AcpExecutionAdapter
+from glink_harness.events import EventBus
+from glink_harness.kernel.acp_env import AcpRuntime
+from glink_harness.kernel.acp_execution import AcpExecutionAdapter
 from harness_helpers import family, test_egress
-from pi_glink.kernel import docker_env
-from pi_glink.kernel.execution import ExecutionAdapter, ExecutionSpec
-from pi_glink.kernel.harness_pi import PiExecutionAdapter
-from pi_glink.kernel.sandbox import SANDBOXES, open_sandbox
-from pi_glink.redaction import REPLACEMENT
-from pi_glink.runs.stages import DecideStage
-from pi_glink.runs import limits
-from pi_glink.contracts import FollowupUnavailable
-from pi_glink.runs.runner import (
+from glink_harness.kernel import docker_env
+from glink_harness.kernel.execution import ExecutionAdapter, ExecutionSpec
+from glink_harness.kernel.harness_pi import PiExecutionAdapter
+from glink_harness.kernel.sandbox import SANDBOXES, open_sandbox
+from glink_harness.redaction import REPLACEMENT
+from glink_harness.runs.stages import DecideStage
+from glink_harness.runs import limits
+from glink_harness.contracts import FollowupUnavailable
+from glink_harness.runs.runner import (
     RunManager,
     UnsupportedCommand,
 )
-from pi_glink.store import CANCELLED, FAILED, FINISHED, RunStore
+from glink_harness.store import CANCELLED, FAILED, FINISHED, RunStore
 from store_helpers import events_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -67,7 +67,7 @@ def make_config(tmp_path: Path, settings: Mapping[str, Any] | None = None, **ove
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_HARNESS": "acp",
+        "GLINK_HARNESS": "acp",
         "TEST_ACP_COMMAND": acp_command(tmp_path, settings or {}),
     }
     values.update(overrides)
@@ -333,7 +333,7 @@ def test_acp_initialize_identifies_the_client_with_a_version(tmp_path: Path) -> 
     ``version`` is answered with ``-32602 Invalid params`` before any session
     exists, so the host sends its own version and this regression pins it.
     """
-    from pi_glink import __version__ as host_version
+    from glink_harness import __version__ as host_version
 
     log = tmp_path / "agent.jsonl"
     _config, store, manager = build_manager(tmp_path, {"FAKE_ACP_LOG": str(log)})
@@ -343,7 +343,7 @@ def test_acp_initialize_identifies_the_client_with_a_version(tmp_path: Path) -> 
     initialize = next(
         entry for entry in read_log(log) if entry["event"] == "initialize"
     )
-    assert initialize["clientInfo"] == {"name": "pi-glink", "version": host_version}
+    assert initialize["clientInfo"] == {"name": "glink-harness", "version": host_version}
 
 
 def test_acp_usage_updates_replace_the_total_instead_of_summing(tmp_path: Path) -> None:
@@ -422,7 +422,7 @@ def test_acp_kernel_exit_carries_the_redacted_agent_stderr_tail(
     settings = {"FAKE_ACP_STDERR": f"agent: 启动失败 OPENAI_API_KEY={secret}"}
     _config, store, manager = build_manager(tmp_path, settings, OPENAI_API_KEY=secret)
 
-    with caplog.at_level(logging.WARNING, logger="pi_glink.runs.runner"):
+    with caplog.at_level(logging.WARNING, logger="glink_harness.runs.runner"):
         record = manager.start("CRASH 掉这个 agent")
         final = manager.wait(record.run_id, timeout=30)
 
@@ -1000,7 +1000,7 @@ def test_injected_credential_values_are_redacted_from_the_run(tmp_path: Path) ->
     config, store, manager = build_manager(
         tmp_path,
         settings,
-        PI_GLINK_ACP_CREDENTIAL_FILES=f"{source}=state/credentials.json",
+        GLINK_ACP_CREDENTIAL_FILES=f"{source}=state/credentials.json",
     )
     record = manager.start("SECRET 请回显凭据")
     final = manager.wait(record.run_id, timeout=30)
@@ -1029,10 +1029,10 @@ def test_a_failed_credential_copy_removal_is_reported_and_keeps_the_verdict(
     source.write_text(json.dumps({"seedToken": secret}), encoding="utf-8")
     settings = {"FAKE_ACP_LOG": str(tmp_path / "agent.jsonl"), "FAKE_ACP_WRITE_REPORT": True}
     _config, store, manager = build_manager(
-        tmp_path, settings, PI_GLINK_ACP_CREDENTIAL_FILES=f"{source}=state/credentials.json"
+        tmp_path, settings, GLINK_ACP_CREDENTIAL_FILES=f"{source}=state/credentials.json"
     )
 
-    from pi_glink.artifacts import ArtifactTree
+    from glink_harness.artifacts import ArtifactTree
 
     def refuse(self, path):
         raise OSError("simulated removal failure")
@@ -1055,7 +1055,7 @@ def test_acp_env_entries_reach_the_agent_process(tmp_path: Path) -> None:
     _config, _store, manager = build_manager(
         tmp_path,
         settings,
-        PI_GLINK_ACP_ENV="ACME_RESEARCH_MODE=workspace;FAKE_ACP_ENV_PROBE=ACME_RESEARCH_MODE",
+        GLINK_ACP_ENV="ACME_RESEARCH_MODE=workspace;FAKE_ACP_ENV_PROBE=ACME_RESEARCH_MODE",
     )
     record = manager.start("环境变量探测")
     final = manager.wait(record.run_id, timeout=30)
@@ -1236,7 +1236,7 @@ def test_acp_adapter_is_composed_through_the_same_contract(tmp_path: Path) -> No
         assert adapter.identity() == expected_identity
 
     # The pi path goes through the same composition and keeps its own driver.
-    from pi_glink.kernel import agent_env
+    from glink_harness.kernel import agent_env
 
     pi_runtime = agent_env.prepare_agent_dir(
         config,

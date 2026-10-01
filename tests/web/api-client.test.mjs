@@ -60,23 +60,23 @@ test('the CSRF header only appears when a session supplied a token', async () =>
   const { calls, api } = recorder();
   setCsrfToken(null);
   await api.startRun('无令牌');
-  assert.equal(calls[0].init.headers['X-Pi-Glink-CSRF'], undefined);
+  assert.equal(calls[0].init.headers['X-Glink-Harness-CSRF'], undefined);
   assert.equal(getCsrfToken(), null);
 
   setCsrfToken('csrf-token-value');
   await api.startRun('有令牌');
-  assert.equal(calls[1].init.headers['X-Pi-Glink-CSRF'], 'csrf-token-value');
+  assert.equal(calls[1].init.headers['X-Glink-Harness-CSRF'], 'csrf-token-value');
   await api.stopRun('run-1');
-  assert.equal(calls[2].init.headers['X-Pi-Glink-CSRF'], 'csrf-token-value');
+  assert.equal(calls[2].init.headers['X-Glink-Harness-CSRF'], 'csrf-token-value');
 
   // GETs never carry the token.
   await api.me();
-  assert.equal(calls[3].init.headers['X-Pi-Glink-CSRF'], undefined);
+  assert.equal(calls[3].init.headers['X-Glink-Harness-CSRF'], undefined);
 
   setCsrfToken('');
   assert.equal(getCsrfToken(), null);
   await api.startRun('清空后');
-  assert.equal(calls[4].init.headers['X-Pi-Glink-CSRF'], undefined);
+  assert.equal(calls[4].init.headers['X-Glink-Harness-CSRF'], undefined);
 });
 
 test('403 csrf_invalid refreshes the accounts token and retries the same POST once', async () => {
@@ -92,8 +92,8 @@ test('403 csrf_invalid refreshes the accounts token and retries the same POST on
   const result = await api.startRun('同一个问题');
   assert.equal(result.run.id, 'new');
   assert.deepEqual(calls.map(({ path }) => path), ['/api/runs', '/api/me', '/api/runs']);
-  assert.equal(calls[0].init.headers['X-Pi-Glink-CSRF'], 'stale');
-  assert.equal(calls[2].init.headers['X-Pi-Glink-CSRF'], 'fresh');
+  assert.equal(calls[0].init.headers['X-Glink-Harness-CSRF'], 'stale');
+  assert.equal(calls[2].init.headers['X-Glink-Harness-CSRF'], 'fresh');
   assert.equal(calls[2].init.body, calls[0].init.body);
   assert.equal(getCsrfToken(), 'fresh');
   setCsrfToken(null);
@@ -109,7 +109,7 @@ test('a second csrf_invalid reaches the failure surface without a refresh loop',
   } });
   await assert.rejects(() => api.stopRun('r1'), (error) => error.status === 403 && error.code === 'csrf_invalid');
   assert.deepEqual(paths.map(({ path }) => path), ['/api/runs/r1/stop', '/api/me', '/api/runs/r1/stop']);
-  assert.equal(paths[2].init.headers['X-Pi-Glink-CSRF'], 'fresh');
+  assert.equal(paths[2].init.headers['X-Glink-Harness-CSRF'], 'fresh');
   setCsrfToken(null);
 });
 

@@ -1,7 +1,7 @@
 # 0013 run 收尾是显式的阶段管线
 
 - 状态：已接受（2026-09-28，架构重设计 S4；行为不变的结构决定）
-- 范围：`host/pi_glink/runs/{pipeline,stages,state,admission,secrets,plugins,channel,runner}.py`
+- 范围：`host/glink_harness/runs/{pipeline,stages,state,admission,secrets,plugins,channel,runner}.py`
 
 ## 背景
 

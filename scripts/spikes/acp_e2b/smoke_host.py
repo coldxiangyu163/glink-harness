@@ -2,7 +2,7 @@
 """ACP E2B 最小真实冒烟（GLINK-ACP-04 / M3b）。
 
 一次短题、有界超时、临时数据根、随机端口：起真实宿主进程（``python -m
-pi_glink.app``）→ ``POST /api/runs`` → 同时订阅 SSE 看流式 → 轮询终态 →
+glink_harness.app``）→ ``POST /api/runs`` → 同时订阅 SSE 看流式 → 轮询终态 →
 ``GET /api/runs/<id>/report`` 回收 ``report.md`` → 用生产对账助手
 ``confirm_sandbox_absent`` 按持久化 sandbox id 确认沙箱已不存在。
 
@@ -28,7 +28,7 @@ sys.path.insert(0, str(REPO_ROOT / "host"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "spikes"))
 from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 
-from pi_glink.kernel.e2b_env import confirm_sandbox_absent  # noqa: E402
+from glink_harness.kernel.e2b_env import confirm_sandbox_absent  # noqa: E402
 
 TERMINAL = {"finished", "failed", "cancelled"}
 
@@ -137,20 +137,20 @@ def main(argv: list[str] | None = None) -> int:
     env.update(
         {
             "PYTHONPATH": str(REPO_ROOT / "host"),
-            "PI_GLINK_HARNESS": PROBE_PACK_NAME,
-            "PI_GLINK_HARNESSES_DIR": str(packs),
-            "PI_GLINK_ACP_CREDENTIAL_FILES": args.credential,
+            "GLINK_HARNESS": PROBE_PACK_NAME,
+            "GLINK_HARNESSES_DIR": str(packs),
+            "GLINK_ACP_CREDENTIAL_FILES": args.credential,
             "LOCAL_WEB_EXECUTOR": "e2b",
             "LOCAL_WEB_E2B_ACP_TEMPLATE": args.template,
             "LOCAL_WEB_DATA_ROOT": str(data_root),
             "LOCAL_WEB_TASK_TIMEOUT_SECONDS": str(args.timeout),
-            "PI_GLINK_RESOURCE_RECONCILE_SECONDS": "0",
+            "GLINK_RESOURCE_RECONCILE_SECONDS": "0",
             "E2B_API_KEY": api_key,
         }
     )
     print("ACP M3b 最小真实冒烟")
     print(f"日期: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"宿主命令: python -m pi_glink.app --port {port}（harness=acp, executor=e2b）")
+    print(f"宿主命令: python -m glink_harness.app --port {port}（harness=acp, executor=e2b）")
     print(f"agent 命令: {args.agent}")
     print(f"模板: {args.template}")
     print(f"数据根: {data_root}")
@@ -159,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with log_path.open("w", encoding="utf-8") as log_handle:
         process = subprocess.Popen(
-            [sys.executable, "-m", "pi_glink.app", "--port", str(port)],
+            [sys.executable, "-m", "glink_harness.app", "--port", str(port)],
             cwd=str(REPO_ROOT),
             env=env,
             stdout=log_handle,

@@ -125,7 +125,7 @@ def test_mode_json_argv_rule_flags_the_deleted_launch_form() -> None:
     assert mode_json_argv_violations('argv = ["pi", "--mode", "json", prompt]') != []
     assert mode_json_argv_violations("subprocess.run(['pi', '--mode', 'json'])") != []
     assert mode_json_argv_violations('argv = ["pi", "--mode", "rpc", prompt]') == []
-    assert mode_json_argv_violations('PI_GLINK_PI_MODE = "json"  # 配置名不是 argv') == []
+    assert mode_json_argv_violations('GLINK_PI_MODE = "json"  # 配置名不是 argv') == []
 
 
 def test_architecture_states_the_real_e2b_recovery_bounds() -> None:
@@ -134,7 +134,7 @@ def test_architecture_states_the_real_e2b_recovery_bounds() -> None:
     数字从 ``e2b_env`` 现读，文档写错或代码改值而文档没跟上都会变红——
     避免「逐文件限幅」这类无数字表述再次掩盖真实边界。
     """
-    from pi_glink.kernel import e2b_env
+    from glink_harness.kernel import e2b_env
 
     text = (ROOT / "docs/architecture.md").read_text(encoding="utf-8")
     mib = 1024 * 1024

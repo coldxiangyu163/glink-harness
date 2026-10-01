@@ -24,18 +24,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from pi_glink.config import build_config
+from glink_harness.config import build_config
 
 from acp_pack import apply_acp_pack
-from pi_glink.events import EventBus
-from pi_glink.kernel import docker_env
-from pi_glink.kernel.acp_env import prepare_acp_runtime
+from glink_harness.events import EventBus
+from glink_harness.kernel import docker_env
+from glink_harness.kernel.acp_env import prepare_acp_runtime
 from harness_helpers import compose_launch, execution_spec, family, test_egress
-from pi_glink.kernel.acp_execution import AcpExecutionAdapter
-from pi_glink.kernel.execution import ExecutionSpec
-from pi_glink.kernel.sandbox import DockerSandbox, E2BSandbox, open_sandbox
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import FAILED, FINISHED, RunStore, RunSpec
+from glink_harness.kernel.acp_execution import AcpExecutionAdapter
+from glink_harness.kernel.execution import ExecutionSpec
+from glink_harness.kernel.sandbox import DockerSandbox, E2BSandbox, open_sandbox
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import FAILED, FINISHED, RunStore, RunSpec
 from store_helpers import finish
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -50,9 +50,9 @@ def make_config(tmp_path: Path, **overrides: str):
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
-        # 测试绝不触碰操作员的真实数据根（~/.pi-glink）。
+        # 测试绝不触碰操作员的真实数据根（~/.glink-harness）。
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_HARNESS": "acp",
+        "GLINK_HARNESS": "acp",
         "TEST_ACP_COMMAND": "dsh --profile acp",
     }
     values.update(overrides)
@@ -130,7 +130,7 @@ def test_credentials_are_mounted_read_only_inside_the_writable_home(
     config = make_config(
         tmp_path,
         LOCAL_WEB_EXECUTOR="docker",
-        PI_GLINK_ACP_CREDENTIAL_FILES=f"{source}=.codex/auth.json",
+        GLINK_ACP_CREDENTIAL_FILES=f"{source}=.codex/auth.json",
     )
     runtime = make_runtime(config, tmp_path)
     plan = make_plan(config, runtime, tmp_path)
@@ -155,8 +155,8 @@ def test_no_credential_value_or_unmapped_host_path_leaks_into_the_plan(
     config = make_config(
         tmp_path,
         LOCAL_WEB_EXECUTOR="docker",
-        PI_GLINK_ACP_CREDENTIAL_FILES=f"{source}=.dsh/.credentials.yaml",
-        PI_GLINK_ACP_ENV="ACME_MODE=workspace",
+        GLINK_ACP_CREDENTIAL_FILES=f"{source}=.dsh/.credentials.yaml",
+        GLINK_ACP_ENV="ACME_MODE=workspace",
     )
     runtime = make_runtime(config, tmp_path)
     plan = make_plan(config, runtime, tmp_path)
@@ -175,7 +175,7 @@ def test_acp_env_entries_travel_by_name_and_home_is_the_run_root(tmp_path: Path)
     config = make_config(
         tmp_path,
         LOCAL_WEB_EXECUTOR="docker",
-        PI_GLINK_ACP_ENV="ACME_MODE=workspace;ACME_EMPTY=",
+        GLINK_ACP_ENV="ACME_MODE=workspace;ACME_EMPTY=",
     )
     runtime = make_runtime(config, tmp_path)
     plan = make_plan(config, runtime, tmp_path)
@@ -194,7 +194,7 @@ def test_the_plan_reuses_the_pi_face_isolation_contract(tmp_path: Path) -> None:
     acp_runtime = make_runtime(config, tmp_path, name="acp")
     acp_plan = make_plan(config, acp_runtime, tmp_path)
 
-    from pi_glink.kernel import agent_env
+    from glink_harness.kernel import agent_env
 
     pi_runtime = agent_env.prepare_agent_dir(
         config,
@@ -223,9 +223,9 @@ def test_the_plan_reuses_the_pi_face_isolation_contract(tmp_path: Path) -> None:
 
 def test_the_pi_docker_plan_is_unchanged_by_the_acp_plan(tmp_path: Path) -> None:
     """The pi face's argv contract stays byte-for-byte where it was."""
-    from pi_glink.kernel import agent_env
+    from glink_harness.kernel import agent_env
 
-    config = make_config(tmp_path, PI_GLINK_HARNESS="pi", LOCAL_WEB_EXECUTOR="docker")
+    config = make_config(tmp_path, GLINK_HARNESS="pi", LOCAL_WEB_EXECUTOR="docker")
     runtime = agent_env.prepare_agent_dir(
         config,
         runtime_dir=tmp_path / "pi" / "pi-agent",
@@ -248,13 +248,13 @@ def test_the_acp_image_is_frozen_at_configuration_time(
     config = make_config(
         tmp_path,
         LOCAL_WEB_EXECUTOR="docker",
-        LOCAL_WEB_ACP_WORKER_IMAGE="pi-glink-acp-worker:pinned",
+        LOCAL_WEB_ACP_WORKER_IMAGE="glink-harness-acp-worker:pinned",
     )
     runtime = make_runtime(config, tmp_path)
-    monkeypatch.setenv("LOCAL_WEB_ACP_WORKER_IMAGE", "pi-glink-acp-worker:other")
+    monkeypatch.setenv("LOCAL_WEB_ACP_WORKER_IMAGE", "glink-harness-acp-worker:other")
     plan = make_plan(config, runtime, tmp_path)
-    assert plan.image == "pi-glink-acp-worker:pinned"
-    assert docker_env.acp_worker_image(config) == "pi-glink-acp-worker:pinned"
+    assert plan.image == "glink-harness-acp-worker:pinned"
+    assert docker_env.acp_worker_image(config) == "glink-harness-acp-worker:pinned"
 
 
 # -- image pin boundary -------------------------------------------------------
@@ -432,7 +432,7 @@ def test_a_missing_daemon_fails_closed_and_keeps_the_persisted_identity(
     run record keeps its container name for the online ledger."""
     config = make_config(tmp_path, LOCAL_WEB_EXECUTOR="docker")
     store = RunStore(config.data_root / "runs")
-    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: False)
+    monkeypatch.setattr("glink_harness.kernel.sandbox.docker_available", lambda: False)
     manager = RunManager(config, EventBus(), store)
     record = manager.start("docker 不可用时应当失败")
     final = manager.wait(record.run_id, timeout=30)
@@ -476,9 +476,9 @@ def test_the_acp_docker_plan_feeds_the_adapter_through_the_runner(
     config = make_config(
         tmp_path,
         LOCAL_WEB_EXECUTOR="docker",
-        LOCAL_WEB_ACP_WORKER_IMAGE="pi-glink-acp-worker:test",
+        LOCAL_WEB_ACP_WORKER_IMAGE="glink-harness-acp-worker:test",
         TEST_ACP_COMMAND="codex-acp --flag value",
-        PI_GLINK_ACP_ENV="ACME_MODE=workspace",
+        GLINK_ACP_ENV="ACME_MODE=workspace",
     )
     runtime = make_runtime(config, tmp_path, name="plan")
     seen: dict[str, object] = {}
@@ -521,9 +521,9 @@ def test_the_acp_docker_plan_feeds_the_adapter_through_the_runner(
         timeout_seconds=5,
     )
     manager = RunManager(config, EventBus(), RunStore(config.data_root / "runs"))
-    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
-    monkeypatch.setattr("pi_glink.kernel.acp_execution.AcpRpcClient", _RecordingClient)
-    monkeypatch.setattr("pi_glink.kernel.sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("glink_harness.kernel.sandbox.docker_available", lambda: True)
+    monkeypatch.setattr("glink_harness.kernel.acp_execution.AcpRpcClient", _RecordingClient)
+    monkeypatch.setattr("glink_harness.kernel.sandbox.subprocess.run", fake_run)
     sandbox = open_sandbox(
         config.executor, config=config, run_id="abc123", workspace=tmp_path / "workspace"
     )
@@ -538,7 +538,7 @@ def test_the_acp_docker_plan_feeds_the_adapter_through_the_runner(
     assert seen["argv"] == docker_env.run_argv(
         config, adapter.launch, run_id="abc123", workspace=tmp_path / "workspace"
     )
-    assert seen["argv"][seen["argv"].index("pi-glink-acp-worker:test") + 1 :] == [
+    assert seen["argv"][seen["argv"].index("glink-harness-acp-worker:test") + 1 :] == [
         "codex-acp",
         "--flag",
         "value",

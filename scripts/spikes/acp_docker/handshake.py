@@ -31,13 +31,13 @@ sys.path.insert(0, str(REPO_ROOT / "host"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "spikes"))
 from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 
-from pi_glink.config import build_config  # noqa: E402
-from pi_glink.kernel.acp_env import prepare_acp_runtime  # noqa: E402
-from pi_glink.kernel.docker_env import acp_worker_image, confirm_absent  # noqa: E402
-from pi_glink.kernel.execution import ExecutionSpec  # noqa: E402
-from pi_glink.kernel.harness_acp import AcpHarnessFamily  # noqa: E402
-from pi_glink.kernel.sandbox import DockerSandbox  # noqa: E402
-from pi_glink.store import RunStore  # noqa: E402
+from glink_harness.config import build_config  # noqa: E402
+from glink_harness.kernel.acp_env import prepare_acp_runtime  # noqa: E402
+from glink_harness.kernel.docker_env import acp_worker_image, confirm_absent  # noqa: E402
+from glink_harness.kernel.execution import ExecutionSpec  # noqa: E402
+from glink_harness.kernel.harness_acp import AcpHarnessFamily  # noqa: E402
+from glink_harness.kernel.sandbox import DockerSandbox  # noqa: E402
+from glink_harness.store import RunStore  # noqa: E402
 
 DEFAULT_COMMAND = "dsh --profile acp"
 
@@ -45,7 +45,7 @@ DEFAULT_COMMAND = "dsh --profile acp"
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="ACP docker 容器内握手（不发 prompt）")
     parser.add_argument("--command", default=DEFAULT_COMMAND)
-    parser.add_argument("--image", default="pi-glink-acp-worker:latest")
+    parser.add_argument("--image", default="glink-harness-acp-worker:latest")
     parser.add_argument("--env", action="append", default=[], help="NAME=value，可重复")
     parser.add_argument("--credential", action="append", default=[], help="source=dest，可重复")
     parser.add_argument(
@@ -66,17 +66,17 @@ def main(argv: list[str] | None = None) -> int:
         permission_allow=args.permission_allow,
     )
     values = {
-        "PI_GLINK_HARNESS": PROBE_PACK_NAME,
-        "PI_GLINK_HARNESSES_DIR": str(packs),
+        "GLINK_HARNESS": PROBE_PACK_NAME,
+        "GLINK_HARNESSES_DIR": str(packs),
         "LOCAL_WEB_EXECUTOR": "docker",
         "LOCAL_WEB_DATA_ROOT": str(workdir / "data"),
         "LOCAL_WEB_ACP_WORKER_IMAGE": args.image,
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": str(args.timeout),
     }
     if args.env:
-        values["PI_GLINK_ACP_ENV"] = ";".join(args.env)
+        values["GLINK_ACP_ENV"] = ";".join(args.env)
     if args.credential:
-        values["PI_GLINK_ACP_CREDENTIAL_FILES"] = ";".join(args.credential)
+        values["GLINK_ACP_CREDENTIAL_FILES"] = ";".join(args.credential)
     config = build_config(values, REPO_ROOT)
 
     run_id = "acp-handshake-" + args.command.split()[0].replace("/", "_")

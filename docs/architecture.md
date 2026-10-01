@@ -51,12 +51,12 @@
 ### 当前实现（迁移前）
 
 当前宿主仍提供研究工作台、HTTP/SSE、站内账号和 SQLite 存储，通过 Docker / E2B 为 run 提供
-独立执行环境，本地 `inproc` 保留为单 Agent 开发与调试入口。默认 `PI_GLINK_TENANCY=local`
-仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用单宿主多租户实现（§10）。
-身份入口为本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请
-注册、登录与服务端会话（`PI_GLINK_AUTH_MODE=accounts`，§10.6）；两者只在服务端生成
+独立执行环境，本地 `inproc` 保留为单 Agent 开发与调试入口。默认 `GLINK_TENANCY=local`
+仍是单用户、全局单 run；`GLINK_TENANCY=multitenant` 时启用单宿主多租户实现（§10）。
+身份入口为本机认证网关注入短时效签名断言（`GLINK_AUTH_MODE=gateway`，默认），或站内邀请
+注册、登录与服务端会话（`GLINK_AUTH_MODE=accounts`，§10.6）；两者只在服务端生成
 `TenantContext`，run 带租户归属。当前配置默认 `tenant` 政策，每租户自备模型凭据；显式
-`PI_GLINK_MODEL_CREDENTIALS=shared` 时由宿主统一提供，这是首发产品选择，不表示本次已修改
+`GLINK_MODEL_CREDENTIALS=shared` 时由宿主统一提供，这是首发产品选择，不表示本次已修改
 运行配置。ACP 注入通道服从同一政策：tenant 下拒绝、shared 下为具名凭据源
 （[ADR 0015](adr/0015-acp-credential-channels-under-model-credential-policy.md)）。
 Docker/E2B 可并发；多租户实现目前只有合成验证，真实网关、HTTPS 终止、邮件交付和生产数据验收
@@ -80,14 +80,14 @@ dsh/codex/opencode 经 stdio JSON-RPC 桥接。开源 harness 名单与包机制
 | 层 | 位置 | 职责 | 不做什么 |
 |---|---|---|---|
 | 前端 | `web/` | 工作台外壳、运行时间线、报告预览 | 不解析终端文本，不做业务编排 |
-| 宿主 | `host/pi_glink/` | 配置冻结、事件总线、HTTP/SSE、存储 | 不导入 pi，不实现研究方法论 |
-| 编排层 | `host/pi_glink/runs/` | run 准入、执行骨架与收尾顺序、终态提交、外部资源台账 | 不解析内核协议帧，不定制内核 |
-| 内核接入 | `host/pi_glink/kernel/` | 启动 pi、消费官方 headless 协议、事件归一化 | 不导入编排层或宿主编排模块，不定制内核 |
+| 宿主 | `host/glink_harness/` | 配置冻结、事件总线、HTTP/SSE、存储 | 不导入 pi，不实现研究方法论 |
+| 编排层 | `host/glink_harness/runs/` | run 准入、执行骨架与收尾顺序、终态提交、外部资源台账 | 不解析内核协议帧，不定制内核 |
+| 内核接入 | `host/glink_harness/kernel/` | 启动 pi、消费官方 headless 协议、事件归一化 | 不导入编排层或宿主编排模块，不定制内核 |
 | Harness 包 | `harnesses/<pack>/` | 各 harness 的可版本化配置与扩展（清单 `harness.toml`、pi 的 settings/扩展、ACP 的 home 覆盖层） | 不放密钥，不放宿主实现 |
 | 方法论 | `methodology/` | 研究工作约定与会话蓝图，由宿主拼入系统提示 | 不放 harness 专有配置 |
 
 依赖方向单向：`前端 → 宿主 HTTP → 编排层 → kernel → pi 进程`；`harnesses/<pack>/` 与 `methodology/` 只作为只读模板被复制或拼入每 run 的运行期配置。
-`host/pi_glink/kernel/` 不得反向导入 `runs/`、`tenancy`、`ownership`、`blueprints`、
+`host/glink_harness/kernel/` 不得反向导入 `runs/`、`tenancy`、`ownership`、`blueprints`、
 `web_*`、`app`、`cli`；`store` 只在三个 harness 族模块
 （`harness.py` / `harness_pi.py` / `harness_acp.py`）中导入（族策略读 RunRecord 与会话种子），
 由 `tests/test_repository_boundaries.py` 的导入方向规则卡住。
@@ -147,7 +147,7 @@ ACP 族的协议事实、能力矩阵与冒烟证据见 [ACP 集成笔记](acp-i
 ## 3. 事件契约
 
 pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、前端、事件日志）只说产品
-事件（`host/pi_glink/events.py`）。
+事件（`host/glink_harness/events.py`）。
 
 | 产品事件 | 来源（pi） | 前端用途 |
 |---|---|---|
@@ -218,8 +218,8 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
 * 已结束/上次进程的 run：只读 `events` 表（按 `seq` 分页），因此重放不受内存窗口容量影响，也无需重新启动 pi。
 * 每个实时订阅者有一个**有界队列**（默认 2000 帧）。停止读取的客户端会被主动断开，而不是让
   队列无限增长；浏览器按 `Last-Event-ID` 重连并从日志补齐，因此断开不丢已提交历史。
-* **连接数有界**：全局上限 `PI_GLINK_MAX_GLOBAL_STREAMS`（默认 64），多租户下每个租户另有
-  `PI_GLINK_MAX_TENANT_STREAMS`（默认 16；local 只用全局上限）。额度在查看 run 之前预留，超额
+* **连接数有界**：全局上限 `GLINK_MAX_GLOBAL_STREAMS`（默认 64），多租户下每个租户另有
+  `GLINK_MAX_TENANT_STREAMS`（默认 16；local 只用全局上限）。额度在查看 run 之前预留，超额
   在写出任何流响应头之前返回 `429 {"error":"stream_limit","scope","limit"}`（附
   `Retry-After`，不含 run id，也不透露他租户是否存在）；流的每条结束路径（正常结束、客户端断开、
   断言/会话过期、慢消费者断开）都会归还额度。前端对非 200 响应做有界重连（1.5/4/10 秒三次后报
@@ -379,7 +379,7 @@ pi 族另有 `_meta.json` 增强（R2，见下「R2 增强与关联」）。
   callId↔childId 的精确关联，子会话的 step/tool 帧提取进度（实测见
   docs/evidence/acp-subagent-zstd-spike.txt）。会话文件是 dsh 私有的 zstd 压缩
   JSONL，按整份重读（有大小上限）；`zstandard` 为可选依赖
-  （`pi-glink[acp-progress]`），缺失时该面如实无进度，不报错。
+  （`glink-harness[acp-progress]`），缺失时该面如实无进度，不报错。
 
 各面能力：pi 族 inproc/docker/e2b 与 ACP 族 inproc/docker（dsh 0.1.7+）为 **steps**
 （逐步进度）；ACP e2b 面本次不实现，能力如实停留 **coarse**。没有进度源或关联失败的
@@ -389,7 +389,7 @@ child 在前端显示为普通「进行中」，不伪造进度。
 
 决定与来由见 [ADR 0011](adr/0011-versioned-event-schema.md)。
 
-**单一来源**：`host/pi_glink/event_schema.py` 声明全部产品事件类型、每个类型的 payload
+**单一来源**：`host/glink_harness/event_schema.py` 声明全部产品事件类型、每个类型的 payload
 字段（名称、JSON 类型、是否必填、枚举、数组元素类型）以及 payload 版本 `v`（按类型、从 1
 起）。`events.py` 的类型常量与终帧集合在导入时与 schema 核对，不一致即启动失败；上表是
 它的阅读版，字段以 schema 为准。
@@ -402,7 +402,7 @@ child 在前端显示为普通「进行中」，不伪造进度。
   `projection.checked` 校验自己产出的每个 `(type, payload)`，漂移在产生处就被点名；
 * 资源台账为遗留 run 直接写入的中断终帧（不经总线）同样先校验、带 `v`。
 
-**违规处理**：`PI_GLINK_EVENT_SCHEMA=strict`（测试套件在 `tests/conftest.py` 设置）时违规帧
+**违规处理**：`GLINK_EVENT_SCHEMA=strict`（测试套件在 `tests/conftest.py` 设置）时违规帧
 抛 `EventSchemaError`，不落盘、不发布、不消耗 `seq`；未设置时记录错误日志后**仍提交**
 ——生产 run 不因契约缺陷中断，但日志点名来源与字段。两种模式都把违规记入进程内列表，
 测试在每个用例结束时断言它为空，后台线程吞掉的违规也会让用例失败。
@@ -553,7 +553,7 @@ abort、取消即毁沙箱的义务已随 GLINK-ARCH-3 删除，见 §5.1/§5.2�
 
 * **local 单用户**：任一持有未确认释放即 `409 resources_unreleased`（附 run id），且保持全局单 run 槽位。
 * **multitenant**：持有计入其 owner 租户的并发槽位**和**全局槽位（无 owner 的记录——单用户面写入——只计全局），
-  与 `PI_GLINK_MAX_TENANT_RUNS` / `PI_GLINK_MAX_GLOBAL_RUNS` 一同比较，超额返回
+  与 `GLINK_MAX_TENANT_RUNS` / `GLINK_MAX_GLOBAL_RUNS` 一同比较，超额返回
   `429 quota_exceeded`（scope/limit，不含 run id）；持有不会被遗忘，达到全局上限时所有新准入都被拒绝
   （fail-closed）。
 * **不可解析行**：`runs.db` 由宿主独占写入，某行的 `record` 不是完整记录（非 JSON、缺必填字段或
@@ -561,12 +561,12 @@ abort、取消即毁沙箱的义务已随 GLINK-ARCH-3 删除，见 §5.1/§5.2�
   全部拒绝），直到操作员修复数据库。不再有 `corrupt` 标注与 `resource-adjudication.json` 侧车。
 
 释放容量有三条路：执行面清理确认 `released: true`、在线自动对账确认，或操作员在宿主**停止时**以
-`python -m pi_glink.app --mark-released <runId> --note "<核对说明>"` 记录人工裁决（`--unreleased`
+`python -m glink_harness.app --mark-released <runId> --note "<核对说明>"` 记录人工裁决（`--unreleased`
 列出待核对项）。人工裁决写出 `resource_adjudication{decision, source: "operator", note, at}`，自动对账
 写出 `source: "auto-verified"` 与 `method`；两者都保留原清理事实与已提交的终态。离线运维命令不接触
 Docker/E2B，也不删除任何资源。
 
-**在线自动对账**：宿主持有数据目录时，按 `PI_GLINK_RESOURCE_RECONCILE_SECONDS`（默认 60，0 关闭）在
+**在线自动对账**：宿主持有数据目录时，按 `GLINK_RESOURCE_RECONCILE_SECONDS`（默认 60，0 关闭）在
 后台线程周期性确认未释放的持有。探测只使用 run 记录里**持久化的执行身份**，且按记录选面：有
 `container_name` 就按名字 `docker inspect`（不存在即确认；仍存在则先按 `stop_argv` 语义幂等
 `docker rm -f` 后再次确认），有 `sandbox_id` 就调用 E2B SDK 按 id 终止/查询（凭据取自冻结配置，
@@ -606,11 +606,11 @@ data_root 若是符号链接、不是目录或带组/其他人写权限，宿主
 | 内核进程位置 | 宿主机器 | 一次性容器 | 云沙箱 |
 | 协议 | `--mode rpc`（双向 JSONL） | `--mode rpc`（跨容器 stdio） | `--mode rpc`（沙箱后台命令 `background=True, stdin=True` 的双向 stdio，经 `SandboxCommandProcess` 以 `popen=` 注入共享 `PiRpcClient`） |
 | 事件时序 | 实时 | 实时 | 实时（沙箱命令流即权威：断流即 `execution_error`，不补发、不对账，见 §5.2） |
-| 运行时来源 | 宿主安装的 Node v24.16.0 / pi | 镜像自包含（`pi-glink-worker:latest`，node v24.21.0 + pi 0.86.1 + `/opt/pi-packages` 预装 pi 包；镜像名在启动时冻结） | 模板自包含（`pi-glink-worker`，node v24.21.0 + pi 0.86.1 + `/opt/pi-packages` 预装 pi 包） |
+| 运行时来源 | 宿主安装的 Node v24.16.0 / pi | 镜像自包含（`glink-harness-worker:latest`，node v24.21.0 + pi 0.86.1 + `/opt/pi-packages` 预装 pi 包；镜像名在启动时冻结） | 模板自包含（`glink-harness-worker`，node v24.21.0 + pi 0.86.1 + `/opt/pi-packages` 预装 pi 包） |
 | 运行期配置 | `runs/<id>/pi-agent`（本 run 独占） | 同目录挂到 `/config` | 同一目录整棵上传到沙箱 `/home/user/config` |
 | 工作区 | `<data>/workspaces/<runId>` | 同左（挂到 `/workspace`） | 沙箱内 `/home/user/workspace`，结束后拉回宿主 |
 | 会话文件 | `runs/<id>/sessions/`（宿主可查） | 该目录挂到 `/sessions`；宿主按挂载映射回本 run 目录后脱敏 | 销毁前按会话头判别回收主会话到本 run 目录（分支会话头部带 `parentSession`，主会话不带），供下一轮使用；主会话无法唯一确定或回收失败不可续接 |
-| 模型凭据 | 真实 key 不进执行环境；本 run 的 `auth.json` 只含出口代理 token（§6），`baseUrl` 指向 `http://127.0.0.1:<port>/model` | 同一 token 随 `/config` 挂载；`baseUrl` 走 `host.docker.internal`（`--add-host …:host-gateway`）或 `PI_GLINK_EGRESS_PUBLIC_URL` | 同一 token 随运行期配置上传；必须配置 `PI_GLINK_EGRESS_PUBLIC_URL`，否则启动即拒绝 |
+| 模型凭据 | 真实 key 不进执行环境；本 run 的 `auth.json` 只含出口代理 token（§6），`baseUrl` 指向 `http://127.0.0.1:<port>/model` | 同一 token 随 `/config` 挂载；`baseUrl` 走 `host.docker.internal`（`--add-host …:host-gateway`）或 `GLINK_EGRESS_PUBLIC_URL` | 同一 token 随运行期配置上传；必须配置 `GLINK_EGRESS_PUBLIC_URL`，否则启动即拒绝 |
 | 搜索凭据 | 有检索 grant 时 `web-search.json`（600）只含 token 与代理 `/search` 地址 | 同左；Docker 带检索 key 需 https 的 public URL | 同左（随沙箱消失） |
 | 隔离强度 | 进程级 | 容器级 | 云端沙箱级 |
 
@@ -788,14 +788,14 @@ Dockerfile 的边界约束，缺 `pi-subagents` 只会退化成“没有子代�
 ## 6. 凭据流
 
 真实模型 key 与检索 key **不进入执行环境**（决定 D4，[ADR 0008](adr/0008-egress-proxy.md)）。pi 族的
-run 只拿到宿主凭据出口代理（`host/pi_glink/egress.py::EgressProxy`）的地址和一个本 run 的短期 token：
+run 只拿到宿主凭据出口代理（`host/glink_harness/egress.py::EgressProxy`）的地址和一个本 run 的短期 token：
 
-* **代理**：宿主进程内一个独立的 loopback 监听（`PI_GLINK_EGRESS_HOST`，默认 `127.0.0.1`；
-  `PI_GLINK_EGRESS_PORT`，默认 0 = 随机端口），与 Web 端口分开。首个 grant 签发时绑定，最后一个 grant
+* **代理**：宿主进程内一个独立的 loopback 监听（`GLINK_EGRESS_HOST`，默认 `127.0.0.1`；
+  `GLINK_EGRESS_PORT`，默认 0 = 随机端口），与 Web 端口分开。首个 grant 签发时绑定，最后一个 grant
   吊销后同步停止（在锁内等监听 socket 关闭后才返回，所以固定端口下紧接着的签发可以立即重新绑定），空闲宿主没有打开的出口端口。仅接受 `POST /model/chat/completions` 转发到宿主冻结的
   `OPENAI_BASE_URL`（替换为 `Authorization: Bearer <真实 key>`），及有检索授权时的
   `POST /search/search`、`POST /search/answer` 转发到宿主冻结的
-  `PI_GLINK_WEB_SEARCH_UPSTREAM`（默认 `https://api.exa.ai`，替换为 `x-api-key`）。方法、路径精确
+  `GLINK_WEB_SEARCH_UPSTREAM`（默认 `https://api.exa.ai`，替换为 `x-api-key`）。方法、路径精确
   匹配，不接受其它端点、编码别名或查询串；模型请求须为 UTF-8 JSON，顶层 `model` 精确等于
   grant 中冻结的宿主模型 id，非法 JSON、重复键或媒体类型不符均不转发、不注入 key。内核送来的
   `Authorization` / `x-api-key` / `Cookie` 与逐跳头不透传；上游重定向原样返回、不跟随（跟随会把真实
@@ -808,19 +808,19 @@ run 只拿到宿主凭据出口代理（`host/pi_glink/egress.py::EgressProxy`�
 * **渲染**：`models.json` 的 `baseUrl` 为 `<egress origin>/model`（字面量；不含 `apiKey`）；`auth.json`
   为 `{"frontier":{"type":"api_key","key":"<token>"}}`；有检索 grant 时 `web-search.json` 为
   `{"exaApiKey":"<token>","exaBaseUrl":"<egress origin>/search"}`，否则删除该文件（插件回退到无密钥的
-  Exa MCP 检索，不是错误）。旧的 `PI_GLINK_WEB_SEARCH_CONFIG` 与操作员 `~/.pi/web-search.json`
+  Exa MCP 检索，不是错误）。旧的 `GLINK_WEB_SEARCH_CONFIG` 与操作员 `~/.pi/web-search.json`
   **不再读取**。
 * **执行面地址**：inproc 为 `http://127.0.0.1:<port>`；Docker 为 `http://host.docker.internal:<port>`
   并加 `--add-host host.docker.internal:host-gateway`；E2B 没有宿主可达路径，**必须**配置
-  `PI_GLINK_EGRESS_PUBLIC_URL`（由部署把该 URL 转发到固定的 `PI_GLINK_EGRESS_PORT`），缺失时启动即
+  `GLINK_EGRESS_PUBLIC_URL`（由部署把该 URL 转发到固定的 `GLINK_EGRESS_PORT`），缺失时启动即
   `ConfigError`（fail closed，绝不退回渲染真实 key）。配置了 public URL 时任何执行面都优先使用它。
-  pi-web-access 拒绝非 loopback 的 http 检索地址，所以 Docker 面带 `PI_GLINK_WEB_SEARCH_KEY` 时同样需要
+  pi-web-access 拒绝非 loopback 的 http 检索地址，所以 Docker 面带 `GLINK_WEB_SEARCH_KEY` 时同样需要
   https 的 public URL。
 * **计量**：代理读取上游自己的 OpenAI 兼容 `usage`（JSON 整体或 SSE 最后一个带 `usage` 的块），按 run
   累计。终帧与 run 记录里 pi 族的 `usage` 取代理计量（`source: "egress"`，含 `requests`、
   `searchRequests`、`input`、`output`、`cacheRead`、`totalTokens`、`unmetered`、`refused`），内核自报的
   用量另记 `kernelUsage`，不是权威。唯一的策略钩子是按租户的每 run 配额
-  （`PI_GLINK_EGRESS_MAX_REQUESTS_PER_RUN` / `PI_GLINK_EGRESS_MAX_TOKENS_PER_RUN`，0 = 不限）。
+  （`GLINK_EGRESS_MAX_REQUESTS_PER_RUN` / `GLINK_EGRESS_MAX_TOKENS_PER_RUN`，0 = 不限）。
 * **ACP 族未覆盖**：ACP agent 仍按 [ADR 0003](adr/0003-acp-credential-copies-removed-at-close-out.md) /
   acp-integration-notes §18 注入凭据副本并在收尾删除；把 ACP 接入出口代理是未决项。注入通道自
   [ADR 0015](adr/0015-acp-credential-channels-under-model-credential-policy.md) 起服从模型凭据政策：
@@ -832,7 +832,7 @@ run 只拿到宿主凭据出口代理（`host/pi_glink/egress.py::EgressProxy`�
 
 宿主持有凭据，而 pi 的工具**可以**把它们回显出来：`bash` 能跑 `env`、`read` 能打开运行期
 配置文件、模型也可能把值引用回回答。因此每一道产品出口都经过
-`host/pi_glink/redaction.py` 的 `SecretRedactor`：
+`host/glink_harness/redaction.py` 的 `SecretRedactor`：
 
 | 出口 | 处理 | 代码 |
 |---|---|---|
@@ -841,7 +841,7 @@ run 只拿到宿主凭据出口代理（`host/pi_glink/egress.py::EgressProxy`�
 | 报告文件 | 经工作区目录句柄读取、脱敏、在 run 目录句柄内原子写入 `runs/<id>/artifacts/report.md`，并记 `redacted=true` | `runs/stages.py::SealStage.report` |
 | 声明交付文件 | ACP `present` → `deliverables_declared`（声明≠交付）；封存最多 8 个工作区相对路径，逐件校验/脱敏，终帧与记录携带逐件结果。E2B 优先取主报告与声明文件再取其他直系子文件，64 MiB 总量不变 | `kernel/acp_projection.py`、`runs/channel.py`、`runs/stages.py`、`kernel/e2b_env.py` |
 | 会话文件 | pi 自写的 JSONL 在收尾时脱敏；只允许本次 run 会话子目录内的普通文件（拒绝链接/越界），Docker 面先把容器路径 `/sessions/…` 映射回该挂载源；子代理分支会话与 `subagent-artifacts/` 同目录被同一边界清扫 | `runs/secrets.py::RunSecretBoundary.sanitize_session_file`、`sandbox.DockerSandbox.host_path`（`docker_env.translate_container_path`） |
-| ACP 状态根 | 收尾扫描范围与处置由运行时契约声明：agent 自己的会话存储（`acp-agent/home`，E2B 历史回收的 `acp-agent/recovered`）**只读扫描**——凭据形状值并入本 run 边界，文件字节不改写（改写会破坏追问要续接的会话，与 §10.2 继承口径同一义务）；对话状态根（`conversations/<根run>/state`，0018）的凭据形状值在**回收时**吸收（只扫本轮变化的文件，同一预算），不在收尾重复改写；**注入凭据副本**（`PI_GLINK_ACP_CREDENTIAL_FILES` 的 dest）在扫描之后逐个删除（只删已知相对路径：不按模式匹配、不跟随链接、必须在根内；追问会从源重新注入，继承与归档都 skip 这些目标）；删除失败记入终帧 `artifactFailures` 并告警，不改变终态；缺失的根按「无可扫之物」处理 | `kernel/sweep.py::SessionSweep`、`kernel/acp_env.py::AcpRuntime.session_sweeps`、`runs/secrets.py::RunSecretBoundary.seal_sessions`、`absorb`、`remove_credential_copies`、`kernel/acp_e2b_env.py::_scan_published_secrets`、`artifacts.py::ArtifactTree.remove` |
+| ACP 状态根 | 收尾扫描范围与处置由运行时契约声明：agent 自己的会话存储（`acp-agent/home`，E2B 历史回收的 `acp-agent/recovered`）**只读扫描**——凭据形状值并入本 run 边界，文件字节不改写（改写会破坏追问要续接的会话，与 §10.2 继承口径同一义务）；对话状态根（`conversations/<根run>/state`，0018）的凭据形状值在**回收时**吸收（只扫本轮变化的文件，同一预算），不在收尾重复改写；**注入凭据副本**（`GLINK_ACP_CREDENTIAL_FILES` 的 dest）在扫描之后逐个删除（只删已知相对路径：不按模式匹配、不跟随链接、必须在根内；追问会从源重新注入，继承与归档都 skip 这些目标）；删除失败记入终帧 `artifactFailures` 并告警，不改变终态；缺失的根按「无可扫之物」处理 | `kernel/sweep.py::SessionSweep`、`kernel/acp_env.py::AcpRuntime.session_sweeps`、`runs/secrets.py::RunSecretBoundary.seal_sessions`、`absorb`、`remove_credential_copies`、`kernel/acp_e2b_env.py::_scan_published_secrets`、`artifacts.py::ArtifactTree.remove` |
 | 子代理镜像 | E2B 面回收的 `runs/<id>/subagents/`（分支会话 + 产物）收尾时经目录句柄清扫，与 §5.2 同一条边界 | `runs/secrets.py::RunSecretBoundary.sweep_tree`（`seal_trees`）、`kernel/e2b_env.py::recover_subagent_files` |
 | 子代理文档 | `runs/<id>/children/<n>/child.json` 只由已过两道脱敏的事件载荷构造（投影 → 提交前再脱敏），`GET /api/runs/{id}/children` 按存储原样下发，不引入新秘密；`children/<n>/<file>` 产物下载按报告下载同一套规则（服务前再脱敏、`X-Redacted`） | `runs/channel.py::RunChannel.emit`、`runs/plugins.py::ChildDocumentsPlugin`、`store.py::read_children`、`web_routes.py` |
 | 报告下载 | `report_path` 不是下载能力：只认一个固定位置——宿主产物副本 `runs/<id>/artifacts/report.md`；工作区 `workspaces/<id>/report.md` 及其他路径一律视为无报告（[ADR 0007](adr/0007-report-served-only-from-host-artifact.md)）。服务前再脱敏，响应头 `X-Redacted` 标明是否发生；`hasReport` 用同一位置规则与同一拒绝条件计算 | `store.py::report_location`、`web_routes.py::_send_report`、`artifacts.py` |
@@ -888,20 +888,20 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 
 | 路径 | 属于 | 说明 |
 |---|---|---|
-| `host/pi_glink/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `redaction`（出站脱敏）/ `accounts`（站内账号）/ `auth`（身份断言与会话）/ `dotenv`（.env 解析）/ `blueprints`（蓝图目录推导与解析渲染）、`harnesses`（harness 包清单的目录推导、fail-closed 解析与选择）；组成根 `app`（服务器与 `create_server`） |
-| `host/pi_glink/web_*.py` | 宿主 HTTP 层 | `web_routes`（路由与 run/health/报告 API）/ `web_sse`（事件流与连接额度）/ `web_security`（身份、会话与请求防护）/ `web_http`（请求体、响应、静态资源、脱敏访问日志）；一个 `HostRequestHandler` 由它们组合而成 |
-| `host/pi_glink/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
-| `host/pi_glink/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env` / `subagent_artifacts`（pi-subagents 产物布局解析与关联，R2）；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手，含 resume/kill-by-id）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）；对话状态基础设施：`archive_channel`（0018 归档通道）/ `conversation_lease` + `acp_sandbox_park`（0020 对话租约事实与收尾泊车）；两族的 run 生命周期策略：`harness` / `harness_pi` / `harness_acp`。不导入 `runs/` 或宿主编排模块 |
-| `host/pi_glink/runs/` | 编排层 | run 准入与执行骨架、收尾顺序、终态提交与资源台账：`runner`（RunManager 公共 API 与准入锁）/ `admission`（两段式准入）/ `pipeline` + `stages`（生命周期管线与各阶段）/ `state`（阶段事实类型）/ `channel`（事件提交路径）/ `secrets`（run 秘密边界）/ `plugins`（子代理文档/进度/增强插件）/ `errors` / `limits` / `resource_ledger`（外部资源台账、重启对账、人工裁决、在线身份探测扫描与对话租约对账/删除闭环，0020）/ `child_progress_observer`（R3a 每 run 进度观察者） |
-| `host/pi_glink/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
-| `harnesses/<pack>/` | Harness 包 | `harness.toml`（`pi-glink-harness/v2` 清单：`family`、`[entry].command`、`[capabilities]` 能力矩阵、`[image]` 镜像需求与上游包精确版本；Dockerfile ARG、`docker/e2b/templates.json` 与 pi 的 `settings.json` 包列表由 `scripts/generate-pack-artifacts.py` 从它生成）、可选 `capabilities.md`（能力提示，拼入系统提示）、ACP 包的 `home/`（每 run HOME 覆盖层，先于凭据注入）；pi 包另有 `settings.json`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
+| `host/glink_harness/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `redaction`（出站脱敏）/ `accounts`（站内账号）/ `auth`（身份断言与会话）/ `dotenv`（.env 解析）/ `blueprints`（蓝图目录推导与解析渲染）、`harnesses`（harness 包清单的目录推导、fail-closed 解析与选择）；组成根 `app`（服务器与 `create_server`） |
+| `host/glink_harness/web_*.py` | 宿主 HTTP 层 | `web_routes`（路由与 run/health/报告 API）/ `web_sse`（事件流与连接额度）/ `web_security`（身份、会话与请求防护）/ `web_http`（请求体、响应、静态资源、脱敏访问日志）；一个 `HostRequestHandler` 由它们组合而成 |
+| `host/glink_harness/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
+| `host/glink_harness/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env` / `subagent_artifacts`（pi-subagents 产物布局解析与关联，R2）；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手，含 resume/kill-by-id）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）；对话状态基础设施：`archive_channel`（0018 归档通道）/ `conversation_lease` + `acp_sandbox_park`（0020 对话租约事实与收尾泊车）；两族的 run 生命周期策略：`harness` / `harness_pi` / `harness_acp`。不导入 `runs/` 或宿主编排模块 |
+| `host/glink_harness/runs/` | 编排层 | run 准入与执行骨架、收尾顺序、终态提交与资源台账：`runner`（RunManager 公共 API 与准入锁）/ `admission`（两段式准入）/ `pipeline` + `stages`（生命周期管线与各阶段）/ `state`（阶段事实类型）/ `channel`（事件提交路径）/ `secrets`（run 秘密边界）/ `plugins`（子代理文档/进度/增强插件）/ `errors` / `limits` / `resource_ledger`（外部资源台账、重启对账、人工裁决、在线身份探测扫描与对话租约对账/删除闭环，0020）/ `child_progress_observer`（R3a 每 run 进度观察者） |
+| `host/glink_harness/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
+| `harnesses/<pack>/` | Harness 包 | `harness.toml`（`glink-harness/v2` 清单：`family`、`[entry].command`、`[capabilities]` 能力矩阵、`[image]` 镜像需求与上游包精确版本；Dockerfile ARG、`docker/e2b/templates.json` 与 pi 的 `settings.json` 包列表由 `scripts/generate-pack-artifacts.py` 从它生成）、可选 `capabilities.md`（能力提示，拼入系统提示）、ACP 包的 `home/`（每 run HOME 覆盖层，先于凭据注入）；pi 包另有 `settings.json`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
 | `web/` | 前端 | 外壳与事件视图（无打包步骤，原生 ESM）；视觉按百鉴 UI 标准库逐值对齐，见 `docs/ui-alignment.md` |
 | `docker/` | 执行面 | `Dockerfile.worker`（pi 容器）、`Dockerfile.acp-worker`（ACP 容器）、`e2b/Dockerfile.e2b`（pi 模板）、`e2b/Dockerfile.acp-e2b`（ACP dev 模板） |
 | `methodology/` | 方法论（harness 无关，唯一真源） | `work-agreement.md`（工作约定）、`blueprints/*.md`（蓝图：阶段/产出契约/检查点），格式契约见 `docs/blueprint-templates.md` |
 | `scripts/` | 运维 | 启动、测试、真实 run 冒烟、E2B 模板构建；`spikes/`（ACP 各面的 live 探针） |
 | `docs/` | 文档与证据 | 架构、边界、集成笔记、`evidence/` |
 | `tests/` | 回归 | `test_*.py`（宿主/内核）、`web/*.test.mjs`（前端模型）、`browser/`（真实浏览器） |
-| `<data_root>`（默认 `~/.pi-glink`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/runs.db`（run 记录与事件，SQLite WAL，含 `-wal`/`-shm`）、`runs/<id>/{pi-agent/ 或 acp-agent/,sessions/,artifacts/,subagents/,children/}`（按本 run 的 harness 渲染；`subagents/` 为 E2B 面回收的子代理镜像；`children/<n>/child.json` 为子代理权威文档，§3.5）、`conversations/<根run>/state/`（ACP 对话级权威状态与 manifest，0018）与 `conversations/<根run>/lease.json`（对话沙箱租约，0020）、`workspaces/<id>/`；目录由宿主以 0700 创建，已存在的符号链接或组/其他人可写目录拒绝启动（不自动 chmod） |
+| `<data_root>`（默认 `~/.glink-harness`） | 运行态 | `host.lock`（宿主独占所有权）、`runs/runs.db`（run 记录与事件，SQLite WAL，含 `-wal`/`-shm`）、`runs/<id>/{pi-agent/ 或 acp-agent/,sessions/,artifacts/,subagents/,children/}`（按本 run 的 harness 渲染；`subagents/` 为 E2B 面回收的子代理镜像；`children/<n>/child.json` 为子代理权威文档，§3.5）、`conversations/<根run>/state/`（ACP 对话级权威状态与 manifest，0018）与 `conversations/<根run>/lease.json`（对话沙箱租约，0020）、`workspaces/<id>/`；目录由宿主以 0700 创建，已存在的符号链接或组/其他人可写目录拒绝启动（不自动 chmod） |
 
 运行期配置目录 `runs/<id>/pi-agent/` 是 pi 的 `PI_CODING_AGENT_DIR`：宿主在其中渲染
 `models.json` 与 `web-search.json`，复制 `harnesses/pi/` 的可版本化配置，pi 自己往里写 `auth.json` /
@@ -913,13 +913,13 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 对话状态根 `conversations/<根run>/state`（0018：归档通道按 offset 增量，凭据目标不进归档，
 manifest 记 `sourceRunId`；历史 run 的 `acp-agent/recovered` 保留为兼容继承源），追问时经归档
 通道回灌新沙箱（通道不可用降级宿主侧继承 + files 逐文件）。追问继承哪一个状态根按父 run 记录的 `executor`
-推导（e2b→对话状态根，其余→`home`），不随宿主当前执行面配置漂移（[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)）。归档通道部署下，e2b 面 ACP run 收尾在回收发布成功后**泊车**（`pause(keep_memory=False)`）而非销毁：沙箱内凭据副本先删（凭据不随沙箱持久化），状态代数标记与对话租约（`conversations/<根run>/lease.json`，[ADR 0020](adr/0020-conversation-sandbox-lease-hot-path.md)）成对落盘，终帧 `cleanup.lease` 记录泊车事实且**不构成 resource hold**；追问优先重连该泊车沙箱（热路径，跳过回灌，`session/resume` 照常新起 agent 进程），代数双端不一致或重连失败一律降级阶段 1 冷路径（新沙箱 + 回灌），降级发 `kernel_status` 警告；闲置 TTL（`PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS`，默认 7200s、0 禁用、硬上限 24h）到期由资源对账 sweep 按沙箱 id fail-closed 销毁，删除对话走 `RunManager.delete_conversation` 最小闭环（销毁租约沙箱 + 清理对话状态对象；run 记录与事件另属产品面）。
+推导（e2b→对话状态根，其余→`home`），不随宿主当前执行面配置漂移（[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)）。归档通道部署下，e2b 面 ACP run 收尾在回收发布成功后**泊车**（`pause(keep_memory=False)`）而非销毁：沙箱内凭据副本先删（凭据不随沙箱持久化），状态代数标记与对话租约（`conversations/<根run>/lease.json`，[ADR 0020](adr/0020-conversation-sandbox-lease-hot-path.md)）成对落盘，终帧 `cleanup.lease` 记录泊车事实且**不构成 resource hold**；追问优先重连该泊车沙箱（热路径，跳过回灌，`session/resume` 照常新起 agent 进程），代数双端不一致或重连失败一律降级阶段 1 冷路径（新沙箱 + 回灌），降级发 `kernel_status` 警告；闲置 TTL（`GLINK_CONVERSATION_LEASE_TTL_SECONDS`，默认 7200s、0 禁用、硬上限 24h）到期由资源对账 sweep 按沙箱 id fail-closed 销毁，删除对话走 `RunManager.delete_conversation` 最小闭环（销毁租约沙箱 + 清理对话状态对象；run 记录与事件另属产品面）。
 
 宿主 HTTP 层的职责边界：路由只决定请求含义（`web_routes`），身份与请求防护集中在
 `web_security`，事件流与连接额度在 `web_sse`，字节读写与静态资源在 `web_http`；`app.py` 只做
 组合与生命周期（数据目录锁、租户材料、run 对账、绑定端口、资源台账扫描线程），CLI 入口与
 离线运维子命令在 `cli.py`。拆分是纯结构调整：路由、状态码、载荷与既有导入路径（含
-`pi_glink.app.main` / `load_config` / `_resource_command` 再导出）保持不变。
+`glink_harness.app.main` / `load_config` / `_resource_command` 再导出）保持不变。
 
 `/` 命令门禁本身在**准入层**（`runs/runner.py::RunManager.start`，斜杠命令与蓝图名从
 `config.blueprints_dir` 推导，harness 无关），路由只负责把
@@ -955,10 +955,10 @@ glink 不再规划独立账号、订阅计费、项目资料库、业务成果�
 
 ## 10. 单宿主多租户（已实现，合成验证）
 
-默认 `PI_GLINK_TENANCY=local`；宿主任一模式都只绑定 loopback（见 §10.5 的行为迁移）。开启
-`multitenant` 后身份入口由 `PI_GLINK_AUTH_MODE` 选择：`gateway`（默认）部署在本机认证网关之后，
+默认 `GLINK_TENANCY=local`；宿主任一模式都只绑定 loopback（见 §10.5 的行为迁移）。开启
+`multitenant` 后身份入口由 `GLINK_AUTH_MODE` 选择：`gateway`（默认）部署在本机认证网关之后，
 由网关注入身份断言；`accounts`（§10.6）在宿主内完成邀请注册、登录与服务端会话。模型凭据来源另由
-`PI_GLINK_MODEL_CREDENTIALS` 显式选择：`tenant`（默认，每租户自己的 key 文件）或 `shared`
+`GLINK_MODEL_CREDENTIALS` 显式选择：`tenant`（默认，每租户自己的 key 文件）或 `shared`
 （SaaS 策略，宿主冻结一套模型凭据供所有租户使用，见 §10.3）。`local` 模式没有身份入口；浏览器来源检查与 JSON-body API 的媒体类型门禁在所有模式一致执行。
 
 ### 10.1 身份与请求授权
@@ -967,7 +967,7 @@ glink 不再规划独立账号、订阅计费、项目资料库、业务成果�
 owner 校验、配额、凭据与脱敏边界完全共用；客户端在任一模式下都不能用请求体、查询参数或自造
 请求头指定租户。
 
-- 断言：`X-Pi-Glink-Identity: v1.<base64url(payload)>.<base64url(hmac-sha256)>`，payload 至少含
+- 断言：`X-Glink-Harness-Identity: v1.<base64url(payload)>.<base64url(hmac-sha256)>`，payload 至少含
   `tenantId`、`userId`、`role`、`audience`、`iat`、`exp`；宿主用仓库外 0600 密钥文件做 constant-time
   HMAC 校验，并检查 audience、过期与寿命上限（默认 300 秒）。重复断言头直接拒绝——这是宿主侧的
   “网关必须清除客户端同名头”。
@@ -979,8 +979,8 @@ owner 校验、配额、凭据与脱敏边界完全共用；客户端在任一�
   通过验证的上下文绝不会已经过期，`clock_skew` 只容忍签发时间略快于宿主时钟的网关。
 - 所有模式（含 local）的 POST 检查 `Origin` / `Referer` / `Sec-Fetch-Site`：任何表示跨站的元数据都会在启动执行面之前被拒绝；
   可信来源仅取实际监听端口上的 loopback origin（`127.0.0.1` / `localhost` / `[::1]`，HTTP）
-  与冻结的 `PI_GLINK_PUBLIC_ORIGIN`；请求自带的 `Host` / `X-Forwarded-*` 不扩大信任范围。
-  反代的外部浏览器 origin 必须通过已有的 `PI_GLINK_PUBLIC_ORIGIN` 配置，不依靠转发 Host。
+  与冻结的 `GLINK_PUBLIC_ORIGIN`；请求自带的 `Host` / `X-Forwarded-*` 不扩大信任范围。
+  反代的外部浏览器 origin 必须通过已有的 `GLINK_PUBLIC_ORIGIN` 配置，不依靠转发 Host。
   无这些头的非浏览器客户端（网关、运维脚本）不受影响。所有 POST 在路由/认证/副作用前拒绝
   任何 `Transfer-Encoding`（411，`Connection: close`，不尝试按 Content-Length 排空 chunk 字节）；
   `POST /api/runs` 在认证/CSRF 后、读取体之前要求 `application/json`（否则 415）；真正无体、
@@ -1001,7 +1001,7 @@ owner/role 判定再受理：其他租户得到与未知 run 相同的 404 且�
 
 ### 10.3 凭据与脱敏边界
 
-租户凭据文件（仓库外、0600）在默认 `PI_GLINK_MODEL_CREDENTIALS=tenant` 策略下为每个租户提供
+租户凭据文件（仓库外、0600）在默认 `GLINK_MODEL_CREDENTIALS=tenant` 策略下为每个租户提供
 `modelApiKey`（必需）与 `webSearchKey`（可选）。解析时 `RunCredentials(origin="tenant")` 只允许本租户
 的值：缺模型 key 拒绝准入，绝不回退宿主 `.env` 或别的租户；解析出的真实 key 只进入本 run 的出口代理
 grant（绑定 `run_id` 与 tenant，§6），执行环境只拿到 token；缺搜索 key 时不签检索授权（删除
@@ -1011,13 +1011,13 @@ grant（绑定 `run_id` 与 tenant，§6），执行环境只拿到 token；缺�
 本 run 的 token（§6.2 残留风险），但读不到任何租户的真实 key；脱敏只做回显保护，不承诺阻止任意编码或网络外传。
 代理按 grant 计量用量并执行每租户每 run 配额钩子；多宿主进程之间不共享配额。
 
-显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 是 SaaS 部署的**显式放宽**，不是任何模式的默认兜底：
+显式 `GLINK_MODEL_CREDENTIALS=shared` 是 SaaS 部署的**显式放宽**，不是任何模式的默认兜底：
 
 * 宿主必须在启动时冻结 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`，任一缺失即拒绝启动；
 * 每个 run 解析 `RunCredentials(origin="shared")`，即同一套宿主共享凭据（同样只进入出口代理 grant）；共享模式不读取任何
-  租户配置：不得配置 `PI_GLINK_TENANT_CONFIG_FILE`（不设置或留空即为无该入口），设置即拒绝
+  租户配置：不得配置 `GLINK_TENANT_CONFIG_FILE`（不设置或留空即为无该入口），设置即拒绝
   启动，也不会构造或读取 `TenantCredentialStore`；缺共享 key 时也不会回退到 `tenant` 或 local；
-* 可选搜索 key 只来自宿主级 `PI_GLINK_WEB_SEARCH_KEY`（操作员 `~/.pi/web-search.json` 不再被读取）；
+* 可选搜索 key 只来自宿主级 `GLINK_WEB_SEARCH_KEY`（操作员 `~/.pi/web-search.json` 不再被读取）；
 * 租户授权仍完全由身份入口决定（网关注入的断言或账号库会话）；共享模式没有租户凭据文件入口，
   也不存在一个可以准入或拒绝租户的文件名单；
 * 每 run 脱敏边界仍包含共享 key（它属于宿主已知秘密）；`redactor_for_record` 在 shared 下使用
@@ -1035,15 +1035,15 @@ grant（绑定 `run_id` 与 tenant，§6），执行环境只拿到 token；缺�
 （§4）。已受理的取消仍与终帧提交在同一线性化点上裁决。`inproc` 在两种模式下都维持全局单 run；
 多租户配置直接拒绝 `inproc`（它共享宿主文件系统）。
 
-SSE 连接同样有界：全局 `PI_GLINK_MAX_GLOBAL_STREAMS`（默认 64）与每租户
-`PI_GLINK_MAX_TENANT_STREAMS`（默认 16），超额在写出流响应头之前返回 `429 stream_limit`（§3.2）。
+SSE 连接同样有界：全局 `GLINK_MAX_GLOBAL_STREAMS`（默认 64）与每租户
+`GLINK_MAX_TENANT_STREAMS`（默认 16），超额在写出流响应头之前返回 `429 stream_limit`（§3.2）。
 
 Docker 面的每个容器实例额外带 `--cpus` / `--memory` / `--pids-limit`（默认 2 / 2g / 512，可配置）与
 `--cap-drop ALL` / `--security-opt no-new-privileges`，镜像与模板不变。E2B 面只能限制沙箱生命周期
 （`LOCAL_WEB_E2B_TIMEOUT_SECONDS`，默认 task timeout + 300 秒）；SDK 不暴露 CPU/内存控制，因此宿主
 只声明自己实际传给云端的限制，不把未请求的限制当作已执行。追问热路径的泊车沙箱另受闲置租约 TTL
-约束（`PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS`，默认 7200 秒、0 禁用、硬上限 24 小时，[ADR 0020](adr/0020-conversation-sandbox-lease-hot-path.md)；
-paused 沙箱的云端保留期与计费模型在 SDK 内无文档），数量另受全宿主上限约束（`PI_GLINK_MAX_PARKED_SANDBOXES`，
+约束（`GLINK_CONVERSATION_LEASE_TTL_SECONDS`，默认 7200 秒、0 禁用、硬上限 24 小时，[ADR 0020](adr/0020-conversation-sandbox-lease-hot-path.md)；
+paused 沙箱的云端保留期与计费模型在 SDK 内无文档），数量另受全宿主上限约束（`GLINK_MAX_PARKED_SANDBOXES`，
 默认 32；只数其它对话仍未到期的租约，本对话的重新泊车是替换；损坏租约按占用计。计数与写租约在同一个全宿主预留临界段内完成（纯本地文件读写，不含云调用），并发泊车不能同时占用最后一个名额），达到上限时本轮不泊车、按冷路径销毁，本对话的旧记录随即结清（全部确认销毁即删除，否则以已过期记录保留待对账重试，不再占名额）。两者都未在本次交付中做 live 验证。
 
 **共享宿主的资源上界**（源码与合成验证，未做压力实测）：内核 stdout 的未结束记录超过
@@ -1056,10 +1056,10 @@ Web 处理器每次 socket 读写有 60 秒期限（`REQUEST_SOCKET_TIMEOUT_SECO
 ### 10.5 行为迁移、回退与未覆盖范围
 
 - **迁移**：任何模式都不再允许绑定非 loopback：无认证公网模式被移除，历史的 `LOCAL_WEB_ALLOW_REMOTE`
-  不再生效；远端访问必须经过本机认证网关注入身份（`PI_GLINK_TENANCY=multitenant`）。这是本次交付
+  不再生效；远端访问必须经过本机认证网关注入身份（`GLINK_TENANCY=multitenant`）。这是本次交付
   明确的行为收紧。该边界与整数配置范围（端口 0–65535、并发/超时/限速/资源上限为正等）在
   `validate_host_config` 里统一校验，构造与 CLI 的 `--host`/`--port` 覆盖都经过它。
-- **回退**：关闭 `PI_GLINK_TENANCY` 回到单用户模式；新旧记录都保留，不需要删除、迁移或改写；
+- **回退**：关闭 `GLINK_TENANCY` 回到单用户模式；新旧记录都保留，不需要删除、迁移或改写；
   多租户密钥文件也不再被读取。
 - **前端不回退**：`/api/me` 除 401 外的任何失败（含 404、网络错误）一律 fail-closed（显示不可达面、
   不探测 `/api/config`），本地工作台绝不会在身份不明时被揭示。先合并前端、后重启宿主期间的旧
@@ -1067,7 +1067,7 @@ Web 处理器每次 socket 读写有 60 秒期限（`REQUEST_SOCKET_TIMEOUT_SECO
 - **未覆盖**：真实网关注入、密钥轮换与撤销；真实 Docker/E2B live 资源上限、沙箱模板的实际隔离强度；
   多宿主租约与共享存储；BYOK、ACP 族接入出口代理（pi 族已接入，§6）、计费与上线运维。合成矩阵通过不等于多租户已经安全上线。
 
-### 10.6 站内账号身份入口（`PI_GLINK_AUTH_MODE=accounts`）
+### 10.6 站内账号身份入口（`GLINK_AUTH_MODE=accounts`）
 
 与网关模式并存但互斥：多租户部署显式选择 `gateway`（默认，语义不变）或 `accounts`。账号模式在
 宿主内完成邀请注册与登录，仍只监听 loopback（生产由 TLS 终止代理提供 HTTPS），并且**只在服务端**
@@ -1103,11 +1103,11 @@ Web 处理器每次 socket 读写有 60 秒期限（`REQUEST_SOCKET_TIMEOUT_SECO
   一次性下发链接与 JSON body 里，永远不进查询串、请求行、Referer 或日志（日志里的请求行查询串被
   统一剥掉；`/api/invitations/check` 只接受 POST JSON，GET/查询形式返回 405）。注册只创建账号，
   不创建租户、不授予模型凭据，也不静默下发会话（注册成功后回到登录）。首位管理员由操作员在宿主停止时以
-  `python -m pi_glink.app --create-invite …` 离线签发（默认策略要求该租户已有模型凭据；`shared`
+  `python -m glink_harness.app --create-invite …` 离线签发（默认策略要求该租户已有模型凭据；`shared`
   策略只校验宿主冻结的共享模型配置，不配置租户凭据文件）；后续管理员通过
   `POST /api/admin/invitations` 只给本租户签发，邀请码原文只在成功响应里出现一次。
 - **请求防护**：状态变更 POST 要求 `application/json`、同源 `Origin`/`Referer`/`Sec-Fetch-Site`；
-  已登录会话还必须携带与 cookie 绑定的 `X-Pi-Glink-CSRF`（`GET /api/me` 下发，只存在页面内存）。
+  已登录会话还必须携带与 cookie 绑定的 `X-Glink-Harness-CSRF`（`GET /api/me` 下发，只存在页面内存）。
   `gateway` 模式忽略会话 cookie，`accounts` 模式忽略断言头，登录失败不会回退到 gateway/local；
   缺本租户模型 key 仍拒绝启动 run（§10.3）。
 - **未验证**：真实 HTTPS/TLS 代理与外部 Origin、邮件交付、密码重置、账号/租户停用运维入口、生产

@@ -35,25 +35,25 @@ from typing import Any
 
 import pytest
 
-from pi_glink.accounts import AccountsStore
-from pi_glink.app import PiGlinkServer, create_server
-from pi_glink.app import main as app_main
-from pi_glink.config import ConfigError, build_config
-from pi_glink.events import EventBus
+from glink_harness.accounts import AccountsStore
+from glink_harness.app import GlinkHarnessServer, create_server
+from glink_harness.app import main as app_main
+from glink_harness.config import ConfigError, build_config
+from glink_harness.events import EventBus
 
 from e2b_fake import FakeSandbox
-from pi_glink.kernel.agent_env import RunCredentials, prepare_agent_dir
+from glink_harness.kernel.agent_env import RunCredentials, prepare_agent_dir
 from harness_helpers import TEST_EGRESS_TOKEN, compose_launch, execution_spec, test_egress
-from pi_glink.kernel.e2b_env import SANDBOX_CONFIG, PiSandboxTransfer
-from pi_glink.kernel.execution import (
+from glink_harness.kernel.e2b_env import SANDBOX_CONFIG, PiSandboxTransfer
+from glink_harness.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
     ExecutionAdapter,
     ExecutionOutcome,
 )
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import RunStore
-from pi_glink.tenancy import (
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import RunStore
+from glink_harness.tenancy import (
     TenantContext,
     TenantCredentialStore,
     build_tenancy,
@@ -71,10 +71,10 @@ SHARED_SEARCH_KEY = "search-shared-000000000000"
 #: A synthetic operator file value that must never substitute for the host key.
 OPERATOR_SEARCH_KEY = "search-operator-0000000000"
 ALPHA_KEY = "sk-alpha-0000000000000000"
-AUDIENCE = "pi-glink-test"
+AUDIENCE = "glink-harness-test"
 SECRET = b"0123456789abcdef0123456789abcdef"
 PASSWORD = "correct horse battery"
-CSRF = "X-Pi-Glink-CSRF"
+CSRF = "X-Glink-Harness-CSRF"
 
 
 # -- synthetic configuration ---------------------------------------------------
@@ -104,13 +104,13 @@ def shared_values(tmp_path: Path, **overrides: str) -> dict[str, str]:
         "LOCAL_WEB_PORT": "0",
         "LOCAL_WEB_EXECUTOR": "docker",
         # Sandboxed runs reach the credential egress proxy via https (ADR 0008).
-        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
-        "PI_GLINK_TENANCY": "multitenant",
-        "PI_GLINK_AUTH_MODE": "accounts",
-        "PI_GLINK_MODEL_CREDENTIALS": "shared",
-        "PI_GLINK_WEB_SEARCH_KEY": SHARED_SEARCH_KEY,
-        "PI_GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts" / "accounts.db"),
-        "PI_GLINK_COOKIE_SECURE": "0",
+        "GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
+        "GLINK_TENANCY": "multitenant",
+        "GLINK_AUTH_MODE": "accounts",
+        "GLINK_MODEL_CREDENTIALS": "shared",
+        "GLINK_WEB_SEARCH_KEY": SHARED_SEARCH_KEY,
+        "GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts" / "accounts.db"),
+        "GLINK_COOKIE_SECURE": "0",
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "60",
     }
     values.update(overrides)
@@ -129,12 +129,12 @@ def tenant_values(tmp_path: Path, tenants: dict[str, Any] | None = None) -> dict
         "LOCAL_WEB_PORT": "0",
         "LOCAL_WEB_EXECUTOR": "docker",
         # Sandboxed runs reach the credential egress proxy via https (ADR 0008).
-        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
-        "PI_GLINK_TENANCY": "multitenant",
-        "PI_GLINK_AUTH_MODE": "accounts",
-        "PI_GLINK_TENANT_CONFIG_FILE": str(write_tenant_file(tmp_path, document)),
-        "PI_GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts" / "accounts.db"),
-        "PI_GLINK_COOKIE_SECURE": "0",
+        "GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
+        "GLINK_TENANCY": "multitenant",
+        "GLINK_AUTH_MODE": "accounts",
+        "GLINK_TENANT_CONFIG_FILE": str(write_tenant_file(tmp_path, document)),
+        "GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts" / "accounts.db"),
+        "GLINK_COOKIE_SECURE": "0",
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "60",
     }
     return values
@@ -190,10 +190,10 @@ def test_shared_policy_is_explicit_and_multitenant_only(tmp_path: Path) -> None:
     assert config.model_credentials == "shared"
     assert config.multi_tenant is True
 
-    with pytest.raises(ConfigError, match="PI_GLINK_MODEL_CREDENTIALS"):
-        build_config(shared_values(tmp_path, PI_GLINK_TENANCY="local"), REPO_ROOT)
-    with pytest.raises(ConfigError, match="PI_GLINK_MODEL_CREDENTIALS"):
-        build_config(shared_values(tmp_path, PI_GLINK_MODEL_CREDENTIALS="magic"), REPO_ROOT)
+    with pytest.raises(ConfigError, match="GLINK_MODEL_CREDENTIALS"):
+        build_config(shared_values(tmp_path, GLINK_TENANCY="local"), REPO_ROOT)
+    with pytest.raises(ConfigError, match="GLINK_MODEL_CREDENTIALS"):
+        build_config(shared_values(tmp_path, GLINK_MODEL_CREDENTIALS="magic"), REPO_ROOT)
 
     # The default stays the original per-tenant contract.
     default = build_config(tenant_values(tmp_path), REPO_ROOT)
@@ -208,15 +208,15 @@ def test_shared_policy_refuses_the_tenant_credential_file_entry(tmp_path: Path) 
     a credential-free registry) fails closed at configuration time.
     """
     keyed = write_tenant_file(tmp_path, {"tenant-alpha": {"modelApiKey": ALPHA_KEY}}, name="keyed.json")
-    with pytest.raises(ConfigError, match="PI_GLINK_TENANT_CONFIG_FILE"):
-        build_config(shared_values(tmp_path, PI_GLINK_TENANT_CONFIG_FILE=str(keyed)), REPO_ROOT)
+    with pytest.raises(ConfigError, match="GLINK_TENANT_CONFIG_FILE"):
+        build_config(shared_values(tmp_path, GLINK_TENANT_CONFIG_FILE=str(keyed)), REPO_ROOT)
 
     empty = write_tenant_file(tmp_path, {}, name="empty.json")
-    with pytest.raises(ConfigError, match="PI_GLINK_TENANT_CONFIG_FILE"):
-        build_config(shared_values(tmp_path, PI_GLINK_TENANT_CONFIG_FILE=str(empty)), REPO_ROOT)
+    with pytest.raises(ConfigError, match="GLINK_TENANT_CONFIG_FILE"):
+        build_config(shared_values(tmp_path, GLINK_TENANT_CONFIG_FILE=str(empty)), REPO_ROOT)
 
     # An empty value is the same as not setting it: no file entry exists.
-    config = build_config(shared_values(tmp_path, PI_GLINK_TENANT_CONFIG_FILE=""), REPO_ROOT)
+    config = build_config(shared_values(tmp_path, GLINK_TENANT_CONFIG_FILE=""), REPO_ROOT)
     assert config.tenant_config_file is None
 
     # The invariant also holds for a directly constructed HostConfig.
@@ -224,7 +224,7 @@ def test_shared_policy_refuses_the_tenant_credential_file_entry(tmp_path: Path) 
         build_config(shared_values(tmp_path), REPO_ROOT),
         tenant_config_file=write_tenant_file(tmp_path, {}, name="sneak.json"),
     )
-    with pytest.raises(ConfigError, match="PI_GLINK_TENANT_CONFIG_FILE"):
+    with pytest.raises(ConfigError, match="GLINK_TENANT_CONFIG_FILE"):
         load_identity_material(sneak)
 
 
@@ -326,13 +326,13 @@ def test_shared_credentials_never_render_into_the_run(tmp_path: Path) -> None:
 
 
 def test_shared_mode_never_substitutes_the_operator_search_file(tmp_path: Path) -> None:
-    # The operator file (``PI_GLINK_WEB_SEARCH_CONFIG``) is no longer read at all.
+    # The operator file (``GLINK_WEB_SEARCH_CONFIG``) is no longer read at all.
     operator = tmp_path / "operator-web-search.json"
     operator.write_text(json.dumps({"exaApiKey": OPERATOR_SEARCH_KEY}), encoding="utf-8")
     operator.chmod(0o600)
     config = build_config(
         shared_values(
-            tmp_path, PI_GLINK_WEB_SEARCH_KEY="", PI_GLINK_WEB_SEARCH_CONFIG=str(operator)
+            tmp_path, GLINK_WEB_SEARCH_KEY="", GLINK_WEB_SEARCH_CONFIG=str(operator)
         ),
         REPO_ROOT,
     )
@@ -568,17 +568,17 @@ def behavior(monkeypatch: pytest.MonkeyPatch) -> AdapterBehavior:
     def build(spec, **kwargs):
         return FakeAdapter(spec, on_frame=kwargs["on_frame"], behavior=state)
 
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", build)
+    monkeypatch.setattr("glink_harness.kernel.harness_pi.PiExecutionAdapter", build)
     return state
 
 
-def start_server(instance: PiGlinkServer) -> threading.Thread:
+def start_server(instance: GlinkHarnessServer) -> threading.Thread:
     thread = threading.Thread(target=instance.serve_forever, daemon=True)
     thread.start()
     return thread
 
 
-def stop_server(instance: PiGlinkServer, thread: threading.Thread) -> None:
+def stop_server(instance: GlinkHarnessServer, thread: threading.Thread) -> None:
     instance.shutdown()
     instance.server_close()
     thread.join(timeout=5)
@@ -595,7 +595,7 @@ def shared_server(tmp_path: Path, behavior: AdapterBehavior):
 
 
 def raw_request(
-    server: PiGlinkServer,
+    server: GlinkHarnessServer,
     path: str,
     *,
     method: str = "GET",
@@ -618,7 +618,7 @@ def raw_request(
 
 
 class Client:
-    def __init__(self, server: PiGlinkServer) -> None:
+    def __init__(self, server: GlinkHarnessServer) -> None:
         self.server = server
         self.cookie: str | None = None
         self.csrf: str | None = None
@@ -659,7 +659,7 @@ class Client:
         return self.call("/api/runs", method="POST", body={"prompt": prompt, **extra})[:2]
 
 
-def bootstrap_user(server: PiGlinkServer, tenant: str, email: str, *, name: str = "成员") -> None:
+def bootstrap_user(server: GlinkHarnessServer, tenant: str, email: str, *, name: str = "成员") -> None:
     store = server.accounts
     store.upsert_tenant(tenant, f"组织 {tenant}")
     store.create_user(
@@ -667,7 +667,7 @@ def bootstrap_user(server: PiGlinkServer, tenant: str, email: str, *, name: str 
     )
 
 
-def wait_for_terminal(server: PiGlinkServer, run_id: str, timeout: float = 20.0):
+def wait_for_terminal(server: GlinkHarnessServer, run_id: str, timeout: float = 20.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         record = server.store.get(run_id)
@@ -678,7 +678,7 @@ def wait_for_terminal(server: PiGlinkServer, run_id: str, timeout: float = 20.0)
 
 
 def test_shared_mode_serves_two_tenants_from_one_host_model(
-    shared_server: PiGlinkServer, behavior: AdapterBehavior
+    shared_server: GlinkHarnessServer, behavior: AdapterBehavior
 ) -> None:
     server = shared_server
     bootstrap_user(server, "tenant-alpha", "alpha@example.test")
@@ -772,7 +772,7 @@ def test_shared_mode_serves_two_tenants_from_one_host_model(
 
 
 def test_shared_mode_keeps_the_quota_per_tenant(
-    shared_server: PiGlinkServer, behavior: AdapterBehavior
+    shared_server: GlinkHarnessServer, behavior: AdapterBehavior
 ) -> None:
     server = shared_server
     bootstrap_user(server, "tenant-alpha", "alpha2@example.test")
@@ -808,7 +808,7 @@ def test_shared_mode_keeps_the_quota_per_tenant(
 
 
 def test_shared_mode_refuses_client_supplied_model_fields(
-    shared_server: PiGlinkServer, behavior: AdapterBehavior
+    shared_server: GlinkHarnessServer, behavior: AdapterBehavior
 ) -> None:
     server = shared_server
     bootstrap_user(server, "tenant-alpha", "alpha3@example.test")
@@ -837,7 +837,7 @@ def test_shared_mode_refuses_client_supplied_model_fields(
         "/api/runs?model=evil/model",
         method="POST",
         body={"prompt": "合法请求"},
-        headers={"X-Pi-Glink-Model": "evil/model"},
+        headers={"X-Glink-Harness-Model": "evil/model"},
     )[:2]
     assert status == 201, payload
     run_id = payload["run"]["runId"]
@@ -851,7 +851,7 @@ def test_shared_mode_bootstrap_uses_the_host_configuration(
 ) -> None:
     """``--create-invite`` validates the shared host config, not a tenant entry."""
     config = build_config(shared_values(tmp_path), REPO_ROOT)
-    monkeypatch.setattr("pi_glink.app.load_config", lambda: config)
+    monkeypatch.setattr("glink_harness.app.load_config", lambda: config)
     code = app_main(
         [
             "--create-invite",
@@ -877,7 +877,7 @@ def test_shared_mode_bootstrap_uses_the_host_configuration(
     # The defensive refusal: a shared config that somehow lost its key must not
     # bootstrap an organisation that cannot run.
     broken = replace(config, openai_api_key="")
-    monkeypatch.setattr("pi_glink.app.load_config", lambda: broken)
+    monkeypatch.setattr("glink_harness.app.load_config", lambda: broken)
     code = app_main(["--create-invite", "--tenant", "tenant-other", "--email", "other@example.test"])
     captured = capsys.readouterr()
     assert code == 2
@@ -885,7 +885,7 @@ def test_shared_mode_bootstrap_uses_the_host_configuration(
 
 
 def test_shared_mode_invite_registration_then_run_uses_host_credentials(
-    shared_server: PiGlinkServer, behavior: AdapterBehavior
+    shared_server: GlinkHarnessServer, behavior: AdapterBehavior
 ) -> None:
     """The full SaaS onboarding: invite -> register -> login -> shared run."""
     server = shared_server
@@ -922,9 +922,9 @@ def test_shared_gateway_mode_is_equally_explicit_and_uses_host_credentials(
     secret.chmod(0o600)
     values = shared_values(
         tmp_path,
-        PI_GLINK_AUTH_MODE="gateway",
-        PI_GLINK_GATEWAY_SECRET_FILE=str(secret),
-        PI_GLINK_TENANCY_AUDIENCE=AUDIENCE,
+        GLINK_AUTH_MODE="gateway",
+        GLINK_GATEWAY_SECRET_FILE=str(secret),
+        GLINK_TENANCY_AUDIENCE=AUDIENCE,
     )
     server = create_server(build_config(values, REPO_ROOT))
     thread = start_server(server)
@@ -938,7 +938,7 @@ def test_shared_gateway_mode_is_equally_explicit_and_uses_host_credentials(
             "/api/runs",
             method="POST",
             body={"prompt": "网关共享模式"},
-            headers={"X-Pi-Glink-Identity": token},
+            headers={"X-Glink-Harness-Identity": token},
         )
         assert status == 201, raw
         run_id = json.loads(raw)["run"]["runId"]

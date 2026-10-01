@@ -8,7 +8,7 @@
 # read-only / agent / agent-full-access（默认 agent，集成笔记 §14.5），M8 的真实
 # 「首轮+追问」run 就是在不设 session_config 的默认模式下跑通的。声明一个钉版不认的
 # 取值会让包应用 session_config 时失败闭环。
-format = "pi-glink-harness/v2"
+format = "glink-harness/v2"
 name = "codex"
 family = "acp"
 

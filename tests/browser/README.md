@@ -49,7 +49,7 @@ node tests/browser/acceptance.mjs --mode accounts --only shell,lifecycle --out /
 `tests/fixtures/accounts_server.py` 起一个**真实宿主**（真实 Runner / RunStore /
 EventBus / HTTP / SSE / 生产前端），只把执行面换成进程内替身；数据根、账号库、
 HOME / XDG 都是本次运行专属的临时目录，合成凭据只写进临时文件。不会读操作员的
-`.env`、`~/.pi`、`~/.pi-glink`，不会调用真实模型、Docker 或 E2B，也不会碰任何
+`.env`、`~/.pi`、`~/.glink-harness`，不会调用真实模型、Docker 或 E2B，也不会碰任何
 已在运行的服务。fixture 由调用方按**记录的 PID** 终止，不用宽匹配 `pkill`。
 
 题目里的 `[scenario:…]` 标记选择合成场景（`tools` / `subagent` / `slow` / `fail` /

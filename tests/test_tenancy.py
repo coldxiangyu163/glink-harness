@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.config import ConfigError, build_config
-from pi_glink.tenancy import (
+from glink_harness.config import ConfigError, build_config
+from glink_harness.tenancy import (
     ASSERTION_HEADER,
     GatewayAuthenticator,
     TenantAuthError,
@@ -31,7 +31,7 @@ from pi_glink.tenancy import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SECRET = b"0123456789abcdef0123456789abcdef"
-AUDIENCE = "pi-glink-test"
+AUDIENCE = "glink-harness-test"
 
 
 def write_file(tmp_path: Path, name: str, content: bytes, mode: int = 0o600) -> Path:
@@ -320,11 +320,11 @@ def make_values(tmp_path: Path, **overrides: str) -> dict[str, str]:
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_TENANCY": "multitenant",
+        "GLINK_TENANCY": "multitenant",
         "LOCAL_WEB_EXECUTOR": "docker",
-        "PI_GLINK_GATEWAY_SECRET_FILE": str(secret),
-        "PI_GLINK_TENANT_CONFIG_FILE": str(tenants),
-        "PI_GLINK_TENANCY_AUDIENCE": AUDIENCE,
+        "GLINK_GATEWAY_SECRET_FILE": str(secret),
+        "GLINK_TENANT_CONFIG_FILE": str(tenants),
+        "GLINK_TENANCY_AUDIENCE": AUDIENCE,
     }
     values.update(overrides)
     return values
@@ -345,16 +345,16 @@ def test_multitenant_requires_loopback_container_face_and_material(tmp_path: Pat
         )
     with pytest.raises(ConfigError, match="Docker/E2B"):
         build_config(make_values(tmp_path, LOCAL_WEB_EXECUTOR="inproc"), REPO_ROOT)
-    with pytest.raises(ConfigError, match="PI_GLINK_GATEWAY_SECRET_FILE"):
+    with pytest.raises(ConfigError, match="GLINK_GATEWAY_SECRET_FILE"):
         values = make_values(tmp_path)
-        del values["PI_GLINK_GATEWAY_SECRET_FILE"]
+        del values["GLINK_GATEWAY_SECRET_FILE"]
         build_config(values, REPO_ROOT)
-    with pytest.raises(ConfigError, match="PI_GLINK_TENANCY_AUDIENCE"):
+    with pytest.raises(ConfigError, match="GLINK_TENANCY_AUDIENCE"):
         values = make_values(tmp_path)
-        del values["PI_GLINK_TENANCY_AUDIENCE"]
+        del values["GLINK_TENANCY_AUDIENCE"]
         build_config(values, REPO_ROOT)
-    with pytest.raises(ConfigError, match="PI_GLINK_TENANCY"):
-        build_config(make_values(tmp_path, PI_GLINK_TENANCY="open"), REPO_ROOT)
+    with pytest.raises(ConfigError, match="GLINK_TENANCY"):
+        build_config(make_values(tmp_path, GLINK_TENANCY="open"), REPO_ROOT)
 
 
 def test_multitenant_startup_refuses_a_world_readable_key_file(tmp_path: Path) -> None:
@@ -378,4 +378,4 @@ def test_local_mode_ignores_the_multitenant_material(tmp_path: Path) -> None:
 
 
 def test_assertion_header_name_is_part_of_the_contract() -> None:
-    assert ASSERTION_HEADER == "X-Pi-Glink-Identity"
+    assert ASSERTION_HEADER == "X-Glink-Harness-Identity"

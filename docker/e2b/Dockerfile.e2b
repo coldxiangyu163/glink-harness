@@ -37,7 +37,7 @@ RUN apt-get update \
          'set -eu' \
          'for pkg in pi-web-access; do' \
          '  if [ ! -f "/opt/pi-packages/node_modules/$pkg/package.json" ]; then' \
-         '    echo "pi-glink: 镜像内预装包缺失: $pkg（宿主与镜像声明不一致，请重建镜像/模板）" >&2' \
+         '    echo "glink-harness: 镜像内预装包缺失: $pkg（宿主与镜像声明不一致，请重建镜像/模板）" >&2' \
          '    exit 78' \
          '  fi' \
          'done' \

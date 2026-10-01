@@ -1,6 +1,6 @@
 """Suite-wide guard: every product frame a test produces must match the schema.
 
-Strict mode (:data:`pi_glink.event_schema.STRICT_ENV`) makes the bus and the
+Strict mode (:data:`glink_harness.event_schema.STRICT_ENV`) makes the bus and the
 projectors raise on a violating frame. A violation raised on a background
 thread (a run's worker, a stream pump) can be swallowed by the code under test,
 so each test also fails when the schema recorded any violation during it.
@@ -14,9 +14,9 @@ import os
 
 import pytest
 
-os.environ.setdefault("PI_GLINK_EVENT_SCHEMA", "strict")
+os.environ.setdefault("GLINK_EVENT_SCHEMA", "strict")
 
-from pi_glink import event_schema  # noqa: E402
+from glink_harness import event_schema  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

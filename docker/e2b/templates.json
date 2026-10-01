@@ -1,9 +1,9 @@
 {
-  "format": "pi-glink-e2b-templates/v1",
+  "format": "glink-harness-e2b-templates/v1",
   "generated_by": "scripts/generate-pack-artifacts.py（勿手改；改 harnesses/<包>/harness.toml 后重新生成）",
   "templates": {
     "pi-worker": {
-      "alias": "pi-glink-worker",
+      "alias": "glink-harness-worker",
       "dockerfile": "docker/e2b/Dockerfile.e2b",
       "cpu_count": 2,
       "memory_mb": 4096,

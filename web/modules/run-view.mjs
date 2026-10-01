@@ -21,7 +21,8 @@
  * The view reads nothing but the model it is given: no fetch, no timers that
  * outlive `dispose`. Every word it prints comes from `present.mjs`, so engine
  * vocabulary (tool names, stage codes, host paths) never reaches the screen.
- * Class names stay `pi-*` because the browser regressions assert on them.
+ * Class names keep the `glink-*` product prefix; the browser regressions
+ * assert on them, so rename only together with those assertions.
  */
 
 import {
@@ -78,28 +79,28 @@ export function createRunView({
   const uid = `run-view-${(viewCounter += 1)}`;
 
   // ── process fold ─────────────────────────────────────────────────────────
-  const process = el('section', 'pi-process');
+  const process = el('section', 'glink-process');
   process.setAttribute('aria-label', '研究过程');
-  const toggle = el('button', 'pi-process-toggle trace-toggle');
+  const toggle = el('button', 'glink-process-toggle trace-toggle');
   toggle.type = 'button';
   toggle.setAttribute('aria-controls', `${uid}-process`);
   const toggleIcon = icon('sparkles', 16);
-  toggleIcon.classList.add('pi-process-icon');
-  const toggleLabel = el('span', 'pi-process-label');
+  toggleIcon.classList.add('glink-process-icon');
+  const toggleLabel = el('span', 'glink-process-label');
   toggleLabel.setAttribute('role', 'status');
   toggleLabel.setAttribute('aria-live', 'polite');
   const toggleChevron = icon('chevron-down', 14);
-  toggleChevron.classList.add('pi-process-chevron');
+  toggleChevron.classList.add('glink-process-chevron');
   toggle.append(toggleIcon, toggleLabel, toggleChevron);
-  const body = el('div', 'pi-process-body');
+  const body = el('div', 'glink-process-body');
   body.id = `${uid}-process`;
   // body (0fr ↔ 1fr) › inner (overflow clip, no box) › track (timeline rule + padding):
   // any padding on the clipped child itself would survive a 0fr track.
-  const inner = el('div', 'pi-process-inner');
-  const track = el('div', 'pi-process-track');
-  const list = el('div', 'pi-process-list');
-  const pending = el('div', 'pi-pending');
-  pending.append(el('span', 'pi-pending-dot'), el('span', 'pi-pending-label'));
+  const inner = el('div', 'glink-process-inner');
+  const track = el('div', 'glink-process-track');
+  const list = el('div', 'glink-process-list');
+  const pending = el('div', 'glink-pending');
+  pending.append(el('span', 'glink-pending-dot'), el('span', 'glink-pending-label'));
   pending.hidden = true;
   track.append(list, pending);
   inner.append(track);
@@ -107,38 +108,38 @@ export function createRunView({
   process.append(toggle, body);
 
   // ── answer frame ─────────────────────────────────────────────────────────
-  const answer = el('div', 'pi-answer');
-  const answerHead = el('header', 'pi-answer-head');
+  const answer = el('div', 'glink-answer');
+  const answerHead = el('header', 'glink-answer-head');
   answerHead.hidden = true;
-  const headRow = el('div', 'pi-answer-title');
+  const headRow = el('div', 'glink-answer-title');
   headRow.append(icon('agent', 20), el('h3', '', '研究助理'));
   const draftBadge = el('span', 'badge', '待核验草稿');
   draftBadge.dataset.variant = 'warning';
   headRow.append(draftBadge);
   const disclaimer = el(
     'p',
-    'pi-answer-note',
+    'glink-answer-note',
     'AI 生成，未经人工核验：可作为起草参考，不能直接对外发送或据此下判断。',
   );
   answerHead.append(headRow, disclaimer);
-  const answerBody = el('div', 'pi-answer-body');
+  const answerBody = el('div', 'glink-answer-body');
 
-  const output = el('section', 'pi-output');
+  const output = el('section', 'glink-output');
   output.setAttribute('aria-label', '生成的文件');
   output.hidden = true;
-  const outputTitle = el('p', 'pi-output-title', '已生成 1 个文件');
-  const outputRow = el('div', 'pi-output-row');
-  const outputOpen = el('button', 'pi-output-open pi-report-button');
+  const outputTitle = el('p', 'glink-output-title', '已生成 1 个文件');
+  const outputRow = el('div', 'glink-output-row');
+  const outputOpen = el('button', 'glink-output-open glink-report-button');
   outputOpen.type = 'button';
   outputOpen.setAttribute('aria-label', '在右侧打开 report.md');
   const fileTile = document.createElement('img');
-  fileTile.className = 'pi-file-tile';
+  fileTile.className = 'glink-file-tile';
   fileTile.src = '/icons/markdown-32.png';
   fileTile.alt = '';
   fileTile.width = 32;
   fileTile.height = 32;
-  const fileText = el('span', 'pi-output-text');
-  fileText.append(el('span', 'pi-output-name', 'report.md'), el('span', 'pi-output-meta', 'Markdown 文档 · 待核验草稿'));
+  const fileText = el('span', 'glink-output-text');
+  fileText.append(el('span', 'glink-output-name', 'report.md'), el('span', 'glink-output-meta', 'Markdown 文档 · 待核验草稿'));
   outputOpen.append(fileTile, fileText);
   outputOpen.addEventListener('click', () => {
     if (latest?.hasReport && onOpenReport) onOpenReport(latest.runId);
@@ -150,28 +151,28 @@ export function createRunView({
   outputRow.append(outputOpen, outputDownload);
   output.append(outputTitle, outputRow);
 
-  const deliveries = el('section', 'pi-output pi-deliverables');
+  const deliveries = el('section', 'glink-output glink-deliverables');
   deliveries.setAttribute('aria-label', '交付文件');
   deliveries.hidden = true;
-  const deliveryTitle = el('p', 'pi-output-title');
-  const deliveryList = el('div', 'pi-deliverables-list');
+  const deliveryTitle = el('p', 'glink-output-title');
+  const deliveryList = el('div', 'glink-deliverables-list');
   deliveries.append(deliveryTitle, deliveryList);
 
   // ── children panel (ChildRun, §3.5) ────────────────────────────────────────
   // A run with dispatched subagents lists them in the detail area; a run
   // without any never renders an empty panel. The rows reuse the process-row
-  // geometry (pi-step-row) and the output section's chrome — no new styles.
-  const childrenSection = el('section', 'pi-output pi-children');
+  // geometry (glink-step-row) and the output section's chrome — no new styles.
+  const childrenSection = el('section', 'glink-output glink-children');
   childrenSection.setAttribute('aria-label', '子代理');
   childrenSection.hidden = true;
-  const childrenTitle = el('p', 'pi-output-title');
-  const childrenList = el('div', 'pi-children-list');
+  const childrenTitle = el('p', 'glink-output-title');
+  const childrenList = el('div', 'glink-children-list');
   childrenSection.append(childrenTitle, childrenList);
 
-  const outcome = el('section', 'pi-outcome');
+  const outcome = el('section', 'glink-outcome');
   outcome.hidden = true;
 
-  const actions = el('div', 'pi-answer-actions');
+  const actions = el('div', 'glink-answer-actions');
   actions.setAttribute('role', 'group');
   actions.setAttribute('aria-label', '回答操作');
   actions.hidden = true;
@@ -266,21 +267,21 @@ export function createRunView({
     if (childrenTitle.textContent !== title) childrenTitle.textContent = title;
     childrenList.replaceChildren(
       ...rows.map((child) => {
-        const row = el('div', 'pi-stage pi-step-row pi-child-row');
+        const row = el('div', 'glink-stage glink-step-row glink-child-row');
         row.dataset.status = child.status;
         row.append(
           icon('agent', 14),
-          el('span', 'pi-stage-text', childLabel(child)),
-          el('span', 'pi-tool-state', childStatusText(child.status)),
+          el('span', 'glink-stage-text', childLabel(child)),
+          el('span', 'glink-tool-state', childStatusText(child.status)),
         );
         // R2 增强：耗时/工具步数（来自 _meta.json 白名单）与产物下载链接。
         const facts = childFacts(child);
-        if (facts) row.append(el('span', 'pi-child-facts', facts));
+        if (facts) row.append(el('span', 'glink-child-facts', facts));
         if (Array.isArray(child.artifacts) && child.artifacts.length && model.runId) {
-          const links = el('span', 'pi-child-artifacts');
+          const links = el('span', 'glink-child-artifacts');
           for (const artifact of child.artifacts) {
             if (!artifact || typeof artifact.name !== 'string' || !artifact.name) continue;
-            const link = el('a', 'pi-child-artifact', artifact.name);
+            const link = el('a', 'glink-child-artifact', artifact.name);
             link.href = childFileHref(model.runId, child.n, artifact.name);
             link.target = '_blank';
             link.rel = 'noopener';
@@ -335,7 +336,7 @@ export function createRunView({
 
     const act = running ? activity(model) : null;
     pending.hidden = !running || act.live;
-    if (!pending.hidden) pending.querySelector('.pi-pending-label').textContent = act.label;
+    if (!pending.hidden) pending.querySelector('.glink-pending-label').textContent = act.label;
   }
 
   function finalAnswerIndex(items) {
@@ -379,29 +380,29 @@ export function createRunView({
       answerIndex = nextAnswer;
     }
     rendered.forEach(({ node }, index) => {
-      if (node.classList.contains('pi-text')) node.classList.toggle('pi-narration', index !== answerIndex);
+      if (node.classList.contains('glink-text')) node.classList.toggle('glink-narration', index !== answerIndex);
     });
   }
 
   function createNode(item) {
     switch (item.kind) {
       case 'thinking': {
-        const details = el('details', 'pi-thinking');
-        const summary = el('summary', 'pi-step-row trace-toggle');
-        summary.append(icon('sparkles', 14), el('span', 'pi-thinking-label'), chevron());
-        details.append(summary, el('div', 'pi-thinking-body'));
+        const details = el('details', 'glink-thinking');
+        const summary = el('summary', 'glink-step-row trace-toggle');
+        summary.append(icon('sparkles', 14), el('span', 'glink-thinking-label'), chevron());
+        details.append(summary, el('div', 'glink-thinking-body'));
         return details;
       }
       case 'tool': {
         if (isTodoWrite(item)) {
-          const row = el('div', 'pi-stage pi-step-row pi-plan-update');
-          row.append(icon('checklist', 14), el('span', 'pi-stage-text'));
+          const row = el('div', 'glink-stage glink-step-row glink-plan-update');
+          row.append(icon('checklist', 14), el('span', 'glink-stage-text'));
           return row;
         }
-        const card = el('details', 'pi-tool');
-        const head = el('summary', 'pi-tool-head pi-step-row trace-toggle');
-        const args = el('span', 'pi-tool-args');
-        head.append(icon('wrench', 14), el('span', 'pi-tool-name'), args, el('span', 'pi-tool-state'), chevron('pi-tool-chevron'));
+        const card = el('details', 'glink-tool');
+        const head = el('summary', 'glink-tool-head glink-step-row trace-toggle');
+        const args = el('span', 'glink-tool-args');
+        head.append(icon('wrench', 14), el('span', 'glink-tool-name'), args, el('span', 'glink-tool-state'), chevron('glink-tool-chevron'));
         head.addEventListener('click', (event) => {
           if (card.dataset.hasDetail !== 'true') {
             event.preventDefault();
@@ -410,10 +411,10 @@ export function createRunView({
           // The reader's own choice outranks the streaming default from now on.
           card.dataset.touched = 'true';
         });
-        const detail = el('div', 'pi-tool-detail');
-        const wrap = el('div', 'pi-tool-detail-wrap');
-        wrap.append(el('div', 'pi-tool-result pi-tool-structured'),
-          el('pre', 'pi-tool-output scroll-area'), el('div', 'pi-tool-result'));
+        const detail = el('div', 'glink-tool-detail');
+        const wrap = el('div', 'glink-tool-detail-wrap');
+        wrap.append(el('div', 'glink-tool-result glink-tool-structured'),
+          el('pre', 'glink-tool-output scroll-area'), el('div', 'glink-tool-result'));
         detail.append(wrap);
         card.append(head, detail);
         return card;
@@ -423,10 +424,10 @@ export function createRunView({
         // compact row while the child runs, a folded result preview once it
         // settles. The child run's own step stream never enters the timeline
         // (§3.5: 子代理正文永不进事件日志).
-        const card = el('details', 'pi-tool pi-subagent');
-        const head = el('summary', 'pi-tool-head pi-step-row trace-toggle');
-        const args = el('span', 'pi-tool-args');
-        head.append(icon('agent', 14), el('span', 'pi-tool-name'), args, el('span', 'pi-tool-state'), chevron('pi-tool-chevron'));
+        const card = el('details', 'glink-tool glink-subagent');
+        const head = el('summary', 'glink-tool-head glink-step-row trace-toggle');
+        const args = el('span', 'glink-tool-args');
+        head.append(icon('agent', 14), el('span', 'glink-tool-name'), args, el('span', 'glink-tool-state'), chevron('glink-tool-chevron'));
         head.addEventListener('click', (event) => {
           if (card.dataset.hasDetail !== 'true') {
             event.preventDefault();
@@ -434,34 +435,34 @@ export function createRunView({
           }
           card.dataset.touched = 'true';
         });
-        const detail = el('div', 'pi-tool-detail');
-        const wrap = el('div', 'pi-tool-detail-wrap');
-        wrap.append(el('div', 'pi-tool-result'));
+        const detail = el('div', 'glink-tool-detail');
+        const wrap = el('div', 'glink-tool-detail-wrap');
+        wrap.append(el('div', 'glink-tool-result'));
         detail.append(wrap);
         card.append(head, detail);
         return card;
       }
       case 'text':
-        return el('div', 'pi-text');
+        return el('div', 'glink-text');
       case 'notice': {
-        const notice = el('details', 'pi-notice');
-        const summary = el('summary', 'pi-step-row trace-toggle');
-        summary.append(icon('alert-circle', 14), el('span', 'pi-notice-text'), chevron());
+        const notice = el('details', 'glink-notice');
+        const summary = el('summary', 'glink-step-row trace-toggle');
+        summary.append(icon('alert-circle', 14), el('span', 'glink-notice-text'), chevron());
         summary.addEventListener('click', (event) => {
           if (notice.dataset.hasDetail !== 'true') event.preventDefault();
         });
-        notice.append(summary, el('div', 'pi-notice-detail'));
+        notice.append(summary, el('div', 'glink-notice-detail'));
         return notice;
       }
       case 'stage': {
-        const stage = el('div', 'pi-stage pi-step-row');
-        stage.append(icon('refresh', 14), el('span', 'pi-stage-text'));
+        const stage = el('div', 'glink-stage glink-step-row');
+        stage.append(icon('refresh', 14), el('span', 'glink-stage-text'));
         return stage;
       }
       case 'turn':
       default: {
         // Turns are bookkeeping; the node exists only to keep index ↔ item aligned.
-        const turn = el('div', 'pi-turn');
+        const turn = el('div', 'glink-turn');
         turn.hidden = true;
         return turn;
       }
@@ -470,7 +471,7 @@ export function createRunView({
 
   function chevron(extra = '') {
     const node = icon('chevron-down', 12);
-    node.classList.add('pi-row-chevron');
+    node.classList.add('glink-row-chevron');
     if (extra) node.classList.add(extra);
     return node;
   }
@@ -479,31 +480,31 @@ export function createRunView({
     switch (item.kind) {
       case 'thinking': {
         node.dataset.status = item.closed ? 'done' : 'running';
-        const label = node.querySelector('.pi-thinking-label');
+        const label = node.querySelector('.glink-thinking-label');
         const next = item.closed ? '思考过程' : '正在思考';
         if (label.textContent !== next) label.textContent = next;
-        const text = node.querySelector('.pi-thinking-body');
+        const text = node.querySelector('.glink-thinking-body');
         if (text.textContent !== item.text) text.textContent = item.text;
         return;
       }
       case 'tool': {
         if (isTodoWrite(item)) {
           node.dataset.status = item.status;
-          node.querySelector('.pi-stage-text').textContent = planUpdateLabel(item);
+          node.querySelector('.glink-stage-text').textContent = planUpdateLabel(item);
           return;
         }
         node.dataset.status = item.status;
         const described = describeTool(item.name, item.args, item.presentation);
-        const iconNode = node.querySelector('.pi-tool-head .icon');
+        const iconNode = node.querySelector('.glink-tool-head .icon');
         if (iconNode.dataset.icon !== described.icon) iconNode.dataset.icon = described.icon;
-        const nameNode = node.querySelector('.pi-tool-name');
+        const nameNode = node.querySelector('.glink-tool-name');
         if (nameNode.textContent !== described.action) nameNode.textContent = described.action;
-        const argsNode = node.querySelector('.pi-tool-args');
+        const argsNode = node.querySelector('.glink-tool-args');
         const title = item.presentation === 'fetch_page' ? fetchedTitle(item.result) : '';
         const objectText = title ? `${title} · ${described.object}` : described.object;
         if (argsNode.textContent !== objectText) argsNode.textContent = objectText;
         argsNode.classList.toggle('is-mono', described.mono);
-        const structured = node.querySelector('.pi-tool-structured');
+        const structured = node.querySelector('.glink-tool-structured');
         const queries = item.presentation === 'search_web' && Array.isArray(item.args?.queries)
           ? item.args.queries.filter((query) => typeof query === 'string' && query.trim()) : [];
         const plans = item.presentation === 'plan' ? planEntries(item.args) : [];
@@ -511,12 +512,12 @@ export function createRunView({
           : plans.map(planEntryLabel).join('\n');
         if (structured.textContent !== structuredText) structured.textContent = structuredText;
         structured.hidden = !structuredText;
-        node.querySelector('.pi-tool-state').textContent = toolStateLabel(item);
-        const outputNode = node.querySelector('.pi-tool-output');
+        node.querySelector('.glink-tool-state').textContent = toolStateLabel(item);
+        const outputNode = node.querySelector('.glink-tool-output');
         const outputText = displayPath(item.output);
         if (outputNode.textContent !== outputText) outputNode.textContent = outputText;
         outputNode.hidden = outputText === '';
-        const resultNode = node.querySelector('.pi-tool-detail-wrap > .pi-tool-result:not(.pi-tool-structured)');
+        const resultNode = node.querySelector('.glink-tool-detail-wrap > .glink-tool-result:not(.glink-tool-structured)');
         const resultText = displayPath(item.result || '');
         resultNode.hidden = resultText === '';
         if (resultNode.textContent !== resultText) resultNode.textContent = resultText;
@@ -524,7 +525,7 @@ export function createRunView({
         // back to a chip — unless the reader opened it themselves.
         const hasDetail = structuredText !== '' || outputText !== '' || resultText !== '';
         node.dataset.hasDetail = String(hasDetail);
-        node.querySelector('.pi-tool-chevron').hidden = !hasDetail;
+        node.querySelector('.glink-tool-chevron').hidden = !hasDetail;
         if (!hasDetail) node.open = false;
         else if (node.dataset.touched !== 'true') node.open = item.status === 'running';
         return;
@@ -542,18 +543,18 @@ export function createRunView({
         }[item.status] ?? 'running';
         node.dataset.status = cardStatus;
         const described = describeChild(item);
-        const iconNode = node.querySelector('.pi-tool-head .icon');
+        const iconNode = node.querySelector('.glink-tool-head .icon');
         if (iconNode.dataset.icon !== described.icon) iconNode.dataset.icon = described.icon;
-        const nameNode = node.querySelector('.pi-tool-name');
+        const nameNode = node.querySelector('.glink-tool-name');
         if (nameNode.textContent !== described.action) nameNode.textContent = described.action;
-        const argsNode = node.querySelector('.pi-tool-args');
+        const argsNode = node.querySelector('.glink-tool-args');
         if (argsNode.textContent !== described.object) argsNode.textContent = described.object;
         // 进行中时状态位借给 R3a 进度行（3 步 · 最近读取 report.md）；收口后
-        // 回到状态词。复用 pi-tool-state 同一槽位，不引入新类。
-        const stateNode = node.querySelector('.pi-tool-state');
+        // 回到状态词。复用 glink-tool-state 同一槽位，不引入新类。
+        const stateNode = node.querySelector('.glink-tool-state');
         const stateText = childCardState(item);
         if (stateNode.textContent !== stateText) stateNode.textContent = stateText;
-        const resultNode = node.querySelector('.pi-tool-result');
+        const resultNode = node.querySelector('.glink-tool-result');
         const resultText = displayPath(item.resultPreview || '');
         resultNode.hidden = resultText === '';
         if (resultNode.textContent !== resultText) resultNode.textContent = resultText;
@@ -561,7 +562,7 @@ export function createRunView({
         // the reader's own open/close wins from then on.
         const hasDetail = resultText !== '';
         node.dataset.hasDetail = String(hasDetail);
-        node.querySelector('.pi-tool-chevron').hidden = !hasDetail;
+        node.querySelector('.glink-tool-chevron').hidden = !hasDetail;
         if (!hasDetail) node.open = false;
         else if (node.dataset.touched !== 'true') node.open = false;
         return;
@@ -583,18 +584,18 @@ export function createRunView({
       case 'notice': {
         node.dataset.level = item.level;
         const text = noticeText(item);
-        const label = node.querySelector('.pi-notice-text');
+        const label = node.querySelector('.glink-notice-text');
         if (label.textContent !== text) label.textContent = text;
         const detail = displayPath(item.detail || '');
-        node.querySelector('.pi-notice-detail').textContent = detail;
+        node.querySelector('.glink-notice-detail').textContent = detail;
         node.dataset.hasDetail = String(detail !== '');
-        node.querySelector('.pi-row-chevron').hidden = !detail;
+        node.querySelector('.glink-row-chevron').hidden = !detail;
         return;
       }
       case 'stage': {
         const text = stageText(item);
         node.hidden = text === null;
-        const label = node.querySelector('.pi-stage-text');
+        const label = node.querySelector('.glink-stage-text');
         if (text !== null && label.textContent !== text) label.textContent = text;
         return;
       }
@@ -622,22 +623,22 @@ export function createRunView({
       deliveryTitle.textContent = `交付文件 · ${files.length}`;
       deliveryList.replaceChildren();
       files.forEach((file, index) => {
-        const row = el('div', 'pi-output-row');
+        const row = el('div', 'glink-output-row');
         const name = String(file.path || '').split('/').pop() || '文件';
         const available = file.available === true && file.status === 'ok';
         const href = deliverableHref(model.runId, index);
-        const open = el('a', 'pi-output-name');
+        const open = el('a', 'glink-output-name');
         open.textContent = name;
         open.setAttribute('aria-label', `打开 ${name}`);
         if (available) { open.href = href; open.target = '_blank'; open.rel = 'noopener'; }
         else { open.removeAttribute('href'); open.setAttribute('aria-disabled', 'true'); }
-        const text = el('span', 'pi-output-text');
+        const text = el('span', 'glink-output-text');
         text.append(open);
         const status = file.status === 'rejected' ? `未能保存：${file.reason || '安全校验未通过'}`
           : available ? '已保存' : '整理中';
-        text.append(el('span', 'pi-output-meta', [file.description, status].filter(Boolean).join(' · ')));
+        text.append(el('span', 'glink-output-meta', [file.description, status].filter(Boolean).join(' · ')));
         const tile = document.createElement('img');
-        tile.className = 'pi-file-tile'; tile.src = '/icons/markdown-32.png'; tile.alt = '';
+        tile.className = 'glink-file-tile'; tile.src = '/icons/markdown-32.png'; tile.alt = '';
         tile.width = 32; tile.height = 32;
         row.append(tile, text);
         if (available) {
@@ -684,16 +685,16 @@ export function createRunView({
     outcome.dataset.tone = spec.tone;
     outcome.setAttribute('role', spec.live);
     outcome.setAttribute('aria-live', spec.live === 'alert' ? 'assertive' : 'polite');
-    const tile = el('span', 'pi-outcome-icon');
+    const tile = el('span', 'glink-outcome-icon');
     tile.setAttribute('aria-hidden', 'true');
     tile.append(icon(spec.icon, 16));
-    const text = el('div', 'pi-outcome-text');
-    const heading = el('h3', 'pi-outcome-title', spec.title);
+    const text = el('div', 'glink-outcome-text');
+    const heading = el('h3', 'glink-outcome-title', spec.title);
     heading.id = `${uid}-outcome-title`;
     outcome.setAttribute('aria-labelledby', heading.id);
-    text.append(heading, el('p', 'pi-outcome-desc', spec.text));
+    text.append(heading, el('p', 'glink-outcome-desc', spec.text));
     if (spec.actions.length || spec.detail) {
-      const row = el('div', 'pi-outcome-actions');
+      const row = el('div', 'glink-outcome-actions');
       for (const [label, action] of spec.actions) {
         const button = el('button', 'btn outline sm');
         button.type = 'button';
@@ -708,12 +709,12 @@ export function createRunView({
       }
       let detailBlock = null;
       if (spec.detail) {
-        const more = el('button', 'btn ghost sm pi-outcome-more');
+        const more = el('button', 'btn ghost sm glink-outcome-more');
         more.type = 'button';
         more.setAttribute('aria-expanded', 'false');
         more.setAttribute('aria-controls', `${uid}-outcome-detail`);
         more.append(document.createTextNode('查看详情'), icon('chevron-down', 16));
-        detailBlock = el('pre', 'pi-outcome-detail', spec.detail);
+        detailBlock = el('pre', 'glink-outcome-detail', spec.detail);
         detailBlock.id = `${uid}-outcome-detail`;
         detailBlock.hidden = true;
         more.addEventListener('click', () => {

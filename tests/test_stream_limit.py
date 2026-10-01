@@ -18,16 +18,16 @@ from typing import Any
 
 import pytest
 
-from pi_glink.app import PiGlinkServer, create_server
-from pi_glink.config import ConfigError, build_config
-from pi_glink.kernel.execution import (
+from glink_harness.app import GlinkHarnessServer, create_server
+from glink_harness.config import ConfigError, build_config
+from glink_harness.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
     ExecutionAdapter,
     ExecutionOutcome,
     SessionInfo,
 )
-from pi_glink.web_sse import StreamLimits
+from glink_harness.web_sse import StreamLimits
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -87,10 +87,10 @@ class _Adapter(ExecutionAdapter):
 @pytest.fixture()
 def stream_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A local host whose execution face is a fake adapter (no pi process)."""
-    created: list[PiGlinkServer] = []
+    created: list[GlinkHarnessServer] = []
 
     def build(adapter: _Adapter, **overrides: str):
-        monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter)
+        monkeypatch.setattr("glink_harness.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: adapter)
         instance = create_server(make_config(tmp_path, **overrides))
         created.append(instance)
         thread = threading.Thread(target=instance.serve_forever, daemon=True)
@@ -103,7 +103,7 @@ def stream_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         instance.server_close()
 
 
-def start_run(server: PiGlinkServer, prompt: str = "流") -> str:
+def start_run(server: GlinkHarnessServer, prompt: str = "流") -> str:
     connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
     try:
         body = json.dumps({"prompt": prompt}).encode("utf-8")
@@ -118,14 +118,14 @@ def start_run(server: PiGlinkServer, prompt: str = "流") -> str:
         connection.close()
 
 
-def open_stream(server: PiGlinkServer, run_id: str, *, timeout: float = 10.0):
+def open_stream(server: GlinkHarnessServer, run_id: str, *, timeout: float = 10.0):
     """Open the SSE request and return the live connection plus its response."""
     connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=timeout)
     connection.request("GET", f"/api/runs/{run_id}/events")
     return connection, connection.getresponse()
 
 
-def read_all(server: PiGlinkServer, run_id: str, *, timeout: float = 10.0) -> tuple[int, str, bytes]:
+def read_all(server: GlinkHarnessServer, run_id: str, *, timeout: float = 10.0) -> tuple[int, str, bytes]:
     connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=timeout)
     try:
         connection.request("GET", f"/api/runs/{run_id}/events")
@@ -135,7 +135,7 @@ def read_all(server: PiGlinkServer, run_id: str, *, timeout: float = 10.0) -> tu
         connection.close()
 
 
-def wait_for_terminal(server: PiGlinkServer, run_id: str, timeout: float = 20.0) -> None:
+def wait_for_terminal(server: GlinkHarnessServer, run_id: str, timeout: float = 20.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         record = server.store.get(run_id)
@@ -147,7 +147,7 @@ def wait_for_terminal(server: PiGlinkServer, run_id: str, timeout: float = 20.0)
 
 def test_the_global_ceiling_refuses_before_any_stream_header(tmp_path: Path, stream_server) -> None:
     adapter = _Adapter(forever=True)
-    server, _thread = stream_server(adapter, PI_GLINK_MAX_GLOBAL_STREAMS="1")
+    server, _thread = stream_server(adapter, GLINK_MAX_GLOBAL_STREAMS="1")
     run_id = start_run(server)
 
     connection, response = open_stream(server, run_id)
@@ -189,7 +189,7 @@ def test_the_global_ceiling_refuses_before_any_stream_header(tmp_path: Path, str
 
 def test_a_stream_that_ends_normally_releases_its_slot(tmp_path: Path, stream_server) -> None:
     adapter = _Adapter(forever=False)
-    server, _thread = stream_server(adapter, PI_GLINK_MAX_GLOBAL_STREAMS="1")
+    server, _thread = stream_server(adapter, GLINK_MAX_GLOBAL_STREAMS="1")
     run_id = start_run(server)
     wait_for_terminal(server, run_id)
 
@@ -236,10 +236,10 @@ def test_stream_limits_require_a_positive_ceiling() -> None:
 
 
 def test_the_stream_ceiling_config_rejects_zero(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError, match="PI_GLINK_MAX_GLOBAL_STREAMS"):
-        make_config(tmp_path, PI_GLINK_MAX_GLOBAL_STREAMS="0")
-    with pytest.raises(ConfigError, match="PI_GLINK_MAX_TENANT_STREAMS"):
-        make_config(tmp_path, PI_GLINK_MAX_TENANT_STREAMS="-1")
+    with pytest.raises(ConfigError, match="GLINK_MAX_GLOBAL_STREAMS"):
+        make_config(tmp_path, GLINK_MAX_GLOBAL_STREAMS="0")
+    with pytest.raises(ConfigError, match="GLINK_MAX_TENANT_STREAMS"):
+        make_config(tmp_path, GLINK_MAX_TENANT_STREAMS="-1")
 
 
 def test_the_default_ceilings_are_the_documented_ones(tmp_path: Path) -> None:

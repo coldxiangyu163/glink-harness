@@ -1,6 +1,6 @@
 """The versioned product event schema and the boundaries that enforce it.
 
-``host/pi_glink/event_schema.py`` is the single declaration; the bus, both
+``host/glink_harness/event_schema.py`` is the single declaration; the bus, both
 kernel projections and the resource ledger validate against it, and
 ``scripts/gen-event-schema.py`` renders it for the front-end. The suite runs in
 strict mode (``tests/conftest.py``), so every other test already fails on a
@@ -18,12 +18,12 @@ from typing import Any
 
 import pytest
 
-from pi_glink import event_schema, events
-from pi_glink.events import EventBus
-from pi_glink.kernel import projection as pi_projection
-from pi_glink.kernel.acp_projection import AcpProjector
-from pi_glink.kernel.projection import Projector
-from pi_glink.redaction import SecretRedactor
+from glink_harness import event_schema, events
+from glink_harness.events import EventBus
+from glink_harness.kernel import projection as pi_projection
+from glink_harness.kernel.acp_projection import AcpProjector
+from glink_harness.kernel.projection import Projector
+from glink_harness.redaction import SecretRedactor
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = REPO_ROOT / "scripts" / "gen-event-schema.py"
@@ -148,7 +148,7 @@ def test_lenient_mode_logs_and_still_commits(
 ) -> None:
     monkeypatch.setenv(event_schema.STRICT_ENV, "")
     bus = EventBus()
-    with caplog.at_level(logging.ERROR, logger="pi_glink.event_schema"):
+    with caplog.at_level(logging.ERROR, logger="glink_harness.event_schema"):
         event = bus.commit("r1", events.RUN_STARTED, {"index": 1})
     assert event.seq == 1 and event.payload == {"index": 1}
     assert "事件违反 schema" in caplog.text and "run_started.prompt" in caplog.text

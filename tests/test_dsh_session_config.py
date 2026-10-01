@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.config import ConfigError, build_config, load_config, validate_host_config
-from pi_glink.events import EventBus
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import FAILED, FINISHED, RunStore
+from glink_harness.config import ConfigError, build_config, load_config, validate_host_config
+from glink_harness.events import EventBus
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import FAILED, FINISHED, RunStore
 from acp_pack import write_acp_pack
 from test_kernel_acp_runner import acp_command, payloads, read_events, read_log
 
@@ -60,7 +60,7 @@ def wired_config(
             encoding="utf-8",
         )
     values = {
-        "PI_GLINK_HARNESS": "dsh", "PI_GLINK_HARNESSES_DIR": str(packs),
+        "GLINK_HARNESS": "dsh", "GLINK_HARNESSES_DIR": str(packs),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
     }
     values.update(env or {})
@@ -100,8 +100,8 @@ def test_process_environment_overrides_dotenv_and_is_frozen(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seed = wired_config(tmp_path, {})
-    monkeypatch.setenv("PI_GLINK_HARNESS", "dsh")
-    monkeypatch.setenv("PI_GLINK_HARNESSES_DIR", str(seed.harnesses_dir))
+    monkeypatch.setenv("GLINK_HARNESS", "dsh")
+    monkeypatch.setenv("GLINK_HARNESSES_DIR", str(seed.harnesses_dir))
     monkeypatch.setenv("LOCAL_WEB_DATA_ROOT", str(tmp_path / "process-data"))
     monkeypatch.setenv("OPENAI_MODEL", "openrouter/openai/gpt-6-sol")
     monkeypatch.setenv("OPENAI_REASONING_EFFORT", "high")
@@ -119,13 +119,13 @@ def test_process_environment_overrides_dotenv_and_is_frozen(
 
 @pytest.mark.parametrize("pack", ["pi", "codex", "opencode"])
 def test_unwired_packs_do_not_require_model_or_effort(pack: str) -> None:
-    config = build_config({"PI_GLINK_HARNESS": pack}, REPO_ROOT)
+    config = build_config({"GLINK_HARNESS": pack}, REPO_ROOT)
     assert config.session_config == ()
 
 
 def test_repository_dsh_declares_sources_and_has_no_dead_model_default() -> None:
     config = build_config({
-        "PI_GLINK_HARNESS": "dsh", "OPENAI_MODEL": "openai/gpt-6-sol",
+        "GLINK_HARNESS": "dsh", "OPENAI_MODEL": "openai/gpt-6-sol",
         "OPENAI_REASONING_EFFORT": "xhigh",
     }, REPO_ROOT)
     assert config.session_config == (

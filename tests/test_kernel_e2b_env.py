@@ -37,11 +37,11 @@ import pytest
 from e2b import FileNotFoundException
 
 from e2b_fake import BrokenHandle, FakeSandbox, IdleHandle
-from pi_glink.config import build_config
-from pi_glink.events import EventBus
-from pi_glink.kernel import agent_env, e2b_env
+from glink_harness.config import build_config
+from glink_harness.events import EventBus
+from glink_harness.kernel import agent_env, e2b_env
 from harness_helpers import compose_launch, execution_spec, family, test_egress
-from pi_glink.kernel.e2b_env import (
+from glink_harness.kernel.e2b_env import (
     ARTIFACT_MAX_BYTES,
     SANDBOX_PACKAGE_GUARD,
     SANDBOX_SESSIONS,
@@ -51,11 +51,11 @@ from pi_glink.kernel.e2b_env import (
     SandboxCommandProcess,
     _read_file_bounded,
 )
-from pi_glink.kernel.execution import ExecutionAdapter, ExecutionSpec
-from pi_glink.kernel.sandbox import E2BSandbox, open_sandbox
-from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import RunStore
+from glink_harness.kernel.execution import ExecutionAdapter, ExecutionSpec
+from glink_harness.kernel.sandbox import E2BSandbox, open_sandbox
+from glink_harness.kernel.rpc import PiRpcClient
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import RunStore
 from store_helpers import events_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -70,8 +70,8 @@ def make_config(tmp_path: Path, **overrides: str):
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_EXECUTOR": "e2b",
         "E2B_API_KEY": "e2b-secret-key",
-        "LOCAL_WEB_E2B_TEMPLATE": "pi-glink-worker",
-        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
+        "LOCAL_WEB_E2B_TEMPLATE": "glink-harness-worker",
+        "GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
     }
     values.update(overrides)
     return build_config(values, REPO_ROOT)
@@ -145,7 +145,7 @@ def test_e2b_key_reaches_create_and_model_key_stays_out_of_env(tmp_path: Path) -
         config, runtime, run_id="abc123", workspace=tmp_path / "ws", sandbox_factory=factory
     )
     client.open()
-    assert captured["template"] == "pi-glink-worker"
+    assert captured["template"] == "glink-harness-worker"
     # The *E2B* key authenticates the sandbox API…
     assert captured["api_key"] == "e2b-secret-key"
     # …while the *model* key travels in auth.json, never as an env var.
@@ -1393,7 +1393,7 @@ def test_popen_injection_reaches_the_shared_rpc_client(tmp_path: Path) -> None:
         session = adapter.session_info()
         assert session is not None
         assert session.payload["sandboxId"] == "fake-sandbox"
-        assert session.payload["template"] == "pi-glink-worker"
+        assert session.payload["template"] == "glink-harness-worker"
     finally:
         adapter.close()
 
@@ -1402,7 +1402,7 @@ def test_abort_settle_grace_does_not_change_the_cancelled_verdict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """宽限只等收尾落盘，不改终态判定；pi 不理会 abort 时宽限到期照常返回。"""
-    import pi_glink.kernel.execution as execution_module
+    import glink_harness.kernel.execution as execution_module
 
     monkeypatch.setattr(execution_module, "ABORT_SETTLE_GRACE_SECONDS", 0.2)
     config = make_config(tmp_path)

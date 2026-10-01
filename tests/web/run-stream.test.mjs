@@ -85,12 +85,12 @@ test('tool cards track streaming output and final status', () => {
 
 test('cumulative tool snapshots replace the display instead of duplicating prefixes', () => {
   // Mirrors the real run `ebf75f590601`, whose bash tool emitted
-  // tool_updated snapshots of length 0 → 53 → 495, each containing the
-  // previous one. Appending would grow the card to 548 characters.
+  // tool_updated snapshots of length 0 → 58 → 515, each containing the
+  // previous one. Appending would grow the card to 573 characters.
   const snapshots = [
     '',
-    '/Users/coldxiangyu/.pi-glink/workspaces/run\n',
-    '/Users/coldxiangyu/.pi-glink/workspaces/run\n\nPI vars:\nPI_CODING_AGENT_DIR=/data/pi-agent\n',
+    '/Users/coldxiangyu/.glink-harness/workspaces/run\n',
+    '/Users/coldxiangyu/.glink-harness/workspaces/run\n\nPI vars:\nPI_CODING_AGENT_DIR=/data/pi-agent\n',
   ];
   let model = createRunState({ runId: 'r1' });
   model = apply(model, frame(1, 'tool_started', { toolCallId: 'c1', toolName: 'bash', args: { command: 'env' } }));
@@ -113,7 +113,7 @@ test('the audited run ebf75f590601 replays with replacement semantics (real fixt
   const frames = fixture.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line));
   assert.equal(frames.length, 5);
   const updates = frames.filter((event) => event.type === 'tool_updated');
-  assert.deepEqual(updates.map((event) => event.payload.output.length), [0, 53, 495]);
+  assert.deepEqual(updates.map((event) => event.payload.output.length), [0, 58, 515]);
   assert.ok(updates[1].payload.output.startsWith(updates[0].payload.output));
   assert.ok(updates[2].payload.output.startsWith(updates[1].payload.output));
 
@@ -122,9 +122,9 @@ test('the audited run ebf75f590601 replays with replacement semantics (real fixt
   model = applyAll(model, frames.filter((event) => event.type !== 'tool_finished'));
   let tool = model.items.find((item) => item.kind === 'tool');
   assert.equal(tool.output, updates[2].payload.output, 'the last snapshot is the display');
-  assert.equal(tool.output.length, 495);
+  assert.equal(tool.output.length, 515);
   const concatenated = updates.map((event) => event.payload.output).join('');
-  assert.equal(concatenated.length, 548, 'appending the frames is what the old code did');
+  assert.equal(concatenated.length, 573, 'appending the frames is what the old code did');
   assert.notEqual(tool.output, concatenated);
   assert.equal(tool.output.match(/workspaces\/ebf75f590601/g)?.length, 1, 'the prefix must appear once');
 
@@ -135,7 +135,7 @@ test('the audited run ebf75f590601 replays with replacement semantics (real fixt
   assert.equal(tool.result, updates[2].payload.output, 'the terminal result carries the full text');
   assert.equal(tool.output, '', 'the streamed preview is dropped once the result repeats it');
   const rendered = tool.output + tool.result;
-  assert.equal(rendered.length, 495);
+  assert.equal(rendered.length, 515);
   assert.equal(rendered.match(/workspaces\/ebf75f590601/g)?.length, 1);
   assert.equal(tool.status, 'done');
 });

@@ -27,9 +27,9 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.app import create_server, main as app_main
-from pi_glink.config import ConfigError, build_config
-from pi_glink.ownership import DataRootBusy
+from glink_harness.app import create_server, main as app_main
+from glink_harness.config import ConfigError, build_config
+from glink_harness.ownership import DataRootBusy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HOST_ROOT = REPO_ROOT / "host"
@@ -53,11 +53,11 @@ def config_values(tmp_path: Path, tenants: Path, **overrides: str) -> dict[str, 
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
         "LOCAL_WEB_PORT": "0",
         "LOCAL_WEB_EXECUTOR": "docker",
-        "PI_GLINK_TENANCY": "multitenant",
-        "PI_GLINK_AUTH_MODE": "accounts",
-        "PI_GLINK_TENANT_CONFIG_FILE": str(tenants),
-        "PI_GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts" / "accounts.db"),
-        "PI_GLINK_COOKIE_SECURE": "0",
+        "GLINK_TENANCY": "multitenant",
+        "GLINK_AUTH_MODE": "accounts",
+        "GLINK_TENANT_CONFIG_FILE": str(tenants),
+        "GLINK_ACCOUNTS_DB": str(tmp_path / "data" / "accounts" / "accounts.db"),
+        "GLINK_COOKIE_SECURE": "0",
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "60",
     }
     values.update(overrides)
@@ -133,8 +133,8 @@ def test_a_second_process_is_refused_without_touching_the_account_database(
             "import json, sys\n"
             "from pathlib import Path\n"
             f"sys.path.insert(0, {str(HOST_ROOT)!r})\n"
-            "from pi_glink.app import create_server\n"
-            "from pi_glink.config import build_config\n"
+            "from glink_harness.app import create_server\n"
+            "from glink_harness.config import build_config\n"
             f"config = build_config(json.loads(sys.argv[1]), Path({str(REPO_ROOT)!r}))\n"
             "try:\n"
             "    create_server(config)\n"
@@ -169,7 +169,7 @@ def test_print_config_never_creates_or_modifies_the_account_database(
 ) -> None:
     tenants = write_tenant_file(tmp_path)
     config = make_config(tmp_path, tenants)
-    monkeypatch.setattr("pi_glink.app.load_config", lambda: config)
+    monkeypatch.setattr("glink_harness.app.load_config", lambda: config)
 
     # Validation only: no data root is created, no database appears.
     assert app_main(["--print-config"]) == 0
@@ -214,14 +214,14 @@ def test_accounts_db_must_live_inside_the_data_root(tmp_path: Path) -> None:
     # A sibling path outside the data root is refused: two hosts with different
     # data roots (and different locks) must not be able to share one library.
     with pytest.raises(ConfigError) as excinfo:
-        make_config(tmp_path, tenants, PI_GLINK_ACCOUNTS_DB=str(tmp_path / "shared-accounts.db"))
+        make_config(tmp_path, tenants, GLINK_ACCOUNTS_DB=str(tmp_path / "shared-accounts.db"))
     assert "LOCAL_WEB_DATA_ROOT" in str(excinfo.value)
     # The data root itself is a directory, not a database file.
     with pytest.raises(ConfigError):
-        make_config(tmp_path, tenants, PI_GLINK_ACCOUNTS_DB=str(tmp_path / "data"))
+        make_config(tmp_path, tenants, GLINK_ACCOUNTS_DB=str(tmp_path / "data"))
     # A subdirectory inside the root is a legitimate placement.
     config = make_config(
-        tmp_path, tenants, PI_GLINK_ACCOUNTS_DB=str(tmp_path / "data" / "auth" / "accounts.db")
+        tmp_path, tenants, GLINK_ACCOUNTS_DB=str(tmp_path / "data" / "auth" / "accounts.db")
     )
     assert config.accounts_db == tmp_path / "data" / "auth" / "accounts.db"
 
@@ -234,4 +234,4 @@ def test_accounts_db_symlink_cannot_escape_the_data_root(tmp_path: Path) -> None
     link = tmp_path / "data" / "linked.db"
     link.symlink_to(elsewhere)
     with pytest.raises(ConfigError):
-        make_config(tmp_path, tenants, PI_GLINK_ACCOUNTS_DB=str(link))
+        make_config(tmp_path, tenants, GLINK_ACCOUNTS_DB=str(link))

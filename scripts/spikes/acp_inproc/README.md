@@ -70,7 +70,7 @@ HOME 共享一份 npx 缓存，避免冷下载超过 initialize 的 60s 上限�
 
 * opencode 不需要派生配置：凭据就是 `--credential` 复制进 run HOME 的
   `auth.json`；`--watch opencode` 只影响子进程命令行采样关键字。
-* `--credential` 走 `PI_GLINK_ACP_CREDENTIAL_FILES`（只读复制进每 run HOME，
+* `--credential` 走 `GLINK_ACP_CREDENTIAL_FILES`（只读复制进每 run HOME，
   父目录 0700、文件 0600，注入值并入该 run 的 redactor）。
 * `--session-config` / `--permission-allow` 写入临时探针包清单
   （`harnesses/probe/harness.toml` 的 `session_config` / `permission_allow`）：

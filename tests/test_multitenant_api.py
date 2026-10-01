@@ -21,21 +21,21 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.store import RunSpec
-from pi_glink.app import PiGlinkServer, create_server
-from pi_glink.config import build_config
-from pi_glink.kernel.execution import (
+from glink_harness.store import RunSpec
+from glink_harness.app import GlinkHarnessServer, create_server
+from glink_harness.config import build_config
+from glink_harness.kernel.execution import (
     ArtifactRecovery,
     CleanupReport,
     ExecutionAdapter,
     ExecutionOutcome,
     SessionInfo,
 )
-from pi_glink.tenancy import ASSERTION_HEADER, issue_assertion
+from glink_harness.tenancy import ASSERTION_HEADER, issue_assertion
 from store_helpers import finish
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-AUDIENCE = "pi-glink-test"
+AUDIENCE = "glink-harness-test"
 SECRET = b"0123456789abcdef0123456789abcdef"
 ALPHA_KEY = "sk-alpha-0000000000000000"
 BETA_KEY = "sk-beta-0000000000000000"
@@ -258,7 +258,7 @@ def adapters(monkeypatch: pytest.MonkeyPatch) -> AdapterBehavior:
         behavior.created.append(adapter)
         return adapter
 
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", build)
+    monkeypatch.setattr("glink_harness.kernel.harness_pi.PiExecutionAdapter", build)
     return behavior
 
 
@@ -284,24 +284,24 @@ def make_config(tmp_path: Path, tenant_files: tuple[Path, Path], **overrides: st
         "LOCAL_WEB_PORT": "0",
         "LOCAL_WEB_EXECUTOR": "docker",
         # Docker web search goes through an https egress URL (ADR 0008).
-        "PI_GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
-        "PI_GLINK_TENANCY": "multitenant",
-        "PI_GLINK_GATEWAY_SECRET_FILE": str(secret),
-        "PI_GLINK_TENANT_CONFIG_FILE": str(tenants),
-        "PI_GLINK_TENANCY_AUDIENCE": AUDIENCE,
+        "GLINK_EGRESS_PUBLIC_URL": "https://egress.example.test",
+        "GLINK_TENANCY": "multitenant",
+        "GLINK_GATEWAY_SECRET_FILE": str(secret),
+        "GLINK_TENANT_CONFIG_FILE": str(tenants),
+        "GLINK_TENANCY_AUDIENCE": AUDIENCE,
         "LOCAL_WEB_TASK_TIMEOUT_SECONDS": "60",
     }
     values.update(overrides)
     return build_config(values, REPO_ROOT)
 
 
-def start_server(instance: PiGlinkServer) -> threading.Thread:
+def start_server(instance: GlinkHarnessServer) -> threading.Thread:
     thread = threading.Thread(target=instance.serve_forever, daemon=True)
     thread.start()
     return thread
 
 
-def stop_server(instance: PiGlinkServer, thread: threading.Thread) -> None:
+def stop_server(instance: GlinkHarnessServer, thread: threading.Thread) -> None:
     instance.shutdown()
     instance.server_close()
     thread.join(timeout=5)
@@ -325,7 +325,7 @@ def server(tmp_path: Path, tenant_files: tuple[Path, Path], adapters: AdapterBeh
 
 
 def request(
-    server: PiGlinkServer,
+    server: GlinkHarnessServer,
     path: str,
     *,
     method: str = "GET",
@@ -352,7 +352,7 @@ def request(
 
 
 def start_run(
-    server: PiGlinkServer, prompt: str, *, token: str | None, **body_extra
+    server: GlinkHarnessServer, prompt: str, *, token: str | None, **body_extra
 ) -> dict:
     body = {"prompt": prompt, **body_extra}
     status, _headers, raw = request(server, "/api/runs", method="POST", body=body, token=token)
@@ -360,7 +360,7 @@ def start_run(
     return json.loads(raw)["run"]
 
 
-def wait_for_terminal(server: PiGlinkServer, run_id: str, token: str | None, timeout: float = 30.0):
+def wait_for_terminal(server: GlinkHarnessServer, run_id: str, token: str | None, timeout: float = 30.0):
     deadline = time.monotonic() + timeout
     latest: dict = {}
     while time.monotonic() < deadline:
@@ -376,7 +376,7 @@ def wait_for_terminal(server: PiGlinkServer, run_id: str, token: str | None, tim
 
 
 def read_stream(
-    server: PiGlinkServer,
+    server: GlinkHarnessServer,
     path: str,
     *,
     token: str | None,
@@ -404,7 +404,7 @@ def read_stream(
 # -- identity -----------------------------------------------------------------
 
 
-def test_unauthenticated_api_requests_are_refused_without_details(server: PiGlinkServer) -> None:
+def test_unauthenticated_api_requests_are_refused_without_details(server: GlinkHarnessServer) -> None:
     for path, method in (
         ("/api/config", "GET"),
         ("/api/blueprints", "GET"),
@@ -420,7 +420,7 @@ def test_unauthenticated_api_requests_are_refused_without_details(server: PiGlin
         assert json.loads(raw) == {"error": "unauthenticated"}, path
 
 
-def test_health_needs_no_identity_but_names_no_run(server: PiGlinkServer) -> None:
+def test_health_needs_no_identity_but_names_no_run(server: GlinkHarnessServer) -> None:
     status, _headers, raw = request(server, "/api/health")
     assert status == 200
     payload = json.loads(raw)
@@ -429,7 +429,7 @@ def test_health_needs_no_identity_but_names_no_run(server: PiGlinkServer) -> Non
 
 
 def test_forged_expired_wrong_audience_and_duplicate_assertions_are_refused(
-    server: PiGlinkServer,
+    server: GlinkHarnessServer,
 ) -> None:
     valid = assertion()
     _version, payload, signature = valid.split(".")
@@ -477,7 +477,7 @@ def test_forged_expired_wrong_audience_and_duplicate_assertions_are_refused(
         connection.close()
 
 
-def test_public_config_reports_the_callers_own_model_credential(server: PiGlinkServer) -> None:
+def test_public_config_reports_the_callers_own_model_credential(server: GlinkHarnessServer) -> None:
     alpha = assertion("tenant-alpha", "user-a")
     delta = assertion("tenant-delta", "user-d")
     alpha_view = json.loads(request(server, "/api/config", token=alpha)[2])
@@ -491,7 +491,7 @@ def test_public_config_reports_the_callers_own_model_credential(server: PiGlinkS
 
 
 def test_blueprints_are_host_level_and_identical_for_every_tenant(
-    server: PiGlinkServer,
+    server: GlinkHarnessServer,
 ) -> None:
     """蓝图是宿主级资源：任何已认证租户看到同一份目录推导结果（与 /api/config 同形）。"""
     alpha = request(server, "/api/blueprints", token=assertion("tenant-alpha", "user-a"))
@@ -509,7 +509,7 @@ def test_blueprints_are_host_level_and_identical_for_every_tenant(
         assert secret not in rendered
 
 
-def test_malformed_role_assertion_is_a_401_not_a_500(server: PiGlinkServer) -> None:
+def test_malformed_role_assertion_is_a_401_not_a_500(server: GlinkHarnessServer) -> None:
     """A signed payload whose role is a JSON array/object must not crash the host.
 
     The acceptance audit reproduced a ``TypeError`` (unhashable membership
@@ -534,7 +534,7 @@ def test_malformed_role_assertion_is_a_401_not_a_500(server: PiGlinkServer) -> N
         assert json.loads(raw) == {"error": "unauthenticated"}
 
 
-def test_just_expired_assertion_is_a_401(server: PiGlinkServer) -> None:
+def test_just_expired_assertion_is_a_401(server: GlinkHarnessServer) -> None:
     """A token one second past its ``exp`` is refused, not accepted in grace."""
     stale = issue_assertion(
         SECRET,
@@ -549,7 +549,7 @@ def test_just_expired_assertion_is_a_401(server: PiGlinkServer) -> None:
     assert json.loads(raw) == {"error": "unauthenticated"}
 
 
-def test_client_supplied_owner_fields_are_ignored(server: PiGlinkServer) -> None:
+def test_client_supplied_owner_fields_are_ignored(server: GlinkHarnessServer) -> None:
     token = assertion("tenant-alpha", "user-a")
     run = start_run(
         server,
@@ -567,7 +567,7 @@ def test_client_supplied_owner_fields_are_ignored(server: PiGlinkServer) -> None
 # -- cross-tenant read/cancel matrix ------------------------------------------
 
 
-def test_tenant_scope_lists_and_reads_only_its_own_runs(server: PiGlinkServer, adapters) -> None:
+def test_tenant_scope_lists_and_reads_only_its_own_runs(server: GlinkHarnessServer, adapters) -> None:
     alpha_token = assertion("tenant-alpha", "user-a")
     beta_token = assertion("tenant-beta", "user-b")
     alpha_run = start_run(server, "alpha run", token=alpha_token)
@@ -602,7 +602,7 @@ def test_tenant_scope_lists_and_reads_only_its_own_runs(server: PiGlinkServer, a
 
 
 def test_stop_requires_the_creator_or_a_tenant_admin(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     adapters.settle = False  # keep the run open so cancellation is meaningful
     creator = assertion("tenant-alpha", "user-a")
@@ -639,7 +639,7 @@ def test_stop_requires_the_creator_or_a_tenant_admin(
 
 
 def test_same_tenant_members_share_read_access(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     """A member of the run's tenant may read detail, SSE and the report."""
     adapters.write_report = True
@@ -661,7 +661,7 @@ def test_same_tenant_members_share_read_access(
 
 
 def test_sse_reconnect_resumes_after_the_cursor(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     """A dropped reader reconnects with ``Last-Event-ID`` and loses nothing."""
     adapters.settle = False
@@ -691,7 +691,7 @@ def test_sse_reconnect_resumes_after_the_cursor(
 
 
 def test_foreign_parent_is_unknown_and_copies_nothing(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     """A follow-up must never read another tenant's session or report.
 
@@ -730,7 +730,7 @@ def test_foreign_parent_is_unknown_and_copies_nothing(
 
 
 def test_foreign_parent_state_is_not_probed(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     """A foreign parent answers ``unknown_run`` whatever its own state says.
 
@@ -766,7 +766,7 @@ def test_foreign_parent_state_is_not_probed(
     assert json.loads(raw)["error"] == "run_busy"
 
 
-def test_unknown_and_ownerless_parents_are_unknown_runs(server: PiGlinkServer) -> None:
+def test_unknown_and_ownerless_parents_are_unknown_runs(server: GlinkHarnessServer) -> None:
     """Ownerless records (single-user surface) are never resumable in multi-tenant mode."""
     alpha = assertion("tenant-alpha", "user-a")
     status, _headers, raw = request(
@@ -804,7 +804,7 @@ def test_unknown_and_ownerless_parents_are_unknown_runs(server: PiGlinkServer) -
 
 
 def test_same_tenant_followup_resumes_private_session_and_report(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     """The legitimate follow-up keeps owner, private session copy and report seed."""
     adapters.persist_session = True
@@ -857,7 +857,7 @@ def test_same_tenant_followup_resumes_private_session_and_report(
 
 
 def test_same_tenant_member_followup_records_the_new_creator(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     """同租户成员可以续接该租户的父 run；新 run 的 creator 是发起者。"""
     adapters.persist_session = True
@@ -885,7 +885,7 @@ def test_same_tenant_member_followup_records_the_new_creator(
 
 
 def test_ownerless_records_are_invisible_to_every_tenant(
-    server: PiGlinkServer, tmp_path: Path
+    server: GlinkHarnessServer, tmp_path: Path
 ) -> None:
     workspace = server.config.workspace_root / "ownerless01"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -902,7 +902,7 @@ def test_ownerless_records_are_invisible_to_every_tenant(
     assert (workspace / "report.md").read_text(encoding="utf-8") == "# 旧报告\n"
 
 
-def test_children_follow_the_same_owner_rules_as_the_run_detail(server: PiGlinkServer) -> None:
+def test_children_follow_the_same_owner_rules_as_the_run_detail(server: GlinkHarnessServer) -> None:
     """GET /api/runs/{id}/children: 同租户 200，异租户/未知同形 404，未认证 401。"""
     seed_history(server, "alpha-children", tenant="tenant-alpha")
     server.store.write_child(
@@ -942,7 +942,7 @@ def test_children_follow_the_same_owner_rules_as_the_run_detail(server: PiGlinkS
 
 
 def test_each_run_renders_only_its_own_tenants_credentials(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     """The kernel sees only an egress token; the grant behind it holds the
     tenant's own key (docs/adr/0008-egress-proxy.md)."""
@@ -995,7 +995,7 @@ def test_each_run_renders_only_its_own_tenants_credentials(
 
 
 def test_a_tenant_without_configured_model_key_is_refused_admission(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     token = assertion("tenant-delta", "user-d")
     status, _headers, raw = request(
@@ -1008,7 +1008,7 @@ def test_a_tenant_without_configured_model_key_is_refused_admission(
 
 
 def test_tenant_secrets_do_not_cross_runs_or_tenants(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     adapters.frames = (
         {
@@ -1045,7 +1045,7 @@ def test_tenant_secrets_do_not_cross_runs_or_tenants(
 
 
 def test_two_tenants_run_concurrently_up_to_the_ceilings(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     adapters.settle = False
     alpha = assertion("tenant-alpha", "user-a")
@@ -1076,7 +1076,7 @@ def test_two_tenants_run_concurrently_up_to_the_ceilings(
 
 
 def test_the_global_ceiling_refuses_without_naming_other_tenants(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     adapters.settle = False
     tokens = {
@@ -1109,7 +1109,7 @@ def test_the_global_ceiling_refuses_without_naming_other_tenants(
 
 
 def test_concurrent_admissions_never_exceed_the_global_ceiling(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     """Nine racing requests fill exactly the four slots, never more.
 
@@ -1153,7 +1153,7 @@ def test_concurrent_admissions_never_exceed_the_global_ceiling(
 
 
 def test_unreleased_resources_consume_slots_without_naming_the_run(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     """GLINK-RES-01 replaced the global refusal with slot accounting.
 
@@ -1203,7 +1203,7 @@ def test_unreleased_resources_occupy_slots_inside_the_commit_window(
     """
     adapters.release = False
     instance = create_server(
-        make_config(tmp_path, tenant_files, PI_GLINK_MAX_GLOBAL_RUNS="1"),
+        make_config(tmp_path, tenant_files, GLINK_MAX_GLOBAL_RUNS="1"),
         docker_probe=lambda _name: (False, "测试替身：不确认释放"),
     )
     thread = start_server(instance)
@@ -1240,7 +1240,7 @@ def test_unreleased_resources_occupy_slots_inside_the_commit_window(
 
 
 def test_accepted_cancellation_still_wins_under_concurrency(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     adapters.settle = False
     alpha = assertion("tenant-alpha", "user-a")
@@ -1260,7 +1260,7 @@ def test_accepted_cancellation_still_wins_under_concurrency(
 # -- SSE ----------------------------------------------------------------------
 
 def test_event_stream_authorizes_before_writing_headers(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     adapters.settle = False
     alpha = assertion("tenant-alpha", "user-a")
@@ -1284,7 +1284,7 @@ def test_event_stream_authorizes_before_writing_headers(
 
 
 def test_event_stream_ends_when_the_assertion_expires(
-    server: PiGlinkServer, adapters: AdapterBehavior
+    server: GlinkHarnessServer, adapters: AdapterBehavior
 ) -> None:
     adapters.settle = False
     short = assertion("tenant-alpha", "user-a", ttl=2)
@@ -1302,7 +1302,7 @@ def test_event_stream_ends_when_the_assertion_expires(
 
 
 def test_event_stream_stops_when_the_assertion_expires_during_replay(
-    server: PiGlinkServer, monkeypatch: pytest.MonkeyPatch
+    server: GlinkHarnessServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A persisted-log replay must honor the assertion expiry mid-stream.
 
@@ -1340,8 +1340,8 @@ def test_the_per_tenant_stream_budget_is_separate_from_the_global_one(
         make_config(
             tmp_path,
             tenant_files,
-            PI_GLINK_MAX_TENANT_STREAMS="1",
-            PI_GLINK_MAX_GLOBAL_STREAMS="2",
+            GLINK_MAX_TENANT_STREAMS="1",
+            GLINK_MAX_GLOBAL_STREAMS="2",
         ),
         docker_probe=lambda _name: (False, "测试替身：不确认释放"),
     )
@@ -1394,7 +1394,7 @@ def test_the_per_tenant_stream_budget_is_separate_from_the_global_one(
 
 
 def test_event_stream_replays_the_whole_history_with_a_valid_assertion(
-    server: PiGlinkServer, monkeypatch: pytest.MonkeyPatch
+    server: GlinkHarnessServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Positive case: a valid assertion still gets the complete replay."""
     seed_history(server, "history-full", frames=20)
@@ -1442,7 +1442,7 @@ def test_restart_replay_keeps_tenant_isolation(
 # -- request origin (CSRF) ----------------------------------------------------
 
 
-def test_cross_site_posts_are_refused_before_any_work(server: PiGlinkServer, adapters) -> None:
+def test_cross_site_posts_are_refused_before_any_work(server: GlinkHarnessServer, adapters) -> None:
     token = assertion("tenant-alpha", "user-a")
     body = {"prompt": "csrf"}
     status, _headers, raw = request(

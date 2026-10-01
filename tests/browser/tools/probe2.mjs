@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { startHost } from '../support/host.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const outDir = mkdtempSync(join(tmpdir(), 'pi-glink-probe2-'));
+const outDir = mkdtempSync(join(tmpdir(), 'glink-harness-probe2-'));
 const dump = {};
 const snap = async (name, fn) => {
   try {
@@ -64,7 +64,7 @@ async function signIn(page, host, user) {
       stopVisible: !document.querySelector('#stop-run')?.hidden,
       sendHidden: document.querySelector('#send-button')?.hidden,
       readOnly: document.querySelector('#prompt-input')?.readOnly,
-      processLabel: document.querySelector('.pi-process-label')?.textContent,
+      processLabel: document.querySelector('.glink-process-label')?.textContent,
     })),
   );
   await page.click('#stop-run');
@@ -73,9 +73,9 @@ async function signIn(page, host, user) {
   await snap('stopped', () =>
     page.evaluate(() => ({
       status: document.querySelector('#run-view')?.dataset.status,
-      tone: document.querySelector('.pi-outcome')?.dataset.tone,
-      text: document.querySelector('.pi-outcome')?.innerText?.replace(/\n/g, ' | '),
-      icon: document.querySelector('.pi-outcome-icon .icon')?.dataset.icon,
+      tone: document.querySelector('.glink-outcome')?.dataset.tone,
+      text: document.querySelector('.glink-outcome')?.innerText?.replace(/\n/g, ' | '),
+      icon: document.querySelector('.glink-outcome-icon .icon')?.dataset.icon,
       stopHidden: document.querySelector('#stop-run')?.hidden,
       sendVisible: !document.querySelector('#send-button')?.hidden,
     })),
@@ -88,14 +88,14 @@ async function signIn(page, host, user) {
   await snap('replay', () =>
     page.evaluate(() => ({
       status: document.querySelector('#run-view')?.dataset.status,
-      answer: document.querySelector('.pi-answer-body')?.innerText?.slice(0, 80),
+      answer: document.querySelector('.glink-answer-body')?.innerText?.slice(0, 80),
       outputHidden: document.querySelector('[aria-label="生成的文件"]')?.hidden,
       outputText: document.querySelector('[aria-label="生成的文件"]')?.innerText?.slice(0, 120),
       distance: (() => {
         const scroll = document.querySelector('#conversation-scroll');
         return Math.round(scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight);
       })(),
-      foldExpanded: document.querySelector('.pi-process-toggle')?.getAttribute('aria-expanded'),
+      foldExpanded: document.querySelector('.glink-process-toggle')?.getAttribute('aria-expanded'),
       composerPlaceholder: document.querySelector('#prompt-input')?.placeholder,
     })),
   );
@@ -263,7 +263,7 @@ async function signIn(page, host, user) {
   await snap('localRun', () =>
     page.evaluate(() => ({
       status: document.querySelector('#run-view')?.dataset.status,
-      answer: document.querySelector('.pi-answer-body')?.innerText?.slice(0, 80),
+      answer: document.querySelector('.glink-answer-body')?.innerText?.slice(0, 80),
       rows: document.querySelectorAll('#run-list [data-run-id]').length,
     })),
   );

@@ -21,10 +21,10 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.app import create_server
-from pi_glink.config import build_config
-from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.store import FAILED, RUNNING, RunStore, RunSpec
+from glink_harness.app import create_server
+from glink_harness.config import build_config
+from glink_harness.kernel.rpc import PiRpcClient
+from glink_harness.store import FAILED, RUNNING, RunStore, RunSpec
 from store_helpers import events_text, finish
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -124,13 +124,13 @@ def test_a_second_host_cannot_reconcile_a_live_owners_run(tmp_path: Path, same_p
 
 def test_ownership_is_exclusive_across_processes(tmp_path: Path) -> None:
     """The real deployment case: the second host is another process."""
-    from pi_glink.ownership import DataRootOwnership  # noqa: PLC0415
+    from glink_harness.ownership import DataRootOwnership  # noqa: PLC0415
 
     data_root = tmp_path / "data"
     ownership = DataRootOwnership.acquire(data_root)
     probe = (
         "import sys; from pathlib import Path\n"
-        "from pi_glink.ownership import DataRootBusy, DataRootOwnership\n"
+        "from glink_harness.ownership import DataRootBusy, DataRootOwnership\n"
         "try:\n"
         "    DataRootOwnership.acquire(Path(sys.argv[1]))\n"
         "except DataRootBusy:\n"
@@ -147,9 +147,9 @@ def test_ownership_is_exclusive_across_processes(tmp_path: Path) -> None:
 
 
 def test_reconcile_without_ownership_is_refused_and_changes_nothing(tmp_path: Path) -> None:
-    from pi_glink.events import EventBus  # noqa: PLC0415
-    from pi_glink.runs.runner import RunManager  # noqa: PLC0415
-    from pi_glink.ownership import OwnershipRequired  # noqa: PLC0415
+    from glink_harness.events import EventBus  # noqa: PLC0415
+    from glink_harness.runs.runner import RunManager  # noqa: PLC0415
+    from glink_harness.ownership import OwnershipRequired  # noqa: PLC0415
 
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
@@ -180,7 +180,7 @@ def test_resource_adjudication_requires_the_host_to_be_stopped(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The operator command runs under the same ownership as the host."""
-    from pi_glink.app import _resource_command  # noqa: PLC0415
+    from glink_harness.app import _resource_command  # noqa: PLC0415
 
     config = make_config(tmp_path)
     store = RunStore(config.data_root / "runs")
@@ -208,7 +208,7 @@ def test_resource_adjudication_requires_the_host_to_be_stopped(
 def test_a_fresh_data_root_is_private(tmp_path: Path) -> None:
     import stat  # noqa: PLC0415
 
-    from pi_glink.ownership import DataRootOwnership  # noqa: PLC0415
+    from glink_harness.ownership import DataRootOwnership  # noqa: PLC0415
 
     root = tmp_path / "data"
     ownership = DataRootOwnership.acquire(root)
@@ -225,7 +225,7 @@ def test_a_group_or_other_writable_data_root_is_refused_untouched(
     """Fail closed and report; the host never chmods an existing root for you."""
     import stat  # noqa: PLC0415
 
-    from pi_glink.ownership import DataRootOwnership, DataRootUnsafe  # noqa: PLC0415
+    from glink_harness.ownership import DataRootOwnership, DataRootUnsafe  # noqa: PLC0415
 
     root = tmp_path / "wide"
     root.mkdir()
@@ -238,7 +238,7 @@ def test_a_group_or_other_writable_data_root_is_refused_untouched(
 
 
 def test_a_symlinked_or_non_directory_data_root_is_refused(tmp_path: Path) -> None:
-    from pi_glink.ownership import DataRootOwnership, DataRootUnsafe  # noqa: PLC0415
+    from glink_harness.ownership import DataRootOwnership, DataRootUnsafe  # noqa: PLC0415
 
     target = tmp_path / "target"
     target.mkdir()
@@ -255,7 +255,7 @@ def test_a_symlinked_or_non_directory_data_root_is_refused(tmp_path: Path) -> No
 
 def test_the_host_refuses_to_start_on_an_unsafe_data_root(tmp_path: Path) -> None:
     """The same rule applies to the real start path, not only to the lock class."""
-    from pi_glink.ownership import DataRootUnsafe  # noqa: PLC0415
+    from glink_harness.ownership import DataRootUnsafe  # noqa: PLC0415
 
     config = make_config(tmp_path)
     config.data_root.mkdir(parents=True, exist_ok=True)
@@ -267,11 +267,11 @@ def test_the_host_refuses_to_start_on_an_unsafe_data_root(tmp_path: Path) -> Non
 def test_the_cli_reports_an_unsafe_data_root_and_exits_two(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from pi_glink.app import main as app_main  # noqa: PLC0415
+    from glink_harness.app import main as app_main  # noqa: PLC0415
 
     config = make_config(tmp_path)
     config.data_root.mkdir(parents=True, exist_ok=True)
     config.data_root.chmod(0o777)
-    monkeypatch.setattr("pi_glink.app.load_config", lambda: config)
+    monkeypatch.setattr("glink_harness.app.load_config", lambda: config)
     assert app_main([]) == 2
     assert "权限过宽" in capsys.readouterr().err

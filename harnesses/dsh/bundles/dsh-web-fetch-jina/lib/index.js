@@ -6,7 +6,7 @@
  * without a configuration edit and no secret ever enters a configuration file.
  * The bundle's `cordis.patch.yml` inserts this row and points `web.fetchProvider` at it.
  *
- * @module @pi-glink/dsh-web-fetch-jina
+ * @module @glink-harness/dsh-web-fetch-jina
  */
 
 import { lookup } from 'node:dns'

@@ -11,7 +11,7 @@ function config(overrides = {}) {
     timeoutMs: 5_000,
     maxResponseBytes: 1_000_000,
     maxBodyChars: 1_000,
-    userAgent: 'pi-glink-test/0.0.1',
+    userAgent: 'glink-harness-test/0.0.1',
     ...overrides,
   }
 }

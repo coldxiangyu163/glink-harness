@@ -23,15 +23,15 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.config import ConfigError, build_config
-from pi_glink.kernel.acp_e2b_env import SANDBOX_ACP_HOME
-from pi_glink.kernel.acp_sandbox_park import (
+from glink_harness.config import ConfigError, build_config
+from glink_harness.kernel.acp_e2b_env import SANDBOX_ACP_HOME
+from glink_harness.kernel.acp_sandbox_park import (
     GENERATION_MARKER_PATH,
     park_sandbox,
     read_generation_marker,
     write_generation_marker,
 )
-from pi_glink.kernel.conversation_lease import (
+from glink_harness.kernel.conversation_lease import (
     LeaseCorruptError,
     settle_lease_after_destroy,
     DEFAULT_LEASE_TTL_SECONDS,
@@ -43,7 +43,7 @@ from pi_glink.kernel.conversation_lease import (
     remove_lease,
     write_lease,
 )
-from pi_glink.kernel.e2b_env import SandboxError
+from glink_harness.kernel.e2b_env import SandboxError
 
 from e2b_fake import FakeFileNotFoundException, FakeSandbox
 
@@ -127,7 +127,7 @@ def test_lease_expiry_and_expire_now(tmp_path: Path) -> None:
 
 def test_config_ttl_knob_aligns_with_the_lease_module() -> None:
     """config 的默认值/上限与台账模块的真源一致（防漂移）。"""
-    import pi_glink.config as config_module
+    import glink_harness.config as config_module
 
     assert config_module._DEFAULT_LEASE_TTL_SECONDS == DEFAULT_LEASE_TTL_SECONDS
     assert config_module._MAX_LEASE_TTL_SECONDS == MAX_LEASE_TTL_SECONDS
@@ -144,11 +144,11 @@ def test_config_ttl_validation(tmp_path: Path) -> None:
     }
     config = build_config(values, REPO_ROOT)
     assert config.conversation_lease_ttl_seconds == DEFAULT_LEASE_TTL_SECONDS
-    beyond = dict(values, PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS=str(MAX_LEASE_TTL_SECONDS + 1))
+    beyond = dict(values, GLINK_CONVERSATION_LEASE_TTL_SECONDS=str(MAX_LEASE_TTL_SECONDS + 1))
     with pytest.raises(ConfigError, match="LEASE_TTL"):
         build_config(beyond, REPO_ROOT)
     zero = build_config(
-        dict(values, PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS="0"), REPO_ROOT
+        dict(values, GLINK_CONVERSATION_LEASE_TTL_SECONDS="0"), REPO_ROOT
     )
     assert zero.conversation_lease_ttl_seconds == 0
 
@@ -162,7 +162,7 @@ def make_config(tmp_path: Path, *, ttl: int = 7200):
         "OPENAI_BASE_URL": "https://example.invalid/v1",
         "OPENAI_MODEL": "test/model",
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS": str(ttl),
+        "GLINK_CONVERSATION_LEASE_TTL_SECONDS": str(ttl),
     }
     return build_config(values, REPO_ROOT)
 

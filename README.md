@@ -1,13 +1,13 @@
-# pi-glink
+# glink-harness
 
-以 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 为执行内核的研究工作台：本机 / Docker / E2B 三种执行面共享同一套 run 生命周期。默认 `local` 模式仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用**单宿主多租户**—— 身份入口二选一：本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`PI_GLINK_AUTH_MODE=accounts`）；两者都只在可信服务端生成租户上下文，Docker/E2B 可并发（默认全局 4 / 单租户 2）。模型凭据默认仍是每租户自备（`PI_GLINK_MODEL_CREDENTIALS=tenant`）；SaaS 部署可显式选择 `shared`，由宿主冻结一套模型凭据统一提供，共享模式不读取任何租户配置（配置 `PI_GLINK_TENANT_CONFIG_FILE` 即拒绝启动）；ACP 族的注入通道（`PI_GLINK_ACP_ENV` / `PI_GLINK_ACP_CREDENTIAL_FILES` / `PI_GLINK_ACP_CREDENTIAL_ENV`）视同模型凭据服从同一政策——tenant 政策下拒绝、shared 下为 ACP 宿主的具名凭据源（[ADR 0015](docs/adr/0015-acp-credential-channels-under-model-credential-policy.md)、[ADR 0016](docs/adr/0016-acp-credential-env-single-source.md)）。多租户目前只经过**合成验证**（临时密钥文件、自签断言、fake 执行面、临时数据根），没有真实网关、Docker/E2B live 或生产数据验收，不能把“合成矩阵通过”当作多租户已经安全上线。方向、当前实现与尚未覆盖的边界见 [架构](docs/architecture.md) 与 [多租户方案](docs/multitenancy-plan.md)；前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按 pi 的原生事件语义重写。
+harness 无关的研究工作台宿主：[pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)、dsh、codex、opencode 等原生 harness 作为独立进程接入（宿主默认 harness 仍是 `pi`，ACP 族只在显式 `GLINK_HARNESS` 配置下启用），本机 / Docker / E2B 三种执行面共享同一套 run 生命周期。默认 `local` 模式仍是单用户、全局单 run；`GLINK_TENANCY=multitenant` 时启用**单宿主多租户**—— 身份入口二选一：本机认证网关注入短时效签名断言（`GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`GLINK_AUTH_MODE=accounts`）；两者都只在可信服务端生成租户上下文，Docker/E2B 可并发（默认全局 4 / 单租户 2）。模型凭据默认仍是每租户自备（`GLINK_MODEL_CREDENTIALS=tenant`）；SaaS 部署可显式选择 `shared`，由宿主冻结一套模型凭据统一提供，共享模式不读取任何租户配置（配置 `GLINK_TENANT_CONFIG_FILE` 即拒绝启动）；ACP 族的注入通道（`GLINK_ACP_ENV` / `GLINK_ACP_CREDENTIAL_FILES` / `GLINK_ACP_CREDENTIAL_ENV`）视同模型凭据服从同一政策——tenant 政策下拒绝、shared 下为 ACP 宿主的具名凭据源（[ADR 0015](docs/adr/0015-acp-credential-channels-under-model-credential-policy.md)、[ADR 0016](docs/adr/0016-acp-credential-env-single-source.md)）。多租户目前只经过**合成验证**（临时密钥文件、自签断言、fake 执行面、临时数据根），没有真实网关、Docker/E2B live 或生产数据验收，不能把“合成矩阵通过”当作多租户已经安全上线。方向、当前实现与尚未覆盖的边界见 [架构](docs/architecture.md) 与 [多租户方案](docs/multitenancy-plan.md)；前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按所选 harness 族的原生事件语义投影（pi 族三个执行面均走 `--mode rpc`，ACP 族的 dsh/codex/opencode 经 stdio JSON-RPC 桥接）。
 
 **当前状态：本机 / Docker / E2B 三种执行面均已跑通真实 run**，验收记录见 [docs/acceptance.md](docs/acceptance.md)，证据在 `docs/evidence/`。除前端静态资源源自 Glink 工作台外，本仓库不引用 FrontierAgent 的任何运行模块。
 
 ## 边界（先读这条）
 
-- **不 fork、不 patch、不 vendor pi 内核。** 只使用 pi 的官方 headless 协议与官方扩展点（extension / skill / package / custom provider / MCP）。
-- **不复制 FrontierAgent 的 runtime。** 本仓库自有宿主只做编排、事件投影与呈现；研究方法论通过 pi 的提示词与扩展表达。
+- **不 fork、不 patch、不 vendor 任何 harness 内核。** 只使用各 harness 官方文档化的协议与扩展点（pi 的 headless 协议与 extension / skill / package / custom provider / MCP；dsh/codex/opencode 经 ACP stdio JSON-RPC 及各自的 profiles / bundles / skills 机制）。
+- **不复制 FrontierAgent 的 runtime。** 本仓库自有宿主只做编排、事件投影与呈现；研究方法论与工作约定放在 `methodology/`（harness 无关），经各 harness 的提示词与扩展机制表达。
 - 前端不解析终端文本，只消费结构化事件。
 - 详见 [docs/pi-boundary.md](docs/pi-boundary.md) 与 [docs/architecture.md](docs/architecture.md)。开发本仓库先读 [AGENTS.md](AGENTS.md)，验证范围与交付要求见 [工程约束](docs/engineering.md)。
 
@@ -23,18 +23,18 @@
 | e2b SDK | ≥ 2（E2B 执行面；交付门禁要求可导入） | `uv pip install -e ".[e2b]"`（含代理网络需要的 `httpx[socks]`） |
 | zstandard | ≥ 0.22（`acp-progress` extra；交付门禁要求可导入） | `uv pip install -e ".[acp-progress]"`；单独运行 ACP 进度测试时缺失仍可 skip |
 
-本机执行面用宿主安装的 pi；换版本做演练时用 `PI_GLINK_PI_BIN` 指向另一个二进制，无需改 PATH（见 [docs/pi-boundary.md](docs/pi-boundary.md) §3）。
+本机执行面用宿主安装的 pi；换版本做演练时用 `GLINK_PI_BIN` 指向另一个二进制，无需改 PATH（见 [docs/pi-boundary.md](docs/pi-boundary.md) §3）。
 
 ## 三种执行面
 
 | 执行面 | 取值 | 语义 |
 |---|---|---|
-| 本机进程 | `inproc` | pi 以子进程运行在宿主机器上，工作区在 `<数据根>/workspaces/<runId>` |
-| 容器 | `docker` | pi 与工作区都在一次性容器内，宿主只做编排与事件投影 |
-| 云沙箱 | `e2b` | pi 与工作区都在 E2B 沙箱内（沙箱后台命令 `stdin=True` 的 RPC 双向 stdio，与另两面同一套 `--mode rpc`）；真实模型/检索 key 不进沙箱，只上传本 run 的出口代理 token（须配置 `PI_GLINK_EGRESS_PUBLIC_URL`） |
+| 本机进程 | `inproc` | 选中的 harness 以子进程运行在宿主机器上，工作区在 `<数据根>/workspaces/<runId>` |
+| 容器 | `docker` | harness 与工作区都在一次性容器内，宿主只做编排与事件投影 |
+| 云沙箱 | `e2b` | harness 与工作区都在 E2B 沙箱内（沙箱后台命令 `stdin=True` 的 RPC 双向 stdio，与另两面同一套 `--mode rpc`）；真实模型/检索 key 不进沙箱，只上传本 run 的出口代理 token（须配置 `GLINK_EGRESS_PUBLIC_URL`） |
 
 三面共享同一套输入/事件/收尾契约（`kernel/execution.py` 的 `ExecutionAdapter`）：每个 run 拥有
-自己的运行期配置（`runs/<id>/pi-agent/`）、session 目录（`runs/<id>/sessions/`）与工作区；
+自己的运行期配置（`runs/<id>/pi-agent/`，ACP 族为 `acp-agent/`）、session 目录（`runs/<id>/sessions/`）与工作区；
 完成后在同一对话发送追问会提交 `POST /api/runs {"prompt":"…","parentRunId":"<上一轮 runId>"}`，
 返回新 run 的 `parentRunId`。它复制上一轮经安全校验的会话副本，通过 pi 官方 `--session` 续接，
 不会另起会话或改写旧 run；侧栏按研究汇总，旧报告仍可打开。会话记录不可续接时返回
@@ -64,7 +64,7 @@ CLI 的 Node fetch 不认 socks5，构建走 Python SDK + `httpx[socks]`）。
 发布顺序是**镜像/模板先于宿主**：新宿主会要求容器/沙箱内有预装包守卫，旧模板不满足时直接失败（不静默降级）。模板自带 `/opt/pi-packages`（pi-web-access + pi-subagents）与守卫脚本；宿主把运行期 `settings.json` 的 `npm:` 声明渲染成该目录的本地包，run 内不再“先装包再干活”。证据：[docs/evidence/prebaked-packages.txt](docs/evidence/prebaked-packages.txt)。
 
 真实模型 key 与检索 key 不进沙箱：运行期 `auth.json` / `web-search.json` 只含本 run 的凭据出口代理
-token，`baseUrl` 指向 `PI_GLINK_EGRESS_PUBLIC_URL`（E2B 面必须配置，否则宿主拒绝启动；见
+token，`baseUrl` 指向 `GLINK_EGRESS_PUBLIC_URL`（E2B 面必须配置，否则宿主拒绝启动；见
 [ADR 0008](docs/adr/0008-egress-proxy.md)），随本 run 的运行期配置上传到沙箱 `/home/user/config/`，
 token 在 run 终帧时吊销。交付内容不只几个 JSON：整个运行期目录
 （含 `AGENTS.md`、`extensions/`、`skills/` 等模板条目）按同一路径语义上传，并记录
@@ -78,9 +78,9 @@ token 在 run 终帧时吊销。交付内容不只几个 JSON：整个运行期�
 
 ```bash
 # 首次/升级：先建候选并自检，再移动宿主引用的 latest（旧镜像先留 previous tag）
-docker build -t pi-glink-worker:candidate -f docker/Dockerfile.worker .
-docker tag pi-glink-worker:latest pi-glink-worker:previous
-docker tag pi-glink-worker:candidate pi-glink-worker:latest
+docker build -t glink-harness-worker:candidate -f docker/Dockerfile.worker .
+docker tag glink-harness-worker:latest glink-harness-worker:previous
+docker tag glink-harness-worker:candidate glink-harness-worker:latest
 LOCAL_WEB_EXECUTOR=docker scripts/run-local-web.sh                     # 用容器跑 pi
 ```
 
@@ -104,12 +104,12 @@ cp .env.example .env         # 填写 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_
 scripts/run-local-web.sh     # 默认 http://127.0.0.1:7860
 ```
 
-脚本把所有依赖都铺好了：优先用仓库内的 `.venv`，否则回退 `uv run` 或系统 Python，并始终把 `host/` 放进导入路径。部署单位是**整个仓库目录**：宿主按仓库相对路径定位 `web/`（前端资源）、`harnesses/<pack>/`（harness 包）与 `scripts/`；`pip install -e .` 只用于让 `pi_glink` 可导入（包声明含 `pi_glink.kernel` 与 `pi_glink.runs`），独立安装 wheel 不是受支持的形态。等价的手动方式：
+脚本把所有依赖都铺好了：优先用仓库内的 `.venv`，否则回退 `uv run` 或系统 Python，并始终把 `host/` 放进导入路径。部署单位是**整个仓库目录**：宿主按仓库相对路径定位 `web/`（前端资源）、`harnesses/<pack>/`（harness 包）与 `scripts/`；`pip install -e .` 只用于让 `glink_harness` 可导入（包声明含 `glink_harness.kernel` 与 `glink_harness.runs`），独立安装 wheel 不是受支持的形态。等价的手动方式：
 
 ```bash
 uv venv --python 3.12 .venv       # 首次
-uv pip install -e ".[dev]"        # 首次：让 pi_glink 可导入，并装上 pytest、ruff、mypy、pytest-cov
-.venv/bin/python -m pi_glink.app
+uv pip install -e ".[dev]"        # 首次：让 glink_harness 可导入，并装上 pytest、ruff、mypy、pytest-cov
+.venv/bin/python -m glink_harness.app
 ```
 
 常用参数：
@@ -122,7 +122,7 @@ scripts/run-local-web.sh --mark-released <runId> --note "已核对容器/沙箱�
 ```
 
 `--host` / `--port` 覆盖与构造走同一套校验（`validate_host_config`）：非 loopback 主机、或超出
-0–65535 的端口直接拒绝启动（退出码 2）。数据目录（默认 `~/.pi-glink`）由宿主以 0700 创建
+0–65535 的端口直接拒绝启动（退出码 2）。数据目录（默认 `~/.glink-harness`）由宿主以 0700 创建
 （`runs/`、`workspaces/` 与各 run 子目录同样）；已存在的数据目录若是符号链接、不是目录，
 或带组/其他人写权限，宿主拒绝启动并提示操作员自行 `chmod 700`，不会自动改动已有目录权限。
 
@@ -130,10 +130,10 @@ scripts/run-local-web.sh --mark-released <runId> --note "已核对容器/沙箱�
 直接拒绝启动，不会改动正在运行的任务。执行面清理未确认成功（或宿主异常退出后资源状态未知）的 run
 会持续占用运行额度：本机（`local`）模式任一持有即让新研究返回 `409 resources_unreleased`（附 run id）；
 多租户模式把持有计入其 owner 租户与全局槽位，额度用尽时返回 `429 quota_exceeded`。Docker/E2B 宿主会按
-记录里持久化的容器名/沙箱 id 周期性自动对账（`PI_GLINK_RESOURCE_RECONCILE_SECONDS`，默认 60 秒，0 关闭；
+记录里持久化的容器名/沙箱 id 周期性自动对账（`GLINK_RESOURCE_RECONCILE_SECONDS`，默认 60 秒，0 关闭；
 只探测、不猜名字），确认资源不存在后归还额度；核对真实资源后也可用 `--mark-released` 记录人工裁决。
 `--unreleased` 列出待核对项。归档通道部署下，E2B 面 ACP run 收尾会把沙箱**泊车**为对话热缓存
-（`pause`，闲置 TTL `PI_GLINK_CONVERSATION_LEASE_TTL_SECONDS` 默认 7200 秒、0 禁用）：追问优先重连原沙箱
+（`pause`，闲置 TTL `GLINK_CONVERSATION_LEASE_TTL_SECONDS` 默认 7200 秒、0 禁用）：追问优先重连原沙箱
 （热路径，省新沙箱与回灌），失败降级冷路径；泊车不占运行额度，到期由同一对账线程按沙箱 id 销毁
 （[ADR 0020](docs/adr/0020-conversation-sandbox-lease-hot-path.md)）。run 记录与事件存放在 `<数据根>/runs/runs.db`（SQLite）；此前版本的
 `runs/<id>/meta.json` / `events.jsonl` 与 `<数据根>/sessions/` 不再被读取，旧 run 不可见、不可追问，不提供迁移。
@@ -151,7 +151,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/api/health` | 宿主与 pi 可用性、当前活跃 run |
+| GET | `/api/health` | 宿主与所选 harness 可用性、当前活跃 run |
 | GET | `/api/config` | 公开配置（无密钥、无宿主路径） |
 | GET | `/api/blueprints` | 可用会话蓝图目录（`name`/`description`/阶段元数据；与准入同源推导，只读） |
 | POST | `/api/runs` | 创建并启动一次 run，body `{"prompt": "…"}` |
@@ -170,23 +170,23 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 本机（`local`）执行面同一时间只允许一个 run；并发请求返回 `409 run_busy` 并附当前 run id；已有 run 的执行资源未确认释放时返回 `409 resources_unreleased` 并附 run id。以 `/` 开头的 prompt 只接受宿主解释的 `/<蓝图名> <题目>`（蓝图名从 `methodology/blueprints/` 推导，当前仅 `deepresearch`），其余返回 `400 unsupported_command`（错误体只给推导出的蓝图名列表，不回显被拒输入）——pi 对这类消息会先执行扩展命令，而 pi-subagents 注册了 `/run --bg`、`/subagents-detach` 等后台入口；拒绝在任何 run 目录/执行面创建之前，追问同样适用。终态以事件日志里的终帧为唯一提交点：终帧在 `fsync` 成功前对任何读取入口都不可见，失败则从未出现；收到终帧后立即读取详情、列表或报告都是同一事实。
 
-多租户模式（`PI_GLINK_TENANCY=multitenant`）下所有 `/api/*`（健康的存活性探测除外）都要求可信身份——网关断言或站内会话：未认证 `401`，权限不足 `403`，未知/异租户/无 owner 记录统一 `404`，超过并发上限 `429 quota_exceeded`。下一节说明完整语义。`/api/blueprints` 是宿主级资源的只读目录：认证后各租户看到同一份列表（与 `/api/config` 同形）；空目录/缺失目录都返回 `200 {"blueprints": []}`，格式不合契约的文件不进列表（原因只进日志）。
+多租户模式（`GLINK_TENANCY=multitenant`）下所有 `/api/*`（健康的存活性探测除外）都要求可信身份——网关断言或站内会话：未认证 `401`，权限不足 `403`，未知/异租户/无 owner 记录统一 `404`，超过并发上限 `429 quota_exceeded`。下一节说明完整语义。`/api/blueprints` 是宿主级资源的只读目录：认证后各租户看到同一份列表（与 `/api/config` 同形）；空目录/缺失目录都返回 `200 {"blueprints": []}`，格式不合契约的文件不进列表（原因只进日志）。
 
-## 多租户（单宿主，`PI_GLINK_TENANCY=multitenant`）
+## 多租户（单宿主，`GLINK_TENANCY=multitenant`）
 
-身份入口由 `PI_GLINK_AUTH_MODE` 显式选择，默认 `gateway` 保持原语义；`accounts` 增加站内邀请注册、登录与服务端会话。模型凭据来源由 `PI_GLINK_MODEL_CREDENTIALS` 显式选择（默认 `tenant`，SaaS 用 `shared`，见下）。两种入口都只在服务端生成 `TenantContext`，run/list/详情/报告/SSE/取消/追问走同一套 owner 与配额校验；`local` 完全保持旧行为，不显示任何登录或组织界面。
+身份入口由 `GLINK_AUTH_MODE` 显式选择，默认 `gateway` 保持原语义；`accounts` 增加站内邀请注册、登录与服务端会话。模型凭据来源由 `GLINK_MODEL_CREDENTIALS` 显式选择（默认 `tenant`，SaaS 用 `shared`，见下）。两种入口都只在服务端生成 `TenantContext`，run/list/详情/报告/SSE/取消/追问走同一套 owner 与配额校验；`local` 完全保持旧行为，不显示任何登录或组织界面。
 
-### 身份入口 A：网关断言（默认，`PI_GLINK_AUTH_MODE=gateway`）
+### 身份入口 A：网关断言（默认，`GLINK_AUTH_MODE=gateway`）
 
 本模式只支持一个宿主进程部署在本机认证网关之后：网关完成登录，并在每个请求注入
-`X-Pi-Glink-Identity: v1.<base64url(payload)>.<base64url(hmac-sha256)>`。宿主只信任这枚断言，
+`X-Glink-Harness-Identity: v1.<base64url(payload)>.<base64url(hmac-sha256)>`。宿主只信任这枚断言，
 不做登录、OIDC 或用户体系；客户端无法用请求体、查询参数或自造请求头指定租户，重复断言头直接拒绝。
 断言至少携带 `tenantId`、`userId`、`role`、`audience`、`iat`、`exp`，宿主以 constant-time HMAC 校验
 签名并检查 audience、过期与寿命上限；过期即 401（无宽限窗口），签名正确但字段类型畸形的断言同样
 统一 401，不会变成 500。
 
-- **配置**：本模式要求 `PI_GLINK_GATEWAY_SECRET_FILE`、`PI_GLINK_TENANT_CONFIG_FILE`、
-  `PI_GLINK_TENANCY_AUDIENCE` 三项齐备；两个文件必须在仓库外且权限 0600（或更严）。任一缺失、
+- **配置**：本模式要求 `GLINK_GATEWAY_SECRET_FILE`、`GLINK_TENANT_CONFIG_FILE`、
+  `GLINK_TENANCY_AUDIENCE` 三项齐备；两个文件必须在仓库外且权限 0600（或更严）。任一缺失、
   权限过宽或位于仓库内都拒绝启动，不会回落到无认证的本地模式。本模式只允许绑定 loopback，且
   执行面必须是 `docker`/`e2b`（`inproc` 共享宿主文件系统，只保留给本地单用户调试）。
 - **归属**：run 在受理时原子写入 `tenant_id` 与 `creator_user_id`。同租户成员可看列表、详情、SSE 与
@@ -195,7 +195,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   追问（`parentRunId`）同样先过租户门禁：异租户/未知/无 owner 父 run 统一 `404 unknown_run`，在确认
   所有者之前不读取其 session、报告、状态或子 run 计数，也不会把它的会话或报告复制给新 run。
 - **凭据**：默认每 run 的模型 key（与可选搜索 key）来自该租户在 `tenants.json` 中的条目，缺
-  `modelApiKey` 直接拒绝准入；绝不回退宿主全局 `OPENAI_API_KEY` 或别的租户；真实 key 只进宿主出口代理。显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时改用宿主冻结的共享凭据（见下文“模型
+  `modelApiKey` 直接拒绝准入；绝不回退宿主全局 `OPENAI_API_KEY` 或别的租户；真实 key 只进宿主出口代理。显式 `GLINK_MODEL_CREDENTIALS=shared` 时改用宿主冻结的共享凭据（见下文“模型
   凭据策略”）。E2B 平台 key 属于宿主资源管理，不是租户模型 key。每 run 的脱敏边界只包含本 run
   凭据，不会把不同租户的秘密互相写入事件、日志或产物。
 - **并发**：仅本模式的 Docker/E2B 可并发，默认全局上限 4、单租户 2，超额立即返回
@@ -204,8 +204,8 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   （一个租户的泄漏不会挡住别的租户，但会持续吃掉额度；达到全局上限时拒绝所有新准入，
   fail-closed）。宿主在线按持久化身份自动对账释放；离线仍可用 `--unreleased` / `--mark-released`
   人工裁决（`--unreleased` 对损坏记录标注 `corrupt`）。
-- **SSE 连接额度**：事件流同时打开数有上限——全局 `PI_GLINK_MAX_GLOBAL_STREAMS`（默认 64），
-  本模式每租户 `PI_GLINK_MAX_TENANT_STREAMS`（默认 16）；额度在写出任何流响应头之前检查，
+- **SSE 连接额度**：事件流同时打开数有上限——全局 `GLINK_MAX_GLOBAL_STREAMS`（默认 64），
+  本模式每租户 `GLINK_MAX_TENANT_STREAMS`（默认 16）；额度在写出任何流响应头之前检查，
   超额返回 `429 {"error":"stream_limit", ...}`（不含 run id），流结束时归还。
 - **SSE 与 CSRF**：事件流在写出任何响应头之前验权；断言过期在重放与实时两个阶段都按帧检查，
   中途过期立即结束该流（没有宽限窗口）。POST 会检查
@@ -216,20 +216,20 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   断言；会话过期时前端收到 `401`，重新认证由网关完成。
 - **行为迁移与回退**：任何模式都不再允许绑定非 loopback——无认证公网模式被移除，历史的
   `LOCAL_WEB_ALLOW_REMOTE` 不再生效；远端访问必须由本机认证网关反代（本模式）。回退方式是关闭
-  `PI_GLINK_TENANCY`（恢复单用户单 run），新旧 run 记录都保留，不删除任何历史。
+  `GLINK_TENANCY`（恢复单用户单 run），新旧 run 记录都保留，不删除任何历史。
 
-### 身份入口 B：站内账号（`PI_GLINK_AUTH_MODE=accounts`）
+### 身份入口 B：站内账号（`GLINK_AUTH_MODE=accounts`）
 
 邀请制注册 + 站内登录，保留网关模式的全部 owner/配额语义，但身份来自服务端会话而不是断言：
 
-- **配置**：`PI_GLINK_TENANCY=multitenant`、`PI_GLINK_AUTH_MODE=accounts`，以及默认 `tenant` 策略下
-  必需的 `PI_GLINK_TENANT_CONFIG_FILE`（`shared` 策略下不得配置）；不再需要网关签名密钥。账号库默认
+- **配置**：`GLINK_TENANCY=multitenant`、`GLINK_AUTH_MODE=accounts`，以及默认 `tenant` 策略下
+  必需的 `GLINK_TENANT_CONFIG_FILE`（`shared` 策略下不得配置）；不再需要网关签名密钥。账号库默认
   `<LOCAL_WEB_DATA_ROOT>/accounts/accounts.db`（仓库外，
   SQLite WAL），与 run/events 文件存储分离，互不迁移。宿主首次创建时建立 0700 专用目录与 0600
   库文件（WAL/SHM 同样属主独占），已有权限过宽或符号链接一律拒绝启动且不自动 chmod——旧库需操作员
   停止宿主后迁移并 `chmod 600`。宿主仍只监听 loopback，生产必须由 TLS 终止代理提供 HTTPS。
 - **引导**：首位管理员由操作员在**宿主停止**时离线签发（取得 data-root ownership 后）：
-  `python -m pi_glink.app --create-invite --tenant tenant-alpha --tenant-name 组织甲 --email admin@example.com --role admin`。
+  `python -m glink_harness.app --create-invite --tenant tenant-alpha --tenant-name 组织甲 --email admin@example.com --role admin`。
   默认（`tenant`）策略下该租户必须已在 `tenants.json` 里配置模型密钥（缺 key 拒绝）；
   `shared` 策略下只校验宿主冻结的共享模型配置（不配置租户凭据文件），首个邀请直接创建组织记录。
   邀请码只打印一次、数据库只存摘要。注册**只创建账号，不创建租户、不授予模型凭据**；后续管理员
@@ -242,23 +242,23 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   在执行 `scrypt` 之前就被拒绝；反代部署下所有用户共享代理这一个 peer，该预算即全部署登录上限
   （默认 120 次/60 秒，可配置），是保护单机 CPU 的可用性取舍。登录失败对“账号不存在”与“密码错误”
   返回同一个 401。所有状态变更 POST 都要求 `application/json`、同源 `Origin`/`Referer`/`Sec-Fetch-Site`，已登录
-  会话还必须携带与 cookie 绑定的 `X-Pi-Glink-CSRF`；客户端伪造的断言头、query/body `tenantId` 一律
+  会话还必须携带与 cookie 绑定的 `X-Glink-Harness-CSRF`；客户端伪造的断言头、query/body `tenantId` 一律
   忽略，登录失败也不会回退到 gateway/local。
-- **回退**：切回 `PI_GLINK_AUTH_MODE=gateway`（或关闭多租户）即可；账号库保留只读，不自动改写 run
+- **回退**：切回 `GLINK_AUTH_MODE=gateway`（或关闭多租户）即可；账号库保留只读，不自动改写 run
   历史，也不降低 owner 校验。
 
 > **前端不回退**：`/api/me` 除 401 外的任何失败（含 404、网络错误）一律显示「服务暂时连不上」，
 > 不探测 `/api/config`、不按 local 流程进入。更新代码后需重启宿主，旧宿主不再兼容。
 
-### 模型凭据策略：`PI_GLINK_MODEL_CREDENTIALS`（默认 `tenant`）
+### 模型凭据策略：`GLINK_MODEL_CREDENTIALS`（默认 `tenant`）
 
 多租户模型的“谁提供模型 key”是显式配置，不是隐式兜底：
 
 - **`tenant`（默认，现行为）**：每个租户在 `tenants.json` 里配置自己的 `modelApiKey`（可选
   `webSearchKey`）；缺模型 key 的租户拒绝准入，绝不回退宿主 `OPENAI_API_KEY` 或别的租户。既有部署不需要改任何东西。
 - **`shared`（显式 SaaS 策略）**：宿主在启动时冻结一套 `OPENAI_API_KEY` / `OPENAI_BASE_URL` /
-  `OPENAI_MODEL` 供所有租户使用；可选搜索 key 只来自宿主级 `PI_GLINK_WEB_SEARCH_KEY`。共享模式不读取任何租户配置：不得配置
-  `PI_GLINK_TENANT_CONFIG_FILE`（不设置或留空即为无该入口），设置即拒绝启动，也不会构造或
+  `OPENAI_MODEL` 供所有租户使用；可选搜索 key 只来自宿主级 `GLINK_WEB_SEARCH_KEY`。共享模式不读取任何租户配置：不得配置
+  `GLINK_TENANT_CONFIG_FILE`（不设置或留空即为无该入口），设置即拒绝启动，也不会构造或
   读取租户凭据存储。三件套缺任一、或把 `shared` 用在非多租户模式，宿主一律拒绝启动，绝不
   静默回退 `tenant` 或 `local`。
 - **执行隔离**：SaaS 部署首选 `LOCAL_WEB_EXECUTOR=e2b`（Docker 同样允许；`inproc` 在两种策略
@@ -266,17 +266,17 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
   的 token（终帧吊销）；run 期间内核工具可读到 token 并在配额内调用代理，这是现存残留面。每 run 脱敏边界包含共享 key 与宿主已知秘密，`redactor_for_record` 在 `shared` 下走
   宿主/共享边界，不会因共享模式没有租户凭据条目而漏脱敏。这仍是回显保护 + 沙箱执行隔离，不承诺 key
   不可能被宿主可读、工具回显或网络外传。**例外是 ACP 族**：shared 下运营方经注入通道
-  （`PI_GLINK_ACP_CREDENTIAL_ENV` / `PI_GLINK_ACP_CREDENTIAL_FILES`）投递的凭据**副本**会进入执行环境
+  （`GLINK_ACP_CREDENTIAL_ENV` / `GLINK_ACP_CREDENTIAL_FILES`）投递的凭据**副本**会进入执行环境
   （沙箱内 agent 工具可读，收尾删除），不像 pi 族真实 key 只留在宿主出口代理——这是
   [ADR 0015](docs/adr/0015-acp-credential-channels-under-model-credential-policy.md) /
   [ADR 0016](docs/adr/0016-acp-credential-env-single-source.md) 已声明的例外，把 ACP 接入出口代理是未决项。
 - **部署最小步骤（accounts + shared + e2b）**：配置 `E2B_API_KEY`、共享模型三件套与（可选）
-  `PI_GLINK_WEB_SEARCH_KEY`；开启 `PI_GLINK_TENANCY=multitenant`、`PI_GLINK_AUTH_MODE=accounts`、
-  `PI_GLINK_MODEL_CREDENTIALS=shared`、`LOCAL_WEB_EXECUTOR=e2b`，并指定仓库外的 0700 账号库目录；
-  生产由 TLS 终止代提供 HTTPS 并设置 `PI_GLINK_PUBLIC_ORIGIN`；宿主停止时用 `--create-invite`
+  `GLINK_WEB_SEARCH_KEY`；开启 `GLINK_TENANCY=multitenant`、`GLINK_AUTH_MODE=accounts`、
+  `GLINK_MODEL_CREDENTIALS=shared`、`LOCAL_WEB_EXECUTOR=e2b`，并指定仓库外的 0700 账号库目录；
+  生产由 TLS 终止代提供 HTTPS 并设置 `GLINK_PUBLIC_ORIGIN`；宿主停止时用 `--create-invite`
   签发首位管理员邀请。真实 HTTPS/邮件/E2B live 验收不在本期范围。
-- **回退**：把 `PI_GLINK_MODEL_CREDENTIALS` 改回 `tenant` 并为每个租户补回 `modelApiKey`，或
-  关闭 `PI_GLINK_TENANCY` 回到单用户；账号库与 run 历史保留只读，不自动改写、不降低 owner 校验。
+- **回退**：把 `GLINK_MODEL_CREDENTIALS` 改回 `tenant` 并为每个租户补回 `modelApiKey`，或
+  关闭 `GLINK_TENANCY` 回到单用户；账号库与 run 历史保留只读，不自动改写、不降低 owner 校验。
 
 > 隔离范围：宿主 API 授权、run 归属、凭据交付与 redaction 在宿主侧完成；容器/沙箱提供执行环境
 > 隔离，但不构成对宿主 API 或存储的替代边界。合成验收覆盖账号存储/会话/CSRF/跨租户与 fake 执行面；
@@ -285,18 +285,18 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 ## 搜索
 
-检索能力全部来自 [pi-web-access](https://github.com/nicobailon/pi-web-access) 扩展，声明在 `harnesses/pi/settings.json` 的 `packages` 里（`npm:pi-web-access@0.31.0`，精确 pin）。本机 inproc 面 pi 启动时把它安装到本 run 的运行期配置目录；Docker / E2B 面宿主把该声明改写成镜像内本地包 `/opt/pi-packages/node_modules/pi-web-access`（pi 官方 local package，"Loaded from the resolved path without copying"），run 内不再访问 registry、不再每 run 生成 `npm/`；镜像守卫在包缺失时明确失败（exit 78），不让 `web_search` 静默消失。实测对照与发布/回滚见 [docs/evidence/prebaked-packages.txt](docs/evidence/prebaked-packages.txt)。
+dsh 族不经 pi-web-access：检索由包内 provider 提供（内置 `web_search` 用 DeepSeek 官方 key、`dsh-web-fetch-jina` bundle 用 Jina key，见 [.env.example](.env.example)），凭据经 ACP 注入通道投递；本节的出口代理只覆盖 pi 族。pi 族的检索能力全部来自 [pi-web-access](https://github.com/nicobailon/pi-web-access) 扩展，声明在 `harnesses/pi/settings.json` 的 `packages` 里（`npm:pi-web-access@0.31.0`，精确 pin）。本机 inproc 面 pi 启动时把它安装到本 run 的运行期配置目录；Docker / E2B 面宿主把该声明改写成镜像内本地包 `/opt/pi-packages/node_modules/pi-web-access`（pi 官方 local package，"Loaded from the resolved path without copying"），run 内不再访问 registry、不再每 run 生成 `npm/`；镜像守卫在包缺失时明确失败（exit 78），不让 `web_search` 静默消失。实测对照与发布/回滚见 [docs/evidence/prebaked-packages.txt](docs/evidence/prebaked-packages.txt)。
 
 真实检索 key 只在宿主凭据出口代理里（[ADR 0008](docs/adr/0008-egress-proxy.md)）：
 
 1. 有检索 key 时，宿主在**本 run 的**运行期目录渲染 `web-search.json`（权限 600），内容是
    `{"exaApiKey": <本 run token>, "exaBaseUrl": <代理>/search}`，代理再转发到
-   `PI_GLINK_WEB_SEARCH_UPSTREAM`（默认 `https://api.exa.ai`）并注入真实 key；
+   `GLINK_WEB_SEARCH_UPSTREAM`（默认 `https://api.exa.ai`）并注入真实 key；
 2. 没有检索 key 也能工作：pi-web-access 会回退到无密钥的 Exa MCP 检索。
 
-检索 key 来源：本机模式与 `shared` 策略为宿主级 `PI_GLINK_WEB_SEARCH_KEY`；默认 `tenant` 策略为该
-租户条目的 `webSearchKey`。操作员 `~/.pi/web-search.json` 与旧的 `PI_GLINK_WEB_SEARCH_CONFIG`
-不再读取（不迁移）。Docker 面带检索 key 时需要 https 的 `PI_GLINK_EGRESS_PUBLIC_URL`。
+检索 key 来源：本机模式与 `shared` 策略为宿主级 `GLINK_WEB_SEARCH_KEY`；默认 `tenant` 策略为该
+租户条目的 `webSearchKey`。操作员 `~/.pi/web-search.json` 与旧的 `GLINK_WEB_SEARCH_CONFIG`
+不再读取（不迁移）。Docker 面带检索 key 时需要 https 的 `GLINK_EGRESS_PUBLIC_URL`。
 
 本仓库不包含 Serper / Jina 链路。检索证据见 [docs/evidence/local-web-search.txt](docs/evidence/local-web-search.txt)。
 
@@ -324,7 +324,7 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 ## 安全边界
 
 - **凭据不进产品面**：事件流、持久事件（`runs.db`）、报告文件与下载、pi 会话文件都经过
-  `host/pi_glink/redaction.py` 的脱敏（值 + 形状双重检测）；流式回答只释放不可能再构成凭据的前缀、
+  `host/glink_harness/redaction.py` 的脱敏（值 + 形状双重检测）；流式回答只释放不可能再构成凭据的前缀、
   从不切开完整命中，释放结果等于整段脱敏，同一凭据被拆到多帧（含前后缀重叠的凭据）也无法拼回；
   暂存最多 8192 字符，超界时本段改输出 `[REDACTED]` 而不释放未判定原文；
   报告下载响应带 `X-Redacted` 头标明是否发生脱敏。
@@ -350,14 +350,14 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 | 路径 | 职责 |
 |---|---|
-| `host/pi_glink/` | 宿主：配置解析、事件总线、HTTP/SSE 服务、静态资源 |
-| `host/pi_glink/runs/` | 编排层：run 准入、执行骨架与收尾顺序、终态提交、外部资源台账 |
-| `host/pi_glink/kernel/` | pi 接入层：headless 协议客户端（RPC / JSON）、事件投影、运行期配置渲染、三执行面适配；不得反向导入编排层或宿主编排模块 |
-| `harnesses/<pack>/` | Harness 包：`harness.toml`（`pi-glink-harness/v2`：`family`、`[entry].command`、`[capabilities]` 能力矩阵、`[image]` 镜像需求与上游包版本；镜像 ARG 与 `docker/e2b/templates.json` 由它生成）、可选 `capabilities.md`（拼入系统提示）、ACP 的 `home/` 覆盖层；pi 包另含 `settings.json` 与 `extensions/`、`agents/`（前台守卫与 `researcher.md`），每次 run 先删再拷到 `runs/<id>/pi-agent/` |
+| `host/glink_harness/` | 宿主：配置解析、事件总线、HTTP/SSE 服务、静态资源 |
+| `host/glink_harness/runs/` | 编排层：run 准入、执行骨架与收尾顺序、终态提交、外部资源台账 |
+| `host/glink_harness/kernel/` | pi 接入层：headless 协议客户端（RPC / JSON）、事件投影、运行期配置渲染、三执行面适配；不得反向导入编排层或宿主编排模块 |
+| `harnesses/<pack>/` | Harness 包：`harness.toml`（`glink-harness/v2`：`family`、`[entry].command`、`[capabilities]` 能力矩阵、`[image]` 镜像需求与上游包版本；镜像 ARG 与 `docker/e2b/templates.json` 由它生成）、可选 `capabilities.md`（拼入系统提示）、ACP 的 `home/` 覆盖层；pi 包另含 `settings.json` 与 `extensions/`、`agents/`（前台守卫与 `researcher.md`），每次 run 先删再拷到 `runs/<id>/pi-agent/` |
 | `web/` | 前端：按百鉴 UI 标准库逐值对齐的静态 ESM 资源（token 层 + 组件层 + 外壳） |
 | `docs/` | `architecture.md`（进程拓扑、事件契约、执行器契约）、`pi-boundary.md`（扩展点与禁止项）、`multitenancy-plan.md`（下一阶段设计与决策点） |
 | `tests/` | 宿主与内核的回归 |
-| `<数据根>`（默认 `~/.pi-glink`） | 运行态：`host.lock`、`runs/runs.db`（run 记录与事件）、`runs/<id>/{pi-agent/,sessions/,artifacts/}`、`workspaces/<id>/` |
+| `<数据根>`（默认 `~/.glink-harness`） | 运行态：`host.lock`、`runs/runs.db`（run 记录与事件）、`runs/<id>/{pi-agent/ 或 acp-agent/,sessions/,artifacts/}`、`workspaces/<id>/` |
 
 ## 前端与 UI 标准库对齐
 
@@ -381,7 +381,7 @@ node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 26 个角�
 
 ## 环境变量
 
-与 FrontierAgent 保持同一套命名：模型 `OPENAI_*`，云沙箱 `E2B_*`，服务与执行面 `LOCAL_WEB_*`；本项目独有概念使用 `PI_GLINK_*`。完整列表（含注释）见 [.env.example](.env.example)。
+与 FrontierAgent 保持同一套命名：模型 `OPENAI_*`，云沙箱 `E2B_*`，服务与执行面 `LOCAL_WEB_*`；本项目独有概念使用 `GLINK_*`。完整列表（含注释）见 [.env.example](.env.example)。
 
 宿主读一次配置后冻结，运行中的 host 不会因为改环境变量而改变行为。
 配置来源优先级固定为：进程环境同名变量 > `.env` 文件 > 内置默认值；
@@ -391,15 +391,15 @@ node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 26 个角�
 
 | 键 | 默认 | 何时需要改 |
 |---|---|---|
-| `PI_GLINK_HARNESS` | `pi` | 选择 harness 包（`pi` / `dsh` / `codex` / `opencode`）；一次部署只跑一个，启动冻结 |
-| `PI_GLINK_HARNESSES_DIR` | `<repo>/harnesses` | 包根目录放在别处时；选中包缺失或清单不合法即拒绝启动 |
-| `PI_GLINK_ACP_CREDENTIAL_FILES` | 空 | ACP agent 需要宿主只读凭据时，按 `source=dest`（`;` 分隔）注入每 run `HOME`；非 ACP 包下设置即拒绝启动 |
-| `PI_GLINK_ACP_CREDENTIAL_ENV` | 空 | ACP 凭据的 `.env` 单源通道：逗号分隔键名，每 run 渲染 dsh 格式 `.dsh/.credentials.yaml` 进沙箱 `HOME`（0600、收尾删除）；与上面 FILES 互斥；声明的键缺值拒绝启动（[ADR 0016](docs/adr/0016-acp-credential-env-single-source.md)） |
-| `PI_GLINK_ACP_ENV` | 空 | 给 ACP agent 进程传环境变量时；`HOME` 不可覆盖（每 run 状态根是隔离边界） |
-| `LOCAL_WEB_ACP_WORKER_IMAGE` | `pi-glink-acp-worker:latest` | ACP + `docker` 面换镜像时（与 pi 面镜像分开，二者装的 agent 不同） |
+| `GLINK_HARNESS` | `pi` | 选择 harness 包（`pi` / `dsh` / `codex` / `opencode`）；一次部署只跑一个，启动冻结 |
+| `GLINK_HARNESSES_DIR` | `<repo>/harnesses` | 包根目录放在别处时；选中包缺失或清单不合法即拒绝启动 |
+| `GLINK_ACP_CREDENTIAL_FILES` | 空 | ACP agent 需要宿主只读凭据时，按 `source=dest`（`;` 分隔）注入每 run `HOME`；非 ACP 包下设置即拒绝启动 |
+| `GLINK_ACP_CREDENTIAL_ENV` | 空 | ACP 凭据的 `.env` 单源通道：逗号分隔键名，每 run 渲染 dsh 格式 `.dsh/.credentials.yaml` 进沙箱 `HOME`（0600、收尾删除）；与上面 FILES 互斥；声明的键缺值拒绝启动（[ADR 0016](docs/adr/0016-acp-credential-env-single-source.md)） |
+| `GLINK_ACP_ENV` | 空 | 给 ACP agent 进程传环境变量时；`HOME` 不可覆盖（每 run 状态根是隔离边界） |
+| `LOCAL_WEB_ACP_WORKER_IMAGE` | `glink-harness-acp-worker:latest` | ACP + `docker` 面换镜像时（与 pi 面镜像分开，二者装的 agent 不同） |
 | `LOCAL_WEB_E2B_ACP_TEMPLATE` | `glink-acp-worker` | ACP + `e2b` 面换模板时（与 pi 面模板分开，同上） |
-| `PI_GLINK_METHODOLOGY_DIR` | `<repo>/methodology` | 方法论根（`work-agreement.md` 与 `blueprints/`）放在别处时 |
-| `PI_GLINK_BLUEPRINTS_DIR` | `<methodology>/blueprints` | 蓝图目录单独覆盖时；目录缺失不是启动错误，只表示可用蓝图集合为空 |
+| `GLINK_METHODOLOGY_DIR` | `<repo>/methodology` | 方法论根（`work-agreement.md` 与 `blueprints/`）放在别处时 |
+| `GLINK_BLUEPRINTS_DIR` | `<methodology>/blueprints` | 蓝图目录单独覆盖时；目录缺失不是启动错误，只表示可用蓝图集合为空 |
 | `LOCAL_WEB_TASK_TIMEOUT_SECONDS` | `1800` | 单次 run 的整体超时（秒）；题型明显更长/更短时。E2B 沙箱寿命按它 + 300s 取值 |
 | `OPENAI_MODEL` | 空 | 部署主模型：pi 保持模型 id 原语义；dsh 必填，按 agent 广告的模型 id 唯一匹配，如 `openai/gpt-5.6-sol`，有歧义时用 `openrouter/openai/gpt-5.6-sol` 全路由消歧；不按首个斜杠猜 provider |
 | `OPENAI_REASONING_EFFORT` | 空 | dsh 必填，如 `xhigh`，须由目标模型广告；不改 pi 现有 thinking 策略，未声明来源的包不消费；与输出 token 上限无关 |
@@ -424,7 +424,7 @@ ACP 族的送达通道、凭据注入与体积边界见 [ACP 集成笔记](docs/
 bash scripts/check.sh
 ```
 
-该入口在临时 HOME 和清空继承环境的子进程中依次执行：事件 schema 生成物校验 → ruff 静态检查（规则集见 `pyproject.toml`）→ mypy 类型检查（`host/pi_glink`）→ Python 回归（同时用 pytest-cov 采集覆盖率）→ 覆盖率总量 ratchet（低于 `scripts/coverage-baseline.json` 的总量基线即失败）→ Node 回归与 dsh bundle 单测；任一步非零退出即按原退出码失败。外部标准库逐值对齐明确记为 `SKIP`。覆盖率基线只升不降，升基线需重测并提交新值，语义见 [ADR 0014](docs/adr/0014-delivery-gate-lint-types-coverage.md)。不启动真实 pi、浏览器、Docker 或 E2B，也不读取真实 `.env` 或个人 pi 配置。它不是 OS 安全沙箱。定向命令和覆盖边界见 [验证矩阵](docs/engineering.md#验证矩阵)；`scripts/run-tests.sh` 保留为仅 Python 的低层入口，不代表全部交付检查。
+该入口在临时 HOME 和清空继承环境的子进程中依次执行：事件 schema 生成物校验 → ruff 静态检查（规则集见 `pyproject.toml`）→ mypy 类型检查（`host/glink_harness`）→ Python 回归（同时用 pytest-cov 采集覆盖率）→ 覆盖率总量 ratchet（低于 `scripts/coverage-baseline.json` 的总量基线即失败）→ Node 回归与 dsh bundle 单测；任一步非零退出即按原退出码失败。外部标准库逐值对齐明确记为 `SKIP`。覆盖率基线只升不降，升基线需重测并提交新值，语义见 [ADR 0014](docs/adr/0014-delivery-gate-lint-types-coverage.md)。不启动真实 pi、浏览器、Docker 或 E2B，也不读取真实 `.env` 或个人 pi 配置。它不是 OS 安全沙箱。定向命令和覆盖边界见 [验证矩阵](docs/engineering.md#验证矩阵)；`scripts/run-tests.sh` 保留为仅 Python 的低层入口，不代表全部交付检查。
 
 以下为**单独授权的浏览器/live 验收**：需要明确归属的目标宿主；`ui-features` 和 `run-smoke` 会提交真实研究、读取服务历史，以下脚本都会更新仓库证据文件。它们不接入默认检查，也不证明多租户已完成。
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Isolated host for the browser acceptance suite (accounts / local modes).
 
-Starts a real ``pi_glink.app`` host on an OS-assigned loopback port with:
+Starts a real ``glink_harness.app`` host on an OS-assigned loopback port with:
 
 * a temporary data root and (accounts mode) a temporary SQLite account database
-  — never the operator's ``~/.pi-glink``;
+  — never the operator's ``~/.glink-harness``;
 * synthetic tenant credentials from a 0600 file in the temporary directory;
 * the real Runner/RunStore/EventBus/HTTP/SSE stack and the production front-end,
   with only the execution face replaced by :class:`FakeAdapter` — no pi process,
@@ -57,13 +57,13 @@ HOST_ROOT = REPO_ROOT / "host"
 if str(HOST_ROOT) not in sys.path:
     sys.path.insert(0, str(HOST_ROOT))
 
-from pi_glink.accounts import AccountsStore  # noqa: E402
-import pi_glink.kernel.harness_pi as pi_family  # noqa: E402
-from pi_glink.app import create_server  # noqa: E402
-from pi_glink.config import build_config  # noqa: E402
-from pi_glink.kernel.child_progress import PiChildProgressSource  # noqa: E402
-from pi_glink.kernel.e2b_env import SUBAGENT_ARTIFACTS_DIRNAME  # noqa: E402
-from pi_glink.kernel.execution import (  # noqa: E402
+from glink_harness.accounts import AccountsStore  # noqa: E402
+import glink_harness.kernel.harness_pi as pi_family  # noqa: E402
+from glink_harness.app import create_server  # noqa: E402
+from glink_harness.config import build_config  # noqa: E402
+from glink_harness.kernel.child_progress import PiChildProgressSource  # noqa: E402
+from glink_harness.kernel.e2b_env import SUBAGENT_ARTIFACTS_DIRNAME  # noqa: E402
+from glink_harness.kernel.execution import (  # noqa: E402
     ArtifactRecovery,
     CleanupReport,
     ExecutionAdapter,
@@ -160,7 +160,7 @@ TOOLS_FRAMES = (
     {"type": "tool_execution_end", "toolCallId": "call-read", "toolName": "read",
      "result": {"content": [{"type": "text", "text": "ENOENT: no such file or directory"}]}, "isError": True},
     {"type": "tool_execution_start", "toolCallId": "call-search", "toolName": "web_search",
-     "args": {"query": "pi-glink 浏览器验收"}},
+     "args": {"query": "glink-harness 浏览器验收"}},
     {"type": "tool_execution_end", "toolCallId": "call-search", "toolName": "web_search",
      "result": {"content": [{"type": "text", "text": "1. 研究工作台\n   https://example.test/a\n2. 浏览器验收\n   https://example.test/b"}]}, "isError": False},
     _text_frame("工作区里有一份报告；有一条读取失败了，检索返回了两条结果。"),
@@ -520,7 +520,7 @@ def install_request_recorder(path: Path | None) -> None:
     if path is None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    from pi_glink.app import HostRequestHandler
+    from glink_harness.app import HostRequestHandler
 
     original = HostRequestHandler.log_message
 
@@ -552,26 +552,26 @@ def config_values(mode: str, state_dir: Path, tenants_file: Path, gateway_secret
         values.update(
             {
                 "LOCAL_WEB_EXECUTOR": "docker",
-                "PI_GLINK_TENANCY": "multitenant",
-                "PI_GLINK_AUTH_MODE": "accounts",
-                "PI_GLINK_TENANT_CONFIG_FILE": str(tenants_file),
-                "PI_GLINK_ACCOUNTS_DB": str(state_dir / "data" / "accounts" / "accounts.db"),
-                "PI_GLINK_COOKIE_SECURE": "0",  # loopback HTTP acceptance run
-                "PI_GLINK_SESSION_ABSOLUTE_SECONDS": "3600",
-                "PI_GLINK_SESSION_IDLE_SECONDS": "1800",
-                "PI_GLINK_INVITE_TTL_SECONDS": "3600",
-                "PI_GLINK_INVITE_CHECK_MAX_ATTEMPTS": "500",
+                "GLINK_TENANCY": "multitenant",
+                "GLINK_AUTH_MODE": "accounts",
+                "GLINK_TENANT_CONFIG_FILE": str(tenants_file),
+                "GLINK_ACCOUNTS_DB": str(state_dir / "data" / "accounts" / "accounts.db"),
+                "GLINK_COOKIE_SECURE": "0",  # loopback HTTP acceptance run
+                "GLINK_SESSION_ABSOLUTE_SECONDS": "3600",
+                "GLINK_SESSION_IDLE_SECONDS": "1800",
+                "GLINK_INVITE_TTL_SECONDS": "3600",
+                "GLINK_INVITE_CHECK_MAX_ATTEMPTS": "500",
             }
         )
     elif mode == "gateway":
         values.update(
             {
                 "LOCAL_WEB_EXECUTOR": "docker",
-                "PI_GLINK_TENANCY": "multitenant",
-                "PI_GLINK_AUTH_MODE": "gateway",
-                "PI_GLINK_TENANT_CONFIG_FILE": str(tenants_file),
-                "PI_GLINK_GATEWAY_SECRET_FILE": str(gateway_secret),
-                "PI_GLINK_TENANCY_AUDIENCE": "pi-glink-browser-acceptance",
+                "GLINK_TENANCY": "multitenant",
+                "GLINK_AUTH_MODE": "gateway",
+                "GLINK_TENANT_CONFIG_FILE": str(tenants_file),
+                "GLINK_GATEWAY_SECRET_FILE": str(gateway_secret),
+                "GLINK_TENANCY_AUDIENCE": "glink-harness-browser-acceptance",
             }
         )
     else:  # local
@@ -580,8 +580,8 @@ def config_values(mode: str, state_dir: Path, tenants_file: Path, gateway_secret
                 # Synthetic credential: the fake adapter never contacts a model.
                 "OPENAI_API_KEY": "sk-local-browser-0000000000000000",
                 "LOCAL_WEB_EXECUTOR": "inproc",
-                "PI_GLINK_TENANCY": "local",
-                "PI_GLINK_AUTH_MODE": "gateway",
+                "GLINK_TENANCY": "local",
+                "GLINK_AUTH_MODE": "gateway",
             }
         )
     return values
@@ -659,7 +659,7 @@ def main() -> int:
 
     _usage_recorder = record_egress_usage
     # Replace only the execution face, exactly like the Python regressions do
-    # (``monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", …)``):
+    # (``monkeypatch.setattr("glink_harness.kernel.harness_pi.PiExecutionAdapter", …)``):
     # the real Runner, store, event bus, HTTP/SSE and front-end all stay in the
     # loop, but no pi binary, Docker daemon or sandbox is contacted.
     pi_family.PiExecutionAdapter = build_fake

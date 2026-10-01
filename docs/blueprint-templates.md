@@ -21,7 +21,7 @@ pi 的 prompt 模板不再参与方法论。
 * 一个蓝图一个文件：`methodology/blueprints/<name>.md`，`<name>` 同时是 API 取值、
   斜杠命令名与 run 记录里的标识。文件名必须是 slug（`^[a-z0-9][a-z0-9-]{0,63}$`），
   目录里其它文件不构成蓝图。
-* 目录位置可用 `PI_GLINK_BLUEPRINTS_DIR` 覆盖（默认 `<repo>/methodology/blueprints`）。
+* 目录位置可用 `GLINK_BLUEPRINTS_DIR` 覆盖（默认 `<repo>/methodology/blueprints`）。
   目录缺失不是启动错误：它只意味着可用蓝图集合为空，任何蓝图 run 都会被拒绝。
 * 宿主自身不持有蓝图内容、也不硬编码名字：**每次准入都从目录重新推导**可用集合，
   文件增删立即生效（符号链接、非常规文件、非 `.md` 不计入）。
@@ -41,7 +41,7 @@ pi 的 prompt 模板不再参与方法论。
 
 ```markdown
 +++
-format = "pi-glink-blueprint/v1"
+format = "glink-harness-blueprint/v1"
 name = "my-topic"            # 必须等于文件 stem
 description = "一句话说明这个会话要交付什么。"
 
@@ -58,7 +58,7 @@ checkpoint = "进入下一阶段前必须成立的自检声明。"
 
 | 字段 | 必填 | 规则 |
 |---|---|---|
-| `format` | 是 | 固定 `"pi-glink-blueprint/v1"`（版本标记；未知取值拒绝） |
+| `format` | 是 | 固定 `"glink-harness-blueprint/v1"`（版本标记；未知取值拒绝） |
 | `name` | 是 | 非空，且等于文件 stem（标识与文件不允许漂移） |
 | `description` | 是 | 非空 |
 | `stages` | 是 | 非空表数组，顺序即阶段顺序 |
@@ -88,7 +88,7 @@ checkpoint = "进入下一阶段前必须成立的自检声明。"
   字段不是字符串 → `400 {"error": "invalid_request", ...}`。
 * 拒绝形态与 `/` 命令门禁一致：只报**推导出的**可用名称列表，不回显提交值，也不回显文件内容。
 * 拒绝发生在凭据解析、父 run 读取、run 目录创建与执行面创建**之前**。
-* 规则**与 harness 无关**：`PI_GLINK_HARNESS=<包名>` 的各族走同一条准入路径、同一套失败形态。
+* 规则**与 harness 无关**：`GLINK_HARNESS=<包名>` 的各族走同一条准入路径、同一套失败形态。
 * **斜杠命令与 API 字段等价**（2026-09-27，GLINK-ARCH-6）：`/<蓝图名> <题目>` 由宿主在
   准入层解释为 `blueprint=<蓝图名>` + `prompt=<题目>`——同一条解析、同一套失败形态；
   请求同时带斜杠命令与 `blueprint` 字段时不猜测优先级，直接拒绝。其余任何以 `/` 开头的

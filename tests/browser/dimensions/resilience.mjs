@@ -27,7 +27,7 @@ export async function run(ctx) {
     async () => {
       const state = await page.evaluate(() => ({
         status: document.querySelector('#run-view')?.dataset.status,
-        answer: document.querySelector('#run-view .pi-answer-body')?.innerText?.slice(0, 120),
+        answer: document.querySelector('#run-view .glink-answer-body')?.innerText?.slice(0, 120),
       }));
       return state.status === 'finished' ? state : null;
     },
@@ -52,18 +52,18 @@ export async function run(ctx) {
     await waitFor(
       async () =>
         page.evaluate(() => {
-          const outcome = document.querySelector('#run-view .pi-outcome');
+          const outcome = document.querySelector('#run-view .glink-outcome');
           return Boolean(outcome) && !outcome.hidden && /读不到/.test(outcome.innerText);
         }),
       { timeout: 15_000, message: 'unreadable-history outcome' },
     ).catch(() => {});
     await page.waitForTimeout(400);
     const unreadable = await page.evaluate(() => {
-      const outcome = document.querySelector('#run-view .pi-outcome');
+      const outcome = document.querySelector('#run-view .glink-outcome');
       return {
         shown: Boolean(outcome) && !outcome.hidden,
-        title: outcome?.querySelector('.pi-outcome-title')?.textContent,
-        actions: [...(outcome?.querySelectorAll('.pi-outcome-actions button') ?? [])].map((node) => node.textContent.trim()),
+        title: outcome?.querySelector('.glink-outcome-title')?.textContent,
+        actions: [...(outcome?.querySelectorAll('.glink-outcome-actions button') ?? [])].map((node) => node.textContent.trim()),
       };
     });
     suite.record(
@@ -135,7 +135,7 @@ export async function run(ctx) {
   suite.record('页面（HTML/可见文字/存储/URL）不含任何合成凭据', leaks.length === 0, leaks);
 
   const engineWords = await chromeText(page);
-  const engineLeaks = ['pi-glink', '执行面', 'inproc', '内核', '宿主', 'session ', 'openai/'].filter((word) =>
+  const engineLeaks = ['glink-harness', '执行面', 'inproc', '内核', '宿主', 'session ', 'openai/'].filter((word) =>
     engineWords.includes(word),
   );
   suite.record(

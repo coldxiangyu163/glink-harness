@@ -1,5 +1,5 @@
 /**
- * pi-glink 自有扩展：把 pi-subagents 的派发强制在前台同步执行。
+ * glink-harness 自有扩展：把 pi-subagents 的派发强制在前台同步执行。
  *
  * 背景：pi-subagents 0.40.0 没有“禁止 async/detached”的配置或环境开关，模型传入
  * `async: true` 即走 detached 子进程（GLINK-SUB-01，docs/pi-integration-notes.md §8）。

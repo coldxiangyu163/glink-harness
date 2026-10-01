@@ -1,0 +1,623 @@
+"""Translate pi session events into the product event stream.
+
+This is the only place that knows pi's wire vocabulary. Everything downstream
+(the run bus, the SSE surface, the browser) speaks the product names defined in
+:mod:`glink_harness.events`, so a pi protocol addition shows up as a change here and
+nowhere else.
+
+Design rules:
+
+* **Never forward raw frames.** A payload is a small, explicit projection; the
+  browser must not be able to depend on pi internals by accident.
+* **Bound the payload.** Tool results and assistant text can be megabytes; they
+  are clipped with an explicit ``truncated`` flag instead of blowing up the
+  event stream.
+* **One pi event may yield several product events; it may also yield none.**
+  Lifecycle frames that the host owns (``run_started`` …) are not produced here.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, Iterable, Mapping
+
+from .. import event_schema, events
+from ..redaction import SecretRedactor, StreamRedactor
+
+#: Fail-closed default. Shape-based masking runs even when a caller forgets to
+#: pass the host redactor, so a credential-shaped value can never leave this
+#: module verbatim — the completion audit reproduced exactly that path with a
+#: ``tool_execution_end`` frame carrying ``OPENAI_API_KEY=…``.
+_FALLBACK_REDACTOR = SecretRedactor()
+
+#: Characters kept from a tool result / partial output before clipping.
+TOOL_TEXT_LIMIT = 4000
+#: Characters kept from a single streaming delta (a delta is already small).
+DELTA_LIMIT = 20000
+#: Bound on an array argument (urls/queries/...): item count and item length.
+ARG_LIST_LIMIT = 20
+ARG_ITEM_LIMIT = 500
+
+#: Tool name that identifies a subagent dispatch (docs/architecture.md §3.5).
+#: pi-subagents registers its dispatch tool under exactly this name
+#: (pi-subagents 0.40.0, also pinned by the foreground guard's own constant in
+#: ``harnesses/pi/extensions/subagent-foreground-guard.ts``); the ACP family (dsh)
+#: exposes the same tool name. Both families recognise a dispatch by this name
+#: alone — no other harness or tool gets the typed treatment.
+SUBAGENT_TOOL_NAME = "subagent"
+#: Bounds for the typed subagent payload fields: the agent name and the task
+#: description are model-controlled text, so they are clipped like any other
+#: payload string (§3.5 child.json: ``task`` 限幅).
+SUBAGENT_AGENT_LIMIT = 200
+SUBAGENT_TASK_LIMIT = 500
+
+# pi assistant-stream delta types -> product event type
+_DELTA_EVENTS = {
+    "text_delta": events.ASSISTANT_DELTA,
+    "thinking_delta": events.THINKING_DELTA,
+}
+
+# pi-family tool semantics belong here, not in the cross-harness reader. The
+# browser keeps its name-based rules only for immutable historical tool frames.
+_PI_TOOL_PRESENTATION = (
+    (r"^(web_?search|search_web|websearch)$", "search_web"),
+    (r"^get_search_content$", "read_search"),
+    (r"fetch|browse|webfetch|http|scrape", "fetch_page"),
+    (r"^(bash|shell|terminal|exec|run_command)$", "execute"),
+    (r"^(read|view|cat|open_file|read_file)$", "read_file"),
+    (r"^(write|create|create_file|write_file)$", "write_file"),
+    (r"edit|apply|patch", "edit_file"),
+    (r"^(subagent|task|spawn_agent|delegate)$", "delegate"),
+    (r"^(grep|find|glob|ls|list|search)$", "find"),
+    (r"todo|plan", "plan"),
+)
+
+
+def _pi_tool_presentation(name: str) -> str:
+    for pattern, hint in _PI_TOOL_PRESENTATION:
+        if re.search(pattern, name, re.IGNORECASE):
+            return hint
+    return "generic"
+
+
+def project_event(
+    frame: Mapping[str, Any], redactor: Any = None
+) -> list[tuple[str, dict[str, Any]]]:
+    """Return the product events for one pi frame (possibly empty).
+
+    ``redactor`` is applied to every payload before it leaves this module, so a
+    credential echoed by a tool (``env``, a config-file read, the model quoting
+    one back) is masked in the event stream, the event log and the browser.
+
+    When no redactor is supplied the module falls back to a shape-only one:
+    forgetting the host redactor degrades detection (known values are missed) but
+    never turns into a leak.
+
+    This stateless view always projects tool calls as generic tool cards. The
+    typed subagent lifecycle (``subagent_started``/``subagent_finished``
+    replacing the generic card for a dispatch's ``toolCallId``,
+    docs/architecture.md §3.5) is a per-run contract: it must remember which
+    call ids dispatched children, which only the stateful :class:`Projector`
+    can. The runner always drives :class:`Projector`, so the product stream is
+    typed; this helper stays generic so single-frame checks and old-format log
+    replay keep working.
+    """
+    frame_type = frame.get("type") or ""
+    handler = _HANDLERS.get(frame_type)
+    if handler is None:
+        return []
+    produced = handler(frame)
+    if not produced:
+        return produced
+    active = redactor if redactor is not None else _FALLBACK_REDACTOR
+    return checked(
+        [(kind, active.redact_payload(payload) or payload) for kind, payload in produced],
+        "pi projection",
+    )
+
+
+def checked(
+    produced: list[tuple[str, dict[str, Any]]], source: str
+) -> list[tuple[str, dict[str, Any]]]:
+    """Validate a projection's output against the product event schema.
+
+    Shared by both harness projections: a drift is reported where it is made
+    (strict mode raises, see :func:`glink_harness.event_schema.check`), before the
+    bus validates the same frame again on commit.
+    """
+    for kind, payload in produced:
+        event_schema.check(kind, payload, source=source)
+    return produced
+
+
+#: Delta events whose split-credential protection needs stream state.
+STREAM_EVENTS = (events.THINKING_DELTA, events.ASSISTANT_DELTA)
+#: pi frames that end a streaming block; the withheld tail is released before
+#: the frame's own product events so it still belongs to the block it came from.
+STREAM_BOUNDARY_FRAMES = frozenset({"turn_end", "message_end", "agent_end", "agent_settled"})
+
+
+class Projector:
+    """Stateful projection of one run's frames: the run's redaction boundary.
+
+    :func:`project_event` redacts every payload on its own, which cannot see a
+    credential split across two deltas — and a per-delta redaction would also
+    hide the raw text a stream needs to recognise an overlapping repeat. Here
+    deltas bypass per-frame redaction and go through one
+    :class:`~glink_harness.redaction.StreamRedactor` as raw text; every other payload
+    is redacted exactly as in :func:`project_event`.
+
+    The projector also owns the typed subagent lifecycle
+    (docs/architecture.md §3.5): a ``tool_execution_start`` for the
+    :data:`SUBAGENT_TOOL_NAME` tool whose args match the dispatch shape is
+    projected as one ``subagent_started`` per task instead of a generic tool
+    card, that call id's ``tool_execution_update`` frames are suppressed, and
+    its ``tool_execution_end`` closes every dispatched child with one
+    ``subagent_finished``. Which call ids are dispatches is per-run state: it
+    lives on this instance, each entry is released when the call ends, and the
+    whole map dies with the projector at run end.
+    """
+
+    def __init__(self, redactor: SecretRedactor) -> None:
+        self._redactor = redactor
+        self._stream = StreamRedactor(redactor)
+        #: toolCallId -> the child ``n`` values that call dispatched.
+        self._subagent_calls: dict[str, list[int]] = {}
+        #: Next child sequence number (``n``) within this run, from 0 up.
+        self._next_child_n = 0
+
+    def project(self, frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+        return checked(self._project(frame), "pi projection")
+
+    def _project(self, frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+        produced: list[tuple[str, dict[str, Any]]] = []
+        if frame.get("type") in STREAM_BOUNDARY_FRAMES:
+            produced.extend(self.flush())
+        frame_type = frame.get("type") or ""
+        if frame_type in _TOOL_EXECUTION_FRAMES:
+            handled = self._project_tool_execution(frame_type, frame)
+        else:
+            handler = _HANDLERS.get(frame_type)
+            if handler is None:
+                return produced
+            handled = handler(frame)
+        for kind, payload in handled:
+            if kind in STREAM_EVENTS:
+                text = self._stream.push(kind, payload["text"])
+                if text:
+                    produced.append((kind, {**payload, "text": text}))
+            else:
+                produced.append((kind, self._redactor.redact_payload(payload)))
+        return produced
+
+    def flush(self) -> list[tuple[str, dict[str, Any]]]:
+        """Release every withheld delta tail (stream boundary or run end)."""
+        released: list[tuple[str, dict[str, Any]]] = []
+        for kind in STREAM_EVENTS:
+            text = self._stream.flush(kind)
+            if text:
+                released.append((kind, {"text": text}))
+        return released
+
+    # -- typed subagent projection (§3.5) --------------------------------------
+
+    def _project_tool_execution(
+        self, frame_type: str, frame: Mapping[str, Any]
+    ) -> list[tuple[str, dict[str, Any]]]:
+        tool_call_id = str(frame.get("toolCallId") or "")
+        if frame_type == "tool_execution_start":
+            if str(frame.get("toolName") or "") == SUBAGENT_TOOL_NAME:
+                tasks = parse_subagent_tasks(frame.get("args"))
+                if tasks is not None:
+                    return self._dispatch_subagents(tool_call_id, tasks)
+                # A subagent-named call whose args do not match the dispatch
+                # shape falls back to a generic card: no typed event is
+                # fabricated (§3.5 回退规则).
+            return _tool_execution_start(frame)
+        ns = self._subagent_calls.get(tool_call_id)
+        if ns is None:
+            return _HANDLERS[frame_type](frame)
+        if frame_type == "tool_execution_update":
+            # A subagent call only ever streams a "(running...)" placeholder;
+            # the typed lifecycle replaces the generic card's updates (§3.5).
+            return []
+        # tool_execution_end closes every child this call dispatched; the call
+        # id is never reused, so its per-run state is released here.
+        self._subagent_calls.pop(tool_call_id, None)
+        is_error = bool(frame.get("isError"))
+        return [
+            (
+                events.SUBAGENT_FINISHED,
+                {
+                    "toolCallId": tool_call_id,
+                    "ns": list(ns),
+                    "status": "failed" if is_error else "finished",
+                    "isError": is_error,
+                    "resultPreview": _clip_text(
+                        extract_text(frame.get("result")), TOOL_TEXT_LIMIT
+                    ),
+                },
+            )
+        ]
+
+    def _dispatch_subagents(
+        self, tool_call_id: str, tasks: list[Mapping[str, Any]]
+    ) -> list[tuple[str, dict[str, Any]]]:
+        ns: list[int] = []
+        produced: list[tuple[str, dict[str, Any]]] = []
+        for task in tasks:
+            n = self._next_child_n
+            self._next_child_n += 1
+            ns.append(n)
+            produced.append(
+                (
+                    events.SUBAGENT_STARTED,
+                    subagent_started_payload(n, tool_call_id, task),
+                )
+            )
+        self._subagent_calls[tool_call_id] = ns
+        return produced
+
+
+def _agent_start(_frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    return [(events.RUN_STAGE, {"stage": "agent_start"})]
+
+
+def _agent_end(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (
+            events.RUN_STAGE,
+            {"stage": "agent_end", "willRetry": bool(frame.get("willRetry"))},
+        )
+    ]
+
+
+def _turn_start(_frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    return [(events.TURN_STARTED, {})]
+
+
+def _turn_end(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    produced: list[tuple[str, dict[str, Any]]] = [(events.TURN_FINISHED, {})]
+    usage = _usage_from_message(frame.get("message"))
+    if usage is not None:
+        produced.append((events.USAGE_REPORTED, {"usage": usage}))
+    return produced
+
+
+def _message_update(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    delta = frame.get("assistantMessageEvent")
+    if not isinstance(delta, Mapping):
+        return []
+    event_type = _DELTA_EVENTS.get(str(delta.get("type")))
+    if event_type is None:
+        return []
+    text = delta.get("delta")
+    if not isinstance(text, str) or not text:
+        return []
+    return [(event_type, {"text": _clip_text(text, DELTA_LIMIT)})]
+
+
+#: How much of an assistant message's authoritative text the event log keeps.
+#: The streamed deltas already carried the whole answer to the browser; this
+#: bound exists so one frame cannot blow up the ``events`` table and the replay ring.
+#: When it clips, the payload says so (``truncated: true``) and the front-end
+#: keeps the longer streamed body instead of replacing it with less.
+ASSISTANT_TEXT_LIMIT = TOOL_TEXT_LIMIT * 4
+
+
+def _message_end(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    message = frame.get("message")
+    if not isinstance(message, Mapping) or message.get("role") != "assistant":
+        return []
+    text = extract_text(message.get("content"))
+    clipped, was_truncated = _clip_text_flagged(text, ASSISTANT_TEXT_LIMIT)
+    payload: dict[str, Any] = {"text": clipped}
+    if was_truncated:
+        # The authoritative copy is incomplete: a client that already holds a
+        # longer streamed body must not treat this as the whole answer.
+        payload["truncated"] = True
+    stop_reason = message.get("stopReason") or message.get("stop_reason")
+    if isinstance(stop_reason, str):
+        payload["stopReason"] = stop_reason
+    usage = _usage_from_message(message)
+    if usage is not None:
+        payload["usage"] = usage
+    return [(events.ASSISTANT_MESSAGE, payload)]
+
+
+#: pi frames that carry a tool call's lifecycle; the stateful :class:`Projector`
+#: routes them through the typed-subagent rules before the generic handlers.
+_TOOL_EXECUTION_FRAMES = frozenset(
+    {"tool_execution_start", "tool_execution_update", "tool_execution_end"}
+)
+
+
+def parse_subagent_tasks(args: Any) -> list[Mapping[str, Any]] | None:
+    """The pi-family dispatch shape: ``args.tasks`` is a non-empty list of task
+    objects (``{"agent": …, "task": …}`` — one ``tool_call`` may dispatch
+    several children, docs/architecture.md §3.5).
+
+    Returns the task list, or ``None`` when the shape does not match. A ``None``
+    means the caller falls back to a generic tool card: a malformed dispatch is
+    rendered honestly as a tool call, never as a fabricated typed event.
+    """
+    if not isinstance(args, Mapping):
+        return None
+    tasks = args.get("tasks")
+    if not isinstance(tasks, (list, tuple)) or not tasks:
+        return None
+    if not all(isinstance(item, Mapping) for item in tasks):
+        return None
+    return list(tasks)
+
+
+def subagent_started_payload(
+    n: int, tool_call_id: str, task: Mapping[str, Any]
+) -> dict[str, Any]:
+    """One ``subagent_started`` payload (§3.5): ``{n, toolCallId, agent, task}``.
+
+    ``agent``/``task`` are model-controlled text: clipped, and absent or
+    non-string values degrade to an empty string rather than being invented.
+    The payload still leaves through the run's redactor like every other event.
+    """
+    agent = task.get("agent")
+    task_text = task.get("task")
+    return {
+        "n": n,
+        "toolCallId": tool_call_id,
+        "agent": _clip_text(agent, SUBAGENT_AGENT_LIMIT)
+        if isinstance(agent, str)
+        else "",
+        "task": _clip_text(task_text, SUBAGENT_TASK_LIMIT)
+        if isinstance(task_text, str)
+        else "",
+    }
+
+
+def _tool_execution_start(
+    frame: Mapping[str, Any],
+) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (
+            events.TOOL_STARTED,
+            {
+                "toolCallId": str(frame.get("toolCallId") or ""),
+                "toolName": str(frame.get("toolName") or ""),
+                "args": project_args(frame.get("args")),
+                "presentation": _pi_tool_presentation(str(frame.get("toolName") or "")),
+            },
+        )
+    ]
+
+
+def _tool_execution_update(
+    frame: Mapping[str, Any],
+) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (
+            events.TOOL_UPDATED,
+            {
+                "toolCallId": str(frame.get("toolCallId") or ""),
+                "toolName": str(frame.get("toolName") or ""),
+                "output": _clip_text(extract_text(frame.get("partialResult")), TOOL_TEXT_LIMIT),
+            },
+        )
+    ]
+
+
+def _tool_execution_end(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    result_text = extract_text(frame.get("result"))
+    return [
+        (
+            events.TOOL_FINISHED,
+            {
+                "toolCallId": str(frame.get("toolCallId") or ""),
+                "toolName": str(frame.get("toolName") or ""),
+                "isError": bool(frame.get("isError")),
+                "result": _clip_text(result_text, TOOL_TEXT_LIMIT),
+            },
+        )
+    ]
+
+
+def _compaction_start(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (
+            events.RUN_STAGE,
+            {"stage": "compaction_start", "reason": str(frame.get("reason") or "")},
+        )
+    ]
+
+
+def _compaction_end(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    return [(events.RUN_STAGE, {"stage": "compaction_end"})]
+
+
+def _auto_retry_start(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (
+            events.RUN_STAGE,
+            {
+                "stage": "auto_retry_start",
+                "attempt": _count_or_none(frame.get("attempt")),
+                "errorMessage": str(frame.get("errorMessage") or "")[:500],
+            },
+        )
+    ]
+
+
+def _count_or_none(value: Any) -> int | None:
+    """pi's retry ``attempt`` as the schema's ``integer | null``."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _auto_retry_end(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (
+            events.RUN_STAGE,
+            {"stage": "auto_retry_end", "success": bool(frame.get("success"))},
+        )
+    ]
+
+
+def _extension_error(frame: Mapping[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (
+            events.KERNEL_STATUS,
+            {
+                "level": "warning",
+                "message": "extension_error",
+                "detail": str(frame.get("error") or "")[:500],
+                "extensionPath": str(frame.get("extensionPath") or ""),
+            },
+        )
+    ]
+
+
+_HANDLERS = {
+    "agent_start": _agent_start,
+    "agent_end": _agent_end,
+    "turn_start": _turn_start,
+    "turn_end": _turn_end,
+    "message_update": _message_update,
+    "message_end": _message_end,
+    "tool_execution_start": _tool_execution_start,
+    "tool_execution_update": _tool_execution_update,
+    "tool_execution_end": _tool_execution_end,
+    "compaction_start": _compaction_start,
+    "compaction_end": _compaction_end,
+    "auto_retry_start": _auto_retry_start,
+    "auto_retry_end": _auto_retry_end,
+    "extension_error": _extension_error,
+}
+
+#: pi frames that carry meaning for the runner but need no product event.
+RUNNER_ONLY_EVENTS = frozenset({"agent_settled", "message_start", "queue_update"})
+
+
+def extract_text(value: Any) -> str:
+    """Flatten a pi message content / tool result into display text.
+
+    pi content blocks are ``{"type": "text", "text": …}`` style objects; tool
+    results may be a plain string, a list of blocks, or a mapping carrying
+    ``content``/``text``/``output``. Unknown shapes degrade to an empty string
+    rather than raising: a renderer must not crash on a protocol addition.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping):
+        for key in ("text", "output", "content", "result", "message"):
+            if key in value:
+                text = extract_text(value[key])
+                if text:
+                    return text
+        return ""
+    if isinstance(value, (list, tuple)):
+        parts: list[str] = []
+        for item in value:
+            text = extract_text(item)
+            if text:
+                parts.append(text)
+        return "\n".join(parts)
+    return ""
+
+
+def _usage_from_message(message: Any) -> dict[str, Any] | None:
+    if not isinstance(message, Mapping):
+        return None
+    usage = message.get("usage")
+    if not isinstance(usage, Mapping):
+        return None
+    projected = {
+        key: usage[key]
+        for key in ("input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost")
+        if key in usage
+    }
+    return projected or None
+
+
+def project_args(args: Any) -> dict[str, Any]:
+    """Keep tool arguments small, JSON-safe and type-stable.
+
+    Shared by both harness projections (the ACP family applies it to
+    ``tool_call``'s ``rawInput``); the payload contract below is the same for
+    every consumer.
+
+    A tool that searches several queries (``queries``) or reads several pages
+    (``urls``) passes an **array**; flattening it to one string here destroys
+    the multi-value payload before the front-end can consume it. The payload
+    contract is therefore: strings stay strings, primitive scalars stay
+    scalars, an array stays a bounded array of clipped strings, and anything
+    else degrades to one clipped string. Bounded means at most
+    :data:`ARG_LIST_LIMIT` items of :data:`ARG_ITEM_LIMIT` characters.
+
+    An array item that is itself an object (``subagent`` receives
+    ``tasks: [{agent, task}, …]``) was previously flattened through
+    :func:`extract_text`, which knows only message/content shapes and returned
+    an empty string: the delegated work disappeared from the card. Such an item
+    now renders as its compact JSON text — still one bounded string, so every
+    array consumer keeps its contract, and the batch stays auditable.
+    """
+    if not isinstance(args, Mapping):
+        return {}
+    projected: dict[str, Any] = {}
+    for key, value in list(args.items())[:20]:
+        projected[str(key)] = _project_arg_value(value)
+    return projected
+
+
+def _project_arg_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _clip_text(value, 2000)
+    if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_arg_item_text(item) for item in list(value)[:ARG_LIST_LIMIT]]
+    if isinstance(value, Mapping):
+        # A single object argument (a filter, an options block) stays readable
+        # text: JSON rather than the empty string extract_text would give.
+        return _clip_text(_compact_json(value), 500)
+    return _clip_text(extract_text(value), 500)
+
+
+def _arg_item_text(item: Any) -> str:
+    """One array item as bounded text: strings as-is, objects as compact JSON."""
+    if isinstance(item, str):
+        return _clip_text(item, ARG_ITEM_LIMIT)
+    if isinstance(item, (Mapping, list, tuple)):
+        return _clip_text(_compact_json(item), ARG_ITEM_LIMIT)
+    return _clip_text(extract_text(item), ARG_ITEM_LIMIT)
+
+
+def _compact_json(value: Any) -> str:
+    """Compact JSON for a bounded payload; unencodable values degrade to text."""
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return extract_text(value)
+
+
+def _clip_text(text: str, limit: int) -> str:
+    return _clip_text_flagged(text, limit)[0]
+
+
+def _clip_text_flagged(text: str, limit: int) -> tuple[str, bool]:
+    """``(clipped, was_truncated)`` — callers that must not lie about
+    completeness use the flag instead of guessing from the marker text."""
+    if len(text) <= limit:
+        return text, False
+    head = text[:limit]
+    return f"{head}\n…[truncated {len(text) - limit} chars]", True
+
+
+def project_frames(
+    frames: Iterable[Mapping[str, Any]], redactor: Any = None
+) -> list[tuple[str, dict[str, Any]]]:
+    """Convenience for tests and offline replay."""
+    produced: list[tuple[str, dict[str, Any]]] = []
+    for frame in frames:
+        produced.extend(project_event(frame, redactor))
+    return produced

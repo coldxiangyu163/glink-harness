@@ -1,16 +1,16 @@
 # 0016 ACP 凭据与 dsh 模型的 .env 单源配置
 
 - 状态：已接受（2026-09-29）；2026-09-30 经 GLINK-DSH-03 修订决定 5
-- 范围：`host/pi_glink/config.py`（`PI_GLINK_ACP_CREDENTIAL_ENV` 解析、政策接入
-  `_acp_credentials_follow_policy`）、`host/pi_glink/kernel/acp_env.py`
-  （`_render_credential_env`）、`host/pi_glink/harnesses.py`（结构来源声明）、
-  `host/pi_glink/kernel/acp_session_config.py`（ACP 应用与实际值核验）、
+- 范围：`host/glink_harness/config.py`（`GLINK_ACP_CREDENTIAL_ENV` 解析、政策接入
+  `_acp_credentials_follow_policy`）、`host/glink_harness/kernel/acp_env.py`
+  （`_render_credential_env`）、`host/glink_harness/harnesses.py`（结构来源声明）、
+  `host/glink_harness/kernel/acp_session_config.py`（ACP 应用与实际值核验）、
   `harnesses/dsh/harness.toml`、`harnesses/dsh/home/.dsh/settings.yaml`（provider 结构）、
   凭据与模型回归、`.env.example`、`README.md`
 
 ## 背景
 
-`PI_GLINK_ACP_CREDENTIAL_FILES`（ADR 0015 之前即存在的文件注入通道）要求操作员维护一份
+`GLINK_ACP_CREDENTIAL_FILES`（ADR 0015 之前即存在的文件注入通道）要求操作员维护一份
 与本地 dsh 生态并行的凭据文件（如 `~/.dsh/.credentials.glink.yaml`）。实践暴露两类问题：
 
 - **双份漂移**：同一把 key 在 `.env`（pi 族用）与注入文件（ACP 族用）各存一份，轮换要改
@@ -28,7 +28,7 @@ dsh 的 acp-app bundle 为每个 ACP-created agent 提供 fallback selection，
 
 ## 决定
 
-1. **凭据单源在 `.env`**：新增 `PI_GLINK_ACP_CREDENTIAL_ENV="KEY_A,KEY_B"`（逗号分隔的
+1. **凭据单源在 `.env`**：新增 `GLINK_ACP_CREDENTIAL_ENV="KEY_A,KEY_B"`（逗号分隔的
    环境键名）。run 准备时宿主从配置值渲染一份 dsh 格式的
    `.dsh/.credentials.yaml`（`version: 1` + 平面 `refs` 映射）进该 run 的 HOME：
    0600、`O_NOFOLLOW`、父目录 owner-only——与文件注入同一条投递纪律；渲染副本登记为
@@ -39,7 +39,7 @@ dsh 的 acp-app bundle 为每个 ACP-created agent 提供 fallback selection，
    ADR 0003 的收尾删除同一套「只删已知相对路径、不跟随链接、失败不遮蔽原异常」纪律）。
    同理，该通道只在 dsh 包下生效（非 dsh 的 ACP 包与 pi 包配置即拒绝启动，不写没人读
    的凭据文件）。
-2. **与 `PI_GLINK_ACP_CREDENTIAL_FILES` 互斥**：两者都往 run HOME 投递凭据，一次部署
+2. **与 `GLINK_ACP_CREDENTIAL_FILES` 互斥**：两者都往 run HOME 投递凭据，一次部署
    只选一个来源，同时配置拒绝启动。FILES 保留为逃生通道（非 dsh 形态的凭据文件）。
 3. **fail-fast**：声明的键名必须是环境变量形态；声明了但 `.env`/环境里没有值 → 拒绝
    启动，绝不渲染空凭据。值存 `HostConfig.acp_credential_env_values`（`repr=False`），

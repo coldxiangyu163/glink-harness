@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from pi_glink.store import (
+from glink_harness.store import (
     CANCELLED,
     CHILD_READ_LIMIT,
     DATABASE_NAME,
@@ -276,7 +276,7 @@ class _Uuid:
 def test_a_generated_id_collision_is_regenerated_not_overwritten(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import pi_glink.store as store_module  # noqa: PLC0415
+    import glink_harness.store as store_module  # noqa: PLC0415
 
     store = RunStore(tmp_path / "runs")
     store.create("原有研究", run_id="dup", spec=SPEC)
@@ -304,7 +304,7 @@ def test_an_existing_directory_is_never_adopted(store: RunStore) -> None:
 def test_generated_ids_are_exhausted_after_bounded_retries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import pi_glink.store as store_module  # noqa: PLC0415
+    import glink_harness.store as store_module  # noqa: PLC0415
 
     store = RunStore(tmp_path / "runs")
     store.create("占用 id", run_id="collide00001", spec=SPEC)

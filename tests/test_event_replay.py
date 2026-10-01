@@ -27,16 +27,16 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink import event_schema
-from pi_glink import events as events_module
-from pi_glink import store as store_module
-from pi_glink.app import PiGlinkServer, create_server
-from pi_glink.config import build_config
-from pi_glink.events import RUN_STARTED, EventBus
-from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.runs.runner import RunManager
-from pi_glink.static_files import WebAssets
-from pi_glink.store import FAILED, RUNNING, RunStore, RunSpec
+from glink_harness import event_schema
+from glink_harness import events as events_module
+from glink_harness import store as store_module
+from glink_harness.app import GlinkHarnessServer, create_server
+from glink_harness.config import build_config
+from glink_harness.events import RUN_STARTED, EventBus
+from glink_harness.kernel.rpc import PiRpcClient
+from glink_harness.runs.runner import RunManager
+from glink_harness.static_files import WebAssets
+from glink_harness.store import FAILED, RUNNING, RunStore, RunSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_PI = Path(__file__).resolve().parent / "fixtures" / "fake_pi.py"
@@ -69,11 +69,11 @@ def fake_factory(*, write_report: bool = True):
     return factory
 
 
-def build_server(config, *, capacity: int | None = None) -> PiGlinkServer:
+def build_server(config, *, capacity: int | None = None) -> GlinkHarnessServer:
     bus = EventBus(capacity=capacity) if capacity is not None else EventBus()
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, bus, store, client_factory=fake_factory())
-    return PiGlinkServer(config, bus, store, manager, WebAssets(config.web_root))
+    return GlinkHarnessServer(config, bus, store, manager, WebAssets(config.web_root))
 
 
 def wait_for(predicate, *, timeout: float = 20.0) -> bool:
@@ -431,7 +431,7 @@ def test_restart_reconciles_a_run_left_running_by_a_previous_process(tmp_path: P
     store.create("上一次进程遗留", run_id="abandoned", workspace=tmp_path / "ws", spec=RunSpec(family="pi", pack="pi", executor="inproc"))
     store.update(
         "abandoned",
-        container_name="pi-glink-abandoned",
+        container_name="glink-harness-abandoned",
         sandbox_id="sandbox-xyz",
     )
     store.append_event(
@@ -458,7 +458,7 @@ def test_restart_reconciles_a_run_left_running_by_a_previous_process(tmp_path: P
     assert [event["seq"] for event in persisted] == [1, 2]
     assert persisted[-1]["payload"]["stopReason"] == "interrupted"
     assert persisted[-1]["payload"]["external"] == {
-        "container": "pi-glink-abandoned",
+        "container": "glink-harness-abandoned",
         "sandbox": "sandbox-xyz",
     }
     # External leftovers are reported for an operator decision, never touched:
@@ -466,7 +466,7 @@ def test_restart_reconciles_a_run_left_running_by_a_previous_process(tmp_path: P
     unreleased = server.manager.unreleased_resources()
     assert [item["runId"] for item in unreleased] == ["abandoned"]
     assert unreleased[0]["cleanup"]["released"] is None
-    assert unreleased[0]["container"] == "pi-glink-abandoned"
+    assert unreleased[0]["container"] == "glink-harness-abandoned"
     server.server_close()
 
 
@@ -566,7 +566,7 @@ def test_a_terminal_frame_is_only_published_once_every_reader_sees_it(tmp_path: 
     bus = _ObservingBus()
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, bus, store, client_factory=fake_factory(write_report=True))
-    server = PiGlinkServer(config, bus, store, manager, WebAssets(config.web_root))
+    server = GlinkHarnessServer(config, bus, store, manager, WebAssets(config.web_root))
     bus.port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -637,7 +637,7 @@ def test_report_write_failure_is_a_consistent_rejection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """R7 with the artifact copy failing: no surface offers a report."""
-    from pi_glink.artifacts import ArtifactTree  # noqa: PLC0415
+    from glink_harness.artifacts import ArtifactTree  # noqa: PLC0415
 
     config = make_config(tmp_path)
     original_replace = ArtifactTree.replace
@@ -668,7 +668,7 @@ def test_report_write_failure_is_a_consistent_rejection(
         thread.join(timeout=5)
 
 
-# -- the terminal commit point (PI-GLINK-STREAM-DURABILITY-20260923) ------------
+# -- the terminal commit point (GLINK-HARNESS-STREAM-DURABILITY-20260923) ------------
 #
 # A terminal state must become visible only once its transaction commits, and a
 # failed commit must leave it never visible. The gate below holds the durable

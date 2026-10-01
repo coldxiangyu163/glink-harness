@@ -2,13 +2,13 @@
 
 上限从「会话寿命配额」改为「异常检测」后，继承/回收/回灌各有三档：
 
-* **正常**：低于警告线（:data:`~pi_glink.kernel.acp_env.INHERIT_WARN_*`），
+* **正常**：低于警告线（:data:`~glink_harness.kernel.acp_env.INHERIT_WARN_*`），
   无声通过——正常研究会话（dsh 实测 ~420KB/轮，50 轮 ≈ 21MB、数百文件）
   永远住在这里；
 * **警告**：越过警告线但低于 fail-closed 线——拷贝/发布照常完成，事实以
   ``kernel_status``（`acp_state_threshold_warning`）进事件流，前端可呈现，
   追问照常受理；
-* **fail-closed**：越过 :data:`~pi_glink.kernel.acp_env.INHERIT_MAX_*`
+* **fail-closed**：越过 :data:`~glink_harness.kernel.acp_env.INHERIT_MAX_*`
   （对齐归档通道上限）——拒绝，不呈现残缺状态。
 
 resume RPC 的超时按状态根体量自适应（保底 60s、4MiB/s 线性、硬上限
@@ -28,15 +28,15 @@ from typing import Any, Mapping
 
 import pytest
 
-from pi_glink.config import HostConfig, build_config
+from glink_harness.config import HostConfig, build_config
 
 from acp_pack import apply_acp_pack
-from pi_glink.events import EventBus
-from pi_glink.kernel.acp_e2b_env import (
+from glink_harness.events import EventBus
+from glink_harness.kernel.acp_e2b_env import (
     ARCHIVE_COMMAND_TIMEOUT_SECONDS,
     AcpStateRecovery,
 )
-from pi_glink.kernel.acp_env import (
+from glink_harness.kernel.acp_env import (
     INHERIT_MAX_FILE_BYTES,
     INHERIT_MAX_FILES,
     INHERIT_MAX_TOTAL_BYTES,
@@ -49,7 +49,7 @@ from pi_glink.kernel.acp_env import (
     prepare_acp_runtime,
     state_threshold_warning,
 )
-from pi_glink.kernel.acp_execution import (
+from glink_harness.kernel.acp_execution import (
     RESUME_TIMEOUT_BASE_SECONDS,
     RESUME_TIMEOUT_BYTES_PER_SECOND,
     RESUME_TIMEOUT_MAX_SECONDS,
@@ -57,13 +57,13 @@ from pi_glink.kernel.acp_execution import (
     _tree_bytes,
     resume_timeout_seconds,
 )
-from pi_glink.kernel.acp_projection import AcpProjector
-from pi_glink.kernel.acp_rpc import REQUEST_TIMEOUT_SECONDS
-from pi_glink.kernel.execution import ExecutionSpec
-from pi_glink.kernel.sandbox import Launch, open_sandbox
-from pi_glink.redaction import SecretRedactor
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import FINISHED, RunStore
+from glink_harness.kernel.acp_projection import AcpProjector
+from glink_harness.kernel.acp_rpc import REQUEST_TIMEOUT_SECONDS
+from glink_harness.kernel.execution import ExecutionSpec
+from glink_harness.kernel.sandbox import Launch, open_sandbox
+from glink_harness.redaction import SecretRedactor
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import FINISHED, RunStore
 from store_helpers import events_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -90,7 +90,7 @@ def make_config(tmp_path: Path, **overrides: str) -> HostConfig:
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_HARNESS": "acp",
+        "GLINK_HARNESS": "acp",
         "TEST_ACP_COMMAND": fake_agent_command(
             tmp_path, {"FAKE_ACP_LOG": str(tmp_path / "agent.jsonl")}
         ),
@@ -175,7 +175,7 @@ def test_inheritance_over_the_warning_line_copies_everything_and_warns(
     不到拒绝量级，拷贝必须完整完成（不截断、不拒收），warning 描述进
     outcome。这就是「追问仍受理」的分支。
     """
-    monkeypatch.setattr("pi_glink.kernel.acp_env.INHERIT_WARN_TOTAL_BYTES", 16)
+    monkeypatch.setattr("glink_harness.kernel.acp_env.INHERIT_WARN_TOTAL_BYTES", 16)
     parent = tmp_path / "parent-home"
     (parent / ".dsh").mkdir(parents=True)
     (parent / ".dsh" / "state.zst").write_bytes(b"x" * 4096)
@@ -191,8 +191,8 @@ def test_inheritance_over_the_fail_closed_line_still_refuses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """fail-closed 档：越过 INHERIT_MAX_* 仍然整次拒绝（纪律不放松）。"""
-    monkeypatch.setattr("pi_glink.kernel.acp_env.INHERIT_WARN_TOTAL_BYTES", 8)
-    monkeypatch.setattr("pi_glink.kernel.acp_env.INHERIT_MAX_TOTAL_BYTES", 16)
+    monkeypatch.setattr("glink_harness.kernel.acp_env.INHERIT_WARN_TOTAL_BYTES", 8)
+    monkeypatch.setattr("glink_harness.kernel.acp_env.INHERIT_MAX_TOTAL_BYTES", 16)
     parent = tmp_path / "parent-home"
     parent.mkdir()
     (parent / "state.bin").write_bytes(b"x" * 4096)
@@ -207,7 +207,7 @@ def test_prepare_runtime_carries_inherit_facts_for_observation(
 ) -> None:
     """prepare_acp_runtime 把继承事实（体量/耗时/警告）挂到 runtime 上。"""
     config = make_config(tmp_path)
-    monkeypatch.setattr("pi_glink.kernel.acp_env.INHERIT_WARN_TOTAL_BYTES", 16)
+    monkeypatch.setattr("glink_harness.kernel.acp_env.INHERIT_WARN_TOTAL_BYTES", 16)
     parent = tmp_path / "parent-home"
     parent.mkdir()
     (parent / "state.bin").write_bytes(b"y" * 300)
@@ -464,7 +464,7 @@ def test_recovery_over_the_warning_line_emits_a_frame(
 
     transfer = BigRecoveryTransfer()
     monkeypatch.setattr(
-        "pi_glink.kernel.acp_execution.AcpSandboxTransfer",
+        "glink_harness.kernel.acp_execution.AcpSandboxTransfer",
         lambda *_args, **_kwargs: transfer,
     )
     sandbox = ScriptedRemoteSandbox(

@@ -26,7 +26,7 @@
         timeoutMs: 60000
         maxResponseBytes: 5000000
         maxBodyChars: 100000
-        userAgent: pi-glink-dsh-web-fetch-jina/0.1.0
+        userAgent: glink-harness-dsh-web-fetch-jina/0.1.0
 
 - id: web-fetch-http
   disabled: true

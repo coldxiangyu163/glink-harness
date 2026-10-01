@@ -5,12 +5,12 @@
 # 的 `ARG *_VERSION`、docker/e2b/templates.json 与 settings.json 的 packages 字段都由
 # scripts/generate-pack-artifacts.py 从这里生成（手改会被 tests/test_repository_boundaries.py
 # 判为漂移）。
-format = "pi-glink-harness/v2"
+format = "glink-harness/v2"
 name = "pi"
 family = "pi"
 
 [entry]
-# 隔离执行面（docker / e2b）镜像内的内核可执行名；inproc 的默认 PI_GLINK_PI_BIN 也取它。
+# 隔离执行面（docker / e2b）镜像内的内核可执行名；inproc 的默认 GLINK_PI_BIN 也取它。
 command = ["pi"]
 
 [capabilities]

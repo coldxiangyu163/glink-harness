@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { startHost } from '../support/host.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const outDir = mkdtempSync(join(tmpdir(), 'pi-glink-probe5-'));
+const outDir = mkdtempSync(join(tmpdir(), 'glink-harness-probe5-'));
 const stateDir = join(outDir, 'state');
 mkdirSync(stateDir, { recursive: true });
 const host = await startHost({ repoRoot: REPO_ROOT, mode: 'accounts', stateDir, logFile: join(outDir, 'fixture.log') });

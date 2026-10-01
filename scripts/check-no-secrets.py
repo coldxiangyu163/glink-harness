@@ -3,10 +3,10 @@
 
 用法::
 
-    .venv/bin/python scripts/check-no-secrets.py [--data-root ~/.pi-glink]
+    .venv/bin/python scripts/check-no-secrets.py [--data-root ~/.glink-harness]
 
 凭据来源与宿主一致：`.env` 的 `OPENAI_API_KEY` / `E2B_API_KEY` /
-`PI_GLINK_WEB_SEARCH_KEY`。
+`GLINK_WEB_SEARCH_KEY`。
 另外按形状扫描（sk-…、e2b_…、exa-…、NAME=value、Bearer …），
 因此即使是宿主从未见过的第三方 token 也会被检出。
 
@@ -30,9 +30,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "host"))
 
-from pi_glink.config import build_config  # noqa: E402
-from pi_glink.dotenv import parse_env_file  # noqa: E402
-from pi_glink.redaction import (  # noqa: E402
+from glink_harness.config import build_config  # noqa: E402
+from glink_harness.dotenv import parse_env_file  # noqa: E402
+from glink_harness.redaction import (  # noqa: E402
     SecretRedactor,
     find_credential_shapes,
     is_placeholder_value,
@@ -98,7 +98,7 @@ def _file_values(data_root: Path) -> Iterator[tuple[str, str]]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="扫描运行态产物里的凭据残留")
-    parser.add_argument("--data-root", default=str(Path.home() / ".pi-glink"))
+    parser.add_argument("--data-root", default=str(Path.home() / ".glink-harness"))
     parser.add_argument("--repo-root", default=str(REPO_ROOT))
     parser.add_argument(
         "--show-placeholders",

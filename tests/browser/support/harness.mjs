@@ -81,7 +81,7 @@ export class Suite {
     const jsonPath = join(this.outDir, 'acceptance.json');
     writeFileSync(jsonPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
     const lines = [
-      `pi-glink 浏览器验收 · mode=${this.mode}`,
+      `glink-harness 浏览器验收 · mode=${this.mode}`,
       `baseUrl: ${this.baseUrl}`,
       `命令: node tests/browser/acceptance.mjs --mode ${this.mode}`,
       `时间: ${this.startedAt} → ${payload.finishedAt}`,

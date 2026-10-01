@@ -40,7 +40,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "host"))
 
-from pi_glink.harnesses import (  # noqa: E402
+from glink_harness.harnesses import (  # noqa: E402
     IMAGE_TARGETS,
     HarnessPack,
     HarnessPackError,
@@ -50,7 +50,7 @@ from pi_glink.harnesses import (  # noqa: E402
 
 #: E2B 模板清单（生成产物）的相对路径与格式标记。
 TEMPLATES_PATH = "docker/e2b/templates.json"
-TEMPLATES_FORMAT = "pi-glink-e2b-templates/v1"
+TEMPLATES_FORMAT = "glink-harness-e2b-templates/v1"
 
 
 @dataclass(frozen=True)
@@ -66,11 +66,11 @@ class ImageBuild:
 
 
 #: 每个 ``[image].target`` 对应的 Dockerfile 与 E2B 模板。键集合必须与
-#: :data:`pi_glink.harnesses.IMAGE_TARGETS` 一致。
+#: :data:`glink_harness.harnesses.IMAGE_TARGETS` 一致。
 IMAGES: dict[str, ImageBuild] = {
     "pi-worker": ImageBuild(
         dockerfiles=("docker/Dockerfile.worker", "docker/e2b/Dockerfile.e2b"),
-        e2b_alias="pi-glink-worker",
+        e2b_alias="glink-harness-worker",
         e2b_dockerfile="docker/e2b/Dockerfile.e2b",
         e2b_builder="sdk",
     ),
@@ -190,7 +190,7 @@ def render_settings(text: str, pack: HarnessPack, where: str) -> str:
 def render_all(repo_root: Path, harnesses_dir: Path | None = None) -> dict[str, str]:
     """所有生成产物：``相对路径 -> 期望内容``（从当前文件与清单渲染，不写盘）。"""
     if set(IMAGES) != set(IMAGE_TARGETS):
-        raise GenerationError("生成器的镜像表与 pi_glink.harnesses.IMAGE_TARGETS 不一致")
+        raise GenerationError("生成器的镜像表与 glink_harness.harnesses.IMAGE_TARGETS 不一致")
     root = Path(repo_root)
     packs = load_packs(Path(harnesses_dir) if harnesses_dir else root / "harnesses")
     outputs: dict[str, str] = {}

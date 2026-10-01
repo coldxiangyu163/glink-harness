@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.kernel.subagent_artifacts import (
+from glink_harness.kernel.subagent_artifacts import (
     associate_children,
     parse_artifact_filename,
     read_meta_enrichment,
@@ -163,7 +163,7 @@ def test_pairing_zip_is_strict_so_a_broken_length_invariant_fails_loudly(
             return iter([[real[0]], [real[1]]])
 
     monkeypatch.setattr(
-        "pi_glink.kernel.subagent_artifacts._group_by_index", lambda _files: _LyingGroups()
+        "glink_harness.kernel.subagent_artifacts._group_by_index", lambda _files: _LyingGroups()
     )
     children = [_child(0, "researcher")]
     artifacts = _files([("researcher", 0, "meta"), ("researcher", 1, "meta")])

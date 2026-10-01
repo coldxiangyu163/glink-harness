@@ -1,6 +1,6 @@
-# @pi-glink/dsh-web-fetch-jina
+# @glink-harness/dsh-web-fetch-jina
 
-pi-glink 的 **out-of-tree dsh bundle**：给 DeepSeek Harness 的 `ctx.web` 注册一个
+glink-harness 的 **out-of-tree dsh bundle**：给 DeepSeek Harness 的 `ctx.web` 注册一个
 Jina Reader（`https://r.jina.ai/`）fetch provider（id `jina`），替代默认的本地 HTTP
 provider（id `http`）。替代动机是 GLINK-DSH-01 的根因：`dsh-web-fetch-http` 在
 「目标主机只有 AAAA + 运行环境无 IPv6 出口」时让一次 socket `'error'` 升级为未捕获异常，
@@ -15,7 +15,7 @@ provider（id `http`）。替代动机是 GLINK-DSH-01 的根因：`dsh-web-fetc
   不静默回退到崩溃面）、把 `web.fetchProvider` 指向 `jina`；另把 `tool-web.fetchTimeoutMs`
   提到 60s（Jina 读 PDF/JS 页面常超过 30s 默认 fetch 预算）。
 * **交付**：bundle 由两个 ACP 镜像在构建期装进 dsh 安装自身的
-  `node_modules/@pi-glink/dsh-web-fetch-jina`（`resolveBundleDir` 的第一个解析锚点）；
+  `node_modules/@glink-harness/dsh-web-fetch-jina`（`resolveBundleDir` 的第一个解析锚点）；
   每 run 的 ACP profile 清单由 `harnesses/dsh/home/.dsh/profiles/acp/package.json` 提供
   （覆盖层只带清单，代码随镜像重建更新，避免追问继承旧副本）。细节与验证见
   `docs/acp-integration-notes.md` §19。
@@ -29,7 +29,7 @@ provider（id `http`）。替代动机是 GLINK-DSH-01 的根因：`dsh-web-fetc
 | `timeoutMs` | `60000` | provider 兜底超时；模型侧 `tool-web.fetchTimeoutMs` 先到期 |
 | `maxResponseBytes` | `5000000` | 响应体上限（JSON 信封必须完整，超限即 `WEB_FETCH_TOO_LARGE`） |
 | `maxBodyChars` | `100000` | 解码后正文上限，超出截断并置 `truncated` |
-| `userAgent` | `pi-glink-dsh-web-fetch-jina/0.1.0` | 发给 Jina 的 `User-Agent` |
+| `userAgent` | `glink-harness-dsh-web-fetch-jina/0.1.0` | 发给 Jina 的 `User-Agent` |
 
 ## 行为契约
 

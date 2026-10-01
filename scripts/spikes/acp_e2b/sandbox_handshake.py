@@ -31,12 +31,12 @@ sys.path.insert(0, str(REPO_ROOT / "host"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "spikes"))
 from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 
-from pi_glink.config import build_config  # noqa: E402
-from pi_glink.kernel.acp_env import prepare_acp_runtime  # noqa: E402
-from pi_glink.kernel.execution import ExecutionSpec  # noqa: E402
-from pi_glink.kernel.harness_acp import AcpHarnessFamily  # noqa: E402
-from pi_glink.kernel.sandbox import E2BSandbox  # noqa: E402
-from pi_glink.store import RunStore  # noqa: E402
+from glink_harness.config import build_config  # noqa: E402
+from glink_harness.kernel.acp_env import prepare_acp_runtime  # noqa: E402
+from glink_harness.kernel.execution import ExecutionSpec  # noqa: E402
+from glink_harness.kernel.harness_acp import AcpHarnessFamily  # noqa: E402
+from glink_harness.kernel.sandbox import E2BSandbox  # noqa: E402
+from glink_harness.store import RunStore  # noqa: E402
 
 #: The agents and the credential location each one reads (M2/M4/M5 measurement).
 AGENTS = {
@@ -121,8 +121,8 @@ def main(argv: list[str] | None = None) -> int:
     workdir = Path(tempfile.mkdtemp(prefix="glink-acp-e2b-handshake-"))
     packs = write_probe_pack(workdir / "probe", agent["command"])
     values = {
-        "PI_GLINK_HARNESS": PROBE_PACK_NAME,
-        "PI_GLINK_HARNESSES_DIR": str(packs),
+        "GLINK_HARNESS": PROBE_PACK_NAME,
+        "GLINK_HARNESSES_DIR": str(packs),
         "LOCAL_WEB_EXECUTOR": "e2b",
         "LOCAL_WEB_DATA_ROOT": str(workdir / "data"),
         "LOCAL_WEB_E2B_ACP_TEMPLATE": args.template,
@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         "E2B_API_KEY": api_key,
     }
     if credential:
-        values["PI_GLINK_ACP_CREDENTIAL_FILES"] = credential
+        values["GLINK_ACP_CREDENTIAL_FILES"] = credential
     config = build_config(values, REPO_ROOT)
     runtime = prepare_acp_runtime(config, runtime_dir=workdir / "acp-agent")
     result["runtime_home"] = str(runtime.home)

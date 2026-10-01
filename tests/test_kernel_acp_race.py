@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.kernel.acp_rpc import AcpClosed, AcpRpcClient
+from glink_harness.kernel.acp_rpc import AcpClosed, AcpRpcClient
 
 
 def _script(tmp_path: Path, name: str, source: str) -> Path:

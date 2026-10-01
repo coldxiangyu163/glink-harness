@@ -1,5 +1,5 @@
 /**
- * HTTP surface of the pi-glink host.
+ * HTTP surface of the glink-harness host.
  *
  * The browser talks to the same endpoints the smoke script uses; nothing here
  * knows about pi. Endpoint shapes are documented in README.md.
@@ -54,7 +54,7 @@ async function call(path, { method = 'GET', body = null, fetchImpl = globalThis.
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
-  if (method !== 'GET' && csrfToken) init.headers['X-Pi-Glink-CSRF'] = csrfToken;
+  if (method !== 'GET' && csrfToken) init.headers['X-Glink-Harness-CSRF'] = csrfToken;
   const response = await fetchImpl(path, init);
   const payload = await parse(response);
   if (!response.ok) {

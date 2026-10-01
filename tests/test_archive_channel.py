@@ -25,8 +25,8 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.egress import EgressProxy
-from pi_glink.kernel.archive_channel import (
+from glink_harness.egress import EgressProxy
+from glink_harness.kernel.archive_channel import (
     ARCHIVE_TOKEN_PREFIX,
     ArchiveChannel,
     ArchiveError,
@@ -547,7 +547,7 @@ def test_state_file_count_budget_is_enforced(tmp_path: Path) -> None:
 
 
 def test_the_default_state_budget_matches_the_inheritance_bounds() -> None:
-    from pi_glink.kernel import acp_env, archive_channel
+    from glink_harness.kernel import acp_env, archive_channel
 
     assert archive_channel.STATE_MAX_FILES == acp_env.INHERIT_MAX_FILES
     assert archive_channel.STATE_MAX_FILE_BYTES == acp_env.INHERIT_MAX_FILE_BYTES

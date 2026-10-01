@@ -21,7 +21,7 @@ if [[ -z "$python" || -z "$node" ]]; then
   exit 2
 fi
 
-scratch="$(mktemp -d "${TMPDIR:-/tmp}/pi-glink-check.XXXXXXXX")"
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/glink-harness-check.XXXXXXXX")"
 trap 'rm -rf -- "$scratch"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -158,17 +158,17 @@ run_check() {
 }
 
 printf '\n[SKIP] 外部标准库逐值对齐：不读取个人标准库，不计入本次通过范围。\n'
-# 前端事件常量由 host/pi_glink/event_schema.py 生成；生成物落后于 schema 即失败。
+# 前端事件常量由 host/glink_harness/event_schema.py 生成；生成物落后于 schema 即失败。
 run_check '事件 schema 生成物是最新的' "$python" scripts/gen-event-schema.py --check
 # 静态检查：规则集见 pyproject.toml [tool.ruff.lint]；缓存写隔离目录，不污染仓库。
 run_check '静态检查（ruff）' \
   "$python" -m ruff check --cache-dir "$scratch/ruff-cache" host scripts tests
 # 类型检查：范围与显式豁免见 pyproject.toml [tool.mypy]；缓存同样隔离。
 run_check '类型检查（mypy）' \
-  "$python" -m mypy --cache-dir "$scratch/mypy-cache" host/pi_glink
+  "$python" -m mypy --cache-dir "$scratch/mypy-cache" host/glink_harness
 run_check 'Python（含仓库边界和检查入口回归）' \
   "$python" -m pytest tests -ra -p no:cacheprovider -p pytest_cov \
-  --cov=host/pi_glink --cov-report= \
+  --cov=host/glink_harness --cov-report= \
   --basetemp="$scratch/pytest" \
   --deselect=tests/test_ui_tokens.py::test_ui_tokens_match_standard_library
 # 覆盖率总量 ratchet：实测总覆盖率不得低于 scripts/coverage-baseline.json 的基线。

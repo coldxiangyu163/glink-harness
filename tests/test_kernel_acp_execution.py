@@ -4,7 +4,7 @@ The runner-level ACP regressions (``test_kernel_acp_runner.py`` /
 ``test_kernel_acp_resume.py`` / ``test_kernel_acp_e2b.py``) exercise these
 adapters through ``RunManager`` with a real child process or a fake SDK. The
 tests here construct :class:`AcpExecutionAdapter` directly over a
-:class:`~pi_glink.kernel.sandbox.Sandbox` (the real in-process and Docker
+:class:`~glink_harness.kernel.sandbox.Sandbox` (the real in-process and Docker
 sandboxes, and a scripted remote sandbox plus a scripted
 ``AcpSandboxTransfer`` for the E2B shape) against a scripted in-process
 ``AcpRpcClient`` stand-in — no subprocess, no store, no HTTP — and pin the
@@ -33,12 +33,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from pi_glink.config import build_config
+from glink_harness.config import build_config
 
 from acp_pack import apply_acp_pack
-from pi_glink.kernel.acp_e2b_env import AcpStateRecovery
-from pi_glink.kernel.acp_env import AcpRuntime
-from pi_glink.kernel.acp_execution import (
+from glink_harness.kernel.acp_e2b_env import AcpStateRecovery
+from glink_harness.kernel.acp_env import AcpRuntime
+from glink_harness.kernel.acp_execution import (
     ACP_STDERR_TAIL_CHARS,
     ACP_STDERR_TAIL_LINE_CHARS,
     ACP_STDERR_TAIL_LINES,
@@ -46,16 +46,16 @@ from pi_glink.kernel.acp_execution import (
     _bounded_stderr_tail,
     compose_prompt,
 )
-from pi_glink.kernel.acp_rpc import (
+from glink_harness.kernel.acp_rpc import (
     AcpClosed,
     AcpError,
     AcpMethodNotFound,
     AcpRequestError,
 )
-from pi_glink.kernel.docker_env import CONTAINER_WORKSPACE, container_name_for
-from pi_glink.kernel.e2b_env import SANDBOX_WORKSPACE
-from pi_glink.kernel.execution import ExecutionSpec
-from pi_glink.kernel.sandbox import (
+from glink_harness.kernel.docker_env import CONTAINER_WORKSPACE, container_name_for
+from glink_harness.kernel.e2b_env import SANDBOX_WORKSPACE
+from glink_harness.kernel.execution import ExecutionSpec
+from glink_harness.kernel.sandbox import (
     CleanupReport,
     Launch,
     Sandbox,
@@ -364,7 +364,7 @@ def make_sandbox_adapter(
         transfer_kwargs.update(_kwargs)
         return transfer
 
-    monkeypatch.setattr("pi_glink.kernel.acp_execution.AcpSandboxTransfer", build_transfer)
+    monkeypatch.setattr("glink_harness.kernel.acp_execution.AcpSandboxTransfer", build_transfer)
     script_dict = dict(script or {})
 
     def factory(argv, **kwargs):
@@ -475,7 +475,7 @@ def test_session_info_records_the_negotiated_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     capabilities = {"loadSession": False, "sessionCapabilities": {"resume": {}}}
-    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
+    monkeypatch.setattr("glink_harness.kernel.sandbox.docker_available", lambda: True)
     adapter, _created, _log, _frames = make_adapter(
         tmp_path,
         script={"capabilities": capabilities, "session_id": "sess-9"},
@@ -499,7 +499,7 @@ def test_session_info_records_the_negotiated_session(
     # A first turn does not masquerade as a continuation.
     assert "resumed" not in payload and "resumeMethod" not in payload
     monkeypatch.setattr(
-        "pi_glink.kernel.sandbox.subprocess.run",
+        "glink_harness.kernel.sandbox.subprocess.run",
         lambda *args, **kwargs: type("R", (), {"returncode": 0, "stderr": ""})(),
     )
     adapter.close()
@@ -818,13 +818,13 @@ def test_close_reports_client_and_container_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     stopped: list[list[str]] = []
-    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
+    monkeypatch.setattr("glink_harness.kernel.sandbox.docker_available", lambda: True)
     adapter, _created, _log, _frames = make_adapter(
         tmp_path, script={"close_raises": True}, executor="docker"
     )
     name = container_name_for("unit-run")
     monkeypatch.setattr(
-        "pi_glink.kernel.sandbox.subprocess.run",
+        "glink_harness.kernel.sandbox.subprocess.run",
         lambda argv, **kwargs: stopped.append(list(argv))
         or type("R", (), {"returncode": 1, "stderr": "permission denied"})(),
     )
@@ -845,11 +845,11 @@ def test_close_reports_client_and_container_failures(
 def test_a_container_already_gone_is_not_a_teardown_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("pi_glink.kernel.sandbox.docker_available", lambda: True)
+    monkeypatch.setattr("glink_harness.kernel.sandbox.docker_available", lambda: True)
     adapter, _created, _log, _frames = make_adapter(tmp_path, executor="docker")
     name = container_name_for("unit-run")
     monkeypatch.setattr(
-        "pi_glink.kernel.sandbox.subprocess.run",
+        "glink_harness.kernel.sandbox.subprocess.run",
         lambda *args, **kwargs: type(
             "R", (), {"returncode": 1, "stderr": f"Error: No such container: {name}"}
         )(),
@@ -917,7 +917,7 @@ def test_the_allowlist_prefers_the_narrowest_allow_option(tmp_path: Path) -> Non
     adapter, _created, _log, frames = make_adapter(
         tmp_path,
         config_overrides={
-            "PI_GLINK_HARNESS": "acp",
+            "GLINK_HARNESS": "acp",
             "TEST_ACP_COMMAND": "agent --acp",
             "TEST_ACP_PERMISSION_ALLOW": "allow_once,allow_always",
         },
@@ -981,7 +981,7 @@ def test_sandbox_start_hands_the_archive_context_to_the_transfer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The frozen spec's archive endpoint/conversation reach the transfer."""
-    from pi_glink.kernel.archive_channel import ArchiveEndpoint
+    from glink_harness.kernel.archive_channel import ArchiveEndpoint
 
     adapter, sandbox, _created, _log, _frames, _ids = make_sandbox_adapter(
         tmp_path,
@@ -1147,7 +1147,7 @@ class _ReclaimTransfer:
         self.calls += 1
         if self.raises:
             raise RuntimeError("boom-after-agent-stop")
-        from pi_glink.kernel.acp_e2b_env import AcpStateRecovery
+        from glink_harness.kernel.acp_e2b_env import AcpStateRecovery
 
         return AcpStateRecovery(ok=self.ok, failures=() if self.ok else ("回收发布失败",))
 
@@ -1207,7 +1207,7 @@ def test_park_proceeds_to_parking_after_a_clean_post_close_reclaim(
         parked.append(kwargs)
         return Outcome()
 
-    monkeypatch.setattr("pi_glink.kernel.acp_execution.park_sandbox", fake_park)
+    monkeypatch.setattr("glink_harness.kernel.acp_execution.park_sandbox", fake_park)
     transfer = _ReclaimTransfer(ok=True)
     adapter = _park_adapter(tmp_path, transfer)
     payload = adapter._park_sandbox()

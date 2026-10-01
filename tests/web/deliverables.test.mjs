@@ -20,7 +20,7 @@ test('the run view renders declared files with description and a real per-index 
       ],
     }));
     dom.raf.shift()();
-    const section = collect(root, (node) => node.className?.includes('pi-deliverables'))[0];
+    const section = collect(root, (node) => node.className?.includes('glink-deliverables'))[0];
     assert.ok(section && !section.hidden);
     const anchors = collect(section, (node) => node.tagName === 'A');
     assert.equal(anchors.length, 3, 'open and download for valid file; no link for rejected file');
@@ -43,7 +43,7 @@ test('a historical run without declarations has no card section', () => {
   try {
     view.render(createRunState({ runId: 'old', status: 'finished', hasReport: true }));
     dom.raf.shift()();
-    assert.ok(collect(root, (node) => node.className?.includes('pi-deliverables'))[0].hidden);
+    assert.ok(collect(root, (node) => node.className?.includes('glink-deliverables'))[0].hidden);
   } finally {
     view.dispose();
     dom.restore();

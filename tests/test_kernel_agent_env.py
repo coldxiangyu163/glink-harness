@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink.config import ConfigError, build_config
-from pi_glink.harnesses import load_pack
-from pi_glink.kernel.agent_env import (
+from glink_harness.config import ConfigError, build_config
+from glink_harness.harnesses import load_pack
+from glink_harness.kernel.agent_env import (
     AUTH_FILENAME,
     IMAGE_PACKAGE_NODE_MODULES,
     PROVIDER_ID,
@@ -20,7 +20,7 @@ from pi_glink.kernel.agent_env import (
 )
 
 from harness_helpers import TEST_EGRESS_TOKEN, compose_launch, execution_spec, test_egress
-from pi_glink.kernel.sandbox import SANDBOXES
+from glink_harness.kernel.sandbox import SANDBOXES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -55,7 +55,7 @@ def _config(tmp_path: Path, template_dir: Path, **overrides: str):
     values.update(overrides)
     if values.get("LOCAL_WEB_EXECUTOR") == "e2b":
         # A sandbox reaches the egress proxy only through a public URL (ADR 0008).
-        values.setdefault("PI_GLINK_EGRESS_PUBLIC_URL", "https://egress.example.test")
+        values.setdefault("GLINK_EGRESS_PUBLIC_URL", "https://egress.example.test")
     return build_config(values, REPO_ROOT)
 
 
@@ -168,7 +168,7 @@ def test_removed_template_entry_and_credential_do_not_survive_a_rerender(
     tmp_path: Path, template_dir: Path
 ) -> None:
     """The old merge-copy kept stale extensions and credentials; replacing does not."""
-    config = _config(tmp_path, template_dir, PI_GLINK_WEB_SEARCH_KEY="exa-secret")
+    config = _config(tmp_path, template_dir, GLINK_WEB_SEARCH_KEY="exa-secret")
     run_dir = tmp_path / "runs" / "run-1"
     runtime = prepare_agent_dir(
         config,
@@ -236,7 +236,7 @@ def test_config_repr_does_not_leak_the_key(tmp_path: Path, template_dir: Path) -
 def test_web_search_grant_renders_the_token_and_the_egress_search_route(
     tmp_path: Path, template_dir: Path
 ) -> None:
-    config = _config(tmp_path, template_dir, PI_GLINK_WEB_SEARCH_KEY="exa-secret")
+    config = _config(tmp_path, template_dir, GLINK_WEB_SEARCH_KEY="exa-secret")
     runtime = _prepare(config, tmp_path, search=True)
     target = runtime.directory / WEB_SEARCH_FILENAME
     payload = json.loads(target.read_text(encoding="utf-8"))
@@ -249,10 +249,10 @@ def test_web_search_grant_renders_the_token_and_the_egress_search_route(
 def test_operator_web_search_file_is_no_longer_read(
     tmp_path: Path, template_dir: Path
 ) -> None:
-    """``PI_GLINK_WEB_SEARCH_CONFIG`` / ``~/.pi/web-search.json`` are gone (ADR 0008)."""
+    """``GLINK_WEB_SEARCH_CONFIG`` / ``~/.pi/web-search.json`` are gone (ADR 0008)."""
     source = tmp_path / "operator-web-search.json"
     source.write_text('{"braveApiKey": "BSA_operator"}\n', encoding="utf-8")
-    config = _config(tmp_path, template_dir, PI_GLINK_WEB_SEARCH_CONFIG=str(source))
+    config = _config(tmp_path, template_dir, GLINK_WEB_SEARCH_CONFIG=str(source))
     runtime = _prepare(config, tmp_path)
     assert not (runtime.directory / WEB_SEARCH_FILENAME).exists()
     assert config.has_web_search_key is False

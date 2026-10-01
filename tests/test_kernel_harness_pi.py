@@ -13,10 +13,10 @@ from pathlib import Path
 import pytest
 
 from acp_pack import write_acp_pack
-from pi_glink.config import ConfigError, HostConfig, build_config
-from pi_glink.kernel.agent_env import RunCredentials
-from pi_glink.kernel.harness import select_family
-from pi_glink.store import CANCELLED, FAILED, FINISHED, RunStore, RunSpec
+from glink_harness.config import ConfigError, HostConfig, build_config
+from glink_harness.kernel.agent_env import RunCredentials
+from glink_harness.kernel.harness import select_family
+from glink_harness.store import CANCELLED, FAILED, FINISHED, RunStore, RunSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"
@@ -29,14 +29,14 @@ def make_config(tmp_path: Path, harness: str = "pi") -> HostConfig:
         "OPENAI_MODEL": "test/model",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
-        "PI_GLINK_HARNESS": harness,
+        "GLINK_HARNESS": harness,
     }
     if harness == "acp":
         packs = write_acp_pack(
             tmp_path, f"{sys.executable} {FAKE_ACP} --config settings.json"
         )
-        values["PI_GLINK_HARNESS"] = "dsh"
-        values["PI_GLINK_HARNESSES_DIR"] = str(packs)
+        values["GLINK_HARNESS"] = "dsh"
+        values["GLINK_HARNESSES_DIR"] = str(packs)
     return build_config(values, REPO_ROOT)
 
 

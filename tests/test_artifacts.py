@@ -25,13 +25,13 @@ from pathlib import Path
 
 import pytest
 
-from pi_glink import artifacts as artifacts_module
-from pi_glink.artifacts import ArtifactError, ArtifactMissing, ArtifactTree
-from pi_glink.config import build_config
-from pi_glink.events import EventBus
-from pi_glink.kernel.rpc import PiRpcClient
-from pi_glink.runs.runner import RunManager
-from pi_glink.store import FINISHED, RunStore
+from glink_harness import artifacts as artifacts_module
+from glink_harness.artifacts import ArtifactError, ArtifactMissing, ArtifactTree
+from glink_harness.config import build_config
+from glink_harness.events import EventBus
+from glink_harness.kernel.rpc import PiRpcClient
+from glink_harness.runs.runner import RunManager
+from glink_harness.store import FINISHED, RunStore
 from store_helpers import events_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -369,7 +369,7 @@ def test_symlinked_report_is_rejected_and_the_target_is_untouched(tmp_path: Path
 def test_oversized_report_is_rejected_not_served(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("pi_glink.runs.limits.REPORT_MAX_BYTES", 64)
+    monkeypatch.setattr("glink_harness.runs.limits.REPORT_MAX_BYTES", 64)
     config = _config(tmp_path)
     manager, _store = _manager(config, tmp_path)
     record = manager.start("超大报告")

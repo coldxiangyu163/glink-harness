@@ -107,13 +107,13 @@ test('current and historical run views keep only plan-update rows, never a docke
     view.render(model); env.flush();
     assert.equal(chat.children.length, 1, 'a plan must not consume space above the conversation');
     assert.equal(chat.children[0], scroll);
-    assert.equal(env.root.querySelector('.pi-todo-panel'), null);
-    assert.equal(env.root.querySelector('.pi-todo-list'), null);
-    assert.deepEqual(env.root.querySelectorAll('.pi-plan-update').map(row => row.textContent), ['计划更新', '计划更新']);
-    assert.equal(env.root.querySelectorAll('.pi-tool').length, 0, 'no repeated todo snapshots in tool cards');
+    assert.equal(env.root.querySelector('.glink-todo-panel'), null);
+    assert.equal(env.root.querySelector('.glink-todo-list'), null);
+    assert.deepEqual(env.root.querySelectorAll('.glink-plan-update').map(row => row.textContent), ['计划更新', '计划更新']);
+    assert.equal(env.root.querySelectorAll('.glink-tool').length, 0, 'no repeated todo snapshots in tool cards');
     const pastRoot = document.createElement('div');
     const past = createRunView({ root: pastRoot }); past.render(model); env.flush();
-    assert.equal(pastRoot.querySelector('.pi-todo-list'), null, 'past turns also remain a lightweight conversation');
+    assert.equal(pastRoot.querySelector('.glink-todo-list'), null, 'past turns also remain a lightweight conversation');
     past.dispose(); view.dispose();
     assert.equal(chat.children.length, 1, 'dispose must not touch the conversation scroller');
   } finally { env.restore(); }
@@ -125,14 +125,14 @@ test('progress panel owns one latest task timeline, not one list per plan update
     const panel = createProgressPanel({ root: env.root });
     const first = reduceAll(createRunState({ runId: 'todo-fixture' }), frames.slice(0, 2));
     panel.render(first);
-    const list = env.root.querySelector('.pi-todo-list');
+    const list = env.root.querySelector('.glink-todo-list');
     assert.ok(list, 'the task list belongs to the progress surface');
-    assert.deepEqual(list.querySelectorAll('.pi-todo-item').map(row => row.textContent),
+    assert.deepEqual(list.querySelectorAll('.glink-todo-item').map(row => row.textContent),
       ['进行中核验资料', '待开始整理报告']);
-    assert.equal(env.root.querySelector('.pi-todo-panel'), null, 'no card inside a card');
+    assert.equal(env.root.querySelector('.glink-todo-panel'), null, 'no card inside a card');
     panel.render(reduceAll(first, frames.slice(2)));
-    assert.equal(env.root.querySelector('.pi-todo-list'), list);
-    assert.deepEqual(list.querySelectorAll('.pi-todo-item').map(row => [row.dataset.todoStatus, row.textContent]), [
+    assert.equal(env.root.querySelector('.glink-todo-list'), list);
+    assert.deepEqual(list.querySelectorAll('.glink-todo-item').map(row => [row.dataset.todoStatus, row.textContent]), [
       ['completed', '已完成核验资料'], ['in_progress', '进行中查证来源'], ['in_progress', '进行中整理报告'],
     ]);
     assert.match(env.root.querySelector('.progress-section-meta').textContent, /1\/3 项已完成.*2 项进行中/);
@@ -151,19 +151,19 @@ test('timeline keeps TaskRows rings, truthful accessibility and the existing pro
     const body = env.root.querySelector('.progress-steps-body');
     assert.equal(head.getAttribute('aria-controls'), body.id);
     assert.equal(head.getAttribute('aria-label'), '收起进度');
-    const running = env.root.querySelector('.pi-todo-item .progress-marker');
+    const running = env.root.querySelector('.glink-todo-item .progress-marker');
     assert.equal(running.getAttribute('role'), 'progressbar');
     assert.equal(running.getAttribute('aria-label'), '核验资料进度');
     assert.equal(running.getAttribute('aria-valuenow'), null, 'no fabricated percentage');
     assert.equal(running.querySelectorAll('circle').length, 2);
-    assert.equal(env.root.querySelector('.pi-todo-state').classList.contains('sr-only'), true);
+    assert.equal(env.root.querySelector('.glink-todo-state').classList.contains('sr-only'), true);
     head.click();
     assert.equal(head.getAttribute('aria-expanded'), 'false');
     assert.equal(head.getAttribute('aria-label'), '展开进度');
     assert.equal(body.hidden, true);
     panel.render(reduceAll(first, frames.slice(2)));
     assert.equal(body.hidden, true, 'incoming replacement preserves the reader fold');
-    assert.equal(env.root.querySelector('.pi-todo-item .icon').dataset.icon, 'check');
+    assert.equal(env.root.querySelector('.glink-todo-item .icon').dataset.icon, 'check');
     head.click(); assert.equal(body.hidden, false);
     env.root.querySelector('.progress-close').click(); assert.equal(closed, 1);
   } finally { env.restore(); }
@@ -177,9 +177,9 @@ test('empty replacement and a different run clear tasks; no-source runs retain a
       { ...frames[0], seq: 1, payload: { ...frames[0].payload, toolName: 'bash', presentation: 'execute', args: { command: 'ls' } } },
     ]);
     panel.render(plain);
-    const list = env.root.querySelector('.pi-todo-list');
+    const list = env.root.querySelector('.glink-todo-list');
     assert.equal(list.hidden, true);
-    assert.match(env.root.querySelector('.progress-steps:not(.pi-todo-list)').textContent, /执行.*ls/);
+    assert.match(env.root.querySelector('.progress-steps:not(.glink-todo-list)').textContent, /执行.*ls/);
     const populated = reduceAll(createRunState({ runId: 'todo-fixture' }), frames);
     panel.render(populated); assert.equal(list.hidden, false);
     const emptied = reduceAll(populated, [
@@ -187,8 +187,8 @@ test('empty replacement and a different run clear tasks; no-source runs retain a
     ]);
     panel.render(emptied);
     assert.equal(list.hidden, true, 'latest empty replacement clears the task source');
-    assert.equal(list.querySelectorAll('.pi-todo-item').length, 0);
-    assert.equal(env.root.querySelector('.progress-steps:not(.pi-todo-list)').hidden, true, 'plan calls are not duplicated as execution tasks');
+    assert.equal(list.querySelectorAll('.glink-todo-item').length, 0);
+    assert.equal(env.root.querySelector('.progress-steps:not(.glink-todo-list)').hidden, true, 'plan calls are not duplicated as execution tasks');
     panel.render(populated);
     panel.render(createRunState({ runId: 'legacy', status: 'finished' }));
     assert.equal(list.hidden, true, 'opening another run cannot inherit the previous plan');
@@ -204,7 +204,7 @@ test('terminal run does not pretend unfinished plan items are done or still runn
       { type: 'run_cancelled', v: 1, runId: 'todo-fixture', seq: 5, ts: 5, payload: { status: 'cancelled' } },
     ]);
     panel.render(stopped);
-    const rows = env.root.querySelectorAll('.pi-todo-item');
+    const rows = env.root.querySelectorAll('.glink-todo-item');
     assert.deepEqual(rows.map(row => row.dataset.status), ['done', 'stopped', 'stopped']);
     assert.match(rows[1].textContent, /未完成查证来源/);
     assert.doesNotMatch(env.root.querySelector('.progress-section-meta').textContent, /进行中/);

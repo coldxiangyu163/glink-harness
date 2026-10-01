@@ -88,8 +88,8 @@ def _promote(alias: str, source_tag: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="构建 pi-glink 的 E2B 模板")
-    parser.add_argument("--alias", default=os.environ.get("PI_GLINK_E2B_TEMPLATE", _TEMPLATE["alias"]))
+    parser = argparse.ArgumentParser(description="构建 glink-harness 的 E2B 模板")
+    parser.add_argument("--alias", default=os.environ.get("GLINK_E2B_TEMPLATE", _TEMPLATE["alias"]))
     parser.add_argument("--cpu", type=int, default=_TEMPLATE["cpu_count"])
     parser.add_argument("--memory-mb", type=int, default=_TEMPLATE["memory_mb"])
     parser.add_argument(

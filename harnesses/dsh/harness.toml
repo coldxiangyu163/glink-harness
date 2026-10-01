@@ -5,7 +5,7 @@
 # 由 scripts/generate-pack-artifacts.py 从下方 [[image.packages]] 生成。
 #
 # 权限保持 fail-closed；主模型与 effort 经 ACP session_config 应用并核验，值只来自 .env。
-format = "pi-glink-harness/v2"
+format = "glink-harness/v2"
 name = "dsh"
 family = "acp"
 

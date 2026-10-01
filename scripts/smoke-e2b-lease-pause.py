@@ -29,7 +29,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "host"))
 
-MARKER = "/home/user/.pi-glink-state-generation"
+MARKER = "/home/user/.glink-harness-state-generation"
 CONVERSATION = "smoke-conv"
 GENERATION = 7
 

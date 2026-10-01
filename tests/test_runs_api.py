@@ -14,10 +14,10 @@ from urllib.parse import quote
 
 import pytest
 
-from pi_glink.store import RunSpec
-from pi_glink.app import PiGlinkServer, create_server
-from pi_glink.config import build_config
-from pi_glink.kernel.rpc import PiRpcClient
+from glink_harness.store import RunSpec
+from glink_harness.app import GlinkHarnessServer, create_server
+from glink_harness.config import build_config
+from glink_harness.kernel.rpc import PiRpcClient
 from store_helpers import finish
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -65,7 +65,7 @@ def server(tmp_path: Path):
 
 
 def request(
-    server: PiGlinkServer, path: str, *, method: str = "GET", body: dict | None = None,
+    server: GlinkHarnessServer, path: str, *, method: str = "GET", body: dict | None = None,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], bytes]:
     port = server.server_address[1]
@@ -138,7 +138,7 @@ def test_refused_local_post_does_not_poison_keep_alive(server):
         connection.close()
 
 
-def wait_for_terminal(server: PiGlinkServer, run_id: str, timeout: float = 30.0) -> dict:
+def wait_for_terminal(server: GlinkHarnessServer, run_id: str, timeout: float = 30.0) -> dict:
     deadline = time.monotonic() + timeout
     latest: dict = {}
     while time.monotonic() < deadline:
@@ -150,7 +150,7 @@ def wait_for_terminal(server: PiGlinkServer, run_id: str, timeout: float = 30.0)
     return latest
 
 
-def _run_dirs(server: PiGlinkServer) -> list[str]:
+def _run_dirs(server: GlinkHarnessServer) -> list[str]:
     runs = server.config.data_root / "runs"
     return sorted(path.name for path in runs.glob("*")) if runs.is_dir() else []
 
@@ -168,7 +168,7 @@ def _run_dirs(server: PiGlinkServer) -> list[str]:
     ],
 )
 def test_slash_commands_outside_the_template_allowlist_are_refused(
-    server: PiGlinkServer, prompt: str
+    server: GlinkHarnessServer, prompt: str
 ) -> None:
     """GLINK-SUB-02 评审修复：客户端输入不能绕过 tool_call 守卫发起 detached run。
 
@@ -192,7 +192,7 @@ def test_slash_commands_outside_the_template_allowlist_are_refused(
     assert _run_dirs(server) == before, "拒绝必须早于 run 目录创建"
 
 
-def test_template_commands_and_ordinary_prompts_still_run(server: PiGlinkServer) -> None:
+def test_template_commands_and_ordinary_prompts_still_run(server: GlinkHarnessServer) -> None:
     for prompt in (
         "/deepresearch 跨境资金监管新规",
         "正文里出现 /run --bg 也只是普通文本",
@@ -253,7 +253,7 @@ def test_followup_prompts_pass_the_same_gate(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
-def test_start_run_returns_a_run_view(server: PiGlinkServer) -> None:
+def test_start_run_returns_a_run_view(server: GlinkHarnessServer) -> None:
     status, _headers, raw = request(
         server, "/api/runs", method="POST", body={"prompt": "写一份最小报告"}
     )
@@ -351,7 +351,7 @@ def test_followup_refuses_a_kernel_that_did_not_resume_parent_session(tmp_path: 
         thread.join(timeout=5)
 
 
-def test_followup_without_a_run_owned_session_is_rejected(server: PiGlinkServer) -> None:
+def test_followup_without_a_run_owned_session_is_rejected(server: GlinkHarnessServer) -> None:
     status, _, raw = request(server, "/api/runs", method="POST", body={"prompt": "原问题"})
     parent_id = json.loads(raw)["run"]["runId"]
     wait_for_terminal(server, parent_id)
@@ -368,7 +368,7 @@ def test_followup_without_a_run_owned_session_is_rejected(server: PiGlinkServer)
     assert json.loads(raw)["error"] == "invalid_request"
 
 
-def test_runs_are_listed_and_readable(server: PiGlinkServer) -> None:
+def test_runs_are_listed_and_readable(server: GlinkHarnessServer) -> None:
     _status, _headers, raw = request(server, "/api/runs", method="POST", body={"prompt": "列我"})
     run_id = json.loads(raw)["run"]["runId"]
     wait_for_terminal(server, run_id)
@@ -383,7 +383,7 @@ def test_runs_are_listed_and_readable(server: PiGlinkServer) -> None:
     assert json.loads(raw)["run"]["runId"] == run_id
 
 
-def test_report_is_served_as_markdown(server: PiGlinkServer) -> None:
+def test_report_is_served_as_markdown(server: GlinkHarnessServer) -> None:
     _status, _headers, raw = request(server, "/api/runs", method="POST", body={"prompt": "报告"})
     run_id = json.loads(raw)["run"]["runId"]
     wait_for_terminal(server, run_id)
@@ -394,7 +394,7 @@ def test_report_is_served_as_markdown(server: PiGlinkServer) -> None:
     assert "fake pi" in body.decode("utf-8")
 
 
-def test_children_endpoint_lists_the_runs_child_documents(server: PiGlinkServer) -> None:
+def test_children_endpoint_lists_the_runs_child_documents(server: GlinkHarnessServer) -> None:
     """GLINK-SUB-R1: GET /api/runs/{id}/children serves the authoritative
     child.json documents (§3.5); a run without a children/ tree has none."""
     _status, _headers, raw = request(server, "/api/runs", method="POST", body={"prompt": "子代理"})
@@ -441,7 +441,7 @@ def test_children_endpoint_lists_the_runs_child_documents(server: PiGlinkServer)
     assert body["children"][1]["status"] == "interrupted"
 
 
-def test_children_endpoint_404s_like_the_run_detail(server: PiGlinkServer) -> None:
+def test_children_endpoint_404s_like_the_run_detail(server: GlinkHarnessServer) -> None:
     status, _headers, raw = request(server, "/api/runs/nosuchrun/children")
     assert status == 404
     body = json.loads(raw)
@@ -469,13 +469,13 @@ def test_missing_report_is_a_404(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
-def test_empty_prompt_is_rejected(server: PiGlinkServer) -> None:
+def test_empty_prompt_is_rejected(server: GlinkHarnessServer) -> None:
     status, _headers, raw = request(server, "/api/runs", method="POST", body={"prompt": "   "})
     assert status == 400
     assert json.loads(raw)["error"] == "invalid_request"
 
 
-def test_non_json_body_is_rejected(server: PiGlinkServer) -> None:
+def test_non_json_body_is_rejected(server: GlinkHarnessServer) -> None:
     port = server.server_address[1]
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/api/runs", data=b"not json", method="POST",
@@ -488,7 +488,7 @@ def test_non_json_body_is_rejected(server: PiGlinkServer) -> None:
         assert error.code == 400
 
 
-def test_second_run_while_busy_is_a_conflict(server: PiGlinkServer) -> None:
+def test_second_run_while_busy_is_a_conflict(server: GlinkHarnessServer) -> None:
     _status, _headers, raw = request(
         server, "/api/runs", method="POST", body={"prompt": "这一轮不要结束 NOSETTLE"}
     )
@@ -583,7 +583,7 @@ def test_event_stream_replays_runs_from_an_earlier_host_process(tmp_path: Path) 
         thread.join(timeout=5)
 
 
-def test_event_stream_replays_finished_runs(server: PiGlinkServer) -> None:
+def test_event_stream_replays_finished_runs(server: GlinkHarnessServer) -> None:
     _status, _headers, raw = request(server, "/api/runs", method="POST", body={"prompt": "流"})
     run_id = json.loads(raw)["run"]["runId"]
     wait_for_terminal(server, run_id)
@@ -604,7 +604,7 @@ def test_event_stream_replays_finished_runs(server: PiGlinkServer) -> None:
 # -- R5: the stop endpoint reports the run's commit point -------------------------
 
 
-def test_stop_answers_follow_the_committed_state(server: PiGlinkServer) -> None:
+def test_stop_answers_follow_the_committed_state(server: GlinkHarnessServer) -> None:
     """R5 consumer contract: accepted → 200; past the commit → 409 with the
     committed status; unknown run → 404. The WIP answered 200 for all three."""
     _status, _headers, raw = request(server, "/api/runs", method="POST", body={"prompt": "已结束的 run"})
@@ -631,7 +631,7 @@ def test_stop_answers_follow_the_committed_state(server: PiGlinkServer) -> None:
 def test_start_is_refused_while_a_release_is_unconfirmed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from pi_glink.kernel.execution import (  # noqa: PLC0415
+    from glink_harness.kernel.execution import (  # noqa: PLC0415
         ArtifactRecovery,
         CleanupReport,
         ExecutionAdapter,
@@ -652,7 +652,7 @@ def test_start_is_refused_while_a_release_is_unconfirmed(
             return CleanupReport(released=False, failures=("synthetic kill failed",))
         def cancel(self): pass
 
-    monkeypatch.setattr("pi_glink.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: LeakingAdapter())
+    monkeypatch.setattr("glink_harness.kernel.harness_pi.PiExecutionAdapter", lambda spec, **kwargs: LeakingAdapter())
     instance = create_server(make_config(tmp_path), client_factory=fake_factory())
     thread = threading.Thread(target=instance.serve_forever, daemon=True)
     thread.start()
@@ -675,7 +675,7 @@ def test_start_is_refused_while_a_release_is_unconfirmed(
 # -- R6: reports written before host copies existed stay readable ----------------
 
 
-def _workspace_report_record(server: PiGlinkServer, run_id: str, *, report: str | None = None,
+def _workspace_report_record(server: GlinkHarnessServer, run_id: str, *, report: str | None = None,
                              report_path: Path | None = None) -> Path:
     """A finished record whose report_path points outside the host artifact copy."""
     store = server.store
@@ -690,7 +690,7 @@ def _workspace_report_record(server: PiGlinkServer, run_id: str, *, report: str 
     return target
 
 
-def _view(server: PiGlinkServer, run_id: str) -> dict:
+def _view(server: GlinkHarnessServer, run_id: str) -> dict:
     detail = json.loads(request(server, f"/api/runs/{run_id}")[2])["run"]
     listed = next(r for r in json.loads(request(server, "/api/runs")[2])["runs"] if r["runId"] == run_id)
     assert detail["hasReport"] == listed["hasReport"]
@@ -698,7 +698,7 @@ def _view(server: PiGlinkServer, run_id: str) -> dict:
 
 
 def test_only_the_host_artifact_copy_is_served_as_the_report(
-    server: PiGlinkServer, tmp_path: Path
+    server: GlinkHarnessServer, tmp_path: Path
 ) -> None:
     """report_path outside runs/<id>/artifacts/report.md never reopens a file.
 
@@ -724,7 +724,7 @@ def test_only_the_host_artifact_copy_is_served_as_the_report(
     assert external.read_text(encoding="utf-8") == "# 外部文件\n"
 
 
-def test_a_host_artifact_behind_a_directory_link_is_not_served(server: PiGlinkServer, tmp_path: Path) -> None:
+def test_a_host_artifact_behind_a_directory_link_is_not_served(server: GlinkHarnessServer, tmp_path: Path) -> None:
     """R2 consumer path: the artifacts directory swapped for a link."""
     outside = tmp_path / "outside-artifacts"
     outside.mkdir()
@@ -737,7 +737,7 @@ def test_a_host_artifact_behind_a_directory_link_is_not_served(server: PiGlinkSe
     assert request(server, "/api/runs/swapartifact/report")[0] == 404
 
 
-def test_child_artifact_download_serves_only_the_child_directory(server: PiGlinkServer) -> None:
+def test_child_artifact_download_serves_only_the_child_directory(server: GlinkHarnessServer) -> None:
     """GLINK-SUB-R2: GET /api/runs/{id}/children/{n}/{file} serves a regular
     file directly inside children/<n>/, redacted on the way out; anything else
     is the same 404, and the owner rules are the run detail's."""
@@ -774,7 +774,7 @@ def test_child_artifact_download_serves_only_the_child_directory(server: PiGlink
 
 
 def _seed_history(
-    server: PiGlinkServer, count: int, *, prefix: str = "hist", tenant_id: str | None = None
+    server: GlinkHarnessServer, count: int, *, prefix: str = "hist", tenant_id: str | None = None
 ) -> list[str]:
     """Commit ``count`` finished runs, oldest first, and return their ids.
 
@@ -797,7 +797,7 @@ def _seed_history(
     return run_ids
 
 
-def _page(server: PiGlinkServer, query: str = "") -> dict:
+def _page(server: GlinkHarnessServer, query: str = "") -> dict:
     status, _headers, raw = request(server, f"/api/runs{query}")
     assert status == 200, raw
     return json.loads(raw)
@@ -808,7 +808,7 @@ def _cursor_query(cursor: str, limit: int = 50) -> str:
 
 
 def test_run_history_is_paged_newest_first_with_a_stable_keyset_cursor(
-    server: PiGlinkServer,
+    server: GlinkHarnessServer,
 ) -> None:
     """First/tail page and cursor stability: every run appears exactly once.
 
@@ -839,7 +839,7 @@ def test_run_history_is_paged_newest_first_with_a_stable_keyset_cursor(
 
 
 def test_without_parameters_the_first_page_is_the_window_it_always_was(
-    server: PiGlinkServer,
+    server: GlinkHarnessServer,
 ) -> None:
     """Backwards compatibility: no `limit`/`cursor` still means newest-100."""
     _seed_history(server, 130)
@@ -850,7 +850,7 @@ def test_without_parameters_the_first_page_is_the_window_it_always_was(
     assert page["hasMore"] is True and page["nextCursor"]
 
 
-def test_a_run_created_between_pages_never_shifts_the_window(server: PiGlinkServer) -> None:
+def test_a_run_created_between_pages_never_shifts_the_window(server: GlinkHarnessServer) -> None:
     """Keyset, not offset: a new run at the top must not re-count the second page."""
     _seed_history(server, 120)
     expected = [record.run_id for record in server.store.list(limit=None)]
@@ -875,7 +875,7 @@ def test_a_run_created_between_pages_never_shifts_the_window(server: PiGlinkServ
     assert fresh["runs"][0]["runId"] == "fresh000001"
 
 
-def test_pagination_edges_empty_single_and_one_row_pages(server: PiGlinkServer) -> None:
+def test_pagination_edges_empty_single_and_one_row_pages(server: GlinkHarnessServer) -> None:
     empty = _page(server)
     assert empty == {"runs": [], "nextCursor": None, "hasMore": False}
 
@@ -892,26 +892,26 @@ def test_pagination_edges_empty_single_and_one_row_pages(server: PiGlinkServer) 
 
 
 @pytest.mark.parametrize("query", ["?limit=0", "?limit=-3", "?limit=abc", "?limit=100000"])
-def test_an_out_of_range_page_size_is_refused(server: PiGlinkServer, query: str) -> None:
+def test_an_out_of_range_page_size_is_refused(server: GlinkHarnessServer, query: str) -> None:
     status, _headers, raw = request(server, f"/api/runs{query}")
     assert status == 400
     assert json.loads(raw)["error"] == "invalid_limit"
 
 
 @pytest.mark.parametrize("query", ["?cursor=not-a-cursor", "?cursor=!!", "?cursor=e30"])
-def test_a_malformed_cursor_is_refused(server: PiGlinkServer, query: str) -> None:
+def test_a_malformed_cursor_is_refused(server: GlinkHarnessServer, query: str) -> None:
     status, _headers, raw = request(server, f"/api/runs{query}")
     assert status == 400
     assert json.loads(raw)["error"] == "invalid_cursor"
 
 
-def test_a_blank_cursor_is_the_first_page(server: PiGlinkServer) -> None:
+def test_a_blank_cursor_is_the_first_page(server: GlinkHarnessServer) -> None:
     _seed_history(server, 3, prefix="blank")
     expected = [record.run_id for record in server.store.list(limit=None)]
     assert [item["runId"] for item in _page(server, "?limit=2&cursor=")["runs"]] == expected[:2]
 
 
-def test_paging_never_crosses_a_tenant_boundary(server: PiGlinkServer) -> None:
+def test_paging_never_crosses_a_tenant_boundary(server: GlinkHarnessServer) -> None:
     """The cursor and the tenant filter share one WHERE clause (M9)."""
     _seed_history(server, 4, prefix="alpha", tenant_id="tenant-alpha")
     _seed_history(server, 3, prefix="beta", tenant_id="tenant-beta")
@@ -955,7 +955,7 @@ def test_listening_loopback_origins_remain_trusted(server, hostname):
 
 
 def test_reverse_proxy_origin_comes_from_frozen_config_not_host(tmp_path):
-    instance = create_server(make_config(tmp_path, PI_GLINK_PUBLIC_ORIGIN="https://glink.example.test"),
+    instance = create_server(make_config(tmp_path, GLINK_PUBLIC_ORIGIN="https://glink.example.test"),
                              client_factory=fake_factory())
     thread = threading.Thread(target=instance.serve_forever, daemon=True)
     thread.start()
@@ -1023,7 +1023,7 @@ def test_a_stalled_request_releases_its_connection(server, monkeypatch):
     新义务：每次 socket 读写有期限（``REQUEST_SOCKET_TIMEOUT_SECONDS``），超时即关闭连接。"""
     import socket
 
-    from pi_glink import app
+    from glink_harness import app
 
     # The shipped handler carries a finite deadline (the stdlib default is None).
     assert isinstance(app.HostRequestHandler.timeout, (int, float))
