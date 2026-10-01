@@ -401,7 +401,7 @@ node tests/browser/ui-parity.mjs --base-url http://127.0.0.1:7861   # 26 个角�
 | `PI_GLINK_METHODOLOGY_DIR` | `<repo>/methodology` | 方法论根（`work-agreement.md` 与 `blueprints/`）放在别处时 |
 | `PI_GLINK_BLUEPRINTS_DIR` | `<methodology>/blueprints` | 蓝图目录单独覆盖时；目录缺失不是启动错误，只表示可用蓝图集合为空 |
 | `LOCAL_WEB_TASK_TIMEOUT_SECONDS` | `1800` | 单次 run 的整体超时（秒）；题型明显更长/更短时。E2B 沙箱寿命按它 + 300s 取值 |
-| `OPENAI_MODEL` | 空 | 部署主模型：pi 保持模型 id 原语义；dsh 必填，按 agent 广告的模型 id 唯一匹配，如 `openai/gpt-6-sol`，有歧义时用 `openrouter/openai/gpt-6-sol` 全路由消歧；不按首个斜杠猜 provider |
+| `OPENAI_MODEL` | 空 | 部署主模型：pi 保持模型 id 原语义；dsh 必填，按 agent 广告的模型 id 唯一匹配，如 `openai/gpt-5.6-sol`，有歧义时用 `openrouter/openai/gpt-5.6-sol` 全路由消歧；不按首个斜杠猜 provider |
 | `OPENAI_REASONING_EFFORT` | 空 | dsh 必填，如 `xhigh`，须由目标模型广告；不改 pi 现有 thinking 策略，未声明来源的包不消费；与输出 token 上限无关 |
 | `OPENAI_CONTEXT_WINDOW` | `400000` | pi 面模型元数据的上下文窗口；provider 窗口更小时 |
 | `OPENAI_MAX_TOKENS` | `65536` | pi 面模型元数据的输出上限；provider 上限更短时 |
