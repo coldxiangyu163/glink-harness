@@ -221,8 +221,48 @@ def repair_resume_home(home: Path | str, *, handle: Any = None) -> None:
         raise AcpStateCompatError("ACP 续接副本路径不可安全修补") from exc
 
 
+def validate_remote_home(home: str, handle: Any, *, create: bool = False) -> list[str]:
+    """Walk from the trusted sandbox '/' anchor using immediate entry kinds.
+
+    Only list a parent after that exact directory was verified. A symlink,
+    missing/ambiguous entry or failed lookup refuses traversal, before any
+    recursive listing, payload read or scratch write under HOME. Cold starts
+    may create missing directories one at a time, then verify the new entry;
+    rebooted hot targets must already exist. No realpath/stat call follows links.
+    """
+    parts = home.split("/")
+    if parts[0] != "" or any(part in ("", ".", "..") for part in parts[1:]):
+        raise AcpStateCompatError("ACP 续接副本状态根路径无效")
+    parent = "/"
+    directories = []
+
+    def matches(parent: str, child: str) -> list[Any]:
+        entries = handle.files.list(
+            parent, depth=1, request_timeout=E2B_REQUEST_TIMEOUT_SECONDS,
+        )
+        return [entry for entry in entries if str(entry.path) == child]
+
+    try:
+        for part in parts[1:]:
+            child = parent.rstrip("/") + "/" + part
+            entries = matches(parent, child)
+            if not entries and create:
+                handle.files.make_dir(child, request_timeout=E2B_REQUEST_TIMEOUT_SECONDS)
+                entries = matches(parent, child)
+            if len(entries) != 1 or _entry_kind(entries[0]) != "dir":
+                raise AcpStateCompatError("ACP 续接副本状态根含链接或未经核验的目录")
+            directories.append(child)
+            parent = child
+    except AcpStateCompatError:
+        raise
+    except Exception as exc:
+        raise AcpStateCompatError("ACP 续接副本状态根目录核验失败") from exc
+    return directories
+
+
 def _repair_remote(home: str, handle: Any) -> None:
     try:
+        validate_remote_home(home, handle)
         entries = handle.files.list(home, depth=5, request_timeout=E2B_REQUEST_TIMEOUT_SECONDS)
         if len(entries) > INHERIT_MAX_FILES * 5:
             raise AcpStateCompatError("ACP 续接副本条目数超过上限")
@@ -261,11 +301,14 @@ def _repair_remote(home: str, handle: Any) -> None:
 
 
 def _publish_remote(handle: Any, home: str, path: str, ancestors: list[str], data: bytes) -> None:
+    # Recheck the complete root chain before scratch I/O too; rename-time
+    # shell guards are a final fence, never permission for an earlier write.
+    roots = validate_remote_home(home, handle)
     temporary = path + ".acp15-" + uuid.uuid4().hex
     try:
         handle.files.write(temporary, data, request_timeout=E2B_REQUEST_TIMEOUT_SECONDS)
-        checks = [f"test ! -L {shlex.quote(p)}" for p in [home, *ancestors, path, temporary]]
-        directories = [f"test -d {shlex.quote(p)}" for p in [home, *ancestors]]
+        checks = [f"test ! -L {shlex.quote(p)}" for p in [*roots, *ancestors, path, temporary]]
+        directories = [f"test -d {shlex.quote(p)}" for p in [*roots, *ancestors]]
         files = [f"test -f {shlex.quote(p)}" for p in [path, temporary]]
         command = " && ".join([
             *checks, *directories, *files, shlex.join(["chmod", "0600", temporary]),

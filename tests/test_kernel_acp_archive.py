@@ -82,8 +82,8 @@ class _ChunkStream:
 class _Entry:
     def __init__(self, path: str, real: Path) -> None:
         self.path = path
-        self.type = "dir" if real.is_dir() else "file"
-        self.size = real.stat().st_size if real.is_file() else 0
+        self.type = "symlink" if real.is_symlink() else ("dir" if real.is_dir() else "file")
+        self.size = real.stat().st_size if self.type == "file" else 0
 
 
 class _Files:
@@ -116,6 +116,12 @@ class _Files:
         return _Info(self._real(path).stat().st_size)
 
     def list(self, path: str, depth: int = 1, **_: Any) -> list[_Entry]:
+        # This fake virtualizes /home/user as root, with trusted virtual
+        # ancestors. Immediate entry kinds model the SDK's no-follow lookup.
+        if path == "/":
+            return [_Entry("/home", self._sandbox.root.parent)]
+        if path == "/home":
+            return [_Entry("/home/user", self._sandbox.root)]
         base = self._real(path)
         found: list[_Entry] = []
         for child in sorted(base.rglob("*")):
@@ -145,9 +151,16 @@ class _Commands:
         # Sandbox paths mean nothing to a host shell: map the state root onto
         # the fake tree (the commands are host-constructed and quote every
         # argument, so the literal prefix can only be our own constant).
-        mapped = cmd.replace(
-            SANDBOX_ACP_HOME, str(self._sandbox.translate(SANDBOX_ACP_HOME))
-        )
+        # Map longest sandbox prefixes through placeholders, so replacing
+        # /home later cannot rewrite an already translated host path.
+        mapped = cmd
+        mappings = [(SANDBOX_ACP_HOME, self._sandbox.translate(SANDBOX_ACP_HOME)),
+                    ("/home/user/acp", self._sandbox.root / "acp"),
+                    ("/home/user", self._sandbox.root), ("/home", self._sandbox.root.parent)]
+        for index, (prefix, _real) in enumerate(mappings):
+            mapped = mapped.replace(prefix, f"__ACP_ROOT_{index}__")
+        for index, (_prefix, real) in enumerate(mappings):
+            mapped = mapped.replace(f"__ACP_ROOT_{index}__", str(real))
         self._sandbox.commands_run.append(mapped)
         completed = subprocess.run(
             ["bash", "-c", mapped],
@@ -172,6 +185,8 @@ class RealCommandFakeSandbox:
         self.sandbox_id = "fake-archive-sandbox"
 
     def translate(self, path: str) -> Path:
+        if path == "/home/user":
+            return self.root
         assert path.startswith("/home/user/")
         return self.root / path[len("/home/user/"):]
 

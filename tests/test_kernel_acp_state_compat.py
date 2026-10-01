@@ -221,11 +221,16 @@ class CompatCommands:
         if ".acp15-" not in command:
             return self.delegate.run(command, **kwargs)
         import subprocess
-        from pi_glink.kernel.acp_e2b_env import SANDBOX_ACP_HOME
         from test_kernel_acp_e2b import _Result
 
-        real_home = self.sandbox.root / "home/user/acp/home"
-        mapped = command.replace(SANDBOX_ACP_HOME, str(real_home))
+        # Guarded publication also checks every Linux ancestor of HOME.
+        # Placeholders prevent /home from matching the final /acp/home leaf.
+        mapped = command
+        prefixes = ["/home/user/acp/home", "/home/user/acp", "/home/user", "/home"]
+        for i, prefix in enumerate(prefixes):
+            mapped = mapped.replace(prefix, f"__ACP_PATH_{i}__")
+        for i, prefix in enumerate(prefixes):
+            mapped = mapped.replace(f"__ACP_PATH_{i}__", str(self.sandbox.root / prefix.lstrip("/")))
         self.repairs.append(command)
         result = subprocess.run(["sh", "-c", mapped], capture_output=True, timeout=kwargs["timeout"])
         return _Result(result.returncode)

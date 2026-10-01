@@ -632,7 +632,10 @@ token，run 收尾时 token 已吊销，文件保留也无害，见 §6）。共
 热重连的沙箱目标；热路径的旧 agent 已在 pause 前停止，reboot 不恢复活 writer。
 父 run 与权威归档不就地修补，本轮正常回收仍可发布其最新状态。lock 不删除。编解码复用
 Node 公共 Zstandard API，按完整帧验证（头单独一帧），压缩文件沿用继承上限，解压日志另按
-每目标根总量 ≤256 MiB 限幅；目录/文件链接不跟随，替换原子发布，失败不启动 agent，
+每目标根总量 ≤256 MiB 限幅。远程从可信 `/` 锚点逐级按即时目录 entry kind 核验
+HOME 自身与全部父分量，核验后才遍历/读写（热重连先于 generation 读取与凭据上传）；
+scratch 写入前复验，rename 保留全目录链无链接守卫。被拒绝的 HOME 不再由失败收尾
+回收或发布。本地 ArtifactTree 目录句柄不变；替换原子发布，失败不启动 agent，
 过程日志不含会话正文或 URL。理由与授权边界见 [ACP 集成笔记 §19.6](acp-integration-notes.md#196-修订撤销-webjina-fetch-request-会话事件)。
 
 **子代理副产物**：pi-subagents 的分支会话与主会话同名同目录（只能按会话头区分，见上表），产物目录由 `artifactDir: "session"` 落在会话目录的 `subagent-artifacts/`。E2B 面在沙箱销毁前把这些有界镜像到宿主拥有的 `runs/<id>/subagents/`（分支会话进 `sessions/`、产物进 `artifacts/`；深度/文件数/单文件/总量限幅，链接不跟随，失败记 `artifactFailures`），inproc/Docker 面的同类文件本就在宿主会话目录内、不另拷贝；两路的会话目录与镜像目录都在收尾时过 run 的脱敏边界（与 §6.1 会话文件同一条规则）。R1 起每个子代理另有权威文档 `runs/<id>/children/<n>/child.json`（§3.5）：它是协议可见事实的落地，与 P0 的 `subagents/` 原始镜像各自独立——镜像是回收基质（保持原样、不改写）；R2 起收尾时按序数启发式把产物关联复制进 `children/<n>/`（§3.5「R2 增强与关联」），未关联的文件留在基质里并记日志。

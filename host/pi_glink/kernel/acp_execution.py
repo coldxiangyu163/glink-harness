@@ -95,7 +95,7 @@ from .acp_rpc import (
     AcpRpcClient,
 )
 from .acp_session_config import apply_session_config
-from .acp_state_compat import repair_resume_home
+from .acp_state_compat import AcpStateCompatError, repair_resume_home, validate_remote_home
 from .acp_sandbox_park import (
     park_sandbox,
     read_generation_marker,
@@ -314,6 +314,8 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
         #: admission gate reads the recovered directory itself, never this
         #: frame alone.
         self._state_recovered: bool | None = None
+        #: A refused remote target must not be read again by failure recovery.
+        self._state_home_rejected = False
         #: The last state recovery's full facts (mode/volume/duration), kept
         #: for the post-recovery ``session_ready`` payload.
         self._state_recovery: Any | None = None
@@ -405,6 +407,16 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
                 timeout_seconds=self.spec.timeout_seconds + 300,
                 resume=target,
             )
+            if self.spec.resume_session and self.spec.config.harness_pack == "dsh":
+                try:
+                    # Validate immediately after reconnect: even the generation
+                    # marker's parent must not be reached through a link.
+                    validate_remote_home(
+                        sandbox.place("home", self.spec.runtime.home), sandbox.handle,
+                    )
+                except AcpStateCompatError:
+                    self._state_home_rejected = True
+                    raise
             marker = read_generation_marker(sandbox.handle)
             expected = (target.conversation_run, target.generation)
             if marker != expected:
@@ -487,6 +499,18 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
                 run_id=self.spec.run_id,
             )
             self._transfer = transfer
+            if (self.spec.resume_session and self.spec.config.harness_pack == "dsh"
+                    and not hot):
+                try:
+                    # Cold targets create then verify missing directories;
+                    # hot roots already passed before the generation lookup.
+                    validate_remote_home(
+                        sandbox.place("home", self.spec.runtime.home), sandbox.handle,
+                        create=True,
+                    )
+                except AcpStateCompatError:
+                    self._state_home_rejected = True
+                    raise
             if (
                 self.spec.resume_session
                 and self.spec.archive is not None
@@ -516,11 +540,15 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
             # ACP-15: target-copy compatibility, after files/archive backfill
             # (or reboot reconnect) and credential uploads, before any new
             # agent can acquire a write handle. Never alter the parent's root.
-            repair_resume_home(
-                (sandbox.place("home", self.spec.runtime.home)
-                 if sandbox.remote else self.spec.runtime.home),
-                handle=sandbox.handle if sandbox.remote else None,
-            )
+            try:
+                repair_resume_home(
+                    (sandbox.place("home", self.spec.runtime.home)
+                     if sandbox.remote else self.spec.runtime.home),
+                    handle=sandbox.handle if sandbox.remote else None,
+                )
+            except AcpStateCompatError:
+                self._state_home_rejected = sandbox.remote
+                raise
         self._emit_state_threshold_warnings()
         spawn = sandbox.spawn(self.launch)
         client_kwargs: dict[str, Any] = {
@@ -1100,6 +1128,16 @@ class AcpExecutionAdapter(SealedOutcome, ExecutionAdapter):
             self.sandbox.recover_workspace(destination, declared=declared)
             if declared else self.sandbox.recover_workspace(destination)
         )
+        if self._state_home_rejected:
+            # Recovery after a failed start must not bypass its path refusal.
+            # Workspace artifacts remain recoverable, but no state publication
+            # or parking can legitimize this rejected HOME.
+            self._state_recovered = False
+            return ArtifactRecovery(
+                files=tuple(files), failures=tuple(failures) + (
+                    "ACP 续接目标未通过安全准备；未读取或回收该状态根",
+                ), state_recovered=False,
+            )
         # The sandbox destroys the agent state with it, so the state root is
         # recovered in the same pre-teardown window as the workspace. A failed
         # recovery publishes nothing, which is exactly the fail-closed refusal

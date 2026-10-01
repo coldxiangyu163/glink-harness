@@ -1995,7 +1995,9 @@ uncaught exception，dsh 进程 exit 1。0.1.5-rc.3 ~ 0.1.7-rc.2 未修复。本
   dsh fail closed。本地/Docker 在继承副本上处理；E2B 在 files/归档冷回灌与本轮凭据上传后、
   或停掉旧 agent 的 `reboot` 热重连后处理同一目标，均早于新 agent 启动。不修改父 run
   或权威归档，子轮正常回收仍按现行发布契约；不删事件、不 fork/patch dsh，不动
-  `session.lock`（它是 flock 的常驻文件，并非残留 PID 锁）。修补有界、无链接跟随、
-  原子发布，失败不启动 agent，日志不打印会话正文或 URL。真实 dsh 零 prompt resume
+  `session.lock`（它是 flock 的常驻文件，并非残留 PID 锁）。修补有界、原子发布；远程
+  从可信 `/` 锚点逐级核验 HOME 与全部父目录无链接，核验后才遍历/读写，scratch 写入前
+  复验且 rename 检查整条目录链。被拒 HOME 不再进入失败回收。失败不启动 agent，
+  日志不打印会话正文或 URL。真实 dsh 零 prompt resume
   与完整性/幂等、冷/热链路及模型配置回归见 `docs/evidence/acp15-delivery.md`。
   本决定不授权离线修改真实运行数据，也不代表旧服务、镜像或模板已更新。
