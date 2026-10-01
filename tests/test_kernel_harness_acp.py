@@ -4,7 +4,9 @@
 ``_decide`` 的 ACP 分支字面量）、追问追加门禁的拒绝点（全部
 ``session_unavailable``）、能力矩阵只来自族已由记录证明的父 run（含 50 帧
 扫描上限）、状态根按父记录 executor 推导（不看宿主当前执行面）、父工作区
-复用与恒为 None 的续接种子。
+复用与恒为 None 的续接种子。R1-3 起追加钉住：族只经 SessionSource 窄协议
+访问宿主事实——共享终态词镜像与 store 逐字相等、能力矩阵读路径只经协议的
+``iter_events``（判定次序与上限语义不变）。
 """
 
 from __future__ import annotations
@@ -19,11 +21,12 @@ from glink_harness.config import HostConfig, build_config
 
 from acp_pack import apply_acp_pack
 from glink_harness.contracts import FollowupUnavailable
+from glink_harness.kernel import harness_acp
 from glink_harness.kernel.harness import select_family
 from glink_harness.kernel.harness_acp import AcpHarnessFamily
 from glink_harness.kernel.acp_projection import AcpProjector
 from glink_harness.redaction import SecretRedactor
-from glink_harness.store import FINISHED, RunSpec, RunStore
+from glink_harness.store import CANCELLED, FAILED, FINISHED, RunRecord, RunSpec, RunStore
 
 from store_helpers import finish
 
@@ -133,6 +136,19 @@ def test_unknown_acp_tool_name_falls_back_to_its_protocol_kind(
     # An unknown tool with other/unknown kind is never guessed from its args.
     if acp_kind in {"other", "unknown"}:
         assert produced[0][1]["presentation"] == "generic"
+
+
+# -- R1-3：族经 SessionSource 窄协议访问宿主事实 ----------------------------------
+
+
+def test_acp_family_vocabulary_mirrors_the_store_vocabulary() -> None:
+    """族不再 import store；与宿主共享的终态词逐字相等在此钉住。
+
+    唯一真源是 ``store.py``；harness_acp.py 的同名常量只是镜像，漂移即红。
+    """
+    assert harness_acp.FINISHED == FINISHED
+    assert harness_acp.FAILED == FAILED
+    assert harness_acp.CANCELLED == CANCELLED
 
 
 # -- (e) 终态词汇归一化 ----------------------------------------------------------
@@ -250,6 +266,51 @@ def test_recorded_capabilities_scan_is_bounded_at_fifty_frames(tmp_path: Path) -
     assert family.recorded_capabilities(within) == {
         "sessionCapabilities": {"resume": {}}
     }
+
+
+def test_capability_matrix_scan_reads_only_via_the_session_source(tmp_path: Path) -> None:
+    """R1-3：能力矩阵读路径只经 SessionSource 协议（不碰具体 store 的直接证明）。
+
+    族是记录事实：非 acp 父记录没有可扫描的矩阵，不触发任何事件读取；acp 父的
+    快照经协议的 ``iter_events`` 取出（帧提取与 50 帧上限语义不变，由上一测试
+    与本测试分别钉住）。
+    """
+    config = make_config(tmp_path)
+    calls: list[str] = []
+
+    class _Source:
+        """最小的 SessionSource 替身：只有本测试用到的协议方法。"""
+
+        def iter_events(self, run_id: str, after: int = 0) -> Any:
+            calls.append(run_id)
+            yield {"type": "kernel_status", "seq": 1, "payload": {}}
+            yield {
+                "type": "session_ready",
+                "seq": 2,
+                "payload": {"agentCapabilities": {"loadSession": True}},
+            }
+
+    family = AcpHarnessFamily(config=config, store=_Source())
+    foreign = RunRecord(
+        run_id="foreign00001",
+        prompt="p",
+        status="finished",
+        created_at=1.0,
+        workspace="/tmp/ws",
+        spec=RunSpec(family="pi", pack="pi", executor="inproc"),
+    )
+    assert family.recorded_capabilities(foreign) is None
+    assert calls == []
+    parent = RunRecord(
+        run_id="parent000050",
+        prompt="p",
+        status="finished",
+        created_at=1.0,
+        workspace="/tmp/ws",
+        spec=RunSpec(family="acp", pack="dsh", executor="inproc"),
+    )
+    assert family.recorded_capabilities(parent) == {"loadSession": True}
+    assert calls == ["parent000050"]
 
 
 # -- 状态根推导 ------------------------------------------------------------------

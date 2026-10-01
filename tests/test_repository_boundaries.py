@@ -102,10 +102,10 @@ def source_violations(root: Path) -> list[str]:
 # 下表是 glink_harness 宿主依赖的唯一许可真源；新增文件必须显式登记（即使暂无宿主依赖）。
 # config 提供运行期只读配置；artifacts 提供安全产物树；redaction 提供凭据清扫；
 # contracts 是共享的中性词汇；events/event_schema 提供结构化事件的词汇/模式；
-# 根包的 __version__ 用于 ACP 协议版本；store 仅族基类 harness.py、ACP 族
-# harness_acp.py（其访问面收敛属 R1-3）与窄协议适配器 run_views.py（R1-1 会话
-# 来源协议的宿主侧 RunStore 实现）读取记录/会话种子；pi 族自 R1-2 起只经
-# SessionSource 协议访问这些事实，不再 import store。
+# 根包的 __version__ 用于 ACP 协议版本；store 仅族基类 harness.py 与窄协议适配器
+# run_views.py（R1-1 会话来源协议的宿主侧 RunStore 实现）读取记录/会话种子；
+# pi 族自 R1-2、ACP 族自 R1-3 起只经 SessionSource 协议访问这些事实，不再
+# import store。
 # 第三方 e2b SDK 只在 E2B 适配器延迟加载，不把所有第三方包视作标准库。
 _KERNEL_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
     "__init__.py": frozenset(),
@@ -127,7 +127,7 @@ _KERNEL_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
     "execution.py": frozenset({"glink_harness.config"}),
     "framing.py": frozenset(),
     "harness.py": frozenset({"glink_harness.config", "glink_harness.contracts", "glink_harness.redaction", "glink_harness.store"}),
-    "harness_acp.py": frozenset({"glink_harness.config", "glink_harness.contracts", "glink_harness.events", "glink_harness.redaction", "glink_harness.store"}),
+    "harness_acp.py": frozenset({"glink_harness.config", "glink_harness.contracts", "glink_harness.events", "glink_harness.redaction"}),  # R1-3：ACP 族只经 SessionSource 协议，不再 import store
     "harness_pi.py": frozenset({"glink_harness.artifacts", "glink_harness.config", "glink_harness.contracts", "glink_harness.redaction"}),  # R1-2：pi 族只经 SessionSource 协议，不再 import store
     "outcome.py": frozenset(),
     "projection.py": frozenset({"glink_harness.event_schema", "glink_harness.events", "glink_harness.redaction"}),
@@ -382,7 +382,12 @@ def test_kernel_import_direction_allows_lower_layers_and_the_store_whitelist() -
     assert kernel_forbidden_imports(kernel_module, "from ..store import RunRecord") == [
         "host/glink_harness/kernel/harness_pi.py: forbidden import glink_harness.store"
     ]
-    for name in ("harness.py", "harness_acp.py", "run_views.py"):
+    # R1-3：ACP 族同样移出 store 白名单，反向回归必须变红。
+    acp_module = Path("host/glink_harness/kernel/harness_acp.py")
+    assert kernel_forbidden_imports(acp_module, "from ..store import RunRecord") == [
+        "host/glink_harness/kernel/harness_acp.py: forbidden import glink_harness.store"
+    ]
+    for name in ("harness.py", "run_views.py"):
         relative = Path("host/glink_harness/kernel") / name
         assert kernel_forbidden_imports(relative, "from ..store import RunRecord") == [], relative
 
@@ -424,7 +429,7 @@ def test_kernel_allowlist_cannot_relicense_orchestration_modules() -> None:
         ), relative
         assert not any(name.startswith("glink_harness.web_") for name in allowed), relative
         assert not any(name == "glink_harness.store" or name.startswith("glink_harness.store.") for name in allowed) or relative in {
-            "harness.py", "harness_acp.py", "run_views.py"
+            "harness.py", "run_views.py"
         }, relative
     for name in _KERNEL_MUST_REJECT:
         assert kernel_forbidden_imports(Path("host/glink_harness/kernel/harness.py"), f"__import__({name!r})")

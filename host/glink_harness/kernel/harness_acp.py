@@ -4,6 +4,11 @@ ACP 族的策略面：空命令白名单、凭据准入空实现、追问追加�
 session id、续接通道、状态根）、状态根继承与 ``AcpProjector``、
 与执行面无关的 launch 描述和 ACP 驱动、ACP stopReason 词汇归一化，以及
 call_id 进度配对与累计快照替换的 usage 语义。
+
+R1-3 起族只经 :class:`~glink_harness.kernel.run_views.SessionSource` 窄协议
+访问宿主事实（父记录只读视图、父 run 事件扫描/能力矩阵、目录布局推导、
+e2b 租约/泊车候选事实），不再 import store；与宿主共享的终态词以同名常量
+镜像，逐字相等由 tests/test_kernel_harness_acp.py 钉住。
 """
 
 from __future__ import annotations
@@ -19,7 +24,6 @@ from typing import Any, Callable, Mapping, TYPE_CHECKING
 from .. import events
 from ..config import ConfigError
 from ..contracts import FollowupUnavailable, Verdict, conversation_guard
-from ..store import CANCELLED, FAILED, FINISHED, RunRecord
 from .acp_env import (
     ACP_HOME_DIRNAME,
     ACP_RECOVERED_DIRNAME,
@@ -44,6 +48,7 @@ from .sandbox import Launch, Mount, Sandbox, SandboxResume
 if TYPE_CHECKING:  # pragma: no cover - annotation only
     from ..redaction import SecretRedactor
     from .agent_env import EgressEndpoint, RunCredentials
+    from .run_views import RunRecord  # 记录只读视图类型（协议面沿用共享数据类型）
 
 logger = logging.getLogger("glink_harness.kernel.harness_acp")
 
@@ -56,6 +61,13 @@ _ACP_CAPABILITY_SCAN_EVENTS = 50
 #: follow-up has exactly one parent (the stale-run gate), so the chain is the
 #: conversation's turn count; the bound only refuses a (corrupt) cycle.
 _CONVERSATION_CHAIN_LIMIT = 128
+
+#: 与宿主 ``store.py`` 共享的产品终态词（``Verdict.status`` 的取值）。R1-3 起
+#: 族只经 ``SessionSource`` 协议访问宿主事实、不再 import store；唯一真源仍是
+#: store.py，逐字相等由 tests/test_kernel_harness_acp.py 钉住，防止两处定义漂移。
+FINISHED = "finished"
+FAILED = "failed"
+CANCELLED = "cancelled"
 
 
 class AcpHarnessFamily(HarnessFamily):
@@ -188,6 +200,7 @@ class AcpHarnessFamily(HarnessFamily):
         """
         if parent.spec.family != self.name:
             return None
+        # 读路径只经 SessionSource 协议（R1-3）：扫描上限与帧提取语义原样。
         for index, event in enumerate(self._store.iter_events(parent.run_id)):
             if index >= _ACP_CAPABILITY_SCAN_EVENTS:
                 break

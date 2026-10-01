@@ -45,6 +45,7 @@ from glink_harness.kernel.conversation_lease import (
 )
 from glink_harness.kernel.execution import ExecutionSpec
 from glink_harness.kernel.harness_acp import AcpHarnessFamily
+from glink_harness.kernel.run_views import RunStoreSessionSource
 from glink_harness.kernel.sandbox import SandboxResume, open_sandbox
 from glink_harness.redaction import SecretRedactor
 from glink_harness.runs.runner import RunManager
@@ -266,7 +267,8 @@ def assistant_text(store: RunStore, run_id: str) -> str:
 
 
 def a_family(config, store) -> AcpHarnessFamily:
-    return AcpHarnessFamily(config=config, store=store)
+    # R1-3：构造点只收 SessionSource 协议对象，仓外调用点自己包适配器。
+    return AcpHarnessFamily(config=config, store=RunStoreSessionSource(store))
 
 
 def a_record(run_id: str, *, executor: str = "e2b", pack: str = "dsh") -> RunRecord:

@@ -5,6 +5,7 @@
 ``RunManager.__init__`` 的唯一选择点（runner 重接线已落地）。R1-1 起追加钉住：
 族构造注入的是 ``SessionSource`` 窄协议（宿主侧 ``RunStoreSessionSource``
 适配器）而非具体 ``RunStore``，以及适配器对六个协议面（设计 §2.3）的委托行为。
+R1-3 起构造点的 isinstance(RunStore) 过渡兼容退场：注入什么持有什么。
 """
 
 from __future__ import annotations
@@ -100,14 +101,17 @@ def test_select_family_injects_the_session_source_adapter(tmp_path: Path) -> Non
     assert not isinstance(source, RunStore)
 
 
-def test_family_constructor_adapts_a_raw_runstore(tmp_path: Path) -> None:
-    """过渡兼容：仓外既有调用点仍可 ``store=`` 传 RunStore；构造点统一收窄为适配器。
+def test_family_constructor_holds_the_session_source_as_given(tmp_path: Path) -> None:
+    """R1-3：isinstance(RunStore) 过渡兼容退场——构造点不再把具体 RunStore 包成适配器。
 
-    R1-2/R1-3 迁移族内访问面后，这一兼容路径随之退场。
+    注入什么持有什么：kernel 内唯一接线点 ``select_family`` 统一注入
+    ``RunStoreSessionSource``（由 test_select_family_injects_the_session_source_adapter
+    钉住），仓外调用点直接构造时须自己给出 SessionSource 协议对象。
     """
     config = make_config(tmp_path, "pi")
-    family = PiHarnessFamily(config=config, store=RunStore(tmp_path / "runs"))
-    assert type(family._store) is RunStoreSessionSource  # noqa: SLF001
+    source = RunStoreSessionSource(RunStore(tmp_path / "runs"))
+    family = PiHarnessFamily(config=config, store=source)
+    assert family._store is source  # noqa: SLF001
 
 
 def make_source(tmp_path: Path) -> tuple[RunStore, RunStoreSessionSource, RunRecord]:

@@ -104,13 +104,11 @@ class HarnessFamily(ABC):
 
     def __init__(self, *, config: HostConfig, store: SessionSource) -> None:
         self._config = config
-        # R1-1：注入点已由 RunStore 收窄为 SessionSource 窄协议。过渡期兼容：
-        # 仓外调用点（既有测试）仍可能直接传入 RunStore，这里统一包成适配器，
-        # 使族实例在任何构造路径下都只持有协议对象。族内的访问面与属性名
-        # ``_store`` 的迁移属 R1-2/R1-3；本任务不新增对具体 store 的引用面。
-        self._store: SessionSource = (
-            RunStoreSessionSource(store) if isinstance(store, RunStore) else store
-        )
+        # R1-3：过渡兼容退场——注入点只收 SessionSource 窄协议对象，不再把传入
+        # 的具体 RunStore 兜底包成适配器。kernel 内唯一接线点是 select_family
+        # （统一注入 RunStoreSessionSource），因此族实例不可能持有具体 RunStore；
+        # 仓外调用点直接构造时须自己给出协议对象。
+        self._store: SessionSource = store
 
     # -- (a) 准入：凭据要求 -----------------------------------------------------
 
