@@ -43,7 +43,7 @@ bash scripts/check.sh
 
 - Git 已跟踪文件中出现真实配置/运行态文件的禁止路径；不读取 `.env` 内容。测试 fixture 中明确合成的 JSON 凭据样例可以保留。
 - `host/` 的 Python 导入重新依赖 `frontier_agent` 或 `apodex`，以及源码中的字面 JS 导入直接引用 pi 的 `src/` 或 `dist/` 私有路径。
-- 导入方向：`tests/test_repository_boundaries.py` 的 `_KERNEL_IMPORT_ALLOWLIST` 按 `host/glink_harness/kernel/` 文件列出允许的外部导入；标准库与 kernel 内部模块可导入，未登记的新 kernel 文件、未列出的宿主模块或第三方模块均违规。`store` 只允许 `harness` / `harness_acp` 与窄协议适配器 `run_views` 导入（pi 族已迁移到 SessionSource 协议，ACP 族面随 R1-3 收敛，最终仅剩适配器）；`_KERNEL_MUST_REJECT` 反表与 `web_*` 前缀断言防止把原本禁止的编排层依赖直接加入白名单。字面量动态导入同样受检。
+- 导入方向：`tests/test_repository_boundaries.py` 的 `_KERNEL_IMPORT_ALLOWLIST` 按 `host/glink_harness/kernel/` 文件列出允许的外部导入；标准库与 kernel 内部模块可导入，未登记的新 kernel 文件、未列出的宿主模块或第三方模块均违规。`store` 只允许族注入接线点 `harness`（`select_family`）与窄协议适配器 `run_views` 导入（两族均已经 SessionSource 协议访问，不直接持有具体 store）；`_KERNEL_MUST_REJECT` 反表与 `web_*` 前缀断言防止把原本禁止的编排层依赖直接加入白名单。字面量动态导入同样受检。
 - 编排边界同时检查 `runner.py` 与 `stages.py` 的抽象导入白名单（不放宽具体 driver），整个
   `runs/` 包不得直接导入 harness 专有模块/运行期类型；字面动态导入（含 importlib alias、
   from-import 的 loader alias 与按 `__package__` 解析的相对名）也受检。资源台账自身组装

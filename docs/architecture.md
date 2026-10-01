@@ -88,9 +88,9 @@ dsh/codex/opencode 经 stdio JSON-RPC 桥接。开源 harness 名单与包机制
 
 依赖方向单向：`前端 → 宿主 HTTP → 编排层 → kernel → pi 进程`；`harnesses/<pack>/` 与 `methodology/` 只作为只读模板被复制或拼入每 run 的运行期配置。
 `host/glink_harness/kernel/` 不得反向导入 `runs/`、`tenancy`、`ownership`、`blueprints`、
-`web_*`、`app`、`cli`；`store` 只在 `harness.py` / `harness_acp.py` 与窄协议适配器
-`run_views.py` 中导入（`run_views.py` 是 R1 执行接口解耦引入的 SessionSource 适配器；
-pi 族已经协议访问、不再直接导入 store，ACP 族的直接引用面随 R1-3 收敛，最终仅剩适配器），
+`web_*`、`app`、`cli`；`store` 只在族注入接线点 `harness.py`（`select_family` 把 RunStore
+包成适配器注入）与窄协议适配器 `run_views.py` 中导入——pi 与 ACP 两族均已经
+SessionSource 协议访问记录与会话来源，不直接持有具体 store；
 由 `tests/test_repository_boundaries.py` 的导入方向规则卡住。
 内核包（node_modules 里的 pi）始终是外部依赖，仓库不持有它的源码。
 
