@@ -1989,5 +1989,15 @@ uncaught exception，dsh 进程 exit 1。0.1.5-rc.3 ~ 0.1.7-rc.2 未修复。本
 * **宿主侧可诊断性**：ACP `session/resume` 被拒时，宿主把 `error.data.details`（或
   `error.data.message`）的有界字符串附到失败原因，经 run 终帧的既有脱敏链呈现；UI 对「追问
   未接上原会话」给出单独文案，不再暗示重试会续接。
-* **既有会话**：已含该事件的旧会话在 0.1.5-rc.3 上仍无法续接；是否离线剔除这类事件属于修改
-  运行数据，需另行决定，本修订不做。
+* **既有会话（GLINK-ACP-15 决定）**：只在新 agent spawn 前的 dsh 续接目标 HOME
+  副本中，为 v3 `session.v3.jsonl.zstd` 的白名单类型 `web/jina-fetch-request` 补顶层
+  `ignorable: true`。保留事件数、seq、引用与全部其他字段；已有标记不重写，未知类型仍由
+  dsh fail closed。本地/Docker 在继承副本上处理；E2B 在 files/归档冷回灌与本轮凭据上传后、
+  或停掉旧 agent 的 `reboot` 热重连后处理同一目标，均早于新 agent 启动。不修改父 run
+  或权威归档，子轮正常回收仍按现行发布契约；不删事件、不 fork/patch dsh，不动
+  `session.lock`（它是 flock 的常驻文件，并非残留 PID 锁）。修补有界、原子发布；远程
+  从可信 `/` 锚点逐级核验 HOME 与全部父目录无链接，核验后才遍历/读写，scratch 写入前
+  复验且 rename 检查整条目录链。被拒 HOME 不再进入失败回收。失败不启动 agent，
+  日志不打印会话正文或 URL。真实 dsh 零 prompt resume
+  与完整性/幂等、冷/热链路及模型配置回归见 `docs/evidence/acp15-delivery.md`。
+  本决定不授权离线修改真实运行数据，也不代表旧服务、镜像或模板已更新。

@@ -67,7 +67,7 @@ SECRET = b"0123456789abcdef0123456789abcdef"
 def translate(sandbox_path: str, root: Path) -> Path:
     """Map one ``/home/user/…`` sandbox path onto the fake sandbox's real tree."""
     relative = sandbox_path.lstrip("/")
-    if not sandbox_path.startswith("/home/user"):
+    if not sandbox_path.startswith("/home/user") and sandbox_path not in ("/", "/home"):
         raise AssertionError(f"unexpected sandbox path: {sandbox_path}")
     return root / relative
 
@@ -98,8 +98,8 @@ class _Entry:
         real = translate(sandbox_path, root)
         self.name = real.name
         self.path = sandbox_path
-        self.type = "dir" if real.is_dir() else "file"
-        self.size = 0 if real.is_dir() else real.stat().st_size
+        self.type = "symlink" if real.is_symlink() else ("dir" if real.is_dir() else "file")
+        self.size = real.stat().st_size if self.type == "file" else 0
 
 
 class FakeFiles:

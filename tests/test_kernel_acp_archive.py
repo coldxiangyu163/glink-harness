@@ -82,8 +82,8 @@ class _ChunkStream:
 class _Entry:
     def __init__(self, path: str, real: Path) -> None:
         self.path = path
-        self.type = "dir" if real.is_dir() else "file"
-        self.size = real.stat().st_size if real.is_file() else 0
+        self.type = "symlink" if real.is_symlink() else ("dir" if real.is_dir() else "file")
+        self.size = real.stat().st_size if self.type == "file" else 0
 
 
 class _Files:
@@ -100,7 +100,7 @@ class _Files:
     def make_dir(self, path: str) -> None:
         self._real(path).mkdir(parents=True, exist_ok=True)
 
-    def write(self, path: str, content: Any) -> None:
+    def write(self, path: str, content: Any, **_: Any) -> None:
         data = content if isinstance(content, bytes) else str(content).encode()
         target = self._real(path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -116,6 +116,12 @@ class _Files:
         return _Info(self._real(path).stat().st_size)
 
     def list(self, path: str, depth: int = 1, **_: Any) -> list[_Entry]:
+        # This fake virtualizes /home/user as root, with trusted virtual
+        # ancestors. Immediate entry kinds model the SDK's no-follow lookup.
+        if path == "/":
+            return [_Entry("/home", self._sandbox.root.parent)]
+        if path == "/home":
+            return [_Entry("/home/user", self._sandbox.root)]
         base = self._real(path)
         found: list[_Entry] = []
         for child in sorted(base.rglob("*")):
@@ -145,9 +151,16 @@ class _Commands:
         # Sandbox paths mean nothing to a host shell: map the state root onto
         # the fake tree (the commands are host-constructed and quote every
         # argument, so the literal prefix can only be our own constant).
-        mapped = cmd.replace(
-            SANDBOX_ACP_HOME, str(self._sandbox.translate(SANDBOX_ACP_HOME))
-        )
+        # Map longest sandbox prefixes through placeholders, so replacing
+        # /home later cannot rewrite an already translated host path.
+        mapped = cmd
+        mappings = [(SANDBOX_ACP_HOME, self._sandbox.translate(SANDBOX_ACP_HOME)),
+                    ("/home/user/acp", self._sandbox.root / "acp"),
+                    ("/home/user", self._sandbox.root), ("/home", self._sandbox.root.parent)]
+        for index, (prefix, _real) in enumerate(mappings):
+            mapped = mapped.replace(prefix, f"__ACP_ROOT_{index}__")
+        for index, (_prefix, real) in enumerate(mappings):
+            mapped = mapped.replace(f"__ACP_ROOT_{index}__", str(real))
         self._sandbox.commands_run.append(mapped)
         completed = subprocess.run(
             ["bash", "-c", mapped],
@@ -172,6 +185,8 @@ class RealCommandFakeSandbox:
         self.sandbox_id = "fake-archive-sandbox"
 
     def translate(self, path: str) -> Path:
+        if path == "/home/user":
+            return self.root
         assert path.startswith("/home/user/")
         return self.root / path[len("/home/user/"):]
 
@@ -390,6 +405,37 @@ def test_backfill_pulls_the_published_state_into_the_sandbox(
     )
     # The manifest never travels to the sandbox (it is host bookkeeping).
     assert not follow_up.translate(f"{SANDBOX_ACP_HOME}/manifest.json").exists()
+
+
+def test_real_archive_backfill_repairs_only_the_target_copy(tmp_path, conversation, proxy) -> None:
+    """Actual tar/curl channel → copied HOME → real codec/atomic rename."""
+    from pi_glink.kernel.acp_state_compat import repair_resume_home
+    from test_kernel_acp_state_compat import decoded, rows, seed
+
+    _need_host_tools()
+    runtime = make_runtime(tmp_path)
+    source = RealCommandFakeSandbox(tmp_path / "legacy")
+    source_home = source.translate(SANDBOX_ACP_HOME)
+    original, data = seed(source_home)
+    first = make_transfer(source, runtime, proxy=proxy, conversation=conversation,
+                          run_id="r1", workspace=tmp_path / "ws")
+    assert first.recover_state().ok
+    authority = conversation / "state" / original.relative_to(source_home)
+    manifest = (conversation / "state/manifest.json").read_bytes()
+    target = RealCommandFakeSandbox(tmp_path / "followup")
+    second = make_transfer(target, runtime, proxy=proxy, conversation=conversation,
+                           run_id="r2", workspace=tmp_path / "ws")
+    second.backfill_state()
+    copied = target.translate(SANDBOX_ACP_HOME) / original.relative_to(source_home)
+    assert copied.read_bytes() == data
+    repair_resume_home(SANDBOX_ACP_HOME, handle=target)
+    expected = rows()
+    expected[1]["ignorable"] = True
+    assert decoded(copied.read_bytes()) == expected
+    assert authority.read_bytes() == data and original.read_bytes() == data
+    assert (conversation / "state/manifest.json").read_bytes() == manifest
+    assert (copied.parent / "session.lock").read_bytes() == b""
+    assert not list(copied.parent.glob("*.acp15-*"))
 
 
 def test_backfill_failure_fails_the_run(

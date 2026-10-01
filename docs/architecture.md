@@ -624,6 +624,20 @@ token，run 收尾时 token 已吊销，文件保留也无害，见 §6）。共
 
 **多轮续接**：run 的事件日志与终态仍不可变；追问是有 `parent_run_id` 的新 run，不修改上轮。每轮独立配置、工作区和会话目录，复制已脱敏会话（≤32 MiB）与上一轮安全报告 `report.md`（不复制其他中间文件）；仅作上下文的报告若本轮未改动，不冒充本轮新产物，旧报告仍在历史轮次。Docker 用容器内 `/sessions/continued.jsonl`，E2B 先回收并清扫会话文件，下一轮上传副本再续接。历史 E2B 运行未回收的会话不能自动续接。E2B 面的续接身份验证时点与另两面相同（GLINK-ARCH-3 起）：pi 以 `--session /home/user/sessions/continued.jsonl` 原地打开续接会话（保持原 session id），RPC `get_state` 在 `session_ready` 即知会话身份，追问身份不符在**回合前、第一次模型调用前**拒 `session_unavailable`；e2b 面 `session_ready` 也从回合后补发改为回合前发布（回收后 `recovered_session()` 仍会补发一帧带宿主 `session_file` 的 `session_ready`）。（决策史见 [ADR 0004](adr/0004-pi-e2b-rpc-convergence.md)。）ACP 追问的状态根继承按**父 run 记录的 `executor`** 推导：e2b 指向对话状态根 `conversations/<根run>/state`（父轮有自身 `acp-agent/recovered` 完整镜像时优先取它，包括混合通道历史；没有自身镜像时对话 manifest 必须来自父轮自己，坏 manifest 不回退）、其余执行面指向 `acp-agent/home`，宿主切换执行面后历史 e2b run 的合法追问仍可受理（[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)、[ADR 0018](adr/0018-conversation-state-archive-channel.md)）。e2b 面的回收/回灌优先走归档通道（单请求 tar 流，按 offset 增量，凭据目标不进归档），没有父轮自身 recovered 镜像时，门禁要求对话 manifest 的 `sourceRunId` 等于父 run 自己；坏 manifest 一律拒绝而不回退。门禁认可的状态根随准入事实传给 Prepare，只有该根是对话级 `state/` 时才由归档通道回灌；旧 `recovered` 或本地/Docker 父轮的 `home` 仍经继承 + files 上传，不能因通道开启而换成另一个空源。缺少合法 manifest 的 `state/` 不受理，归档 GET 返回 404 而非成功空 tar；通道不可用或失败时降级为宿主侧继承 + files 逐文件（现状能力），降级事实进事件流。状态上限是异常检测三分支（[ADR 0019](adr/0019-acp-state-bounds-warning-tier-and-adaptive-resume.md)）：越过警告线（总量 64MB/单文件 32MB/2048 文件，正常研究会话的数倍）只发 `kernel_status` 警告（`acp_state_threshold_warning`）照常续接，越过 fail-closed 线（总量 256MB 对齐通道）才整次拒绝；续接 RPC 的超时按状态根体量自适应（保底 60s + 4MiB/s，硬上限 600s），继承/回灌/回收的体量耗时与 resume 重解析耗时（`stateInherit`/`stateBackfill`/`stateRecovery`/`resumeDurationMs`）进 `session_ready`。多租户模式下父 run 先过租户门禁（§10.2），否则不读它的任何字段；子 run 继承自己的 owner、凭据与私有工作区。三面 live 续接尚未验收，隔离替身测试不能替代镜像/模板验证。
 
+**ACP 旧审计兼容例外（GLINK-ACP-15）**：状态继承/回灌与凭据交付完成后、新 agent spawn
+之前，只有 dsh 续接目标 HOME 的 `.dsh/sessions/<cwd>/<session>/session.v3.jsonl.zstd`
+可作一次白名单 envelope 兼容：仅为已退役的宿主自有 `web/jina-fetch-request` 补
+`ignorable: true`，不改事件数、seq、引用、payload 或其他字段；已有标记不重写，未知类型
+继续 fail closed。本地/Docker 处理本轮继承副本，E2B 处理 files/归档冷回灌目标或 `reboot`
+热重连的沙箱目标；热路径的旧 agent 已在 pause 前停止，reboot 不恢复活 writer。
+父 run 与权威归档不就地修补，本轮正常回收仍可发布其最新状态。lock 不删除。编解码复用
+Node 公共 Zstandard API，按完整帧验证（头单独一帧），压缩文件沿用继承上限，解压日志另按
+每目标根总量 ≤256 MiB 限幅。远程从可信 `/` 锚点逐级按即时目录 entry kind 核验
+HOME 自身与全部父分量，核验后才遍历/读写（热重连先于 generation 读取与凭据上传）；
+scratch 写入前复验，rename 保留全目录链无链接守卫。被拒绝的 HOME 不再由失败收尾
+回收或发布。本地 ArtifactTree 目录句柄不变；替换原子发布，失败不启动 agent，
+过程日志不含会话正文或 URL。理由与授权边界见 [ACP 集成笔记 §19.6](acp-integration-notes.md#196-修订撤销-webjina-fetch-request-会话事件)。
+
 **子代理副产物**：pi-subagents 的分支会话与主会话同名同目录（只能按会话头区分，见上表），产物目录由 `artifactDir: "session"` 落在会话目录的 `subagent-artifacts/`。E2B 面在沙箱销毁前把这些有界镜像到宿主拥有的 `runs/<id>/subagents/`（分支会话进 `sessions/`、产物进 `artifacts/`；深度/文件数/单文件/总量限幅，链接不跟随，失败记 `artifactFailures`），inproc/Docker 面的同类文件本就在宿主会话目录内、不另拷贝；两路的会话目录与镜像目录都在收尾时过 run 的脱敏边界（与 §6.1 会话文件同一条规则）。R1 起每个子代理另有权威文档 `runs/<id>/children/<n>/child.json`（§3.5）：它是协议可见事实的落地，与 P0 的 `subagents/` 原始镜像各自独立——镜像是回收基质（保持原样、不改写）；R2 起收尾时按序数启发式把产物关联复制进 `children/<n>/`（§3.5「R2 增强与关联」），未关联的文件留在基质里并记日志。
 
 **事件时序**：E2B 面自 GLINK-ARCH-3 起与另两面说同一个协议：pi 以 `pi --mode rpc` 作为沙箱

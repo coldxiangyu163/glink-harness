@@ -112,6 +112,7 @@ _KERNEL_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
     "acp_env.py": frozenset({"pi_glink.artifacts", "pi_glink.config", "pi_glink.redaction"}),
     "acp_execution.py": frozenset({"pi_glink.__version__", "pi_glink.config"}),
     "acp_session_config.py": frozenset(),
+    "acp_state_compat.py": frozenset({"pi_glink.artifacts"}),  # 已知退役审计的目标副本兼容
     "acp_projection.py": frozenset({"pi_glink.events", "pi_glink.redaction"}),
     "acp_rpc.py": frozenset(),
     "acp_sandbox_park.py": frozenset({"pi_glink.config", "pi_glink.contracts"}),  # 沙箱泊车只读宿主配置的 TTL
