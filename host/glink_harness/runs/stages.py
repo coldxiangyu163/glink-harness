@@ -261,7 +261,13 @@ class PrepareStage:
             execution.session_seed = None
         for value in prepared.secret_values:
             secrets.learn(value)
-        execution.projector = family.make_projector(secrets.redactor)
+        execution.projector = family.make_projector(
+            secrets.redactor,
+            # 与 ACP 适配器交给 session/new 的 cwd 同一表达式
+            # （sandbox.place("workspace", 宿主工作区)）：agent 交付的绝对
+            # 路径以它为根归一为相对路径。
+            agent_workspace=sandbox.place("workspace", execution.workspace),
+        )
         return prepared.runtime
 
     def egress_endpoint(

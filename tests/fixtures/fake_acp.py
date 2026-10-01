@@ -404,6 +404,10 @@ def prompt_updates(text: str) -> list[dict]:
     declared = structured("FAKE_ACP_PRESENT_FILES", [])
     if declared:
         for item in declared:
+            # "$CWD/..." 模拟 dsh 的实测行为：按 agent 可见的工作区绝对路径交付
+            # （inproc 面 cwd 即宿主工作区），投影层须归一为相对路径。
+            if item["path"].startswith("$CWD/"):
+                item["path"] = str(Path.cwd() / item["path"][5:])
             if "text" in item:
                 target = Path(item["path"])
                 target.parent.mkdir(parents=True, exist_ok=True)

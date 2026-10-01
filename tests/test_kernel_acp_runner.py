@@ -196,6 +196,49 @@ def test_present_declarations_reach_the_terminal_store_and_owner_gated_download(
         thread.join(timeout=5)
 
 
+def test_present_with_agent_absolute_paths_is_normalized_and_saved(tmp_path: Path) -> None:
+    """GLINK-DELIVER-ABS-20261001：dsh 式绝对路径交付的端到端归一。
+
+    fake 按 agent 可见的工作区绝对路径交付（$CWD 展开，等价于 e2b 沙箱里的
+    /home/user/workspace/…）：投影归一为相对路径后保存成功；工作区外的绝对
+    路径仍按契约拒绝。
+    """
+    outside = tmp_path / "outside.md"
+    outside.write_text("OUTSIDE", encoding="utf-8")
+    files = [
+        {"path": "$CWD/abs-notes.md", "description": "绝对路径交付", "text": "# 绝对路径\n"},
+        {"path": str(outside), "description": "根外绝对路径"},
+    ]
+    config = make_config(tmp_path, {"FAKE_ACP_WRITE_REPORT": True,
+                                     "FAKE_ACP_PRESENT_FILES": files}, LOCAL_WEB_PORT="0")
+    server = create_server(config)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        record = server.manager.start("写主报告和备忘录")
+        final = server.manager.wait(record.run_id, timeout=30)
+        assert final is not None and final.status == FINISHED
+        assert [file["status"] for file in final.deliverables] == ["ok", "rejected"]
+        sealed = Path(final.report_path).parent / "abs-notes.md"
+        assert sealed.read_text(encoding="utf-8") == "# 绝对路径\n"
+        events = read_events(server.store, record.run_id)
+        declaration = payloads(events, "deliverables_declared")
+        # 事件契约（工作区相对路径）：事件里已是归一后的路径
+        assert [f["path"] for f in declaration[0]["files"]] == [
+            "abs-notes.md", str(outside),
+        ]
+        origin = f"http://127.0.0.1:{server.server_address[1]}/api/runs/{record.run_id}"
+        with urllib.request.urlopen(origin + "/deliverables/0", timeout=10) as response:
+            assert response.read() == "# 绝对路径\n".encode()
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(origin + "/deliverables/1", timeout=10)
+        assert error.value.code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 
 def test_acp_run_projects_the_whole_lifecycle_and_the_report(tmp_path: Path) -> None:
     log = tmp_path / "agent.jsonl"

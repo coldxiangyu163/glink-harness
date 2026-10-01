@@ -102,8 +102,21 @@ class AcpProjector:
     credentials that run may render), the same object the pi projector gets.
     """
 
-    def __init__(self, redactor: SecretRedactor, *, subagent_dispatch: str = "sync") -> None:
+    def __init__(
+        self,
+        redactor: SecretRedactor,
+        *,
+        subagent_dispatch: str = "sync",
+        workspace_prefix: str | None = None,
+    ) -> None:
         self._redactor = redactor
+        #: 本 run 工作区在 agent 侧的路径（inproc 宿主路径 / 容器、沙箱挂载点），
+        #: 经 ``sandbox.place("workspace", …)`` 由 runner 传入。ACP agent（dsh
+        #: 实测）交付 ``present`` 时给的是这个根下的绝对路径；交付物契约是
+        #: 工作区相对路径（artifacts.deliverable_path），投影在这里归一，
+        #: 根外的绝对路径原样保留，由下游照契约拒绝（不静默改写语义）。
+        prefix = (workspace_prefix or "").rstrip("/")
+        self._workspace_prefix = prefix or None
         #: The pack's declared ``subagent`` dispatch mode (manifest
         #: ``subagent_dispatch``). ``async`` (dsh): a ``completed`` dispatch
         #: call is only the acceptance — the child keeps running and is closed
@@ -125,6 +138,13 @@ class AcpProjector:
         self._subagent_calls: dict[str, list[int]] = {}
         #: Next child sequence number (``n``) within this run, from 0 up.
         self._next_child_n = 0
+
+    def _workspace_relative(self, path: str) -> str:
+        """绝对路径落在本 run 工作区根下时归一为相对路径，其余原样。"""
+        prefix = self._workspace_prefix
+        if prefix and path.startswith(prefix + "/"):
+            return path[len(prefix) + 1:]
+        return path
 
     # -- the projection -------------------------------------------------------
 
@@ -442,7 +462,8 @@ def _agent_tool_call(
             for item in files
         ):
             declared = [
-                {"path": item["path"], **({"description": _clip(item["description"], DETAIL_LIMIT)}
+                {"path": projector._workspace_relative(item["path"]),
+                 **({"description": _clip(item["description"], DETAIL_LIMIT)}
                  if isinstance(item.get("description"), str) else {})}
                 for item in files
             ]

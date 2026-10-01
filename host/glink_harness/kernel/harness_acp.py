@@ -428,9 +428,13 @@ class AcpHarnessFamily(HarnessFamily):
             runtime=runtime, secret_values=tuple(runtime.secrets) + learned_secrets
         )
 
-    def make_projector(self, redactor: "SecretRedactor") -> AcpProjector:
+    def make_projector(
+        self, redactor: "SecretRedactor", *, agent_workspace: str | None = None
+    ) -> AcpProjector:
         return AcpProjector(
-            redactor, subagent_dispatch=self._config.pack.capabilities.subagent_dispatch
+            redactor,
+            subagent_dispatch=self._config.pack.capabilities.subagent_dispatch,
+            workspace_prefix=agent_workspace,
         )
 
     # -- (d) launch 与驱动 ------------------------------------------------------

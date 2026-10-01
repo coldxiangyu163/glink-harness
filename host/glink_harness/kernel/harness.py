@@ -228,9 +228,15 @@ class HarnessFamily(ABC):
         """
 
     @abstractmethod
-    def make_projector(self, redactor: "SecretRedactor") -> FrameProjector:
+    def make_projector(
+        self, redactor: "SecretRedactor", *, agent_workspace: str | None = None
+    ) -> FrameProjector:
         """The frame projector（pi：``Projector``；ACP：``AcpProjector``）。
-        runner 在 PreparedRuntime 的 secret 全部并入边界之后调用。"""
+        runner 在 PreparedRuntime 的 secret 全部并入边界之后调用。
+        ``agent_workspace`` 是本 run 工作区在 agent 侧的路径
+        （``sandbox.place("workspace", …)``，与 ACP 适配器交给 session/new 的
+        cwd 同一值）；pi 投影不需要它（pi 面交付物本就按工作区相对路径），
+        ACP 投影用它把 agent 交付的绝对路径归一为契约要求的相对路径。"""
 
     # -- (d) launch 描述与协议驱动 -------------------------------------------
 

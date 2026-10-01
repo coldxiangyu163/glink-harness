@@ -166,7 +166,11 @@ class PiHarnessFamily(HarnessFamily):
         # added to this run's redaction boundary when it issued the grant.
         return PreparedRuntime(runtime=runtime, seed_consumed=seed_consumed)
 
-    def make_projector(self, redactor: "SecretRedactor") -> Projector:
+    def make_projector(
+        self, redactor: "SecretRedactor", *, agent_workspace: str | None = None
+    ) -> Projector:
+        # pi 面交付物本就按工作区相对路径到达（方法论约定 + pi 投影），
+        # agent_workspace 只服务 ACP 投影的绝对路径归一，这里不使用。
         return Projector(redactor)
 
     # -- (d) launch 描述与协议驱动 ---------------------------------------------

@@ -433,6 +433,42 @@ def test_present_declares_files_without_displacing_ordinary_tool_events() -> Non
                                  "name": "present", "rawInput": {"files": "bad"}})[0][0] == events.TOOL_STARTED
 
 
+def test_present_absolute_paths_under_the_workspace_become_relative() -> None:
+    """dsh 实测交付沙箱绝对路径（GLINK-DELIVER-ABS-20261001）：归一为相对路径。
+
+    落在本 run 工作区根下的绝对路径按契约改写为工作区相对路径；根外的绝对
+    路径原样保留，由 artifacts 按契约拒绝（不静默改写语义）。
+    """
+    projector = AcpProjector(SecretRedactor(), workspace_prefix="/home/user/workspace")
+    produced = _project(projector, {
+        "sessionUpdate": "tool_call", "toolCallId": "present-1", "name": "present",
+        "kind": "other", "status": "pending",
+        "rawInput": {"files": [
+            {"path": "/home/user/workspace/notes.md", "description": "沙箱绝对路径"},
+            {"path": "/home/user/workspace/sub/report.md"},
+            {"path": "relative.md"},
+            {"path": "/etc/passwd"},
+            {"path": "/home/user/workspace2/sibling"},
+        ]},
+    })
+    assert [kind for kind, _ in produced] == [events.TOOL_STARTED, events.DELIVERABLES_DECLARED]
+    assert [f["path"] for f in produced[1][1]["files"]] == [
+        "notes.md", "sub/report.md", "relative.md", "/etc/passwd", "/home/user/workspace2/sibling",
+    ]
+
+
+def test_present_paths_pass_through_without_a_workspace_prefix() -> None:
+    """未绑定工作区前缀时行为不变（旧调用形态兼容）。"""
+    projector = AcpProjector(SecretRedactor())
+    produced = _project(projector, {
+        "sessionUpdate": "tool_call", "toolCallId": "present-1", "name": "present",
+        "kind": "other", "status": "pending",
+        "rawInput": {"files": [{"path": "/abs/notes.md"}]},
+    })
+    assert produced[1][1]["files"][0]["path"] == "/abs/notes.md"
+
+
+
 
 def test_a_tool_call_arriving_terminal_emits_started_and_finished() -> None:
     projector = AcpProjector(SecretRedactor())
