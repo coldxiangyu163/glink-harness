@@ -1,9 +1,12 @@
-# 多 Harness 平台化：设计构想与推进计划
+# 多 Harness 接入与执行适配层收敛计划
 
 [架构](architecture.md) · [工程约束](engineering.md) · [pi 边界](pi-boundary.md)
 
-本文记录「从单一 pi 内核走向多 harness 平台」的方向决定、目标架构、复用策略与里程碑。
-状态（2026-09-25）：方向已经用户确认；**M1（GLINK-ACP-01）已完成合成验证**；
+长期方向已调整为 **ULegal 产品化，glink 收敛为原生 harness 执行适配层**，职责与迁移约束以
+[架构：产品方向与当前实现](architecture.md#产品方向与当前实现)为准。本文保留现有包机制和接入
+证据，§6 分别记录已完成的接入里程碑与尚未实施的收敛工作，不继续扩建独立产品宿主。
+
+既有接入状态（2026-09-25）：**M1（GLINK-ACP-01）已完成合成验证**；
 **M2（GLINK-ACP-02）已完成真实冒烟**：`dsh --profile acp`（dsh 0.1.5-rc.3）与
 `codex-acp`（@zed-industries/codex-acp 0.16.0，M3a 起后继包 @agentclientprotocol/codex-acp）各完成真实 initialize/session/new 握手，并经
 宿主 HTTP API 各跑一次最小真实研究 run（流式事件、终态、`report.md` 回收全部验证）；
@@ -70,11 +73,13 @@ pi、dsh、codex（codex-acp）、opencode（均开源），**Claude（claude-ag
 
 ## 1. 决定与定位
 
-* 宿主（run 编排、事件总线、存储、SSE、租户、脱敏、资源台账）保持 **harness 无关**；
-  `kernel/` 是「harness 适配层」，harness 的差异全部收进 `harnesses/<pack>/` 包。
-* **云端部署由运营方在部署时选定一个 harness**：定下后基本不变，但产品必须
-  **随时可切换、不依赖某个 harness**——切换的边界是「包清单 + 包内容」，宿主、事件契约、
-  HTTP/SSE 与前端不随之改变。
+* **目标职责**：ULegal 拥有产品状态和持久化；glink 保留 harness 无关的执行接口、E2B 传输、
+  取消与回收能力。薄适配层不再拥有账号、产品历史、订阅或第二套权威数据库。当前 `kernel/`
+  仍依赖宿主配置、`RunRecord` 与 `RunStore`，尚未成为可独立使用的适配层，解耦见 §6。
+* **保留原生 harness**：Agent loop、工具、上下文管理、原生会话及特有扩展留给 pi/dsh 等，
+  公共层只归一化协议可证明的执行事实；内核执行结束不等于业务成果完成或资源已释放。
+* **云端部署由运营方选定 harness**：不增加按 run 任意切换的产品入口。切换仍围绕包清单与
+  包内容，不让 ULegal 前端依赖某个内核；应用事件投影与发布由产品后端承担。
 * **云端保留的 harness：pi、dsh（deepseek-harness，原生 ACP server）、codex（codex-acp）、
   opencode**，四者均开源。**Claude（claude-agent-acp + claude CLI）已从产品中移除**
   （2026-09-27 用户决定）：开源性差（闭源 CLI），云端只保留开源 harness；
@@ -88,9 +93,9 @@ pi、dsh、codex（codex-acp）、opencode（均开源），**Claude（claude-ag
 * **保留的产品底线**：工作约定里「**引用某个来源前先打开它**，确认它确实支撑你要写的那句话」
   必须保留（2026-09-24 A/B 实测：删掉这句核实质量显著下降）。
 * 目标候选（未来）：一切 ACP 兼容开源 agent（Gemini CLI、Kimi 等）。
-* **不变量**：产品事件词汇（`events.py`）语义不改；前端不感知 harness 差异；多租户、
-  凭据边界、脱敏、资源台账的既有承诺不因 harness 增加而削弱；run 生命周期与终态判定表
-  （架构 §4）继续是唯一定论。
+* **迁移前不变量**：现有产品事件词汇（`events.py`）、终态提交与资源台账继续由当前宿主负责，
+  不能仅因新目标而放宽。接管时同步改生产方、消费方、测试和文档，转移权威 owner，不并存两套
+  互相覆盖的终态判定；凭据、来源授权、脱敏与可靠清理义务继续保留。
 * **明确不做**：
   * 不做本地客户端模式、不做按 run 选择 harness、本任务不做真实模型/E2B 调用。
   * 不为尚无消费者的 harness 预建空适配器或抽象框架（工程约束：不预建无消费者的抽象）；
@@ -118,9 +123,13 @@ pi、dsh、codex（codex-acp）、opencode（均开源），**Claude（claude-ag
 usage；适配器按 `harness.driver(sandbox.spawn(harness.launch(spec)))` 组合，实现数量是
 「N 个 harness 族 + 3 个 sandbox」，不是 N×3 的矩阵，也没有 `(harness, executor)` 字符串分派。
 
-## 3. 目标架构：三层内容与 harness 包
+## 3. 当前三层内容与 harness 包
 
-run 的系统提示与 agent 环境由三层内容组成，各有唯一归属：
+本节描述迁移前配置及系统提示合同。目标由应用选择工作约定、蓝图和成果格式作为执行输入，
+适配层交付这些输入，不要求所有应用沿用 glink 工作台的 `report.md` 产品格式；当前合同在对应
+消费者改造验收前仍有效。引用前核实原文的底线继续保留。
+
+当前 run 的系统提示与 agent 环境由三层内容组成，各有唯一归属：
 
 | 层 | 内容 | 归属 | 与 harness 的关系 |
 |---|---|---|---|
@@ -364,6 +373,10 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 
 ## 6. 里程碑
 
+### 已完成的接入里程碑
+
+下表保留原验收范围，不证明新的执行适配层或 ULegal 接管已经完成。
+
 | 里程碑 | 内容 | 验收 | 状态 |
 |---|---|---|---|
 | M1（GLINK-ACP-01） | ACP 族 inproc 骨架：ACP stdio JSON-RPC 客户端（复用 LF 分帧）、projector、harness 注册与配置级选择（默认仍为 pi，不动 API/前端）、run 全生命周期接入（受理/流式/取消/终态/产物回收）、fail-closed 权限应答、合成 fake ACP server 测试 | `bash scripts/check.sh` 全绿；合成测试覆盖 §4.1 映射、取消、stopReason 判定、权限拒绝、门禁；现有 pi 三面测试零回归 | 已完成（合成验证；实现口径与待实测项见 [ACP 集成笔记](acp-integration-notes.md)） |
@@ -377,6 +390,20 @@ ACP 客户端本体用 Python 标准库实现（subprocess + json），不新增
 | M8（GLINK-ACP-13） | e2b 面续接：沙箱销毁前有界回收 ACP 状态根到宿主、追问灌回新沙箱每 run HOME（先 0700 后上传）后走 ACP-09 resume 路径，回收/灌回失败 fail-closed；e2b 追问准入在 M7 四条件上增加「父状态根回收成功」；dsh/codex-acp 真实 resume、e2b 选能力具备且凭据可注入者跨沙箱续接 | dsh 与 codex-acp 各一次 inproc「首轮+追问」；e2b 一次跨沙箱「首轮+追问」（新沙箱/同 sessionId/代号回环，按已知 PID 与 sandbox id 清理）；合成回归含回收边界/灌回顺序/准入矩阵/fake SDK 全链路；`bash scripts/check.sh` 全绿；pi 面与既有 ACP 零回归 | **已完成**（2026-09-25）：两次 inproc 真实续接（dsh/codex-acp 均 `session/resume` 且同 sessionId）与一次 e2b 跨沙箱续接（新沙箱、两侧状态根回收、代号回环、沙箱按 id 对账无残留）通过。详见 [ACP 集成笔记](acp-integration-notes.md) §14，证据 `docs/evidence/acp-m8-resume-*.txt` |
 
 每个里程碑独立验收、独立提交边界；里程碑之间允许因实测结论回写本文。
+
+### 后续收敛里程碑（已确认方向，均待实施）
+
+| 顺序 | 范围与交付 | 完成条件 |
+|---|---|---|
+| R1：执行接口解耦 | 将原生协议、会话与 E2B 承载从产品宿主依赖中分离；以调用方冻结的执行输入、会话来源和凭据能力替代族接口直接查询 `RunStore` 的路径 | 当前宿主可消费新接口，既有运行仍可用；适配层不导入产品账号或业务数据库，不解析终端屏幕，原生扩展和会话能力不被删减 |
+| R2：ULegal 接入 | 在 Go 后端完成授权、执行身份绑定、可靠创建、后台观察、明确取消与成果接收；保留现有解析、检索、Office 和来源验证能力 | 试点执行经真实业务授权链进入适配层；刷新或切换会话不重复执行，停止与完成竞争可解释；同组织的私有会话仍不能互读，旧业务链路可用 |
+| R3：权威持久化接管 | 由 ULegal PostgreSQL 持久化执行配置、事件、终态和资源台账；明确原生会话私有存储、重启对账、用量归属与切换点 | 原失败机制覆盖创建响应丢失、重复事件、写库失败、双方重启、取消竞态和清理未知；终态与事件原子可见，未释放资源不被遗忘；取得授权后完成 E2B 真实验收 |
+| R4：退出旧产品宿主 | 新执行切入 ULegal 权威路径；清理失去消费者的 glink 产品 UI、账号、历史与 SQLite 新执行写入分支 | ULegal 能独立完成执行、追问、重放、成果验证与资源恢复；历史处置及回退经明确授权，不删除未知数据；已受理执行在回退后仍有 owner 跟踪 |
+
+每步须可独立交付。R2 的业务视图消费旧宿主的执行事实，权威状态转移发生在 R3 的明确切换点，
+不能先删除 SQLite 再等待 ULegal 补齐可靠性。执行接口承载方式、试点业务范围、会话存储、shared
+凭据政策接管和历史迁移窗口由两仓库实施设计明确；上述方向确认不连带授权代码改造、真实模型
+调用、E2B 构建或运行数据迁移。多宿主与 BYOK 不作为本轮收敛的前置工作。
 
 ### M1 落地偏差（相对 §3–§4；详细口径见 [ACP 集成笔记](acp-integration-notes.md)）
 

@@ -1,21 +1,79 @@
 # 架构
 
-本仓库把 pi（`@earendil-works/pi-coding-agent`）当作**独立内核进程**接入，宿主只做编排、
-事件投影与呈现。本文描述进程拓扑、事件契约、三种执行面的差异、凭据流与目录边界；每条
-结论都对应仓库里的实现或已验证的实测记录（见 `docs/pi-integration-notes.md` 与
-`docs/evidence/`）。
+本仓库把 pi（`@earendil-works/pi-coding-agent`）等原生 harness 当作独立进程接入。
+本文先说明已确认的长期目标，再描述当前宿主的进程拓扑、事件契约、执行面、凭据流与目录边界。
+目标尚未实施；当前实现与历史实测的区别见各节及 `docs/pi-integration-notes.md`、`docs/evidence/`。
 
 ## 产品方向与当前实现
 
-产品的既定方向是多租户研究工作台：通过 Docker / E2B 为研究 run 提供独立执行环境，本地 `inproc` 保留为单 Agent 开发与调试入口。默认 `PI_GLINK_TENANCY=local` 仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用单宿主多租户实现（§10）：身份入口二选一——本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`PI_GLINK_AUTH_MODE=accounts`，§10.6）；两者都只在服务端生成 `TenantContext`，run 带租户归属，模型凭据默认每租户自备（显式 `PI_GLINK_MODEL_CREDENTIALS=shared` 时由宿主统一提供；ACP 族的注入通道视同模型凭据服从同一政策——tenant 政策下拒绝、shared 下为具名凭据源，[ADR 0015](adr/0015-acp-credential-channels-under-model-credential-policy.md)），Docker/E2B 可并发。该实现目前只有**合成验证**（临时密钥/账号库、自签断言、fake 执行面、临时数据根）；真实网关、真实 HTTPS 终止、邮件交付、Docker/E2B live 与生产数据验收未覆盖，不能由单 run smoke 替代。
+### 长期目标（已确认，待实施）
+
+**ULegal 是产品与业务的唯一后端，glink 收敛为原生 harness 的薄执行适配层。**
+这一决定替代继续扩建 glink 独立多租户研究工作台的方向；多租户产品能力仍需实现，但归 ULegal，
+不再在两个仓库各建一套账号、业务状态和历史管理。职责划分以本节为准；适配层的迁移顺序见
+[多 Harness 计划 §6](multi-harness-plan.md#6-里程碑)。ULegal 侧的承接约定与待实施事项记录在
+其 `docs/architecture.md` 和 `docs/open-items.md`，不依赖本机仓库路径。
+
+| 层 | 目标职责 | 不承担的职责 |
+|---|---|---|
+| 原生 pi / dsh 等 | Agent loop、工具、上下文管理、原生会话与各自的扩展、子代理机制 | 产品账号、项目权限、订阅和业务成果状态 |
+| glink 执行适配层 | E2B 承载、RPC/ACP 通信、执行输入与配置交付、协议事实归一化、原生会话回收与恢复、取消、产物回收、资源身份与清理结果回报 | 独立产品前端、登录与邀请、业务历史、订阅计费、第二套权威执行数据库 |
+| ULegal 后端 | 身份与项目/来源授权、业务会话、执行准入、事件与状态持久化、资源台账和重启对账、订阅权益、原始用量归属、成果验证与保存、产品 HTTP 接口 | 重写 harness 的 Agent loop，直接读取其私有格式来推断权威状态 |
+
+目标调用方向为 `ULegal 前端 → ULegal 后端及 PostgreSQL → glink 执行适配层 → E2B 中的原生 harness`。
+适配层只接收服务端冻结的执行输入并回报事实，不直接操作 ULegal 的业务数据库；接口承载方式在
+实施设计中确定，不因保留内部执行接口而恢复独立产品后端。内核执行结束、业务成果验证完成和
+资源释放是不同事实，由 ULegal 在同一执行的权威记录中分别表达，不能互相代替。
+
+首发保持 **shared SaaS**：运营方提供模型凭据，产品按订阅收费；BYOK 是后续可选能力，不作为
+首发前提。凭据与额度政策由产品后端负责，适配层按每次执行的最小权限交付；模型或检索 key 不进入
+镜像、仓库、浏览器和业务记录。实际模型与推理档位须经协议核验，不能把配置文本当成生效证明。
+
+保留原生 harness 不等于直接暴露裸 CLI：不 fork、patch 或 vendor 内核；pi 的 packages/extensions
+与 dsh 的 profiles/bundles 等机制继续由各包承载，不为了统一协议而抹平。研究工作约定与蓝图作为
+应用选择的执行输入，产品特有的报告格式由应用定义；已确认的“引用来源前打开原文核实”、外部
+内容是数据、来源授权、凭据保护和可靠清理继续成立。
+
+### 迁移约束
+
+- **先由 ULegal 接管职责，再退出 SQLite。** 当前 `runs/runs.db` 仍是执行记录、事件重放、终态原子提交和
+  未释放资源台账的事实源。只有 ULegal 可靠接管这些职责并通过失败场景验收，才可停止新执行的
+  SQLite 写入并退出旧宿主；不以内存状态、终端文本或遥测替代持久化。
+- PostgreSQL 接管结构化执行记录不等于取消原生会话文件。会话、状态归档和产物仍须由产品拥有
+  明确的私有存储与访问边界；不能把原件存储目录或整个项目目录直接挂给 harness。
+- 一个执行只有一个权威状态拥有者。迁移期间按明确的执行路径与切换点区分 owner，不把两套库的
+  终态互相覆盖；持久化失败、断流、重复投递和迟到结果不能制造已完成或已释放的假象。
+- 保留已有 Docker 与本地调试路径，当前契约不因目标更新自动变化；服务及真实 harness 验收使用
+  E2B，并单独取得模型、云端和模板操作授权。
+- 不自动迁移账号或按邮箱回填历史归属，不删除旧数据库、会话或报告。历史读取、真实数据迁移与
+  回退窗口需另行决定；回退新请求路径时仍须跟踪已受理执行和未释放资源。
+
+### 当前实现（迁移前）
+
+当前宿主仍提供研究工作台、HTTP/SSE、站内账号和 SQLite 存储，通过 Docker / E2B 为 run 提供
+独立执行环境，本地 `inproc` 保留为单 Agent 开发与调试入口。默认 `PI_GLINK_TENANCY=local`
+仍是单用户、全局单 run；`PI_GLINK_TENANCY=multitenant` 时启用单宿主多租户实现（§10）。
+身份入口为本机认证网关注入短时效签名断言（`PI_GLINK_AUTH_MODE=gateway`，默认），或站内邀请
+注册、登录与服务端会话（`PI_GLINK_AUTH_MODE=accounts`，§10.6）；两者只在服务端生成
+`TenantContext`，run 带租户归属。当前配置默认 `tenant` 政策，每租户自备模型凭据；显式
+`PI_GLINK_MODEL_CREDENTIALS=shared` 时由宿主统一提供，这是首发产品选择，不表示本次已修改
+运行配置。ACP 注入通道服从同一政策：tenant 下拒绝、shared 下为具名凭据源
+（[ADR 0015](adr/0015-acp-credential-channels-under-model-credential-policy.md)）。
+Docker/E2B 可并发；多租户实现目前只有合成验证，真实网关、HTTPS 终止、邮件交付和生产数据验收
+未覆盖，不能由单 run smoke 或已有执行面实测替代。
 
 多租户实现已覆盖服务端可信身份、run/事件/报告/取消的归属过滤、每 run 凭据交付与脱敏边界、显式并发准入与 fail-closed 资源台账（未确认释放的持有计入 owner 租户与全局槽位，可由在线自动对账或离线人工裁决释放）；仍未覆盖多宿主租约、共享存储、真实网关与云环境的资源上限执行。单独容器/沙箱提供执行隔离，但不自动解决宿主 API 授权、存储隔离或凭据访问，也不构成本仓库对容器/沙箱实际隔离强度的保证。
 
-**旧数据不可读**：本次架构重设计（2026-09-28）起不再为旧 run 记录保留兼容分支。run 记录、事件与资源台账迁入 `runs/runs.db`（SQLite，[ADR 0009](adr/0009-sqlite-run-store.md)）后，此前的 `runs/<id>/meta.json` / `events.jsonl` 文件与 `<数据根>/sessions/<id>/` 会话目录**一律不再被读取**：旧 run 不出现在列表、详情、重放与资源台账中，也不能被追问；`runs.db` 的 schema 版本不符时宿主拒绝打开。不提供迁移，需要旧历史的操作员自行保留旧数据根。决策史统一记在 [`docs/adr/`](adr/)，本文只描述现行契约。
+**旧数据不可读**：本次架构重设计（2026-09-28）起不再为旧 run 记录保留兼容分支。run 记录、事件与资源台账迁入 `runs/runs.db`（SQLite，[ADR 0009](adr/0009-sqlite-run-store.md)）后，此前的 `runs/<id>/meta.json` / `events.jsonl` 文件与 `<数据根>/sessions/<id>/` 会话目录**一律不再被读取**：旧 run 不出现在列表、详情、重放与资源台账中，也不能被追问；`runs.db` 的 schema 版本不符时宿主拒绝打开。不提供迁移，需要旧历史的操作员自行保留旧数据根。决策史统一记在 [`docs/adr/`](adr/)。
 
-具体接口与迁移在对应任务中决定，不预建无消费者的租户抽象；修改这些承诺遵循 [工程约束](engineering.md)。现有单 run 测试继续保护当前行为，将来的多租户变更在取得决定后同步替换相关断言，而不是把当前串行测试当作永久需求。
+具体接口与数据迁移在对应实施设计中决定，不预建无消费者的租户抽象；修改当前承诺遵循
+[工程约束](engineering.md)。现有测试继续保护迁移前行为，取得行为替代决定后才同步修改实现、
+消费者与断言；目标变更不等于可以提前删除安全和持久化门禁。
 
-另一个既定方向是**多 harness 平台化**：宿主保持 harness 无关，`kernel/` 泛化为 harness 适配层，云端保留 pi、deepseek-harness（dsh）、Codex 及一切开源 ACP 兼容 agent（2026-09-27 决定移除闭源 CLI；见 [多 harness 方案](multi-harness-plan.md) §1）。方向、架构与里程碑见 [多 harness 方案](multi-harness-plan.md)；当前仓库已落地两个 harness 族——pi 族（三个执行面均 `--mode rpc`，GLINK-ARCH-3 起 e2b 面也已收敛）与 ACP 族（dsh/codex/opencode 经 stdio JSON-RPC 双向桥接，dsh 0.1.7+ 为最快验证的 agent）；本文的进程拓扑、事件契约与追问门禁对两族统一描述，pi 特有的协议细节仍以 pi 为参照系，ACP 族的协议事实见 [ACP 集成笔记](acp-integration-notes.md)。
+当前多 harness 接入已落地 pi 与 ACP 两个族：pi 三个执行面均使用 `--mode rpc`，ACP 族的
+dsh/codex/opencode 经 stdio JSON-RPC 桥接。开源 harness 名单与包机制继续保留，接入事实见
+[多 Harness 方案](multi-harness-plan.md) 与 [ACP 集成笔记](acp-integration-notes.md)。
+下文 §1 至 §10 描述迁移前实现，不代表 ULegal 已经接管。
 
 ## 1. 分层结构
 
@@ -888,10 +946,12 @@ LOCAL_WEB_EXECUTOR=e2b scripts/run-local-web.sh        # 云沙箱执行面
 
 ## 9. 本阶段不做（边界）
 
-场景能力包与档位、多账户与分享、资料库与上传/OCR、DOCX/PDF 导出与图表、报告审阅工作区、
-多角色编排、上下文压缩调优、成本治理、E2B 模板的生产级硬化。单宿主多租户已按 §10 实现（合成验证）；
-多宿主、共享存储、真实网关接入、BYOK 自助与短期凭据代理、计费、上线部署与真实数据迁移仍不在
-本期范围，具体接口、迁移与上线验收见 [多租户方案](multitenancy-plan.md)。
+glink 不再规划独立账号、订阅计费、项目资料库、业务成果工作区或第二套产品历史的扩建；这些能力
+归 ULegal。多宿主、共享配额与对象存储若有实际需求，在产品后端侧单独决定，不沿旧计划继续建设
+独立 glink 控制面。当前单宿主多租户实现及未覆盖项仍见 §10 与 [多租户方案](multitenancy-plan.md)。
+
+本次方向确认不授权执行代码重构、数据库退出、真实历史导入、共享服务重启、模型/云端调用、
+镜像或模板切换、发布与部署。相关操作分别遵循 [工程约束](engineering.md) 和实施验收。
 
 ## 10. 单宿主多租户（已实现，合成验证）
 
