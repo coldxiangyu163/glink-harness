@@ -147,6 +147,10 @@ ACP 族的协议事实、能力矩阵与冒烟证据见 [ACP 集成笔记](acp-i
 
 ## 3. 事件契约
 
+> 面向产品后端的服务契约（受理字段与拒绝映射、SSE 续传与 429、终帧集合与消费纪律、
+> report/deliverables 端点、取消两态）固化在 [exec-contract.md](exec-contract.md)，与
+> `tests/test_exec_contract.py` 逐条对应；本节与 §4 描述其实现语义。
+
 pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、前端、事件日志）只说产品
 事件（`host/glink_harness/events.py`）。
 
