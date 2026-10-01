@@ -298,6 +298,40 @@ def test_followup_without_a_resumable_session_is_409(server: GlinkHarnessServer)
     assert json.loads(raw)["error"] == "session_unavailable"
 
 
+def test_followup_with_unreadable_seed_report_fails_closed(tmp_path: Path) -> None:
+    """契约 1.3：追问的报告种子无法从父 run 安全读取时，run 受理后以 run_failed 收口。
+
+    种子复制在 Prepare 阶段（受理后）执行，因此这不是受理同步拒绝：
+    追问被受理、run 失败、error 载明 report_unavailable——fail-closed，
+    不产生「已续接」的假象。
+    """
+    instance = create_server(
+        make_config(tmp_path), client_factory=fake_factory(persist_session=True)
+    )
+    close = serve(instance)
+    try:
+        parent = start_run(instance, {"prompt": "第一轮产出报告"})
+        assert wait_for_terminal(instance, parent["runId"])["hasReport"] is True
+
+        # 合成故障：父轮已发布报告在追问受理前从 artifacts 消失。
+        artifact = (
+            tmp_path / "data" / "runs" / parent["runId"] / "artifacts" / "report.md"
+        )
+        assert artifact.is_file()
+        artifact.unlink()
+
+        child = start_run(
+            instance, {"prompt": "追问", "parentRunId": parent["runId"]}
+        )
+        latest = wait_for_terminal(instance, child["runId"])
+        assert latest["status"] == "failed"
+        assert "report_unavailable" in (latest.get("error") or "")
+        frames = read_stream(instance, child["runId"])
+        assert frames[-1]["event"] == "run_failed"
+    finally:
+        close()
+
+
 # -- 契约 2：事件通道 -------------------------------------------------------
 
 

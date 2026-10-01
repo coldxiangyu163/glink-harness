@@ -2,7 +2,8 @@
 
 > 本文把 ULegal 对接设计（§2.1 受理面、§3 事件/终态回传、§6 取消语义）固化为可验收的
 > 服务契约，供 R2 产品后端（ULegal）消费。R1-5 只固化**现状行为**，不改实现；每条契约
-> 在 `tests/test_exec_contract.py` 有同名条款测试（测试 docstring 以「契约 x.y」开头）。
+> 的钉住测试见 §5 对应表（新增条款测试在 `tests/test_exec_contract.py`，docstring 以
+> 「契约 x.y」开头；部分条款由其他测试文件的既有用例钉住，§5 已列出位置）。
 >
 > 单一来源约定：**事件词汇、payload 字段与版本 `v` 的唯一来源是
 > `host/glink_harness/event_schema.py`**（前端常量由它生成，`scripts/gen-event-schema.py
@@ -19,7 +20,7 @@
 |---|---|---|---|
 | `prompt` | string 必填 | 本轮题面；`/蓝图名 题目` 等价于 `blueprint`+`prompt`（宿主准入层解析） | 非字符串、空白串 400；以 `/` 开头但不是蓝图命令 400 `unsupported_command` |
 | `parentRunId` | string 可选 | 追问的父 run id | 须匹配 `^[A-Za-z0-9_-]{1,64}$`，否则 400 |
-| `blueprint` | string 可选 | 蓝图名 | 非字符串 400；不存在/不可用 400 `unknown_blueprint`/`blueprint_unavailable` |
+| `blueprint` | string 可选 | 蓝图名 | 非字符串 400；不存在/不可用 400 `unknown_blueprint`/`invalid_blueprint` |
 
 **模型、凭据、harness/executor 选择均不接受客户端字段**：
 
@@ -34,6 +35,9 @@
 ### 1.2 成功响应
 
 `201 Created`，体为 `{"run": <run 视图>}`。run 视图字段：
+
+> 偏差说明：对接设计文档（§2.1/§4.1）写的是「200 + run 视图」，现状实现是
+> `201 Created`（前端与既有测试已钉住 201）。**以本文为准**，消费方应按 201 判定成功。
 
 | 字段 | 含义 |
 |---|---|
@@ -52,17 +56,21 @@ run 视图不含任何宿主路径与凭据。
 |---|---|---|
 | 400 | `invalid_request` | 禁用字段、字段形状违规、空 prompt |
 | 400 | `unsupported_command` | `/` 开头但不是本机蓝图命令（体只给可用蓝图名，不回显输入） |
-| 400 | `unknown_blueprint` / `blueprint_unavailable` | 蓝图不存在 / 蓝图文件不可用 |
+| 400 | `unknown_blueprint` / `invalid_blueprint` | 蓝图不存在 / 蓝图文件不可用（格式校验失败） |
 | 400 | `not_configured` | 宿主缺凭据等配置错误 |
 | 403 | `forbidden` | 跨站请求、租户未配置 |
 | 404 | `unknown_run` | 追问的父 run 未知、异租户或无 owner（三者不可区分） |
 | 409 | `run_busy` | 追问的父轮未终态；或 local 模式全局单 run 槽被占 |
 | 409 | `stale_run` | 父轮已有后续追问（追问只允许接在最新一轮后） |
 | 409 | `session_unavailable` | 跨族/跨包、能力缺失、会话或状态根不可用（fail-closed） |
-| 409 | `report_unavailable` | 追问的报告种子无法从父 run 安全读取 |
 | 409 | `resources_unreleased` | 历史 run 持有未确认释放的执行资源 |
 | 415 | `unsupported_media_type` | 非 JSON 媒体类型 |
 | 429 | `quota_exceeded` | 并发配额（体含 `scope`/`limit`，不含他人 run id） |
+
+**`report_unavailable` 不是受理同步拒绝**：追问的报告种子复制发生在受理后的 Prepare
+阶段；种子无法从父 run 安全读取时，追问 run 被受理后以 `run_failed` 收口，run 视图
+`error` 载明 `report_unavailable`（fail-closed，不产生已续接假象）。消费方按 §2 事件
+通道的终帧与 run 视图 error 识别，而不是等一个 409。
 
 追问门禁次序固定：**owner（unknown_run）→ spec.family → spec.pack → capabilities.resume
 → terminal（run_busy）→ stale（stale_run）**，族追加门禁在其后。
@@ -143,17 +151,25 @@ ACP `present` 声明的交付物，**至多 8 件**，`index` 取值 `0-7`（越
 
 ## 5. 契约 ↔ 测试对应表
 
-| 条款 | 测试（`tests/test_exec_contract.py`） |
+| 条款 | 测试 |
 |---|---|
-| 1.1 禁用字段 400 | `test_forbidden_run_body_fields_are_refused_400`、`test_forbidden_field_matching_ignores_case_and_space` |
-| 1.1/1.2 受理字段、忽略额外字段、冻结 spec、201 run 视图 | `test_accepted_shape_ignored_extras_and_frozen_spec` |
-| 1.1 字段形状 400 | `test_field_shape_violations_are_400` |
-| 1.3 追问拒绝映射 | `test_followup_unknown_parent_is_404`、`test_followup_to_a_running_parent_is_409_run_busy`、`test_followup_after_a_followup_is_409_stale_run`、`test_followup_without_a_resumable_session_is_409` |
-| 2.2 续传 | `test_after_resumes_precisely_and_last_event_id_wins` |
-| 2.3 429 语义 | `test_stream_limit_429_carries_a_readable_json_body` |
-| 2.5 终帧集合 | `test_terminal_frame_set_and_finality`、`test_failed_run_ends_with_run_failed`、`test_cancelled_run_ends_with_run_cancelled` |
-| 2.5 交付不完整 | `test_stop_reason_length_is_finished_with_incomplete_delivery` |
-| 3.1/3.3 report 与 hasReport | `test_report_endpoint_and_has_report`、`test_missing_report_is_404_no_report` |
-| 3.2/3.3 deliverables | `test_run_view_deliverables_and_download` |
-| 3.3 种子 digest | `test_followup_seed_report_does_not_masquerade_as_new_report` |
-| 4 取消两态 | `test_stop_mapping_terminal_and_unknown`、`test_stop_while_finalizing_is_409` |
+| 1.1 禁用字段 400 | `test_exec_contract.py::test_forbidden_run_body_fields_are_refused_400`、`test_forbidden_field_matching_ignores_case_and_space` |
+| 1.1/1.2 受理字段、忽略额外字段、冻结 spec、201 run 视图 | `test_exec_contract.py::test_accepted_shape_ignored_extras_and_frozen_spec` |
+| 1.1 字段形状 400 | `test_exec_contract.py::test_field_shape_violations_are_400` |
+| 1.3 追问拒绝映射 | `test_exec_contract.py::test_followup_unknown_parent_is_404`、`test_followup_to_a_running_parent_is_409_run_busy`、`test_followup_after_a_followup_is_409_stale_run`、`test_followup_without_a_resumable_session_is_409` |
+| 1.3 report_unavailable（受理后 fail-closed） | `test_exec_contract.py::test_followup_with_unreadable_seed_report_fails_closed` |
+| 1.3 蓝图两码 | `test_blueprints.py:681`（unknown_blueprint）、`test_blueprints.py:689`（invalid_blueprint） |
+| 1.3 not_configured / unsupported_command / 415 / resources_unreleased | `test_runs_api.py` 既有用例；resources_unreleased 另见 `test_event_replay.py:237` |
+| 1.3 quota_exceeded | `test_multitenant_api.py:1063/1098`；429 的 tenant 维度见 `:1330` |
+| 1.3 追问门禁 owner 优先 | `test_runner.py::test_foreign_parent_state_is_not_probed`；family→pack→capabilities→terminal→stale 的相互优先级**暂无专测**（诚实缺口，次序语义由 `runs/admission.py` 门禁代码钉住） |
+| 2.1 合并次序 | `test_event_replay.py:315/360` |
+| 2.2 续传 | `test_exec_contract.py::test_after_resumes_precisely_and_last_event_id_wins` |
+| 2.3 429 语义 | `test_exec_contract.py::test_stream_limit_429_carries_a_readable_json_body` |
+| 2.4 流 404 与断言过期 | `test_multitenant_api.py:900/1287/1305/1438` |
+| 2.5 终帧集合 | `test_exec_contract.py::test_terminal_frame_set_and_finality`、`test_failed_run_ends_with_run_failed`、`test_cancelled_run_ends_with_run_cancelled` |
+| 2.5 消费纪律（累计快照/截断/usage 累计） | `test_kernel_projection.py:174`（tool_updated 快照）、`test_kernel_rpc.py:360` 与 `test_kernel_projection.py:289`（assistant_message 截断）、`test_runner.py:652`（usage 累计） |
+| 2.5 交付不完整 | `test_exec_contract.py::test_stop_reason_length_is_finished_with_incomplete_delivery` |
+| 3.1/3.3 report 与 hasReport | `test_exec_contract.py::test_report_endpoint_and_has_report`、`test_missing_report_is_404_no_report` |
+| 3.2/3.3 deliverables | `test_exec_contract.py::test_run_view_deliverables_and_download` |
+| 3.3 种子 digest | `test_exec_contract.py::test_followup_seed_report_does_not_masquerade_as_new_report` |
+| 4 取消两态 | `test_exec_contract.py::test_stop_mapping_terminal_and_unknown`、`test_stop_while_finalizing_is_409` |
