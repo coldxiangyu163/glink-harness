@@ -12,12 +12,13 @@ from e2b.exceptions import TemplateException
 
 class FakeTemplate:
     def __init__(self, *, missing=False, lookup_error=None, fail_lookup_after_build=False,
-                 restore=False):
+                 restore=False, no_auto_default=False):
         self.tags = {} if missing else {"default": "production"}
         self.missing = missing
         self.lookup_error = lookup_error
         self.fail_lookup_after_build = fail_lookup_after_build
         self.restore = restore
+        self.no_auto_default = no_auto_default
         self.builds = 0
         self.assignments = []
         self.queries = 0
@@ -50,7 +51,8 @@ class FakeTemplate:
 
     def build(self, builder, *, alias, tags, **kwargs):
         self.builds += 1
-        self.tags["default"] = "new-build"
+        if not self.no_auto_default:
+            self.tags["default"] = "new-build"
         for tag in tags or ():
             self.tags[tag] = "new-build"
         return SimpleNamespace(name=alias, build_id="new-build", tags=tags or ["default"])
@@ -97,6 +99,35 @@ def test_explicit_not_found_allows_first_build(script, monkeypatch):
     monkeypatch.setattr(script, "Template", fake)
     assert script.main(["--tag", "candidate"]) == 0
     assert fake.builds == 1 and fake.tags["candidate"] == "new-build"
+
+
+def test_first_build_with_candidate_tag_accepts_missing_default(script, monkeypatch, capsys):
+    """新 alias 首建只带候选 tag 时服务端不设 default（2026-10-01 实测）：
+
+    candidate 确认即成功退出并提示 promote，不得把「default 缺失」当发布失败。
+    """
+    fake = FakeTemplate(missing=True, no_auto_default=True)
+    monkeypatch.setattr(script, "Template", fake)
+    assert script.main(["--tag", "candidate"]) == 0
+    assert fake.builds == 1
+    assert fake.tags == {"candidate": "new-build"}  # default 保持未设置
+    assert "promote-from candidate" in capsys.readouterr().out
+
+
+def test_first_build_with_a_preset_default_is_suspicious(script, monkeypatch):
+    """首建却出现预设 default（指向别的 build）是非预期变更，拒绝成功。"""
+    fake = FakeTemplate(missing=True, no_auto_default=True)
+    original_build = fake.build
+
+    def build_with_stale_default(*args, **kwargs):
+        result = original_build(*args, **kwargs)
+        fake.tags["default"] = "someone-elses-build"
+        return result
+
+    fake.build = build_with_stale_default
+    monkeypatch.setattr(script, "Template", fake)
+    assert script.main(["--tag", "candidate"]) != 0
+    assert fake.tags["default"] == "someone-elses-build"  # 未被覆盖
 
 
 def test_candidate_build_preserves_production_default(script, monkeypatch):

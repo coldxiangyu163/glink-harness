@@ -22,9 +22,11 @@ docker/e2b/templates.json 的所选条目（由 scripts/generate-pack-artifacts.
 的条目（acp-worker）只能用它自己的 build_command（E2B CLI）构建，本脚本
 会拒绝并提示对应命令。
 
-候选流程（GLINK-PKG-01）：E2B 服务端会把最新构建设成 `default`，所以
-``--tag candidate`` 会先把当前 default build 标成 ``previous``，构建后若
-default 被服务端移到新 build，就立刻移回旧 build；只有显式
+候选流程（GLINK-PKG-01）：已有 default 的 alias 上，E2B 服务端会把最新构建设成
+`default`，所以 ``--tag candidate`` 会先把当前 default build 标成 ``previous``，
+构建后若 default 被服务端移到新 build，就立刻移回旧 build；新 alias 的首建若只带
+候选 tag，服务端**不**设 default（2026-10-01 glink-harness-worker 首建实测），
+candidate 确认后退出并提示显式 promote。只有显式
 ``--promote-from candidate`` 才会让 default 指向新 build。每一步都打印
 build id 与 tag 现状，供交付证据记录，不输出任何凭据。只有构建前 SDK
 明确 404 才视为首次构建，其它查询错误拒绝构建；构建/移回/promote 后必须读回
@@ -221,6 +223,19 @@ def main(argv: list[str] | None = None) -> int:
         tags = _tags(args.alias)  # no post-build error (including 404) is a first build
         if args.tag and tags.get(args.tag) != info.build_id:
             raise RuntimeError("候选 tag 未确认")
+        if producing_default is None and args.tag:
+            # 新 alias 的首建若只带候选 tag，服务端可能不设 default（2026-10-01
+            # glink-harness-worker 首建实测仅有 candidate），也可能把 default 直接
+            # 指向新 build；两者都是合法首建。default 指向别的 build 才是非预期。
+            actual_default = tags.get("default")
+            if actual_default is not None and actual_default != info.build_id:
+                raise RuntimeError("首建 default 指向了别的 build")
+            if actual_default is None:
+                print(
+                    f"首建完成：{args.tag} -> build {info.build_id}；default 未设置，"
+                    f"沙箱自检通过后用 --promote-from {args.tag} 发布。"
+                )
+                return 0
         if tags.get("default") != expected:
             # Restore only a known candidate change; do not overwrite a third
             # build possibly published by another operator.

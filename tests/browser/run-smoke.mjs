@@ -90,14 +90,16 @@ try {
     toolsDone: document.querySelectorAll('.glink-tool[data-status="done"]').length,
     toolsWithText: [...document.querySelectorAll('.glink-tool')].filter((node) => {
       const output = node.querySelector('.glink-tool-output')?.textContent.trim() ?? '';
-      const result = node.querySelector('.glink-tool-result')?.textContent.trim() ?? '';
+      // 与视图同一精确选择器：wrap 里第一个 .glink-tool-result 是 structured 槽位
+      // （search/plan 专用，其余 presentation 恒空），结果文本在它的兄弟节点。
+      const result = node.querySelector('.glink-tool-detail-wrap > .glink-tool-result:not(.glink-tool-structured)')?.textContent.trim() ?? '';
       return output !== '' || result !== '';
     }).length,
     toolsRenderingTextTwice: [...document.querySelectorAll('.glink-tool')].filter((node) => {
       // After the terminal frame the streamed preview is dropped when it repeats
       // the result; a card must never show the same text in both fields.
       const output = node.querySelector('.glink-tool-output')?.textContent.trim() ?? '';
-      const result = node.querySelector('.glink-tool-result')?.textContent.trim() ?? '';
+      const result = node.querySelector('.glink-tool-detail-wrap > .glink-tool-result:not(.glink-tool-structured)')?.textContent.trim() ?? '';
       return output !== '' && output === result;
     }).length,
     texts: document.querySelectorAll('.glink-text').length,
