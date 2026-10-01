@@ -202,6 +202,26 @@ def test_shared_policy_is_explicit_and_multitenant_only(tmp_path: Path) -> None:
     assert default.model_credentials == "tenant"
 
 
+def test_shared_dsh_pack_readiness_uses_the_acp_channel(tmp_path: Path) -> None:
+    """B1 回归（shared 政策）：dsh + GLINK_ACP_ENV 通道下 model_ready 为真。
+
+    shared 政策认可 ACP 具名凭据通道为宿主冻结凭据源（ADR 0015/0016）；
+    就绪判定与政策用同一表示，不再只看 OPENAI_API_KEY。
+    """
+    config = build_config(
+        shared_values(
+            tmp_path,
+            GLINK_HARNESS="dsh",
+            GLINK_ACP_ENV="OPENROUTER_API_KEY=synthetic-shared",
+            OPENAI_MODEL="openai/gpt-5.6-sol",
+            OPENAI_REASONING_EFFORT="xhigh",
+        ),
+        REPO_ROOT,
+    )
+    assert config.model_credentials == "shared"
+    assert config.model_ready is True
+
+
 def test_shared_policy_refuses_the_tenant_credential_file_entry(tmp_path: Path) -> None:
     """``shared`` reads no tenant configuration at all: any file entry is refused.
 

@@ -3,8 +3,9 @@
 
 用法::
 
-    # 候选构建（不移动生产 default tag；--template 缺省跟随 GLINK_HARNESS 所选包
-    # 的 [image].target，默认包为 dsh → acp-worker）：
+    # 候选构建（不移动生产 default tag；--template 缺省且未设 GLINK_E2B_TEMPLATE_KEY
+    # 时跟随 GLINK_HARNESS 所选包的 [image].target，默认包为 dsh → acp-worker；
+    # 包名/清单无效即拒绝，不回退 pi-worker）：
     E2B_API_KEY=… .venv/bin/python scripts/build-e2b-template.py --tag candidate
     # 显式选择模板（sdk 构建方式的条目才可由本脚本构建）：
     E2B_API_KEY=… .venv/bin/python scripts/build-e2b-template.py --template pi-worker --tag candidate
@@ -42,6 +43,11 @@ from e2b import Template
 from e2b.exceptions import SandboxException
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# 复用宿主的包清单 fail-closed 解析（与 scripts/generate-pack-artifacts.py 同一入口），
+# 不在本脚本另建第二套清单校验规则。
+sys.path.insert(0, str(REPO_ROOT / "host"))
+from glink_harness.harnesses import HarnessPackError, load_pack  # noqa: E402
+
 #: 生成产物：E2B 模板参数（清单派生，见 scripts/generate-pack-artifacts.py）。
 TEMPLATES = REPO_ROOT / "docker" / "e2b" / "templates.json"
 #: 候选构建前的生产 build 会带上这个 tag，作为回滚句柄。
@@ -49,20 +55,34 @@ ROLLBACK_TAG = "previous"
 
 
 def _default_template_key() -> str:
-    """跟随所选 harness 包的镜像目标（缺省包为 dsh → acp-worker）。
+    """所选 harness 包的镜像目标（缺省包 dsh → acp-worker）；无效输入即拒绝。
 
-    只读包清单的 ``[image].target``，不导入宿主模块；包不存在或缺键时
-    回退 pi-worker 由后续校验报出真实错误。
+    只在没有任何显式模板选择（``--template`` / ``GLINK_E2B_TEMPLATE_KEY``）时
+    调用。包名非法、清单不可读/损坏/缺 ``[image].target`` 都直接拒绝——
+    绝不回退 pi-worker：默认路径上选错目标意味着真实构建/改 tag 作用在错误
+    模板上（fail-closed，与 harness 选择不自动回退的原义务一致）。
     """
-    import tomllib
-
-    pack = (os.environ.get("GLINK_HARNESS") or "dsh").strip().lower()
-    manifest = REPO_ROOT / "harnesses" / pack / "harness.toml"
+    pack = (os.environ.get("GLINK_HARNESS") or "dsh").strip().lower() or "dsh"
+    raw_dir = (os.environ.get("GLINK_HARNESSES_DIR") or "").strip()
+    if raw_dir:
+        harnesses_dir = Path(raw_dir).expanduser()
+        if not harnesses_dir.is_absolute():
+            harnesses_dir = REPO_ROOT / harnesses_dir
+    else:
+        harnesses_dir = REPO_ROOT / "harnesses"
     try:
-        target = tomllib.loads(manifest.read_text(encoding="utf-8"))["image"]["target"]
-    except (OSError, KeyError, tomllib.TOMLDecodeError):
-        return "pi-worker"
-    return str(target)
+        target = load_pack(harnesses_dir, pack).image.target
+    except HarnessPackError as exc:
+        raise SystemExit(
+            f"无法从 GLINK_HARNESS={pack!r} 的包清单推断构建目标，拒绝继续：{exc}"
+        ) from exc
+    templates = json.loads(TEMPLATES.read_text(encoding="utf-8"))["templates"]
+    if target not in templates:
+        raise SystemExit(
+            f"包 {pack!r} 的镜像目标 {target!r} 不在 {TEMPLATES.name} 中"
+            f"（可用：{'、'.join(sorted(templates))}），拒绝继续"
+        )
+    return target
 
 
 def _template_entry(key: str) -> dict:
@@ -72,7 +92,6 @@ def _template_entry(key: str) -> dict:
             f"未知模板 {key!r}；可用：{'、'.join(sorted(templates))}"
         )
     return templates[key]
-
 
 
 def _tags(alias: str, *, allow_missing: bool = False) -> dict[str, str]:
@@ -121,8 +140,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="构建 glink-harness 的 E2B 模板")
     parser.add_argument(
         "--template",
-        default=os.environ.get("GLINK_E2B_TEMPLATE_KEY") or _default_template_key(),
-        help="templates.json 里的模板键（缺省跟随 GLINK_HARNESS 所选包的镜像目标）",
+        default=None,
+        help="templates.json 里的模板键；缺省且未设 GLINK_E2B_TEMPLATE_KEY 时，"
+        "才解析 GLINK_HARNESS 所选包的 [image].target（解析失败即拒绝，不回退）",
     )
     parser.add_argument("--alias", default="", help="覆盖模板 alias（默认取所选条目的 alias；GLINK_E2B_TEMPLATE 同效）")
     parser.add_argument("--cpu", type=int, default=0, help="覆盖 CPU 数（默认取所选条目）")
@@ -140,7 +160,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--logs", action="store_true", help="打印构建日志")
     args = parser.parse_args(argv)
 
-    entry = _template_entry(args.template)
+    # 惰性解析：用户显式选择模板时不触碰包清单，避免无关的 harness 默认误拒。
+    template_key = args.template or (os.environ.get("GLINK_E2B_TEMPLATE_KEY") or "").strip()
+    if not template_key:
+        template_key = _default_template_key()
+    entry = _template_entry(template_key)
     dockerfile = REPO_ROOT / entry["dockerfile"]
     args.alias = args.alias or os.environ.get("GLINK_E2B_TEMPLATE", entry["alias"])
     args.cpu = args.cpu or entry["cpu_count"]
@@ -154,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         return _promote(args.alias, args.promote_from)
     if entry.get("builder") != "sdk":
         print(
-            f"模板 {args.template} 由 E2B CLI 构建（builder=cli），本脚本只覆盖 SDK 面；"
+            f"模板 {template_key} 由 E2B CLI 构建（builder=cli），本脚本只覆盖 SDK 面；"
             f"请改用生成产物里的 build_command：{entry.get('build_command', '（无）')}",
             file=sys.stderr,
         )

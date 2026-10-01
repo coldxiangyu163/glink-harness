@@ -24,6 +24,7 @@ from .harnesses import (
     FAMILIES,
     HarnessPack,
     HarnessPackError,
+    SessionConfigSource,
     load_pack,
     pack_names,
 )
@@ -319,16 +320,30 @@ class HostConfig:
     def model_ready(self) -> bool:
         """Host-level model readiness for the selected pack's family.
 
-        pi 族：OpenAI 兼容 key + 模型 id。ACP 族：模型 id + 已声明的凭据通道
-        （``acp_credential_env`` 的值在启动期解析/缺失即拒绝；``acp_credential_files``
-        的源文件同样在启动期校验），通道在列即值已就位。这只是配置就绪，
-        不等于真实模型握手成功。多租户的每租户口径在
-        ``web_security._public_config`` 按上下文覆盖本值。
+        pi 族：OpenAI 兼容 key + 模型 id。ACP 族与既有凭据政策
+        （``_acp_credentials_follow_policy``，ADR 0015/0016）用同一表示：三条
+        具名凭据通道（``acp_credential_env`` 启动期解析值、``acp_credential_files``
+        的 source=dest 声明、``acp_env`` 显式 env）任一在列即视为凭据已配置——
+        注意 ``acp_credential_files`` 的源文件内容在启动期只解析不校验，实际
+        读取发生在 run 准备期。模型 id 是否必需只由真实消费者决定：包清单
+        ``capabilities.session_config`` 声明了 ``OPENAI_MODEL`` 来源的包（如 dsh）
+        才要求宿主模型字段（缺来源在启动期已被拒绝）；未声明的包（codex/
+        opencode）不强行要求。就绪只回答配置齐备，不等于真实认证或模型握手
+        成功。多租户的每租户口径在 ``web_security._public_config`` 按上下文
+        覆盖本值。
         """
         if self.pack.family == "acp":
-            return bool(self.openai_model) and bool(
-                self.acp_credential_env_values or self.acp_credential_files
+            has_channel = bool(
+                self.acp_credential_env_values
+                or self.acp_credential_files
+                or self.acp_env
             )
+            model_required = any(
+                isinstance(declaration, SessionConfigSource)
+                and declaration.source == "OPENAI_MODEL"
+                for _config_id, declaration in self.pack.capabilities.session_config
+            )
+            return has_channel and (bool(self.openai_model) if model_required else True)
         return self.has_openai_key and bool(self.openai_model)
 
     @property

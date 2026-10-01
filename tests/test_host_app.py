@@ -263,6 +263,56 @@ def test_pi_pack_readiness_still_requires_the_openai_key(tmp_path: Path) -> None
     assert config.public_view()["configured"]["model"] is False
 
 
+def test_dsh_process_env_channel_counts_as_configured(tmp_path: Path) -> None:
+    """B1 回归：GLINK_ACP_ENV 进程环境通道是既有政策认可的具名凭据源。
+
+    dsh + GLINK_ACP_ENV=OPENROUTER_API_KEY=<值>（无 CREDENTIAL_ENV/FILES），
+    就绪判定不得遗漏这条通道。
+    """
+    config = build_config(
+        _dsh_values(tmp_path, GLINK_ACP_ENV="OPENROUTER_API_KEY=synthetic-only"),
+        REPO_ROOT,
+    )
+    assert config.model_ready is True
+    assert config.public_view()["configured"]["model"] is True
+
+
+def test_codex_pack_does_not_require_a_host_model_field(tmp_path: Path) -> None:
+    """B1 回归：codex/opencode 未声明 OPENAI_MODEL 来源，不得被误强制。
+
+    codex 包 session_config=()（无宿主模型消费者）：合法原生配置
+    （GLINK_ACP_ENV 传 OPENAI_API_KEY，无宿主 OPENAI_MODEL）即就绪。
+    """
+    config = build_config(
+        {
+            "GLINK_HARNESS": "codex",
+            "GLINK_ACP_ENV": "OPENAI_API_KEY=synthetic-only",
+            "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
+            "LOCAL_WEB_PORT": "0",
+        },
+        REPO_ROOT,
+    )
+    assert config.pack.capabilities.session_config == ()
+    assert config.model_ready is True
+
+
+def test_opencode_pack_readiness_via_credential_file(tmp_path: Path) -> None:
+    """B1 回归：opencode + 凭据文件注入（无宿主模型字段）即就绪。"""
+    source = tmp_path / "auth.json"
+    source.write_text('{"access": "synthetic"}', encoding="utf-8")
+    source.chmod(0o600)
+    config = build_config(
+        {
+            "GLINK_HARNESS": "opencode",
+            "GLINK_ACP_CREDENTIAL_FILES": f"{source}=.local/share/opencode/auth.json",
+            "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
+            "LOCAL_WEB_PORT": "0",
+        },
+        REPO_ROOT,
+    )
+    assert config.model_ready is True
+
+
 def test_health_payload_names_the_selected_pack(tmp_path: Path) -> None:
     """/api/health 的 harness 块报告所选包名与入口（dsh 默认包的直接断言）。"""
     config = build_config(

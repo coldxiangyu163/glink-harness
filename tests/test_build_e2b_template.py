@@ -20,6 +20,7 @@ class FakeTemplate:
         self.restore = restore
         self.builds = 0
         self.assignments = []
+        self.queries = 0
 
     def __call__(self):
         return self
@@ -28,6 +29,7 @@ class FakeTemplate:
         return self
 
     def get_tags(self, alias):
+        self.queries += 1
         if self.lookup_error:
             raise self.lookup_error
         if self.fail_lookup_after_build and self.builds:
@@ -189,3 +191,67 @@ def test_unknown_template_key_is_refused(script, monkeypatch):
     monkeypatch.delenv("GLINK_E2B_TEMPLATE_KEY", raising=False)
     with pytest.raises(SystemExit):
         script.main(["--template", "nope", "--tag", "candidate"])
+
+
+# -- B2：默认模板选择 fail-closed（无效包绝不回退 pi-worker）----------------------
+
+
+def test_invalid_pack_never_falls_back_or_touches_the_sdk(script, monkeypatch):
+    """GLINK_HARNESS=dsh-typo：build 与 promote 都在任何 SDK 查询/构建/tag 修改前拒绝。
+
+    回归 B2：旧实现把无效包静默回退成 pi-worker，fake SDK 会真实执行 build
+    与 previous/default tag 修改且 exit 0。
+    """
+    monkeypatch.delenv("GLINK_E2B_TEMPLATE_KEY", raising=False)
+    monkeypatch.setenv("GLINK_HARNESS", "dsh-typo")
+    fake = FakeTemplate()
+    monkeypatch.setattr(script, "Template", fake)
+    with pytest.raises(SystemExit) as build_exit:
+        script.main(["--tag", "candidate"])
+    with pytest.raises(SystemExit) as promote_exit:
+        script.main(["--promote-from", "candidate"])
+    assert fake.queries == 0 and fake.builds == 0 and fake.assignments == []
+    # SystemExit 的文本即拒绝理由（脚本入口 raise SystemExit(main()) 时打印）
+    assert "dsh-typo" in str(build_exit.value)
+    assert "dsh-typo" in str(promote_exit.value)
+
+
+def test_a_broken_manifest_is_refused_before_the_sdk(script, monkeypatch, tmp_path):
+    """缺字段的包清单（无 [image].target）同样在 SDK 之前拒绝。"""
+    monkeypatch.delenv("GLINK_E2B_TEMPLATE_KEY", raising=False)
+    packs = tmp_path / "packs"
+    pack = packs / "broken"
+    pack.mkdir(parents=True)
+    (pack / "harness.toml").write_text(
+        'format = "glink-harness/v2"\nname = "broken"\nfamily = "acp"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GLINK_HARNESS", "broken")
+    monkeypatch.setenv("GLINK_HARNESSES_DIR", str(packs))
+    fake = FakeTemplate()
+    monkeypatch.setattr(script, "Template", fake)
+    with pytest.raises(SystemExit):
+        script.main(["--tag", "candidate"])
+    assert fake.queries == 0 and fake.builds == 0 and fake.assignments == []
+
+
+def test_an_explicit_template_never_resolves_the_pack_default(script, monkeypatch):
+    """显式合法 --template 不解析包清单：无效 GLINK_HARNESS 不影响，SDK 候选照常。"""
+    monkeypatch.delenv("GLINK_E2B_TEMPLATE_KEY", raising=False)
+    monkeypatch.setenv("GLINK_HARNESS", "dsh-typo")
+    fake = FakeTemplate(restore=True)
+    monkeypatch.setattr(script, "Template", fake)
+    assert script.main(["--template", "pi-worker", "--tag", "candidate"]) == 0
+    assert fake.builds == 1
+    assert fake.tags["candidate"] == "new-build"
+
+
+def test_blank_harness_keeps_the_dsh_default_cli_refusal(script, monkeypatch, capsys):
+    """GLINK_HARNESS 空白视为未设置：默认包 dsh → acp-worker 的 builder=cli 拒绝。"""
+    monkeypatch.delenv("GLINK_E2B_TEMPLATE_KEY", raising=False)
+    monkeypatch.setenv("GLINK_HARNESS", "   ")
+    fake = FakeTemplate()
+    monkeypatch.setattr(script, "Template", fake)
+    assert script.main(["--tag", "candidate"]) == 2
+    assert fake.queries == 0 and fake.builds == 0
+    assert "builder=cli" in capsys.readouterr().err
