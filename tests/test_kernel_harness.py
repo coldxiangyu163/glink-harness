@@ -1,8 +1,10 @@
-"""``select_family`` 的族映射与防御性拒绝。
+"""``select_family`` 的族映射、防御性拒绝与会话来源窄协议注入（R1-1）。
 
 族实例在 ``RunManager.__init__`` 由 ``select_family`` 唯一选出；本文件钉住
 映射表（pi/acp 各自的实现类型与 ``name``）、未知 harness 的 fail-closed，以及
-``RunManager.__init__`` 的唯一选择点（runner 重接线已落地）。
+``RunManager.__init__`` 的唯一选择点（runner 重接线已落地）。R1-1 起追加钉住：
+族构造注入的是 ``SessionSource`` 窄协议（宿主侧 ``RunStoreSessionSource``
+适配器）而非具体 ``RunStore``，以及适配器对六个协议面（设计 §2.3）的委托行为。
 """
 
 from __future__ import annotations
@@ -17,7 +19,8 @@ from glink_harness.config import ConfigError, HostConfig, build_config
 from glink_harness.kernel.harness import HarnessFamily, select_family
 from glink_harness.kernel.harness_acp import AcpHarnessFamily
 from glink_harness.kernel.harness_pi import PiHarnessFamily
-from glink_harness.store import RunStore
+from glink_harness.kernel.run_views import RunStoreSessionSource
+from glink_harness.store import RunRecord, RunSpec, RunStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"
@@ -83,3 +86,81 @@ def test_run_manager_resolves_the_configured_family_at_init(tmp_path: Path) -> N
         assert manager._admission.families == {config.harness: family}  # noqa: SLF001
         assert manager._admission.family_for(config.harness) is family  # noqa: SLF001
         assert manager._admission.spec(None).family == config.harness  # noqa: SLF001
+
+
+# -- R1-1：会话来源窄协议注入点 -----------------------------------------------
+
+
+def test_select_family_injects_the_session_source_adapter(tmp_path: Path) -> None:
+    """族构造拿到的是窄协议适配器，不是具体 RunStore（设计 §2.3）。"""
+    config = make_config(tmp_path, "pi")
+    family = select_family(config.harness, config=config, store=RunStore(tmp_path / "runs"))
+    source = family._store  # noqa: SLF001
+    assert type(source) is RunStoreSessionSource
+    assert not isinstance(source, RunStore)
+
+
+def test_family_constructor_adapts_a_raw_runstore(tmp_path: Path) -> None:
+    """过渡兼容：仓外既有调用点仍可 ``store=`` 传 RunStore；构造点统一收窄为适配器。
+
+    R1-2/R1-3 迁移族内访问面后，这一兼容路径随之退场。
+    """
+    config = make_config(tmp_path, "pi")
+    family = PiHarnessFamily(config=config, store=RunStore(tmp_path / "runs"))
+    assert type(family._store) is RunStoreSessionSource  # noqa: SLF001
+
+
+def make_source(tmp_path: Path) -> tuple[RunStore, RunStoreSessionSource, RunRecord]:
+    """Synthetic store + adapter + one admitted run（临时目录，无真实执行面）。"""
+    store = RunStore(tmp_path / "runs")
+    record = store.create(
+        "第一轮", spec=RunSpec(family="pi", pack="pi", executor="inproc")
+    )
+    return store, RunStoreSessionSource(store), record
+
+
+def test_session_source_record_view_and_event_scan(tmp_path: Path) -> None:
+    """面 1/2：父记录只读视图与父 run 事件扫描。"""
+    store, source, record = make_source(tmp_path)
+    assert source.get(record.run_id) == record
+    assert source.get("missing") is None
+    store.append_event(
+        record.run_id, {"type": "kernel_status", "seq": 1, "payload": {"detail": "x"}}
+    )
+    assert [event["type"] for event in source.iter_events(record.run_id)] == [
+        "kernel_status"
+    ]
+
+
+def test_session_source_directory_layout(tmp_path: Path) -> None:
+    """面 3：目录布局推导与 store 的回答逐点一致（不泄露 SQLite 布局假设）。"""
+    store, source, record = make_source(tmp_path)
+    assert source.run_dir(record.run_id) == store.run_dir(record.run_id)
+    assert source.session_dir(record.run_id) == store.session_dir(record.run_id)
+    assert source.conversations_root() == store.conversations_root()
+    assert source.conversation_dir(record.run_id) == store.conversation_dir(record.run_id)
+
+
+def test_session_source_session_seed_bounded_read(tmp_path: Path) -> None:
+    """面 4：父会话种子有界读；嵌套路径是调用方缺陷，fail-closed。"""
+    store, source, record = make_source(tmp_path)
+    session_dir = store.session_dir(record.run_id)
+    session_dir.mkdir(parents=True)
+    (session_dir / "parent.jsonl").write_bytes(b'{"k": 1}\n')
+    assert (
+        source.read_session_seed(record.run_id, "parent.jsonl", max_bytes=1024)
+        == b'{"k": 1}\n'
+    )
+    with pytest.raises(ValueError, match="直系文件"):
+        source.read_session_seed(record.run_id, "nested/parent.jsonl", max_bytes=1024)
+
+
+def test_session_source_child_documents_round_trip(tmp_path: Path) -> None:
+    """面 5：子代理文档双向读写。"""
+    _store, source, record = make_source(tmp_path)
+    source.write_child(record.run_id, {"n": 0, "status": "running"})
+    document = source.read_child(record.run_id, 0)
+    assert document is not None and document["status"] == "running"
+    page = source.read_children(record.run_id)
+    assert len(page.documents) == 1
+    assert page.skipped == 0

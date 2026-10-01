@@ -29,6 +29,7 @@ from ..store import RunRecord, RunStore
 from .agent_env import EgressEndpoint
 from .execution import ExecutionAdapter, ExecutionSpec
 from .archive_channel import ArchiveEndpoint
+from .run_views import RunStoreSessionSource, SessionSource
 from .sandbox import Launch, Sandbox, SandboxResume
 
 if TYPE_CHECKING:  # pragma: no cover - annotation only
@@ -87,9 +88,11 @@ class HarnessFamily(ABC):
     """One harness family's policy surface. One instance per family name.
 
     ``RunManager`` 按 run 的 ``RunSpec.family`` 经 ``select_family`` 取得并
-    缓存实例（每个族名一份），构造时注入冻结的 ``config`` 与 ``store``；准入
-    时族名写入 run 的 ``RunSpec.family``，此后 runner 与族方法只读
-    ``RunSpec``，不再读 ``config.harness``/``config.executor`` 做分支。
+    缓存实例（每个族名一份），构造时注入冻结的 ``config`` 与会话来源窄协议
+    （:class:`~glink_harness.kernel.run_views.SessionSource`，宿主侧以
+    RunStore 适配器实现，设计 §2.3）；准入时族名写入 run 的
+    ``RunSpec.family``，此后 runner 与族方法只读 ``RunSpec``，不再读
+    ``config.harness``/``config.executor`` 做分支。
     """
 
     name: str = "unknown"  # "pi" | "acp"，与 RunSpec.family 的取值同表
@@ -99,9 +102,15 @@ class HarnessFamily(ABC):
     #: 自带模型配置，出口代理未覆盖）。
     uses_egress: bool = False
 
-    def __init__(self, *, config: HostConfig, store: RunStore) -> None:
+    def __init__(self, *, config: HostConfig, store: SessionSource) -> None:
         self._config = config
-        self._store = store
+        # R1-1：注入点已由 RunStore 收窄为 SessionSource 窄协议。过渡期兼容：
+        # 仓外调用点（既有测试）仍可能直接传入 RunStore，这里统一包成适配器，
+        # 使族实例在任何构造路径下都只持有协议对象。族内的访问面与属性名
+        # ``_store`` 的迁移属 R1-2/R1-3；本任务不新增对具体 store 的引用面。
+        self._store: SessionSource = (
+            RunStoreSessionSource(store) if isinstance(store, RunStore) else store
+        )
 
     # -- (a) 准入：凭据要求 -----------------------------------------------------
 
@@ -348,6 +357,10 @@ def select_family(
     :func:`glink_harness.config.build_config`; the pack itself travels on the
     frozen config as the parsed manifest object (``config.pack``: entry argv,
     capability matrix, prompt, HOME overlay, image requirement).
+
+    这里同时是窄协议的唯一接线点（R1-1）：宿主的 ``RunStore`` 在此包成
+    :class:`RunStoreSessionSource` 适配器后注入族构造，族只见
+    ``SessionSource`` 协议面。
     """
     from .harness_acp import AcpHarnessFamily
     from .harness_pi import PiHarnessFamily
@@ -359,4 +372,4 @@ def select_family(
     family = families.get(harness)
     if family is None:  # config 层已拒绝；这里是防御性兜底
         raise ConfigError(f"未知 harness: {harness!r}")
-    return family(config=config, store=store)
+    return family(config=config, store=RunStoreSessionSource(store))

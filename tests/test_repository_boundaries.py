@@ -102,7 +102,8 @@ def source_violations(root: Path) -> list[str]:
 # 下表是 glink_harness 宿主依赖的唯一许可真源；新增文件必须显式登记（即使暂无宿主依赖）。
 # config 提供运行期只读配置；artifacts 提供安全产物树；redaction 提供凭据清扫；
 # contracts 是共享的中性词汇；events/event_schema 提供结构化事件的词汇/模式；
-# 根包的 __version__ 用于 ACP 协议版本；store 仅三个 harness 族策略读取记录/会话种子。
+# 根包的 __version__ 用于 ACP 协议版本；store 仅三个 harness 族策略与窄协议适配器
+#（run_views.py，R1-1 会话来源协议的宿主侧 RunStore 实现）读取记录/会话种子。
 # 第三方 e2b SDK 只在 E2B 适配器延迟加载，不把所有第三方包视作标准库。
 _KERNEL_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
     "__init__.py": frozenset(),
@@ -129,6 +130,7 @@ _KERNEL_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
     "outcome.py": frozenset(),
     "projection.py": frozenset({"glink_harness.event_schema", "glink_harness.events", "glink_harness.redaction"}),
     "rpc.py": frozenset(),
+    "run_views.py": frozenset({"glink_harness.artifacts", "glink_harness.store"}),  # R1-1 窄协议与宿主侧 RunStore 适配器
     "sandbox.py": frozenset({"glink_harness.config"}),
     "subagent_artifacts.py": frozenset(),
     "sweep.py": frozenset(),
@@ -374,7 +376,7 @@ def test_kernel_import_direction_allows_lower_layers_and_the_store_whitelist() -
     assert kernel_forbidden_imports(kernel_module, "from ..contracts import Verdict") == []
     assert kernel_forbidden_imports(kernel_module, "from pathlib import Path") == []
     assert kernel_forbidden_imports(Path("host/glink_harness/kernel/e2b_env.py"), "from e2b import Sandbox") == []
-    for name in ("harness.py", "harness_pi.py", "harness_acp.py"):
+    for name in ("harness.py", "harness_pi.py", "harness_acp.py", "run_views.py"):
         relative = Path("host/glink_harness/kernel") / name
         assert kernel_forbidden_imports(relative, "from ..store import RunRecord") == [], relative
 
@@ -416,10 +418,49 @@ def test_kernel_allowlist_cannot_relicense_orchestration_modules() -> None:
         ), relative
         assert not any(name.startswith("glink_harness.web_") for name in allowed), relative
         assert not any(name == "glink_harness.store" or name.startswith("glink_harness.store.") for name in allowed) or relative in {
-            "harness.py", "harness_pi.py", "harness_acp.py"
+            "harness.py", "harness_pi.py", "harness_acp.py", "run_views.py"
         }, relative
     for name in _KERNEL_MUST_REJECT:
         assert kernel_forbidden_imports(Path("host/glink_harness/kernel/harness.py"), f"__import__({name!r})")
+
+
+def test_session_source_protocol_covers_the_six_faces_without_runstore() -> None:
+    """R1-1：窄协议覆盖设计 §2.3 的六个协议面，且协议面不引用 RunStore 具体类型。
+
+    方法面 ⇄ 协议面：get（父记录只读视图）、iter_events（父 run 事件扫描/
+    能力矩阵）、run_dir/session_dir/conversations_root/conversation_dir
+    （目录布局推导）、read_session_seed（父会话种子有界读）、
+    read_children/read_child/write_child（子代理文档双向读写）；
+    e2b 租约/泊车事实由 get + conversations_root/conversation_dir 组合
+    （租约文件读取本体在 kernel/conversation_lease.py，不经 store）。
+    适配器必须显式以协议为基类、且不得继承 RunStore（收窄才成立）。
+    """
+    relative = Path("host/glink_harness/kernel/run_views.py")
+    tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"), filename=str(relative))
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    protocol = classes["SessionSource"]
+    methods = {
+        node.name: node for node in protocol.body if isinstance(node, ast.FunctionDef)
+    }
+    expected = {
+        "get", "iter_events",
+        "run_dir", "session_dir", "conversations_root", "conversation_dir",
+        "read_session_seed",
+        "read_children", "read_child", "write_child",
+    }
+    assert expected <= set(methods)
+    for method in methods.values():
+        arguments = [
+            *method.args.posonlyargs, *method.args.args, *method.args.kwonlyargs,
+        ]
+        segments = [ast.unparse(arg.annotation) for arg in arguments if arg.annotation]
+        if method.returns is not None:
+            segments.append(ast.unparse(method.returns))
+        assert all("RunStore" not in segment for segment in segments), method.name
+    adapter = classes["RunStoreSessionSource"]
+    bases = {ast.unparse(base) for base in adapter.bases}
+    assert "SessionSource" in bases
+    assert "RunStore" not in bases
 
 
 def host_module_imports(relative: Path, text: str) -> list[str]:
