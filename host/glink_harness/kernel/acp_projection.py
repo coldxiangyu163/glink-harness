@@ -26,6 +26,16 @@ blocks), ``acp_prompt_result`` (``session/prompt``'s answer) and
 ``acp_permission`` (the fail-closed permission answer). Everything else is a
 real ``session/update`` notification. Keeping the translation here lets the
 runner's event path stay harness-blind.
+
+ACP has no ``message_end`` equivalent: the turn's whole assistant text only
+ever arrives as ``agent_message_chunk`` deltas. The projector therefore
+accumulates each turn's *released* delta text (the same redacted pieces the
+stream emitted, so no second redaction pass and no divergence from what the
+browser already saw) and, at ``acp_turn_finished``, assembles it into the
+authoritative ``assistant_message`` frame the pi family emits from
+``message_end`` — same payload contract (``text``, ``truncated`` when the
+authoritative copy is clipped), emitted after the flushed tail and before
+``turn_finished``. A turn with no assistant text emits no frame.
 """
 
 from __future__ import annotations
@@ -36,8 +46,10 @@ from typing import Any, Callable, Mapping
 from .. import events
 from ..redaction import SecretRedactor, StreamRedactor
 from .projection import (
+    ASSISTANT_TEXT_LIMIT,
     checked,
     SUBAGENT_TOOL_NAME,
+    _clip_text_flagged,
     extract_text,
     project_args,
     subagent_started_payload,
@@ -126,6 +138,11 @@ class AcpProjector:
         #: an agent's reply wording.
         self._async_dispatch = subagent_dispatch == "async"
         self._stream = StreamRedactor(redactor)
+        #: 本轮已释放的 assistant 正文片段（与发出的 assistant_delta 逐字相同，
+        #: 流式脱敏后的文本）。ACP 没有 message_end 一类的整帧，回合末由这些
+        #: 片段装配权威 ``assistant_message``（契约 §2.5）；``acp_turn_started``
+        #: 重置，``acp_turn_finished`` 装配后清空。
+        self._turn_text: list[str] = []
         #: Tool id -> human name, so a later update without a name still shows one.
         self._tool_names: dict[str, str] = {}
         #: Notice keys already emitted (one notice per kind, never a flood).
@@ -157,11 +174,19 @@ class AcpProjector:
         if frame_type == "acp_turn_started":
             # The adapter's synthetic turn boundary: ACP has no update for it,
             # but the product's stream model needs it to close and render the
-            # streamed blocks (front end stays harness-blind).
+            # streamed blocks (front end stays harness-blind). A new turn also
+            # starts a fresh authoritative-body accumulation.
+            self._turn_text = []
             return [(events.TURN_STARTED, {})]
         if frame_type == "acp_turn_finished":
             produced.extend(self.flush())
+            message = self._assistant_message()
+            if message is not None:
+                # 权威正文在 turn_finished 之前落地：前端在块还开着时用权威
+                # 文本替换流式块（truncated 且更短则保留流式正文），再闭块。
+                produced.append(message)
             produced.append((events.TURN_FINISHED, {}))
+            self._turn_text = []
             return produced
         if frame_type == "acp_prompt_result":
             # A turn boundary: release the withheld delta tail before the
@@ -306,6 +331,8 @@ class AcpProjector:
                 )
             released = self._stream.push(stream_event, text) if text else ""
             if released:
+                if stream_event == events.ASSISTANT_DELTA:
+                    self._turn_text.append(released)
                 produced.append((stream_event, {"text": released}))
             return produced
         handler = _UPDATE_HANDLERS.get(kind)
@@ -329,8 +356,29 @@ class AcpProjector:
         for kind in _STREAM_EVENTS:
             text = self._stream.flush(kind)
             if text:
+                if kind == events.ASSISTANT_DELTA:
+                    self._turn_text.append(text)
                 released.append((kind, {"text": text}))
         return released
+
+    def _assistant_message(self) -> tuple[str, dict[str, Any]] | None:
+        """Assemble the turn's authoritative ``assistant_message`` frame.
+
+        ACP only streams the answer; this frame is the turn-end whole copy the
+        pi family emits from ``message_end``. The text is the concatenation of
+        the released (already stream-redacted) deltas, clipped to the same
+        bound the pi family uses; a clipped copy says so (``truncated: true``)
+        and must not overwrite a longer streamed body downstream (契约 §2.5).
+        A turn without any assistant text emits no frame.
+        """
+        text = "".join(self._turn_text)
+        if not text:
+            return None
+        clipped, was_truncated = _clip_text_flagged(text, ASSISTANT_TEXT_LIMIT)
+        payload: dict[str, Any] = {"text": clipped}
+        if was_truncated:
+            payload["truncated"] = True
+        return (events.ASSISTANT_MESSAGE, payload)
 
     # -- helpers --------------------------------------------------------------
 

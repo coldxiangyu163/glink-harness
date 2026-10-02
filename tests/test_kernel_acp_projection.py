@@ -37,7 +37,7 @@ from glink_harness.kernel.acp_projection import (
     TOOL_TEXT_LIMIT,
     AcpProjector,
 )
-from glink_harness.redaction import SecretRedactor
+from glink_harness.redaction import REPLACEMENT, SecretRedactor
 
 
 def _notification(update: Mapping[str, Any]) -> dict[str, Any]:
@@ -149,7 +149,9 @@ def test_the_content_notice_is_once_per_block_type() -> None:
 
 def test_turn_finished_releases_both_withheld_tails_before_closing() -> None:
     """A credential-shaped tail withheld by the stream redactor belongs to the
-    block the turn boundary closes, so it is released first."""
+    block the turn boundary closes, so it is released first; the authoritative
+    assistant_message (assembled from the turn's released deltas, tail
+    included) lands after the tail and before ``turn_finished``."""
     projector = AcpProjector(SecretRedactor())
     # "sk-" at the end is an open credential shape: withheld, not emitted yet.
     assert _project(projector, _chunk("答 sk-")) == [(events.ASSISTANT_DELTA, {"text": "答 "})]
@@ -160,6 +162,7 @@ def test_turn_finished_releases_both_withheld_tails_before_closing() -> None:
     assert produced == [
         (events.THINKING_DELTA, {"text": "sk-"}),
         (events.ASSISTANT_DELTA, {"text": "sk-"}),
+        (events.ASSISTANT_MESSAGE, {"text": "答 sk-"}),
         (events.TURN_FINISHED, {}),
     ]
 
@@ -193,6 +196,96 @@ def test_non_chunk_updates_release_the_withheld_tail_first() -> None:
         unmapped[1][1],
     )
     assert unmapped[1][1]["message"] == "acp_update_not_projected"
+
+
+# -- the authoritative assistant_message ------------------------------------------
+
+
+def test_turn_finished_assembles_the_turns_deltas_into_assistant_message() -> None:
+    """The authoritative text is the concatenation of the turn's released
+    deltas, in order; it lands after the flushed tail and before
+    ``turn_finished``."""
+    projector = AcpProjector(SecretRedactor())
+    projector.project({"type": "acp_turn_started"})
+    assert _project(projector, _chunk("第一段，")) == [
+        (events.ASSISTANT_DELTA, {"text": "第一段，"})
+    ]
+    assert _project(projector, _chunk("第二段。")) == [
+        (events.ASSISTANT_DELTA, {"text": "第二段。"})
+    ]
+    produced = projector.project({"type": "acp_turn_finished"})
+    assert produced == [
+        (events.ASSISTANT_MESSAGE, {"text": "第一段，第二段。"}),
+        (events.TURN_FINISHED, {}),
+    ]
+
+
+def test_assistant_message_excludes_thinking_text() -> None:
+    projector = AcpProjector(SecretRedactor())
+    projector.project({"type": "acp_turn_started"})
+    _project(projector, _chunk("先想一下", "agent_thought_chunk"))
+    _project(projector, _chunk("正文"))
+    produced = projector.project({"type": "acp_turn_finished"})
+    assert produced == [
+        (events.ASSISTANT_MESSAGE, {"text": "正文"}),
+        (events.TURN_FINISHED, {}),
+    ]
+
+
+def test_an_empty_turn_emits_no_assistant_message() -> None:
+    projector = AcpProjector(SecretRedactor())
+    projector.project({"type": "acp_turn_started"})
+    # A turn may stream only thinking, tools, or nothing at all: no frame.
+    _project(projector, _chunk("只在思考", "agent_thought_chunk"))
+    assert projector.project({"type": "acp_turn_finished"}) == [(events.TURN_FINISHED, {})]
+    projector.project({"type": "acp_turn_started"})
+    assert projector.project({"type": "acp_turn_finished"}) == [(events.TURN_FINISHED, {})]
+
+
+def test_assistant_message_is_bounded_and_says_so() -> None:
+    """Over the pi family's authoritative-text bound the frame is clipped with
+    ``truncated: true`` — it must not overwrite a longer streamed body."""
+    projector = AcpProjector(SecretRedactor())
+    projector.project({"type": "acp_turn_started"})
+    body = "字" * (pi_projection.ASSISTANT_TEXT_LIMIT + 100)
+    _project(projector, _chunk(body))
+    produced = projector.project({"type": "acp_turn_finished"})
+    assert [kind for kind, _ in produced] == [events.ASSISTANT_MESSAGE, events.TURN_FINISHED]
+    payload = produced[0][1]
+    assert payload["truncated"] is True
+    assert payload["text"].startswith("字" * 100)
+    assert payload["text"].endswith("[truncated 100 chars]")
+    assert "字" * (pi_projection.ASSISTANT_TEXT_LIMIT + 1) not in payload["text"]
+
+
+def test_assistant_message_does_not_leak_across_turns() -> None:
+    """Each turn assembles only its own text; a follow-up turn starts clean."""
+    projector = AcpProjector(SecretRedactor())
+    projector.project({"type": "acp_turn_started"})
+    _project(projector, _chunk("第一轮"))
+    projector.project({"type": "acp_turn_finished"})
+    projector.project({"type": "acp_turn_started"})
+    _project(projector, _chunk("第二轮"))
+    produced = projector.project({"type": "acp_turn_finished"})
+    assert produced == [
+        (events.ASSISTANT_MESSAGE, {"text": "第二轮"}),
+        (events.TURN_FINISHED, {}),
+    ]
+
+
+def test_assistant_message_carries_the_same_redacted_text_as_the_deltas() -> None:
+    """The accumulated copy is the released stream text: a known secret the
+    stream masked stays masked in the authoritative frame (no second pass, no
+    divergence)."""
+    secret = "opaque-token-value-99"
+    projector = AcpProjector(SecretRedactor([secret]))
+    projector.project({"type": "acp_turn_started"})
+    emitted = _project(projector, _chunk(f"token 是 {secret} 请保密"))
+    produced = projector.project({"type": "acp_turn_finished"})
+    message = produced[0][1]["text"]
+    assert secret not in message
+    assert message == "".join(payload["text"] for _kind, payload in emitted)
+    assert message == f"token 是 {REPLACEMENT} 请保密"
 
 
 # -- the synthetic resume frame ---------------------------------------------------

@@ -20,6 +20,7 @@ import pytest
 
 from glink_harness.events import (
     ASSISTANT_DELTA,
+    ASSISTANT_MESSAGE,
     KERNEL_STATUS,
     RUN_STAGE,
     THINKING_DELTA,
@@ -264,14 +265,19 @@ def test_acp_client_close_terminates_a_stubborn_agent(tmp_path: Path) -> None:
 
 
 def test_turn_frames_close_the_streamed_blocks() -> None:
-    """ACP sends no turn updates; the adapter's synthetic frames supply them."""
+    """ACP sends no turn updates; the adapter's synthetic frames supply them,
+    and the turn end assembles the authoritative assistant_message from the
+    turn's released deltas (the pi family's message_end equivalent)."""
     projector = AcpProjector(SecretRedactor())
     assert projector.project({"type": "acp_turn_started"}) == [(TURN_STARTED, {})]
     assert _project(
         projector,
         {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "回答"}},
     ) == [(ASSISTANT_DELTA, {"text": "回答"})]
-    assert projector.project({"type": "acp_turn_finished"}) == [(TURN_FINISHED, {})]
+    assert projector.project({"type": "acp_turn_finished"}) == [
+        (ASSISTANT_MESSAGE, {"text": "回答"}),
+        (TURN_FINISHED, {}),
+    ]
 
 
 def test_message_and_thought_chunks_project_to_deltas() -> None:
