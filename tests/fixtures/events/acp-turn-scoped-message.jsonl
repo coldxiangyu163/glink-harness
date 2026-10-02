@@ -1,0 +1,16 @@
+{"type": "run_started", "v": 1, "runId": "fx-acp-turn", "seq": 1, "ts": 1790001000.5, "payload": {"prompt": "调研两个来源"}}
+{"type": "turn_started", "v": 1, "runId": "fx-acp-turn", "seq": 2, "ts": 1790001001.0, "payload": {}}
+{"type": "thinking_delta", "v": 1, "runId": "fx-acp-turn", "seq": 3, "ts": 1790001001.5, "payload": {"text": "先检索。"}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-acp-turn", "seq": 4, "ts": 1790001002.0, "payload": {"text": "段一。"}}
+{"type": "tool_started", "v": 1, "runId": "fx-acp-turn", "seq": 5, "ts": 1790001002.5, "payload": {"toolCallId": "s1", "toolName": "web_search", "args": {"queries": ["甲"]}, "presentation": "search_web"}}
+{"type": "tool_finished", "v": 1, "runId": "fx-acp-turn", "seq": 6, "ts": 1790001003.0, "payload": {"toolCallId": "s1", "toolName": "web_search", "isError": false, "result": "命中甲"}}
+{"type": "assistant_message", "v": 1, "runId": "fx-acp-turn", "seq": 7, "ts": 1790001003.5, "payload": {"text": "段一。", "turnScoped": true}}
+{"type": "turn_finished", "v": 1, "runId": "fx-acp-turn", "seq": 8, "ts": 1790001004.0, "payload": {}}
+{"type": "turn_started", "v": 1, "runId": "fx-acp-turn", "seq": 9, "ts": 1790001004.5, "payload": {}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-acp-turn", "seq": 10, "ts": 1790001005.0, "payload": {"text": "前段，"}}
+{"type": "tool_started", "v": 1, "runId": "fx-acp-turn", "seq": 11, "ts": 1790001005.5, "payload": {"toolCallId": "f1", "toolName": "web_fetch", "args": {"url": "https://example.org/a"}, "presentation": "fetch_page"}}
+{"type": "tool_finished", "v": 1, "runId": "fx-acp-turn", "seq": 12, "ts": 1790001006.0, "payload": {"toolCallId": "f1", "toolName": "web_fetch", "isError": false, "result": "页面甲"}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-acp-turn", "seq": 13, "ts": 1790001006.5, "payload": {"text": "后段。"}}
+{"type": "assistant_message", "v": 1, "runId": "fx-acp-turn", "seq": 14, "ts": 1790001007.0, "payload": {"text": "前段，后段。", "turnScoped": true}}
+{"type": "turn_finished", "v": 1, "runId": "fx-acp-turn", "seq": 15, "ts": 1790001007.5, "payload": {}}
+{"type": "run_finished", "v": 1, "runId": "fx-acp-turn", "seq": 16, "ts": 1790001008.0, "payload": {"status": "finished", "stopReason": null, "error": null, "reportPath": null, "reportStatus": "none", "cleanup": {"released": true, "failures": [], "external": {}}, "children": [], "durationSeconds": 7.5}}

@@ -110,6 +110,9 @@ JSON 体，应退避重连；浏览器 EventSource 读不到该体，是其已�
   终帧之后不再有任何帧（终态行在同事务拒绝再写）。
 - `tool_updated.output` 是**累计快照**：每次替换而非拼接。
 - `assistant_message` 可被截断（`truncated: true`）：截断帧不覆盖更长的流式正文。
+- `assistant_message` 带 `turnScoped: true` 时（ACP 族）权威文本覆盖**整个回合**：消费方用它
+  **合并替换本轮全部文本块**（正文段可能已被工具/plan 项夹断成多个块），而不是 pi 族逐
+  message 的「替换最后一个未闭文本块」；缺省该字段的帧（pi 族及旧日志）保持逐 message 语义。
 - `stopReason=length` 时 run 仍 `finished`，但 `stopReason`/`modelStopReason` 为
   `length`，表示**交付不完整**，消费方不得按普通完成呈现。
 - `usage_reported.usage` 为 run 累计值。

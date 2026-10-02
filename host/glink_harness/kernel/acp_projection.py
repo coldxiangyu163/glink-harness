@@ -36,6 +36,15 @@ authoritative ``assistant_message`` frame the pi family emits from
 ``message_end`` — same payload contract (``text``, ``truncated`` when the
 authoritative copy is clipped), emitted after the flushed tail and before
 ``turn_finished``. A turn with no assistant text emits no frame.
+
+The assembled frame covers the **whole turn**, not one message, so it carries
+``turnScoped: true``: pi's per-message frames arrive while their own text
+block is still the tail (the front end replaces that one block), but an ACP
+turn may have closed several text blocks around tool/plan items by turn end —
+applying pi's replace-the-tail rule there would append the whole turn text a
+second time. The marker tells the front end to merge-replace every text block
+of the turn instead (契约 §2.5); pi-family frames omit it and keep the
+per-message rule.
 """
 
 from __future__ import annotations
@@ -369,13 +378,17 @@ class AcpProjector:
         the released (already stream-redacted) deltas, clipped to the same
         bound the pi family uses; a clipped copy says so (``truncated: true``)
         and must not overwrite a longer streamed body downstream (契约 §2.5).
-        A turn without any assistant text emits no frame.
+        A turn without any assistant text emits no frame. The frame spans the
+        whole turn, so it is marked ``turnScoped: true``: the front end
+        merge-replaces every text block of the turn with it instead of pi's
+        per-message replace-the-tail rule (which would duplicate the body once
+        a tool/plan item sits after a text block).
         """
         text = "".join(self._turn_text)
         if not text:
             return None
         clipped, was_truncated = _clip_text_flagged(text, ASSISTANT_TEXT_LIMIT)
-        payload: dict[str, Any] = {"text": clipped}
+        payload: dict[str, Any] = {"text": clipped, "turnScoped": True}
         if was_truncated:
             payload["truncated"] = True
         return (events.ASSISTANT_MESSAGE, payload)

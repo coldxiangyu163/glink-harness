@@ -113,6 +113,7 @@
  * @property {boolean} [truncated]
  * @property {string} [stopReason]
  * @property {Record<string, unknown>} [usage]
+ * @property {boolean} [turnScoped] 回合范围权威帧（ACP 族）：合并替换本轮全部文本块；缺失时旧帧由读侧回退为 pi 族逐 message 语义
  */
 /**
  * deliverables_declared（v1）：ACP present 的声明，不等于文件已安全回收；终帧和 run 详情给出逐文件结果
@@ -820,6 +821,14 @@ export const EVENT_SCHEMA = Object.freeze({
           "object"
         ],
         "required": false
+      },
+      {
+        "name": "turnScoped",
+        "types": [
+          "boolean"
+        ],
+        "required": false,
+        "doc": "回合范围权威帧（ACP 族）：合并替换本轮全部文本块；缺失时旧帧由读侧回退为 pi 族逐 message 语义"
       }
     ]
   },

@@ -140,6 +140,65 @@ test('a truncated authoritative frame keeps the longer streamed answer', () => {
   assert.equal(text[0].closed, true);
 });
 
+test('a turn-scoped authoritative frame merge-replaces every text block of its turn', () => {
+  // ACP 族（dsh 标准回合）：thinking→正文段→tool→回合末权威帧，以及正文被
+  // 工具夹断的回合。权威帧覆盖整回合正文，reducer 用它合并替换本轮全部文本
+  // 块，不追加第二份正文（BLOCKER 第 2 轮）。
+  const { state } = replay('acp-turn-scoped-message');
+  const text = state.items.filter((item) => item.kind === 'text');
+  assert.equal(text.length, 2, '两轮各合并为一个文本块，不重复');
+  // 第 1 轮（thinking→段一→tool）：合并块落在本轮唯一文本块的原位。
+  assert.equal(text[0].text, '段一。');
+  assert.equal(text[0].turn, 1);
+  assert.equal(text[0].closed, true);
+  // 第 2 轮（前段→tool→后段）：合并块落在本轮最后一个文本块的原位，
+  // 即工具卡之后、回合收尾处；前段并入它而不是另留一份。
+  assert.equal(text[1].text, '前段，后段。');
+  assert.equal(text[1].turn, 2);
+  const afterTurn2 = state.items.slice(state.items.findIndex((item) => item.kind === 'turn' && item.index === 2));
+  assert.deepEqual(afterTurn2.map((item) => item.kind), ['turn', 'tool', 'text', 'stage']);
+  // 第 2 轮的合并不触碰第 1 轮已闭合并块（turn 字段限定范围）。
+  assert.equal(state.items.filter((item) => item.kind === 'tool').length, 2);
+});
+
+test('a truncated turn-scoped frame keeps the turn\'s concatenated streamed body', () => {
+  const frame = (seq, type, payload) => ({ seq, type, payload, v: 1, ts: 20 + seq });
+  const frames = [
+    frame(1, 'turn_started', {}),
+    frame(2, 'assistant_delta', { text: '前半，' }),
+    frame(3, 'tool_started', { toolCallId: 't1', toolName: 'bash', args: {} }),
+    frame(4, 'tool_finished', { toolCallId: 't1', toolName: 'bash', isError: false, result: 'ok' }),
+    frame(5, 'assistant_delta', { text: '后半。' }),
+    // 宿主截断后的权威副本比已流式正文短：保留本轮流式拼接正文，仅闭块标记。
+    frame(6, 'assistant_message', { text: '前半，', truncated: true, turnScoped: true }),
+    frame(7, 'turn_finished', {}),
+  ];
+  const state = reduceAll(createRunState({ runId: 'fx-turn-trunc' }), frames);
+  const text = state.items.filter((item) => item.kind === 'text');
+  assert.equal(text.length, 1);
+  assert.equal(text[0].text, '前半，后半。');
+  assert.equal(text[0].truncated, true);
+  assert.equal(text[0].closed, true);
+});
+
+test('a frame without turnScoped keeps the pi per-message rule at any tail', () => {
+  // pi 族零回归：权威帧不带 turnScoped 时仍是「替换最后一个未闭文本块，
+  // 否则追加」——即使末项是工具卡也不走合并语义。
+  const frame = (seq, type, payload) => ({ seq, type, payload, v: 1, ts: 30 + seq });
+  const frames = [
+    frame(1, 'turn_started', {}),
+    frame(2, 'assistant_delta', { text: '流式段。' }),
+    frame(3, 'tool_started', { toolCallId: 't1', toolName: 'bash', args: {} }),
+    frame(4, 'assistant_message', { text: '权威段。' }),
+    frame(5, 'turn_finished', {}),
+  ];
+  const state = reduceAll(createRunState({ runId: 'fx-pi-tail' }), frames);
+  const text = state.items.filter((item) => item.kind === 'text');
+  assert.equal(text.length, 2, '不带标记的帧不合并本轮文本块');
+  assert.equal(text[0].text, '流式段。');
+  assert.equal(text[1].text, '权威段。');
+});
+
 test('subagent progress is latest-wins and the terminal children summary settles every child', () => {
   const frames = load('subagents');
   const beforeTerminal = reduceAll(createRunState({ runId: 'fx-sub' }), frames.slice(0, -1));

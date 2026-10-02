@@ -166,6 +166,11 @@ SPECS: tuple[EventSpec, ...] = (
             _opt("truncated", "boolean"),
             _opt("stopReason", "string"),
             _opt("usage", "object"),
+            _opt(
+                "turnScoped",
+                "boolean",
+                doc="回合范围权威帧（ACP 族）：合并替换本轮全部文本块；缺失时旧帧由读侧回退为 pi 族逐 message 语义",
+            ),
         ),
         doc="权威正文；truncated 时不覆盖更长的流式正文",
     ),

@@ -22,9 +22,13 @@
  *   carry the value accumulated so far, not a delta: they replace.
  * * **Deltas** — `assistant_delta` / `thinking_delta` append to the open block.
  * * **Authoritative terminal frames** — `assistant_message` replaces the
- *   streamed text (unless it is `truncated` and shorter), `tool_finished`
- *   drops a preview equal to its result, and the run terminal frame settles
- *   running tools and children (its `children` summary is the source of truth).
+ *   streamed text (unless it is `truncated` and shorter): pi-family frames
+ *   cover one message and replace the open tail block, while ACP-family frames
+ *   carry `turnScoped: true` and merge-replace every text block of the turn
+ *   (their text spans blocks already closed around tool/plan items);
+ *   `tool_finished` drops a preview equal to its result, and the run terminal
+ *   frame settles running tools and children (its `children` summary is the
+ *   source of truth).
  * * **No hidden state** — every visible thing is an item in `state.items`,
  *   derived only from events.
  */
@@ -240,6 +244,9 @@ function applyFinalMessage(model, payload) {
   const truncated = payload.truncated === true;
   const last = lastItem(model);
   if (text === '') return model;
+  if (payload.turnScoped === true) {
+    return applyTurnScopedMessage(model, text, truncated);
+  }
   if (last && last.kind === 'text' && !last.closed) {
     // The streamed text and pi's authoritative message agree in practice; use
     // pi's copy so a dropped delta cannot leave a truncated answer on screen.
@@ -255,6 +262,45 @@ function applyFinalMessage(model, payload) {
     });
   }
   return appendItem(model, { kind: 'text', turn: model.turn, text, closed: true, truncated });
+}
+
+//: ACP 族的权威帧覆盖整个回合（投影层把本轮已释放的 delta 装配成一帧，
+//: docs/multi-harness-plan.md §4.1）。pi 族逐 message 的「替换最后一个未闭
+//: 文本块」在这里会复制正文：回合中正文段被工具/plan 项夹断后末项不再是
+//: 文本块，appendItem 会把整回合正文再挂一次（thinking→正文→tool 的标准
+//: dsh 回合同样如此）。因此用权威文本合并替换本轮全部文本块：合并块落在
+//: 本轮最后一个文本块的原位——回合正文在它的流收尾处呈现（视图据此把它
+//: 提升为最终回答气泡），更早的文本块并入它。截断纪律与 pi 族相同：权威
+//: 副本更短时保留本轮已流式的拼接正文（两者同源，内容一致）。
+function applyTurnScopedMessage(model, text, truncated) {
+  let streamed = '';
+  let lastTextIndex = -1;
+  model.items.forEach((item, index) => {
+    if (item.kind === 'text' && item.turn === model.turn) {
+      streamed += item.text;
+      lastTextIndex = index;
+    }
+  });
+  if (lastTextIndex < 0) {
+    return appendItem(model, { kind: 'text', turn: model.turn, text, closed: true, truncated });
+  }
+  const keepStreamed = truncated && streamed.length > text.length;
+  const merged = {
+    kind: 'text',
+    turn: model.turn,
+    text: keepStreamed ? streamed : text,
+    closed: true,
+    truncated,
+  };
+  const items = [];
+  model.items.forEach((item, index) => {
+    if (item.kind === 'text' && item.turn === model.turn) {
+      if (index === lastTextIndex) items.push(merged);
+      return;
+    }
+    items.push(item);
+  });
+  return { ...model, items };
 }
 
 function startTool(model, payload) {

@@ -162,7 +162,7 @@ def test_turn_finished_releases_both_withheld_tails_before_closing() -> None:
     assert produced == [
         (events.THINKING_DELTA, {"text": "sk-"}),
         (events.ASSISTANT_DELTA, {"text": "sk-"}),
-        (events.ASSISTANT_MESSAGE, {"text": "答 sk-"}),
+        (events.ASSISTANT_MESSAGE, {"text": "答 sk-", "turnScoped": True}),
         (events.TURN_FINISHED, {}),
     ]
 
@@ -215,7 +215,7 @@ def test_turn_finished_assembles_the_turns_deltas_into_assistant_message() -> No
     ]
     produced = projector.project({"type": "acp_turn_finished"})
     assert produced == [
-        (events.ASSISTANT_MESSAGE, {"text": "第一段，第二段。"}),
+        (events.ASSISTANT_MESSAGE, {"text": "第一段，第二段。", "turnScoped": True}),
         (events.TURN_FINISHED, {}),
     ]
 
@@ -227,7 +227,7 @@ def test_assistant_message_excludes_thinking_text() -> None:
     _project(projector, _chunk("正文"))
     produced = projector.project({"type": "acp_turn_finished"})
     assert produced == [
-        (events.ASSISTANT_MESSAGE, {"text": "正文"}),
+        (events.ASSISTANT_MESSAGE, {"text": "正文", "turnScoped": True}),
         (events.TURN_FINISHED, {}),
     ]
 
@@ -253,6 +253,7 @@ def test_assistant_message_is_bounded_and_says_so() -> None:
     assert [kind for kind, _ in produced] == [events.ASSISTANT_MESSAGE, events.TURN_FINISHED]
     payload = produced[0][1]
     assert payload["truncated"] is True
+    assert payload["turnScoped"] is True
     assert payload["text"].startswith("字" * 100)
     assert payload["text"].endswith("[truncated 100 chars]")
     assert "字" * (pi_projection.ASSISTANT_TEXT_LIMIT + 1) not in payload["text"]
@@ -268,7 +269,7 @@ def test_assistant_message_does_not_leak_across_turns() -> None:
     _project(projector, _chunk("第二轮"))
     produced = projector.project({"type": "acp_turn_finished"})
     assert produced == [
-        (events.ASSISTANT_MESSAGE, {"text": "第二轮"}),
+        (events.ASSISTANT_MESSAGE, {"text": "第二轮", "turnScoped": True}),
         (events.TURN_FINISHED, {}),
     ]
 

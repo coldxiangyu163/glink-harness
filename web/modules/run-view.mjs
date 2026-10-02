@@ -366,6 +366,16 @@ export function createRunView({
         return;
       }
       if (entry.item !== item) {
+        // The reducer can retire an item at a middle index (the ACP
+        // turn-scoped authoritative frame folds the turn's earlier text
+        // blocks into the last one), shifting a different kind into a slot
+        // whose node was built for the old kind. Such a node cannot be
+        // updated into the new item, so it is rebuilt in place.
+        if (entry.item.kind !== item.kind) {
+          const node = createNode(item);
+          entry.node.replaceWith(node);
+          entry.node = node;
+        }
         entry.item = item;
         update(entry.node, item);
       }

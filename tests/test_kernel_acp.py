@@ -275,7 +275,7 @@ def test_turn_frames_close_the_streamed_blocks() -> None:
         {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "回答"}},
     ) == [(ASSISTANT_DELTA, {"text": "回答"})]
     assert projector.project({"type": "acp_turn_finished"}) == [
-        (ASSISTANT_MESSAGE, {"text": "回答"}),
+        (ASSISTANT_MESSAGE, {"text": "回答", "turnScoped": True}),
         (TURN_FINISHED, {}),
     ]
 
