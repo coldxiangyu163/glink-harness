@@ -9,9 +9,13 @@ import pytest
 
 from glink_harness.config import ConfigError, build_config, load_config, validate_host_config
 from glink_harness.events import EventBus
+from glink_harness.kernel.acp_e2b_env import SANDBOX_ACP_HOME
+from glink_harness.kernel.acp_env import prepare_acp_runtime
+from glink_harness.kernel.docker_env import CONTAINER_HOME
 from glink_harness.runs.runner import RunManager
 from glink_harness.store import FAILED, FINISHED, RunStore
 from acp_pack import write_acp_pack
+from harness_helpers import compose_launch, execution_spec
 from test_kernel_acp_runner import acp_command, payloads, read_events, read_log
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -132,9 +136,38 @@ def test_repository_dsh_declares_sources_and_has_no_dead_model_default() -> None
         ("model", "openai/gpt-6-sol", "dsh-model"),
         ("reasoning_effort", "xhigh", "value"),
     )
-    text = (REPO_ROOT / "harnesses/dsh/home/.dsh/settings.yaml").read_text()
+    # DSH-03：provider 接入结构的单源是 home/ 覆盖层里的 --patch 文件
+    # （挂载时同步注册路由），settings.yaml 不再重复声明同一份结构。
+    assert config.pack.capabilities.patch_overlays == (".dsh/patches/llm-pi-ai.yml",)
+    text = (REPO_ROOT / "harnesses/dsh/home/.dsh/patches/llm-pi-ai.yml").read_text()
     assert "agent-default-model:" not in text
     assert "apiKeyEnv: OPENROUTER_API_KEY" in text
+    settings = (REPO_ROOT / "harnesses/dsh/home/.dsh/settings.yaml").read_text()
+    assert "providers:" not in settings
+
+
+@pytest.mark.parametrize("executor, placed_home", [
+    ("inproc", None),  # inproc：放置后的 HOME 就是宿主侧 run HOME 本身
+    ("docker", CONTAINER_HOME),
+    ("e2b", SANDBOX_ACP_HOME),
+])
+def test_patch_overlay_reaches_the_launch_argv_on_every_face(
+    tmp_path: Path, executor: str, placed_home: str | None,
+) -> None:
+    """DSH-03：包声明的 --patch 覆盖层按放置后的 HOME 进入 launch argv。"""
+    config = build_config({
+        "GLINK_HARNESS": "dsh", "OPENAI_MODEL": "openai/gpt-6-sol",
+        "OPENAI_REASONING_EFFORT": "xhigh",
+        "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
+    }, REPO_ROOT)
+    runtime = prepare_acp_runtime(config, runtime_dir=tmp_path / "acp-agent")
+    home = placed_home or str(runtime.home)
+    spec = execution_spec(config, runtime, workspace=tmp_path / "workspace")
+    launch, _sandbox = compose_launch("acp", executor, spec, store_root=tmp_path / "runs")
+    assert list(launch.argv) == [
+        "dsh", "--profile", "acp",
+        "--patch", f"{home}/.dsh/patches/llm-pi-ai.yml",
+    ]
 
 
 @pytest.mark.parametrize("mismatch", [False, True])

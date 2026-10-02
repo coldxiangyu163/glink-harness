@@ -136,6 +136,9 @@ def test_the_repository_packs_declare_the_expected_families_and_commands() -> No
     assert caps.subagent_dispatch == "async"
     # 运行中子代理进度源由能力声明，族代码不再按包名 / 状态根目录特判 dsh。
     assert caps.child_progress == "dsh-session-zstd" and caps.resume is True
+    # DSH-03：providers 结构经 dsh `--patch` 在插件挂载时同步注册路由，
+    # 绕开 settings 异步注册链在冷启动 session/new 上的广告竞态。
+    assert caps.patch_overlays == (".dsh/patches/llm-pi-ai.yml",)
 
     codex = load_pack(REPO_PACKS, "codex")
     assert codex.command == ("codex-acp",)
@@ -154,6 +157,7 @@ def test_the_repository_packs_declare_the_expected_families_and_commands() -> No
     for pack in (codex, opencode):
         assert pack.capabilities.subagent_dispatch == "sync"
         assert pack.capabilities.child_progress is None
+        assert pack.capabilities.patch_overlays == ()
 
 
 def test_a_missing_harnesses_directory_offers_no_names(tmp_path: Path) -> None:
@@ -221,6 +225,38 @@ _V1 = 'format = "glink-harness/v1"\nname = "demo"\nfamily = "pi"\n'
         (
             acp_manifest(capabilities='resume = true\nchild_progress = "tail-the-log"\n'),
             "child_progress",
+        ),
+        # patch_overlays：只接受 run HOME 内有界相对路径，且必须随 home/ 交付。
+        (pi_manifest(capabilities='patch_overlays = [".dsh/patches/x.yml"]\n'), 'family="acp"'),
+        (
+            acp_manifest(capabilities='resume = true\npatch_overlays = ".dsh/patches/x.yml"\n'),
+            "patch_overlays",
+        ),
+        (
+            acp_manifest(capabilities='resume = true\npatch_overlays = []\n'),
+            "patch_overlays",
+        ),
+        (
+            acp_manifest(capabilities='resume = true\npatch_overlays = ["/etc/x.yml"]\n'),
+            "patch_overlays",
+        ),
+        (
+            acp_manifest(capabilities='resume = true\npatch_overlays = [".dsh/../x.yml"]\n'),
+            "patch_overlays",
+        ),
+        (
+            acp_manifest(capabilities='resume = true\npatch_overlays = [".dsh//x.yml"]\n'),
+            "patch_overlays",
+        ),
+        (
+            acp_manifest(capabilities='resume = true\npatch_overlays = [".dsh\\\\x.yml"]\n'),
+            "patch_overlays",
+        ),
+        (
+            acp_manifest(
+                capabilities='resume = true\npatch_overlays = [".dsh/patches/missing.yml"]\n'
+            ),
+            "不在 home/ 覆盖层内",
         ),
         # 镜像需求：target 必须属于本族、版本必须精确、ARG 名规范、角色合族。
         (acp_manifest(image=PI_IMAGE), "image.target"),
@@ -322,6 +358,26 @@ def test_an_empty_home_overlay_directory_is_a_directory_not_a_failure(tmp_path: 
     (pack_dir / "home").mkdir()
     pack = load_pack(tmp_path / "harnesses", "demo")
     assert pack.home == pack_dir / "home"
+
+
+def test_patch_overlays_must_be_shipped_by_the_home_overlay(tmp_path: Path) -> None:
+    pack_dir = write_manifest(
+        tmp_path,
+        "demo",
+        acp_manifest(
+            capabilities='resume = true\npatch_overlays = [".dsh/patches/x.yml"]\n'
+        ),
+    )
+    delivered = pack_dir / "home" / ".dsh" / "patches" / "x.yml"
+    delivered.parent.mkdir(parents=True)
+    delivered.write_text("- id: demo\n", encoding="utf-8")
+    pack = load_pack(tmp_path / "harnesses", "demo")
+    assert pack.capabilities.patch_overlays == (".dsh/patches/x.yml",)
+    # 软链不是仓库内容：交付目标换成软链即整包拒绝。
+    delivered.unlink()
+    os.symlink(tmp_path / "elsewhere.yml", delivered)
+    with pytest.raises(HarnessPackError, match="不在 home/ 覆盖层内"):
+        load_pack(tmp_path / "harnesses", "demo")
 
 
 def test_a_home_overlay_on_a_pi_pack_is_refused(tmp_path: Path) -> None:

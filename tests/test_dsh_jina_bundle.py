@@ -155,12 +155,19 @@ def test_profile_overlay_lists_the_shipped_bundles_plus_the_jina_bundle() -> Non
         if path.is_file()
     )
     assert overlay_files == [
+        "harnesses/dsh/home/.dsh/patches/llm-pi-ai.yml",
         "harnesses/dsh/home/.dsh/profiles/acp/cordis.patch.yml",
         "harnesses/dsh/home/.dsh/profiles/acp/package.json",
         "harnesses/dsh/home/.dsh/settings.yaml",
     ]
+    # provider 接入结构的单源是 --patch 覆盖层（DSH-03，挂载时同步注册路由）；
+    # 它只能携带凭据引用名，不能携带 key 值。
+    patch_text = (
+        REPO_ROOT / "harnesses" / "dsh" / "home" / ".dsh" / "patches" / "llm-pi-ai.yml"
+    ).read_text(encoding="utf-8")
+    assert "apiKeyEnv: OPENROUTER_API_KEY" in patch_text and "sk-" not in patch_text
     settings_text = (REPO_ROOT / "harnesses" / "dsh" / "home" / ".dsh" / "settings.yaml").read_text(encoding="utf-8")
-    assert "apiKeyEnv" in settings_text and "sk-" not in settings_text, "overlay settings 只能携带引用名，不能携带 key 值"
+    assert "sk-" not in settings_text, "overlay settings 不能携带 key 值"
 
 
 def profile_override(text: str, row_id: str) -> str:
@@ -209,6 +216,13 @@ def test_glink_profile_is_delivered_to_a_fresh_run_home(tmp_path: Path) -> None:
     for row_id in ("session-telemetry-otel", "skill-badge"):
         assert "disabled: true" in profile_override(text, row_id)
     assert delivered.stat().st_mode & 0o777 == 0o600
+    # DSH-03：--patch 覆盖层随 home/ 交付到每 run HOME，launch 按放置后的
+    # HOME 拼 `--patch <HOME>/.dsh/patches/llm-pi-ai.yml`。
+    overlay = runtime.home / ".dsh" / "patches" / "llm-pi-ai.yml"
+    assert overlay.read_text(encoding="utf-8") == (
+        PROFILE_DIR.parents[1] / "patches" / "llm-pi-ai.yml"
+    ).read_text(encoding="utf-8")
+    assert overlay.stat().st_mode & 0o777 == 0o600
     assert runtime.credential_dests == ()
 
 

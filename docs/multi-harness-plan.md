@@ -168,11 +168,13 @@ v1 时期的顶层 `command`/`package`/`version`/`session_config`/`permission_al
 | `[capabilities].child_progress` | ACP 包（可选） | 运行中子代理进度源；目前只有 `dsh-session-zstd`（状态根下 `.dsh/sessions` 的私有会话文件，dsh 声明）。未声明 = 该包如实没有进度源，族代码不按包名或目录猜 |
 | `[capabilities.session_config]` | ACP 包（可选） | `id → value` 或结构来源表 `{ source = "OPENAI_MODEL" / "OPENAI_REASONING_EFFORT", encoding = "value" / "dsh-model" }`；来源从宿主冻结配置派生，缺值拒绝启动；`session/new` 与续接后应用并核验实际 `currentValue`，未广告选项/值或不一致即 run 失败；`dsh-model` 仅用于主模型，按 dsh 广告的 JSON 路由唯一匹配 |
 | `[capabilities].permission_allow` | ACP 包（可选） | ACP option/tool kind 的子集；缺省空 = fail-closed 全拒 |
+| `[capabilities].patch_overlays` | ACP 包（可选） | dsh `--patch` launcher 覆盖层（可重复）：run HOME 内的相对路径数组，必须由 home/ overlay 交付对应普通文件（解析期校验，缺失即拒）；launch 按放置后的 HOME 追加 `--patch <HOME>/<相对路径>`，使插件 config 在挂载时同步生效（dsh 声明，DSH-03）。未声明 = 不追加任何旗标 |
 | `[image].target` | 所有包（必填） | 承载该包的 worker 镜像：pi 族只能是 `pi-worker`，ACP 族只能是 `acp-worker` |
 | `[image].cpu_count` / `memory_mb` | 所有包（可选，缺省 2 / 4096） | E2B 模板资源下限；同一镜像取成员包的最大值 |
 | `[[image.packages]]` | 所有包（至少一条） | `arg`（Dockerfile ARG 名，`*_VERSION`）、`package`（npm 包名）、`version`（精确版本）、`role`。pi 族 role ∈ `kernel`（恰好一个）/`pi-package`（预装进 `/opt/pi-packages`，并写入 `settings.json`）；ACP 族 role = `agent` |
 
-* ACP 专属能力（`subagent_dispatch`/`child_progress`/`session_config`/`permission_allow`）出现在
+* ACP 专属能力（`subagent_dispatch`/`child_progress`/`session_config`/`permission_allow`/
+  `patch_overlays`）出现在
   pi 包即拒绝（这些键对 pi 族没有消费者）。
 * **族代码只读能力声明**：`config.pack`（`HarnessPack` 对象本身）是运行期唯一入口，`HostConfig`
   不再有从清单抄来的 `acp_command`/`acp_session_config`/`acp_permission_allow`/

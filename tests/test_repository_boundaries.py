@@ -338,6 +338,11 @@ def synthetic_repo(tmp_path: Path) -> Path:
         target = root / manifest.relative_to(ROOT)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(manifest, target)
+        # load_pack validates that declared patch_overlays ship in the pack's
+        # home/ overlay, so the synthetic repo carries it too.
+        overlay = manifest.parent / "home"
+        if overlay.is_dir():
+            shutil.copytree(overlay, target.parent / "home")
     return root
 
 

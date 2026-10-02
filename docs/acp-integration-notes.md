@@ -2004,23 +2004,46 @@ uncaught exception，dsh 进程 exit 1。0.1.5-rc.3 ~ 0.1.7-rc.2 未修复。本
   与完整性/幂等、冷/热链路及模型配置回归见 `docs/evidence/acp15-delivery.md`。
   本决定不授权离线修改真实运行数据，也不代表旧服务、镜像或模板已更新。
 
-## 20. 已知问题：dsh .env 单源接线在 session/new 广告路径不生效（B1 验收发现，2026-10-02）
+## 20. 已修复：dsh session/new 广告自定义 providers 路由（DSH-03，2026-10-02）
 
-ULegal 对接的 B1 真实模型验收中发现（完整证据在 ULegal 仓 `.local/b1-evidence.txt`，本节为仓内登记）：
+ULegal 对接的 B1 真实模型验收中发现（完整证据在 ULegal 仓 `.local/b1-evidence.txt`）：
+harnesses/dsh overlay 的 `settings.yaml` llm-pi-ai providers 段（openrouter 的
+`openai/gpt-5.6-sol`）在真实 dsh 0.1.5-rc.3 acp profile 的 `session/new` 路径不产生
+广告路由，宿主 session_config 核验 fail-closed「匹配 0 个广告路由」。根因调查与修复如下。
 
-* **现象**：harnesses/dsh overlay 的 `settings.yaml` llm-pi-ai providers 段（目录条目如
-  openrouter 的 `openai/gpt-5.6-sol`）在真实 dsh 0.1.5-rc.3 acp profile 的
-  `session/new` 路径**不产生广告路由**——宿主 session_config 核验 fail-closed
-  「匹配 0 个广告路由」。五组对照探针（最小 catalog、去 models、凭据直入环境等）
-  均不广告；语法错误对照证实 settings.yaml 确实被读取，但该 providers 段在
-  acp profile 组合下不生效。
-* **路径依赖（复核收窄）**：同次验收的 `session/resume` 路径 session_ready 帧广告
-  **含** openrouter 组（runs.db events 直读）——resume 能广告、session/new 不能，
-  修复点应定位在 session/new 的广告装配层，不要按「settings 段整体不生效」修。
-* **交叉核对**：`docs/evidence/dsh03-delivery.md` 交付回执本就声明「真实包版本与模型
-  组合未验收」；settings.yaml 注释所称「2026-10-01 部署验收实测」只到失败观测与
-  目录条目修正，gpt-5.6-sol 经 openrouter 的真实 dsh run 在仓内无成功记录。
-* **影响与现状**：B1 按包广告默认路由 deepseek-official/deepseek-v4-flash 完成验收
-  （M2/M8/M9 同一路径）。用户经 openrouter 的模型选择在 session/new 不可用。
-* **待办**：dsh 行为或包 overlay 的修复另开议题；修复验收须用真实 dsh 的
-  session/new 广告探针（不消耗模型）+ 一次真实模型 run。
+* **根因（启动竞态）**：dsh-base 组合层以空 config「休眠」挂载 llm-pi-ai（其
+  cordis.patch.yml 注释原文：*mounted dormant: zero routes until a `llm-pi-ai:` settings
+  section supplies provider profiles*）。settings.yaml 的 providers 段只能经异步链注册为
+  路由（`ctx.inject(["settings"])` → installSection → onChange →
+  `ctx.llm.registerAdapter`，dsh-settings 服务须先异步 load+publish 才可注入）。而 ACP 的
+  `session/new` 一被请求就立即以「当时已注册路由」的快照装配广告（dsh-acp
+  `AcpModelControl.state()` 枚举 `listProviders()`，空组被过滤）。冷启动（全新 DSH_HOME，
+  正是 glink 每 run HOME overlay 与 B1 E2B 的形态）下 session/new 在 t+0.85~1.4s 返回，
+  settings 驱动的注册在 t+1.2~2.4s 才完成，openrouter 组稳定缺席；同一 HOME 暖启动注册
+  足够快反而能广告（本机 5/5），所以现象表现为环境依赖的不稳定竞态。resume 能广告另有
+  两个原因：resume 处理器先恢复会话、观测时刻进程已运行更久；且 state() 会把持久化的
+  当前选择无条件 unshift 进广告组。`llm/adapters-updated` 后的 `config_option_update`
+  推送是否携带迟到路由本身也是竞态（冷启动 7 次中 3 次 8s 内唯一推送仍不含），宿主侧
+  等待通知不可靠。
+* **修复（包 overlay 形态，不触碰 dsh 内核）**：providers 结构从 settings.yaml 移到包
+  overlay 的 `home/.dsh/patches/llm-pi-ai.yml`（单源），经 dsh 官方 `--patch` launcher
+  旗标（可重复，应用在 profile 层之后）作为 llm-pi-ai 插件 config 声明——挂载时同步
+  注册路由，不再依赖时序。宿主侧新增 ACP 包能力
+  `[capabilities].patch_overlays`（run HOME 相对路径，须由 home/ overlay 交付，解析期
+  fail-closed 校验），launch 按放置后的 HOME 追加 `--patch <HOME>/<相对路径>`，三面
+  （inproc/docker/e2b）同一代码路径。settings.yaml 的 llm-pi-ai 段不再重复声明，但仍是
+  有效的运行期热改入口（installSection 以插件 config 为 base 合并用户段，onChange 会
+  replace 路由）；修复前会话的追问经继承得到的旧 settings.yaml 含同内容段，与 patch
+  合并结果一致。
+* **验收（不消耗模型的广告探针，initialize + session/new，不发 prompt）**：真实 dsh
+  0.1.5-rc.3 acp profile、每次全新 run HOME（仓库 overlay 原样落盘、只设 HOME、
+  argv 为 `dsh --profile acp --patch <HOME>/.dsh/patches/llm-pi-ai.yml`，即宿主
+  launch 的产物形态）——3/3 次首次 session/new 即广告 openrouter 组与
+  `["openrouter","openai/gpt-5.6-sol"]`（t+0.89~1.6s）。对照变体：patch-only
+  （settings.yaml 不含 llm-pi-ai 段）与 patch + 含段 settings.yaml 各 3/3 通过，
+  证实单源 patch 与「修复前会话继承的旧 settings.yaml」两种形态都成立。
+* **残余风险**：dsh 上游更根本的修复（ACP profile 在服务 session/new 前等待 settings
+  就绪，或将 config_option_update 与路由注册对齐）不受本仓节奏控制，可作为长期项另行
+  上报；`--patch` config 会整行替换该插件的组合 config 层（dsh-base 本为空，无副作用；
+  上游若将来在组合层为 llm-pi-ai 加 config 需复核）；gpt-5.6-sol 经 openrouter 的真实
+  模型 run 仍按 B1 验收另行进行，本节只登记广告路径修复。

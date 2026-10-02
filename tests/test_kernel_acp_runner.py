@@ -25,7 +25,7 @@ import pytest
 from glink_harness.app import create_server
 from glink_harness.config import ConfigError, HostConfig, build_config
 
-from acp_pack import apply_acp_pack
+from acp_pack import apply_acp_pack, write_acp_pack
 from glink_harness.events import EventBus
 from glink_harness.kernel.acp_env import AcpRuntime
 from glink_harness.kernel.acp_execution import AcpExecutionAdapter
@@ -132,6 +132,38 @@ def test_ninth_declaration_and_oversized_file_fail_without_blocking_terminal(
     assert all(item["status"] == "ok" for item in final.deliverables[1:])
     assert any("超过 8" in failure for failure in read_events(store, record.run_id)[-1]["payload"]["artifactFailures"])
     assert final.report_path is not None
+
+
+def test_a_declared_patch_overlay_reaches_the_agent_argv(tmp_path: Path) -> None:
+    """DSH-03：包声明的 --patch 覆盖层按放置后的 HOME 进入 agent argv。"""
+    log = tmp_path / "agent.jsonl"
+    settings = {"FAKE_ACP_LOG": str(log), "FAKE_ACP_WRITE_REPORT": True}
+    packs = write_acp_pack(
+        tmp_path,
+        acp_command(tmp_path, settings),
+        patch_overlays=(".dsh/patches/providers.yml",),
+    )
+    overlay = packs / "dsh" / "home" / ".dsh" / "patches" / "providers.yml"
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text("- id: llm-pi-ai\n", encoding="utf-8")
+    config = build_config({
+        "OPENAI_API_KEY": "sk-test",
+        "OPENAI_BASE_URL": "https://example.invalid/v1",
+        "OPENAI_MODEL": "test/model",
+        "LOCAL_WEB_DATA_ROOT": str(tmp_path / "data"),
+        "GLINK_HARNESS": "dsh",
+        "GLINK_HARNESSES_DIR": str(packs),
+    }, REPO_ROOT)
+    store = RunStore(config.data_root / "runs")
+    manager = RunManager(config, EventBus(), store)
+    record = manager.start("验证 --patch 进入 agent argv")
+    final = manager.wait(record.run_id, timeout=30)
+    assert final is not None and final.status == FINISHED
+    run_home = config.data_root / "runs" / record.run_id / "acp-agent" / "home"
+    launched = next(entry for entry in read_log(log) if entry["event"] == "argv")
+    assert launched["argv"][-2:] == [
+        "--patch", f"{run_home}/.dsh/patches/providers.yml",
+    ]
 
 
 def test_present_declarations_reach_the_terminal_store_and_owner_gated_download(tmp_path: Path) -> None:

@@ -500,6 +500,13 @@ class AcpHarnessFamily(HarnessFamily):
 
         The argv is the selected pack's ``entry.command`` verbatim and is never
         shell-expanded; on an isolated sandbox it names an image-local command.
+        The pack's declared ``patch_overlays`` (dsh's repeatable ``--patch``)
+        extend it as ``--patch <HOME>/<relative>`` pairs resolved against the
+        sandbox-placed HOME, so the overlay file the run HOME carries registers
+        its routes at plugin-mount time instead of via dsh's asynchronous
+        settings chain (DSH-03: session/new advertised only the routes
+        registered so far, and on a cold HOME the settings-driven registration
+        finished after the first session/new answered).
         ``HOME`` is this run's own agent state root as the sandbox places it
         (host path in-process, :data:`CONTAINER_HOME` in Docker, the uploaded
         state root on E2B), so ``~/.codex`` / ``~/.dsh`` live in the run
@@ -522,8 +529,11 @@ class AcpHarnessFamily(HarnessFamily):
                 for dest in runtime.credential_dests
             ),
         )
+        argv = build_acp_argv(config)
+        for overlay in config.pack.capabilities.patch_overlays:
+            argv += ["--patch", f"{home}/{overlay}"]
         return Launch(
-            argv=tuple(build_acp_argv(config)),
+            argv=tuple(argv),
             env={"HOME": home},
             secret_env={name: value for name, value in config.acp_env},
             mounts=mounts,

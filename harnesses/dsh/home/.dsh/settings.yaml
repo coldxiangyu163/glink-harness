@@ -1,21 +1,8 @@
-# 每 run HOME 的 provider 接入结构，不声明部署模型或 reasoning effort。
+# 每 run HOME 的 dsh 用户文档。provider 接入结构不在此声明：
+# 单源是同目录 patches/llm-pi-ai.yml，经 dsh `--patch` 在插件挂载时
+# 同步注册路由（DSH-03；settings 驱动的注册是异步链，冷启动晚于首个
+# session/new 应答）。此处仍可写 llm-pi-ai 段做运行期热改：installSection
+# 以插件 config 为 base 合并用户段，onChange 会 replace 路由。
 # OPENAI_MODEL / OPENAI_REASONING_EFFORT 由宿主经 ACP 应用并核验；
-# apiKeyEnv 只是凭据引用名，值经宿主渲染（GLINK_ACP_CREDENTIAL_ENV
-# 或 GLINK_ACP_CREDENTIAL_FILES），永远不进仓库。本机 ~/.dsh/ 互不影响。
-llm-pi-ai:
-  providers:
-    openrouter:
-      apiKeyEnv: OPENROUTER_API_KEY
-      # 模型目录条目是接入结构而非部署值：dsh 经 pi-ai 目录路由，目录外
-      # 的模型无实现可用（「could serve no request」）；部署选哪个模型仍由
-      # .env 的 OPENAI_MODEL 决定。pi-ai@0.85.1 的 openrouter 目录只含
-      # 图像模型（2026-10-01 部署验收实测 openai/gpt-6-sol 匹配 0 广告
-      # 路由），文本模型在此声明；升级 pi-ai 后可改为依赖上游目录。
-      models:
-        - id: openai/gpt-5.6-sol
-          name: GPT-5.6 Sol (OpenRouter)
-          contextWindow: 1050000
-          maxTokens: 32768
-          reasoningEfforts:
-            high: high
-            xhigh: xhigh
+# 凭据值经宿主渲染（GLINK_ACP_CREDENTIAL_ENV 或
+# GLINK_ACP_CREDENTIAL_FILES），永远不进仓库。本机 ~/.dsh/ 互不影响。

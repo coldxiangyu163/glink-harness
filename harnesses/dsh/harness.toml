@@ -22,6 +22,11 @@ resume = true
 subagent_dispatch = "async"
 # 子代理运行中进度读 dsh 私有的 session.v4.jsonl.zstd（位于 agent HOME/.dsh/sessions）。
 child_progress = "dsh-session-zstd"
+# dsh `--patch` launcher 覆盖层（run HOME 相对路径，由 home/ overlay 交付）：
+# llm-pi-ai 的 providers 结构在插件挂载时同步注册路由，绕开 settings 异步
+# 注册链的启动竞态——冷启动下首个 session/new 曾稳定不广告 openrouter 组
+#（DSH-03 根因修复，docs/acp-integration-notes.md §20）。
+patch_overlays = [".dsh/patches/llm-pi-ai.yml"]
 
 [capabilities.session_config]
 # 仅声明来源与协议编码规则，不固定部署值。new/resume 均按当前宿主冻结配置应用。

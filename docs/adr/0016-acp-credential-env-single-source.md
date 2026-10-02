@@ -1,6 +1,9 @@
 # 0016 ACP 凭据与 dsh 模型的 .env 单源配置
 
-- 状态：已接受（2026-09-29）；2026-09-30 经 GLINK-DSH-03 修订决定 5
+- 状态：已接受（2026-09-29）；2026-09-30 经 GLINK-DSH-03 修订决定 5；2026-10-02
+  DSH-03 起 provider 结构从 `settings.yaml` 移到 `home/.dsh/patches/llm-pi-ai.yml`
+  （dsh `--patch` 挂载时同步注册路由，见 `docs/acp-integration-notes.md` §20），
+  本 ADR 的凭据与模型单源决定不变
 - 范围：`host/glink_harness/config.py`（`GLINK_ACP_CREDENTIAL_ENV` 解析、政策接入
   `_acp_credentials_follow_policy`）、`host/glink_harness/kernel/acp_env.py`
   （`_render_credential_env`）、`host/glink_harness/harnesses.py`（结构来源声明）、

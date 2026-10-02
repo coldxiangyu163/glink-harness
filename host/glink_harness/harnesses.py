@@ -9,7 +9,8 @@ the **single source** of everything a harness differs in:
 * ``[entry]`` — the agent's argv (ACP) or the kernel binary (pi);
 * ``[capabilities]`` — the capability matrix family code reads instead of
   recognising a pack by name: ``resume``, ``subagent_dispatch``,
-  ``child_progress``, ``session_config`` and ``permission_allow``;
+  ``child_progress``, ``session_config``, ``permission_allow`` and
+  ``patch_overlays``;
 * ``[image]`` — the image requirement: which worker image carries the pack,
   its E2B resource floor, and every upstream npm package + exact version the
   image pins (``[[image.packages]]``). The Dockerfile ``ARG`` lines, the E2B
@@ -88,6 +89,12 @@ ACP_PERMISSION_TOOL_KINDS = (
     "other",
 )
 
+#: Bounds on the ``patch_overlays`` capability: each entry becomes one
+#: ``--patch <path>`` argv pair, so the count and length stay bounded like the
+#: manifest itself.
+PATCH_OVERLAY_MAX_ENTRIES = 8
+PATCH_OVERLAY_MAX_CHARS = 200
+
 #: How an ACP agent's ``subagent`` tool reports dispatch (capability
 #: ``subagent_dispatch``). ``sync``: the tool call ends when the child ends, so
 #: its terminal status is the child's outcome. ``async``: the tool call ends as
@@ -108,12 +115,25 @@ _NPM_NAME_RE = re.compile(r"^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$")
 _TOP_LEVEL_KEYS = frozenset({"format", "name", "family", "entry", "capabilities", "image"})
 _ENTRY_KEYS = frozenset({"command"})
 _CAPABILITY_KEYS = frozenset(
-    {"resume", "subagent_dispatch", "child_progress", "session_config", "permission_allow"}
+    {
+        "resume",
+        "subagent_dispatch",
+        "child_progress",
+        "session_config",
+        "permission_allow",
+        "patch_overlays",
+    }
 )
 #: Capabilities only an ACP pack may declare (the pi family's equivalents are
 #: product code: the foreground guard, the pi child-progress source).
 _ACP_ONLY_CAPABILITIES = frozenset(
-    {"subagent_dispatch", "child_progress", "session_config", "permission_allow"}
+    {
+        "subagent_dispatch",
+        "child_progress",
+        "session_config",
+        "permission_allow",
+        "patch_overlays",
+    }
 )
 _IMAGE_KEYS = frozenset({"target", "cpu_count", "memory_mb", "packages"})
 _IMAGE_PACKAGE_KEYS = frozenset({"arg", "package", "version", "role"})
@@ -144,6 +164,13 @@ class HarnessCapabilities:
     child_progress: str | None = None
     session_config: tuple[tuple[str, str | SessionConfigSource], ...] = ()
     permission_allow: tuple[str, ...] = ()
+    #: Extra launcher patch overlays (dsh's repeatable ``--patch <path>``),
+    #: each a path **relative to the run HOME** that the ``home/`` overlay
+    #: delivers; family code appends them to the launch argv in declaration
+    #: order, resolved against the sandbox-placed HOME. Mounting a route
+    #: structure this way registers it at plugin-mount time instead of via
+    #: the agent's asynchronous settings chain (DSH-03).
+    patch_overlays: tuple[str, ...] = ()
 
     def resolve_session_config(
         self, values: Mapping[str, str]
@@ -303,6 +330,17 @@ def load_pack(harnesses_dir: Path, name: str) -> HarnessPack:
             raise HarnessPackError(f"home/ 覆盖层必须是目录：{home}")
         home_path = home
 
+    # Declared patch overlays are delivered by the home/ overlay: a pack that
+    # declares one it does not ship would only fail at agent launch time, so
+    # refuse it here, with the rest of the all-or-nothing pack validation.
+    for overlay in capabilities.patch_overlays:
+        delivered = None if home_path is None else home_path / overlay
+        if delivered is None or delivered.is_symlink() or not delivered.is_file():
+            raise HarnessPackError(
+                f"harness 清单 capabilities.patch_overlays 声明的 {overlay!r} "
+                f"不在 home/ 覆盖层内（普通文件）：{manifest}"
+            )
+
     return HarnessPack(
         name=name,
         family=family,
@@ -386,6 +424,7 @@ def _parse_capabilities(document: dict, family: str, manifest: Path) -> HarnessC
         child_progress=progress,
         session_config=_parse_session_config(table, manifest),
         permission_allow=_parse_permission_allow(table, manifest),
+        patch_overlays=_parse_patch_overlays(table, manifest),
     )
 
 
@@ -442,6 +481,45 @@ def _parse_permission_allow(table: dict, manifest: Path) -> tuple[str, ...]:
         if item not in tokens:
             tokens.append(item)
     return tuple(tokens)
+
+
+def _parse_patch_overlays(table: dict, manifest: Path) -> tuple[str, ...]:
+    """HOME-relative launcher patch overlay paths (dsh ``--patch``).
+
+    Each entry must stay inside the run HOME: a relative POSIX path with no
+    empty, ``.`` or ``..`` segments and no backslash, so the launch argv can
+    resolve it against the sandbox-placed HOME on every face. Whether the
+    file itself exists is checked against the pack's ``home/`` overlay in
+    :func:`load_pack` (parsing here does not know the pack directory).
+    """
+    raw = table.get("patch_overlays")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not raw:
+        raise HarnessPackError(
+            f"harness 清单 capabilities.patch_overlays 必须是非空字符串数组：{manifest}"
+        )
+    if len(raw) > PATCH_OVERLAY_MAX_ENTRIES:
+        raise HarnessPackError(
+            f"harness 清单 capabilities.patch_overlays 超过 {PATCH_OVERLAY_MAX_ENTRIES} 项：{manifest}"
+        )
+    overlays: list[str] = []
+    for item in raw:
+        if (
+            not isinstance(item, str)
+            or not item
+            or len(item) > PATCH_OVERLAY_MAX_CHARS
+            or item.startswith("/")
+            or "\\" in item
+            or any(segment in ("", ".", "..") for segment in item.split("/"))
+        ):
+            raise HarnessPackError(
+                f"patch_overlays 只接受 run HOME 内的相对路径（无绝对路径、"
+                f"空段、. 或 ..）：{manifest}（{item!r}）"
+            )
+        if item not in overlays:
+            overlays.append(item)
+    return tuple(overlays)
 
 
 def _parse_image(document: dict, family: str, manifest: Path) -> ImageRequirement:

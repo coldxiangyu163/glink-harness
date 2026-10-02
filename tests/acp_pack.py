@@ -36,6 +36,7 @@ def acp_manifest(
     subagent_dispatch: str = "",
     child_progress: str = "",
     resume: bool = True,
+    patch_overlays: tuple[str, ...] = (),
 ) -> str:
     """The v2 manifest text for one ACP test pack.
 
@@ -62,6 +63,8 @@ def acp_manifest(
         lines.append(f"child_progress = {json.dumps(child_progress)}")
     if permission_allow:
         lines.append("permission_allow = " + json.dumps(list(permission_allow)))
+    if patch_overlays:
+        lines.append("patch_overlays = " + json.dumps(list(patch_overlays)))
     if session_config:
         lines += ["", "[capabilities.session_config]"]
         lines += [f"{json.dumps(key)} = {json.dumps(value)}" for key, value in session_config]

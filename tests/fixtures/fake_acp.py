@@ -822,6 +822,9 @@ def main() -> int:
             except (OSError, json.JSONDecodeError) as exc:
                 print(f"fake_acp: cannot read config {path}: {exc}", file=sys.stderr)
                 return 2
+    # How the host launched the agent (entry.command plus any pack-declared
+    # patch overlays): logged so regressions assert the real launch shape.
+    log("argv", argv=argv)
     for raw in sys.stdin:
         line = raw.strip()
         if not line:

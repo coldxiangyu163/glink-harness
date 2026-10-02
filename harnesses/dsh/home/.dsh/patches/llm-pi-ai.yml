@@ -1,0 +1,33 @@
+# 每 run 的 provider 接入结构（单源），经 dsh 官方 `--patch` launcher 覆盖层
+# 在插件挂载时同步注册路由；凭据引用名（apiKeyEnv）永不携带 key 值。
+#
+# 为什么不再放在 settings.yaml：dsh 0.1.5-rc.3 的 llm-pi-ai 在组合层以空
+# config 休眠挂载，settings.yaml 的 providers 段要经异步链（settings 服务
+# 就绪 → installSection → onChange → registerAdapter）才注册为路由；冷启动
+# 下该链完成晚于首个 session/new 应答，openrouter 组稳定缺席（DSH-03，
+# docs/acp-integration-notes.md §20）。--patch 在 profile 层之后应用，config
+# 整行替换组合层的空 config，挂载即注册，广告不再依赖时序。settings.yaml 的
+# llm-pi-ai 段仍然有效（installSection 以插件 config 为 base、用户段合并后
+# onChange 会 replace 路由），留作运行期热改入口；仓库形态不重复声明同一份
+# 结构，避免两处漂移。
+#
+# OPENAI_MODEL / OPENAI_REASONING_EFFORT 由宿主经 ACP 应用并核验。
+# 模型目录条目是接入结构而非部署值：dsh 经 pi-ai 目录路由，目录外
+# 的模型无实现可用（「could serve no request」）；部署选哪个模型仍由
+# .env 的 OPENAI_MODEL 决定。pi-ai@0.85.1 的 openrouter 目录只含
+# 图像模型（2026-10-01 部署验收实测 openai/gpt-6-sol 匹配 0 广告
+# 路由），文本模型在此声明；升级 pi-ai 后可改为依赖上游目录。
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      openrouter:
+        apiKeyEnv: OPENROUTER_API_KEY
+        models:
+          - id: openai/gpt-5.6-sol
+            name: GPT-5.6 Sol (OpenRouter)
+            contextWindow: 1050000
+            maxTokens: 32768
+            reasoningEfforts:
+              high: high
+              xhigh: xhigh

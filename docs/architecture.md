@@ -483,7 +483,7 @@ child 在前端显示为普通「进行中」，不伪造进度。
 `harnesses/<pack>/harness.toml` 解析出的包清单：`family` 决定实现，包的能力提示与 ACP 包的
 `home/` 覆盖层由该包提供，包名随 `spec.pack` 写入 run 记录；P3 起 `HostConfig.pack` 直接持有
 `HarnessPack` 对象，族代码只读其 `[capabilities]` 能力矩阵——`resume`、`subagent_dispatch`、
-`child_progress`、`session_config`、`permission_allow`——不再按包名特判）。族接口覆盖六面职责：(a) 准入
+`child_progress`、`session_config`、`permission_allow`、`patch_overlays`——不再按包名特判）。族接口覆盖六面职责：(a) 准入
 ——凭据要求（`/` 命令门禁与斜杠解释自 GLINK-ARCH-6 起是宿主级、harness 无关，不再由族提供白名单）；
 (b) 追问准入与续接种子——族追加门禁、工作区复用、会话种子与 `resume_session` 值、会话身份
 的校验时机；(c) runtime 渲染与 projector 工厂（渲染中新知的秘密经 `PreparedRuntime` 交出，
