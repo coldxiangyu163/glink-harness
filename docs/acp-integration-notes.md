@@ -2047,3 +2047,16 @@ harnesses/dsh overlay 的 `settings.yaml` llm-pi-ai providers 段（openrouter �
   上报；`--patch` config 会整行替换该插件的组合 config 层（dsh-base 本为空，无副作用；
   上游若将来在组合层为 llm-pi-ai 加 config 需复核）；gpt-5.6-sol 经 openrouter 的真实
   模型 run 仍按 B1 验收另行进行，本节只登记广告路径修复。
+
+## 21. 已知问题：失败 run 把空状态回发覆盖对话 manifest.sourceRunId（B2 验收发现，2026-10-02）
+
+ULegal 对接 B2（dsh+E2B）验收中发现（完整证据在 ULegal 仓 `.local/b2-evidence.txt`，本节为仓内登记）：
+
+* **现象**：run `6a716638e0b2` 在 agent 未启动即失败（归档回灌 404）后，finalize 仍把
+  0 文件的空状态发布到 `conversations/3ebc1885dff8/state`，把父 run
+  `3ebc1885dff8` 发布过的良好状态根与 `manifest.sourceRunId` 覆盖为失败 run 自身。
+* **后果边界**：可达结果仍 fail-closed——该对话后续追问按 stale_run/无 sessionId
+  被拒，不会以空状态冒充可续接；但父 run 发布过的良好状态根**不可取回**，
+  对话链事实被污染（磁盘终态只剩覆盖后的 manifest，正面实证只能以日志为据）。
+* **修复方向**：发布状态根/manifest 前核验本 run 达到 session_ready（或状态根非空），
+  未达则拒发空状态；登记议题后另行修复与验收。
