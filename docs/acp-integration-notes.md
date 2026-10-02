@@ -2003,3 +2003,24 @@ uncaught exception，dsh 进程 exit 1。0.1.5-rc.3 ~ 0.1.7-rc.2 未修复。本
   日志不打印会话正文或 URL。真实 dsh 零 prompt resume
   与完整性/幂等、冷/热链路及模型配置回归见 `docs/evidence/acp15-delivery.md`。
   本决定不授权离线修改真实运行数据，也不代表旧服务、镜像或模板已更新。
+
+## 20. 已知问题：dsh .env 单源接线在 session/new 广告路径不生效（B1 验收发现，2026-10-02）
+
+ULegal 对接的 B1 真实模型验收中发现（完整证据在 ULegal 仓 `.local/b1-evidence.txt`，本节为仓内登记）：
+
+* **现象**：harnesses/dsh overlay 的 `settings.yaml` llm-pi-ai providers 段（目录条目如
+  openrouter 的 `openai/gpt-5.6-sol`）在真实 dsh 0.1.5-rc.3 acp profile 的
+  `session/new` 路径**不产生广告路由**——宿主 session_config 核验 fail-closed
+  「匹配 0 个广告路由」。五组对照探针（最小 catalog、去 models、凭据直入环境等）
+  均不广告；语法错误对照证实 settings.yaml 确实被读取，但该 providers 段在
+  acp profile 组合下不生效。
+* **路径依赖（复核收窄）**：同次验收的 `session/resume` 路径 session_ready 帧广告
+  **含** openrouter 组（runs.db events 直读）——resume 能广告、session/new 不能，
+  修复点应定位在 session/new 的广告装配层，不要按「settings 段整体不生效」修。
+* **交叉核对**：`docs/evidence/dsh03-delivery.md` 交付回执本就声明「真实包版本与模型
+  组合未验收」；settings.yaml 注释所称「2026-10-01 部署验收实测」只到失败观测与
+  目录条目修正，gpt-5.6-sol 经 openrouter 的真实 dsh run 在仓内无成功记录。
+* **影响与现状**：B1 按包广告默认路由 deepseek-official/deepseek-v4-flash 完成验收
+  （M2/M8/M9 同一路径）。用户经 openrouter 的模型选择在 session/new 不可用。
+* **待办**：dsh 行为或包 overlay 的修复另开议题；修复验收须用真实 dsh 的
+  session/new 广告探针（不消耗模型）+ 一次真实模型 run。
