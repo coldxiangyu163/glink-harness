@@ -12,11 +12,14 @@
 # 结构，避免两处漂移。
 #
 # OPENAI_MODEL / OPENAI_REASONING_EFFORT 由宿主经 ACP 应用并核验。
-# 模型目录条目是接入结构而非部署值：dsh 经 pi-ai 目录路由，目录外
-# 的模型无实现可用（「could serve no request」）；部署选哪个模型仍由
-# .env 的 OPENAI_MODEL 决定。pi-ai@0.85.1 的 openrouter 目录只含
-# 图像模型（2026-10-01 部署验收实测 openai/gpt-6-sol 匹配 0 广告
-# 路由），文本模型在此声明；升级 pi-ai 后可改为依赖上游目录。
+# 模型目录条目是接入结构而非部署值：部署选哪个模型仍由 .env 的
+# OPENAI_MODEL 决定。本地声明的必要性来自上面的休眠挂载机制——patch
+# config 是挂载时注册路由的唯一同步来源；并非上游目录缺文本模型
+# （pi-ai@0.85.1 的 openrouter 文本目录实测有数百条目且含
+# openai/gpt-5.6-sol；2026-10-01「匹配 0 广告路由」的观测真因是上述
+# 启动竞态与 gpt-6-sol/gpt-5.6-sol 的名称差异，见 §20）。不要按
+# 「升级 pi-ai 后依赖上游目录」删除本地声明：那会回到休眠零路由，
+# 且广告集合会随上游目录漂移。
 - id: llm-pi-ai
   name: '@deepseek-ai/dsh-llm-pi-ai'
   config:
