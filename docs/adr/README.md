@@ -26,3 +26,4 @@
 | [0018](0018-conversation-state-archive-channel.md) | 宿主持有对话级权威状态，E2B 面回收/回灌走归档通道（增量 tar 流），继承阈值改为异常检测 |
 | [0019](0019-acp-state-bounds-warning-tier-and-adaptive-resume.md) | 状态上限三分支（警告档不拒、fail-closed 才拒），resume 超时按状态根体量自适应，继承/回灌/回收与 resume 耗时进事件流 |
 | [0020](0020-conversation-sandbox-lease-hot-path.md) | 对话沙箱租约：收尾泊车（pause）而非销毁，追问热路径重连原沙箱（代数双端一致才命中，失败降级冷路径），TTL 对账销毁与删除最小闭环；租约不占 run 槽位 |
+| [0021](0021-event-fixture-contract.md) | 跨消费方一致性 = 权威事件样例库（golden fixtures）+ 消费方 fold 契约测试（不共享 fold 代码）；ULegal trajectory 定位为业务里程碑+展示 fold，delta/直播帧不落盘不投影，事件原文存档归 R3 |

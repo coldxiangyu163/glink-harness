@@ -440,6 +440,18 @@ child 在前端显示为普通「进行中」，不伪造进度。
 读者会误读时，提升该类型的 `v` 并同步 reducer。**schema 引入之前写下的事件日志没有 `v`，
 当前前端不可读，也没有迁移**：回放这类 run 时时间线为空，状态停在 REST 记录给出的值。
 
+### 3.7 跨消费方一致性：事件样例库与契约测试
+
+决定与来由见 [ADR 0021](adr/0021-event-fixture-contract.md)。
+
+同一事件流有多个消费方 fold（本仓 `run-reducer.mjs` 块模型；ULegal trajectory 行投影），
+一致性不靠共享 fold 代码（两侧语言栈不同），靠 glink 维护的**权威事件样例库**
+（golden fixtures，覆盖事件词汇全形态；`tests/fixtures/events/*.jsonl` 为其雏形）与各消费
+方的**契约测试**：同一份样例喂两侧、fold 输出快照必须一致。演进护栏：新事件形态先入
+样例库再进实现，消费方契约测试不过即红。ULegal 侧 trajectory 定位为业务里程碑 + 展示
+fold，delta/直播帧不落盘不投影；事件原文存档归 R3 存储边界重定义
+（[multi-harness-plan.md](multi-harness-plan.md) §6），本期不建。
+
 ## 4. run 生命周期
 
 1. `POST /api/runs {prompt, parentRunId?, blueprint?}` → 准入（见下）→ 生成 `runId`（run 目录**排他**创建，

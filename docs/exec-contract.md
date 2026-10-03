@@ -116,6 +116,9 @@ JSON 体，应退避重连；浏览器 EventSource 读不到该体，是其已�
 - `stopReason=length` 时 run 仍 `finished`，但 `stopReason`/`modelStopReason` 为
   `length`，表示**交付不完整**，消费方不得按普通完成呈现。
 - `usage_reported.usage` 为 run 累计值。
+- **消费方契约测试**：各消费方 fold 的一致性由 glink 权威事件样例库的契约测试钉住
+  （[ADR 0021](adr/0021-event-fixture-contract.md)）——新事件形态先入样例库，消费方 fold
+  对同一样例的输出快照必须一致，不过即红。
 
 ## 3. 报告与产物端点
 
