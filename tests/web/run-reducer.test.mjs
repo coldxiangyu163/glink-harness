@@ -3,10 +3,11 @@
  * and the feed that folds a subscription through it (`run-stream.mjs`).
  *
  * `tests/fixtures/events/*.jsonl` are synthetic runs written in the persisted
- * envelope `{type, v, runId, seq, ts, payload}`. `tests/test_event_schema.py`
- * checks every versioned fixture against the host schema, so the frames fed
- * here are frames the bus would commit. `legacy-unversioned.jsonl` is a log
- * written before the schema existed (no `v`): it must not be applied.
+ * envelope `{type, v, runId, seq, ts, payload}` (`#` lines are comment headers).
+ * `tests/test_event_fixture_contract.py` checks every versioned fixture against
+ * the host schema, so the frames fed here are frames the bus would commit.
+ * `legacy-unversioned.jsonl` is a log written before the schema existed (no
+ * `v`): it must not be applied.
  */
 
 import { test } from 'node:test';
@@ -27,9 +28,10 @@ import { createRunFeed } from '../../web/modules/run-stream.mjs';
 const FIXTURE_DIR = new URL('../fixtures/events/', import.meta.url);
 
 function load(name) {
+  // `#` lines are the fixture's comment header (tests/fixtures/events/README.md).
   return readFileSync(new URL(`${name}.jsonl`, FIXTURE_DIR), 'utf8')
     .split('\n')
-    .filter((line) => line.trim())
+    .filter((line) => line.trim() && !line.startsWith('#'))
     .map((line) => JSON.parse(line));
 }
 

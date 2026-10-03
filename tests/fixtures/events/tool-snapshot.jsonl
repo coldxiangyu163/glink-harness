@@ -1,3 +1,6 @@
+# tool-snapshot —— pi 族最小完整 run：session_ready、累计工具快照（替换而非拼接）、
+# 权威正文替换流式增量、usage_reported、report 回收、run_finished。
+# 来源：fake pi 运行裁剪合成（无真实运行依赖）。
 {"type": "run_started", "v": 1, "runId": "fx-tool", "seq": 1, "ts": 1790000000.5, "payload": {"prompt": "列出工作目录"}}
 {"type": "session_ready", "v": 1, "runId": "fx-tool", "seq": 2, "ts": 1790000001.0, "payload": {"sessionId": "s-1", "sessionFile": null, "model": "fake/model", "thinkingLevel": "low"}}
 {"type": "turn_started", "v": 1, "runId": "fx-tool", "seq": 3, "ts": 1790000001.5, "payload": {}}

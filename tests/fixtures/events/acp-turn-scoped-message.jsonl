@@ -1,3 +1,6 @@
+# acp-turn-scoped-message —— ACP 族回合范围权威帧（turnScoped=true）：合并替换本回合
+# 全部文本块，正文被工具夹断也不留第二份；两轮互不触碰。
+# 来源：ACP 投影回合末装配语义（B3 评审 BLOCKER 修复）的最小合成。
 {"type": "run_started", "v": 1, "runId": "fx-acp-turn", "seq": 1, "ts": 1790001000.5, "payload": {"prompt": "调研两个来源"}}
 {"type": "turn_started", "v": 1, "runId": "fx-acp-turn", "seq": 2, "ts": 1790001001.0, "payload": {}}
 {"type": "thinking_delta", "v": 1, "runId": "fx-acp-turn", "seq": 3, "ts": 1790001001.5, "payload": {"text": "先检索。"}}

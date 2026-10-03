@@ -1,3 +1,6 @@
+# legacy-unversioned —— schema 引入之前写下的事件日志（无 v）：当前消费方不可读，
+# 全部帧拒收但 seq 水位仍推进；没有迁移。
+# 来源：按旧日志格式手工合成。
 {"type": "run_started", "runId": "fx-legacy", "seq": 1, "ts": 1790000000.5, "payload": {"prompt": "旧日志"}}
 {"type": "turn_started", "runId": "fx-legacy", "seq": 2, "ts": 1790000001.0, "payload": {}}
 {"type": "assistant_message", "runId": "fx-legacy", "seq": 3, "ts": 1790000001.5, "payload": {"text": "旧答案"}}

@@ -6,7 +6,7 @@ import { collectSources } from '../../web/modules/progress-panel.mjs';
 import { describeTool, planEntries, stageText, describeChild } from '../../web/modules/present.mjs';
 
 const frames = readFileSync(new URL('../fixtures/events/acp-presentation.jsonl', import.meta.url), 'utf8')
-  .trim().split('\n').map(JSON.parse);
+  .trim().split('\n').filter((line) => !line.startsWith('#')).map(JSON.parse);
 const model = reduceAll(createRunState({ runId: 'acp-fixture' }), frames);
 
 test('ACP fixture: search, fetch title, todos, dispatch, thinking and usage survive the consumer', () => {

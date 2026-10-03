@@ -1,3 +1,6 @@
+# failed-running-tool —— run_failed 三态终帧之一：auto_retry_start 阶段帧、kernel_status
+# 警告、运行中工具随失败收口为 interrupted。
+# 来源：fake pi 内核退出运行裁剪合成。
 {"type": "run_started", "v": 1, "runId": "fx-fail", "seq": 1, "ts": 1790000000.5, "payload": {"prompt": "会失败"}}
 {"type": "turn_started", "v": 1, "runId": "fx-fail", "seq": 2, "ts": 1790000001.0, "payload": {}}
 {"type": "run_stage", "v": 1, "runId": "fx-fail", "seq": 3, "ts": 1790000001.5, "payload": {"stage": "auto_retry_start", "attempt": 1, "errorMessage": "overloaded"}}

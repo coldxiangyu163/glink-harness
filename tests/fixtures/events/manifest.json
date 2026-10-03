@@ -1,0 +1,204 @@
+{
+  "$schema": "权威事件样例库清单（ADR 0021）：每个样例一条，键为 .jsonl 文件名（去后缀）。source=来源；semantics=覆盖的语义点；forms=样例中出现的事件形态；web=glink web reducer fold 的期望快照不变量；trajectory=ULegal trajectory 语义（tests/trajectory_reference.py 参考 fold）的期望投影行与终帧展示快照。两侧共享的核心不变量（status/texts/toolCount）必须一致，契约测试断言。",
+  "tool-snapshot": {
+    "source": "fake pi 运行裁剪合成",
+    "semantics": ["session_ready 会话事实", "tool_updated 累计快照替换而非拼接", "权威正文替换流式增量", "tool_finished 与末快照相同时丢弃预览", "usage_reported 累计值", "report 回收"],
+    "forms": ["assistant_delta", "assistant_message", "run_finished", "run_started", "session_ready", "thinking_delta", "tool_finished", "tool_started", "tool_updated", "turn_finished", "turn_started", "usage_reported"],
+    "web": {
+      "status": "finished", "texts": ["目录里有两行输出。"], "toolCount": 1, "turnCount": 1,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0,
+      "sessionId": "s-1", "model": "fake/model", "hasReport": true, "stopReason": null, "error": null,
+      "usageTotalTokens": 15
+    },
+    "trajectory": {
+      "milestones": [["started", "列出工作目录"], ["session", "s-1", "fake/model"], ["terminal", "finished"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "ok", "redacted": false, "children": 0, "texts": ["目录里有两行输出。"], "toolCount": 1, "deliverables": {}},
+      "rejected": 0
+    }
+  },
+  "truncated-message": {
+    "source": "fake pi 长回答运行裁剪合成",
+    "semantics": ["truncated 权威帧比已流式正文短时保留流式拼接", "闭块并保留 truncated 标记"],
+    "forms": ["assistant_delta", "assistant_message", "run_finished", "run_started", "turn_finished", "turn_started"],
+    "web": {
+      "status": "finished",
+      "texts": ["答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答"],
+      "textTruncated": [true], "toolCount": 0, "turnCount": 1,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0
+    },
+    "trajectory": {
+      "milestones": [["started", "长回答"], ["terminal", "finished"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答"], "toolCount": 0, "deliverables": {}},
+      "rejected": 0
+    }
+  },
+  "subagents": {
+    "source": "fake pi pi-subagents 运行裁剪合成",
+    "semantics": ["subagent_updated 进度 latest-wins（累计快照）", "终帧 children 摘要收口所有子代理（含缺 typed 终帧者）"],
+    "forms": ["run_finished", "run_started", "subagent_finished", "subagent_started", "subagent_updated", "turn_finished", "turn_started"],
+    "web": {
+      "status": "finished", "texts": [], "toolCount": 0, "turnCount": 1,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0,
+      "children": [
+        {"n": 0, "agent": "researcher", "task": "调研甲", "status": "finished", "durationMs": 4200, "toolCount": 5},
+        {"n": 1, "agent": "researcher", "task": "调研乙", "status": "failed"}
+      ]
+    },
+    "trajectory": {
+      "milestones": [["started", "派发两个子代理"], ["terminal", "finished"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 2, "texts": [], "toolCount": 0, "deliverables": {}},
+      "rejected": 0
+    }
+  },
+  "failed-running-tool": {
+    "source": "fake pi 内核退出运行裁剪合成",
+    "semantics": ["run_failed 终帧", "auto_retry_start 阶段帧带 attempt/errorMessage", "kernel_status 警告条目", "运行中工具随失败收口为 interrupted"],
+    "forms": ["kernel_status", "run_failed", "run_stage", "run_started", "tool_started", "tool_updated", "turn_started"],
+    "web": {
+      "status": "failed", "stopReason": "kernel_exit", "error": "pi exited with code 1",
+      "texts": [], "toolCount": 1, "toolStatuses": ["interrupted"], "turnCount": 1,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0
+    },
+    "trajectory": {
+      "milestones": [["started", "会失败"], ["stage", "auto_retry_start", 1], ["terminal", "failed"]],
+      "snapshot": {"status": "failed", "stopReason": "kernel_exit", "error": "pi exited with code 1", "reportStatus": "none", "redacted": false, "children": 0, "texts": [], "toolCount": 1, "deliverables": {}},
+      "rejected": 0
+    }
+  },
+  "acp-presentation": {
+    "source": "原 dsh run 27f0b4df7c1f 的脱敏合成语料（docs/evidence/acp-presentation-2026-09-29/）",
+    "semantics": ["tool_started presentation 呈现提示", "run_stage plan 条目", "空 agent 的 subagent_started", "ACP 计账 usage_reported（basis）", "未终结样例：无终帧、无展示快照"],
+    "forms": ["run_stage", "subagent_started", "thinking_delta", "tool_finished", "tool_started", "turn_started", "usage_reported"],
+    "web": {
+      "status": "running", "texts": [], "toolCount": 3, "turnCount": 1,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0,
+      "usageTotalTokens": 1200
+    },
+    "trajectory": {
+      "milestones": [["stage", "plan", null]],
+      "snapshot": null,
+      "rejected": 0
+    }
+  },
+  "acp-turn-scoped-message": {
+    "source": "ACP 投影回合末装配语义（B3 评审 BLOCKER 修复）的最小合成",
+    "semantics": ["turnScoped 权威帧合并替换本回合全部文本块", "正文被工具夹断不留第二份", "合并不触碰已闭合的前一轮文本块"],
+    "forms": ["assistant_delta", "assistant_message", "run_finished", "run_started", "thinking_delta", "tool_finished", "tool_started", "turn_finished", "turn_started"],
+    "web": {
+      "status": "finished", "texts": ["段一。", "前段，后段。"], "toolCount": 2, "turnCount": 2,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0
+    },
+    "trajectory": {
+      "milestones": [["started", "调研两个来源"], ["terminal", "finished"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["段一。", "前段，后段。"], "toolCount": 2, "deliverables": {}},
+      "rejected": 0
+    }
+  },
+  "legacy-unversioned": {
+    "source": "按 schema 引入前的旧日志格式手工合成",
+    "semantics": ["无 v 的旧日志整日志不可读：全部帧拒收", "拒收仍推进 seq 水位", "没有迁移"],
+    "forms": ["assistant_message", "run_finished", "run_started", "turn_started"],
+    "web": {
+      "status": "running", "texts": [], "toolCount": 0, "turnCount": 0,
+      "rejectedFrames": 4, "ignoredFrames": 0, "gaps": 0
+    },
+    "trajectory": {
+      "milestones": [],
+      "snapshot": null,
+      "rejected": 4
+    }
+  },
+  "stages": {
+    "source": "按 fake pi 运行的阶段序列手工合成",
+    "semantics": ["run_stage 生命周期形态：agent_start/agent_end/compaction_start（带 reason）/compaction_end", "阶段帧不产生文本块与工具卡"],
+    "forms": ["assistant_delta", "assistant_message", "run_finished", "run_stage", "run_started", "turn_finished", "turn_started"],
+    "web": {
+      "status": "finished", "texts": ["收到。"], "toolCount": 0, "turnCount": 1,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0
+    },
+    "trajectory": {
+      "milestones": [["started", "阶段演练"], ["stage", "agent_start", null], ["stage", "compaction_start", null], ["stage", "compaction_end", null], ["stage", "agent_end", null], ["terminal", "finished"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["收到。"], "toolCount": 0, "deliverables": {}},
+      "rejected": 0
+    }
+  },
+  "rate-limit-retry": {
+    "source": "按 fake pi 限流重试运行手工合成",
+    "semantics": ["429 限流自动重试：auto_retry_start（attempt/willRetry/errorMessage）后 auto_retry_end(success)", "重试不重复正文"],
+    "forms": ["assistant_delta", "assistant_message", "run_finished", "run_stage", "run_started", "turn_finished", "turn_started", "usage_reported"],
+    "web": {
+      "status": "finished", "texts": ["重试后完成。"], "toolCount": 0, "turnCount": 1,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0,
+      "usageTotalTokens": 42
+    },
+    "trajectory": {
+      "milestones": [["started", "限流重试"], ["stage", "auto_retry_start", 1], ["stage", "auto_retry_end", 1], ["terminal", "finished"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["重试后完成。"], "toolCount": 0, "deliverables": {}},
+      "rejected": 0
+    }
+  },
+  "run-cancelled": {
+    "source": "按取消语义（runs/stages.py Verdict(CANCELLED, \"abort\")）手工合成",
+    "semantics": ["run_cancelled 终帧（stopReason=abort）", "运行中工具随取消收口为 cancelled", "未收口子代理由终帧 children 摘要定为 cancelled"],
+    "forms": ["run_cancelled", "run_started", "subagent_started", "tool_started", "tool_updated", "turn_started"],
+    "web": {
+      "status": "cancelled", "stopReason": "abort", "error": null,
+      "texts": [], "toolCount": 1, "toolStatuses": ["cancelled"], "turnCount": 1,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0,
+      "children": [{"n": 0, "agent": "researcher", "task": "调研丙", "status": "cancelled"}]
+    },
+    "trajectory": {
+      "milestones": [["started", "长跑取消"], ["terminal", "cancelled"]],
+      "snapshot": {"status": "cancelled", "stopReason": "abort", "error": null, "reportStatus": "none", "redacted": false, "children": 1, "texts": [], "toolCount": 1, "deliverables": {}},
+      "rejected": 0
+    }
+  },
+  "deliverables-declared": {
+    "source": "按 present/回收契约手工合成",
+    "semantics": ["deliverables_declared 只表示声明（declared/不可用）", "终帧 deliverables 给出逐文件回收结果（ok/missing）"],
+    "forms": ["assistant_delta", "assistant_message", "deliverables_declared", "run_finished", "run_started", "turn_finished", "turn_started"],
+    "web": {
+      "status": "finished", "texts": ["已产出两份文件。"], "toolCount": 0, "turnCount": 1,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0,
+      "deliverables": [
+        {"path": "out/brief.md", "status": "ok", "available": true},
+        {"path": "out/data.csv", "status": "missing", "available": false}
+      ]
+    },
+    "trajectory": {
+      "milestones": [["started", "产出两份文件"], ["deliverables", ["out/brief.md", "out/data.csv"]], ["terminal", "finished"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["已产出两份文件。"], "toolCount": 0, "deliverables": {"out/brief.md": "ok", "out/data.csv": "missing"}},
+      "rejected": 0
+    }
+  },
+  "redacted-terminal": {
+    "source": "按脱敏边界（runs/channel.py、redaction.py REPLACEMENT）手工合成",
+    "semantics": ["[REDACTED] 标记在工具卡与权威正文中原样留存", "终帧 redacted=true 声明展示产物经过脱敏"],
+    "forms": ["assistant_message", "run_finished", "run_started", "tool_finished", "tool_started", "turn_finished", "turn_started"],
+    "web": {
+      "status": "finished", "texts": ["配置中的令牌为 [REDACTED]。"], "toolCount": 1,
+      "toolResults": ["token=[REDACTED]"], "turnCount": 1, "hasReport": true,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0
+    },
+    "trajectory": {
+      "milestones": [["started", "读取密钥配置"], ["terminal", "finished"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "ok", "redacted": true, "children": 0, "texts": ["配置中的令牌为 [REDACTED]。"], "toolCount": 1, "deliverables": {}},
+      "rejected": 0
+    }
+  },
+  "follow-up-turns": {
+    "source": "按追问续接运行（--session 续接）手工合成",
+    "semantics": ["追问链一轮 run：session_ready 带回续接身份（sessionId/sessionFile），终帧回写", "同 run 多轮 turn 的 pi 族逐 message 语义：各轮正文独立成块、不跨轮合并"],
+    "forms": ["assistant_delta", "assistant_message", "run_finished", "run_started", "session_ready", "turn_finished", "turn_started"],
+    "web": {
+      "status": "finished", "texts": ["第一点已确认。", "第二点补充如下。", "以上。"], "toolCount": 0, "turnCount": 3,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0,
+      "sessionId": "s-follow", "model": "fake/model"
+    },
+    "trajectory": {
+      "milestones": [["started", "接着上回：补充第二点"], ["session", "s-follow", "fake/model"], ["terminal", "finished"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["第一点已确认。", "第二点补充如下。", "以上。"], "toolCount": 0, "deliverables": {}},
+      "rejected": 0
+    }
+  }
+}

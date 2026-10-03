@@ -1,0 +1,9 @@
+# run-cancelled —— run_cancelled 三态终帧之一：用户取消（stopReason=abort），运行中工具
+# 随 run 收口为 cancelled，未收口子代理由终帧 children 摘要定为 cancelled。
+# 来源：按取消语义（runs/stages.py Verdict(CANCELLED, "abort")）手工合成。
+{"type": "run_started", "v": 1, "runId": "fx-cancel", "seq": 1, "ts": 1790004000.5, "payload": {"prompt": "长跑取消"}}
+{"type": "turn_started", "v": 1, "runId": "fx-cancel", "seq": 2, "ts": 1790004001.0, "payload": {}}
+{"type": "tool_started", "v": 1, "runId": "fx-cancel", "seq": 3, "ts": 1790004001.5, "payload": {"toolCallId": "call_z", "toolName": "bash", "args": {"command": "sleep 100"}}}
+{"type": "tool_updated", "v": 1, "runId": "fx-cancel", "seq": 4, "ts": 1790004002.0, "payload": {"toolCallId": "call_z", "toolName": "bash", "output": "partial"}}
+{"type": "subagent_started", "v": 1, "runId": "fx-cancel", "seq": 5, "ts": 1790004002.5, "payload": {"n": 0, "toolCallId": "call_c", "agent": "researcher", "task": "调研丙"}}
+{"type": "run_cancelled", "v": 1, "runId": "fx-cancel", "seq": 6, "ts": 1790004003.0, "payload": {"status": "cancelled", "stopReason": "abort", "error": null, "reportPath": null, "reportStatus": "none", "cleanup": {"released": true, "failures": [], "external": {}}, "children": [{"n": 0, "agent": "researcher", "task": "调研丙", "status": "cancelled"}]}}

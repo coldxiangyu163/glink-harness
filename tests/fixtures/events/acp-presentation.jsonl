@@ -1,3 +1,6 @@
+# acp-presentation —— ACP 族工具呈现提示（presentation）、plan 阶段帧、空 agent 的
+# subagent_started、ACP 计账 usage_reported；未终结样例（直播中段）。
+# 来源：原 dsh run 27f0b4df7c1f 的脱敏合成语料（docs/evidence/acp-presentation-2026-09-29/）。
 {"type":"turn_started","v":1,"runId":"acp-fixture","seq":1,"ts":1,"payload":{}}
 {"type":"thinking_delta","v":1,"runId":"acp-fixture","seq":2,"ts":2,"payload":{"text":"先核对一手来源"}}
 {"type":"tool_started","v":1,"runId":"acp-fixture","seq":3,"ts":3,"payload":{"toolCallId":"s1","toolName":"web_search","kind":"other","presentation":"search_web","args":{"queries":["AI drug discovery clinical trial results","创新药临床数据 2025"]}}}

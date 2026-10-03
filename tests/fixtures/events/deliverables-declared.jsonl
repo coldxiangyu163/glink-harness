@@ -1,0 +1,10 @@
+# deliverables-declared —— ACP present 声明先行（deliverables_declared 只表示声明，不代表
+# 已安全回收），终帧 deliverables 给出逐文件回收结果：一得（ok）一失（missing）。
+# 来源：按 present/回收契约（event_schema deliverables_declared 注释）手工合成。
+{"type": "run_started", "v": 1, "runId": "fx-deliver", "seq": 1, "ts": 1790005000.5, "payload": {"prompt": "产出两份文件"}}
+{"type": "turn_started", "v": 1, "runId": "fx-deliver", "seq": 2, "ts": 1790005001.0, "payload": {}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-deliver", "seq": 3, "ts": 1790005001.5, "payload": {"text": "已产出两份文件。"}}
+{"type": "assistant_message", "v": 1, "runId": "fx-deliver", "seq": 4, "ts": 1790005002.0, "payload": {"text": "已产出两份文件。"}}
+{"type": "deliverables_declared", "v": 1, "runId": "fx-deliver", "seq": 5, "ts": 1790005002.5, "payload": {"files": [{"path": "out/brief.md", "description": "简报"}, {"path": "out/data.csv"}]}}
+{"type": "turn_finished", "v": 1, "runId": "fx-deliver", "seq": 6, "ts": 1790005003.0, "payload": {}}
+{"type": "run_finished", "v": 1, "runId": "fx-deliver", "seq": 7, "ts": 1790005003.5, "payload": {"status": "finished", "stopReason": null, "error": null, "reportPath": null, "reportStatus": "none", "cleanup": {"released": true, "failures": [], "external": {}}, "children": [], "durationSeconds": 3.0, "deliverables": [{"path": "out/brief.md", "description": "简报", "status": "ok"}, {"path": "out/data.csv", "status": "missing"}]}}

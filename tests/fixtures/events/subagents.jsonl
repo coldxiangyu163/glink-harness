@@ -1,3 +1,6 @@
+# subagents —— 两个子代理派发：进度帧 latest-wins（累计快照），终帧 children 摘要收口
+# 所有子代理（含缺 typed 终帧者：n=1 由摘要定为 failed）。
+# 来源：fake pi pi-subagents 运行裁剪合成。
 {"type": "run_started", "v": 1, "runId": "fx-sub", "seq": 1, "ts": 1790000000.5, "payload": {"prompt": "派发两个子代理"}}
 {"type": "turn_started", "v": 1, "runId": "fx-sub", "seq": 2, "ts": 1790000001.0, "payload": {}}
 {"type": "subagent_started", "v": 1, "runId": "fx-sub", "seq": 3, "ts": 1790000001.5, "payload": {"n": 0, "toolCallId": "call_a", "agent": "researcher", "task": "调研甲"}}

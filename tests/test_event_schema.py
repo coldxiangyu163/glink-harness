@@ -28,7 +28,6 @@ from glink_harness.redaction import SecretRedactor
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GENERATOR = REPO_ROOT / "scripts" / "gen-event-schema.py"
 GENERATED = REPO_ROOT / "web" / "modules" / "event-schema.gen.mjs"
-FIXTURES = REPO_ROOT / "tests" / "fixtures" / "events"
 
 _SAMPLE = {
     "string": "x",
@@ -191,19 +190,17 @@ def test_a_projection_drift_is_reported_at_its_source(expect_violation) -> None:
 
 
 def _frames(path: Path) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    # ``#`` lines are the fixture's comment header (tests/fixtures/events/README.md).
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
 
 
-def test_the_front_end_event_fixtures_are_valid_envelopes() -> None:
-    paths = sorted(FIXTURES.glob("*.jsonl"))
-    assert len(paths) >= 5
-    for path in paths:
-        for frame in _frames(path):
-            found = event_schema.envelope_problems(frame)
-            if path.stem == "legacy-unversioned":
-                assert any("v=None" in problem for problem in found), (path.name, found)
-            else:
-                assert found == [], (path.name, frame["seq"], found)
+def test_tool_update_frames_fixture_is_valid_envelopes() -> None:
+    # 样例库（tests/fixtures/events/）的逐帧 schema 校验归
+    # tests/test_event_fixture_contract.py（ADR 0021）；这里钉住库外的回放样例。
     for frame in _frames(REPO_ROOT / "tests" / "fixtures" / "tool-update-frames.jsonl"):
         assert event_schema.envelope_problems(frame) == []
 

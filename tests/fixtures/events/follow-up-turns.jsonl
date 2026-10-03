@@ -1,0 +1,21 @@
+# follow-up-turns —— 多轮追问链中一轮 run 的事件流：追问的父子关系（parentRunId）由 REST
+# 记录承载、不在事件流内；事件流内可见的是续接身份（session_ready 带回 sessionId/
+# sessionFile，终帧回写）与同 run 多轮 turn 的 pi 族逐 message 语义（各轮正文独立成块、
+# 不跨轮合并）。
+# 来源：按追问续接运行（--session 续接）手工合成。
+{"type": "run_started", "v": 1, "runId": "fx-follow", "seq": 1, "ts": 1790007000.5, "payload": {"prompt": "接着上回：补充第二点"}}
+{"type": "session_ready", "v": 1, "runId": "fx-follow", "seq": 2, "ts": 1790007001.0, "payload": {"sessionId": "s-follow", "sessionFile": "session.jsonl", "model": "fake/model", "thinkingLevel": null}}
+{"type": "turn_started", "v": 1, "runId": "fx-follow", "seq": 3, "ts": 1790007001.5, "payload": {}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-follow", "seq": 4, "ts": 1790007002.0, "payload": {"text": "第一点已确认。"}}
+{"type": "assistant_message", "v": 1, "runId": "fx-follow", "seq": 5, "ts": 1790007002.5, "payload": {"text": "第一点已确认。"}}
+{"type": "turn_finished", "v": 1, "runId": "fx-follow", "seq": 6, "ts": 1790007003.0, "payload": {}}
+{"type": "turn_started", "v": 1, "runId": "fx-follow", "seq": 7, "ts": 1790007003.5, "payload": {}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-follow", "seq": 8, "ts": 1790007004.0, "payload": {"text": "第二点"}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-follow", "seq": 9, "ts": 1790007004.5, "payload": {"text": "补充如下。"}}
+{"type": "assistant_message", "v": 1, "runId": "fx-follow", "seq": 10, "ts": 1790007005.0, "payload": {"text": "第二点补充如下。"}}
+{"type": "turn_finished", "v": 1, "runId": "fx-follow", "seq": 11, "ts": 1790007005.5, "payload": {}}
+{"type": "turn_started", "v": 1, "runId": "fx-follow", "seq": 12, "ts": 1790007006.0, "payload": {}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-follow", "seq": 13, "ts": 1790007006.5, "payload": {"text": "以上。"}}
+{"type": "assistant_message", "v": 1, "runId": "fx-follow", "seq": 14, "ts": 1790007007.0, "payload": {"text": "以上。"}}
+{"type": "turn_finished", "v": 1, "runId": "fx-follow", "seq": 15, "ts": 1790007007.5, "payload": {}}
+{"type": "run_finished", "v": 1, "runId": "fx-follow", "seq": 16, "ts": 1790007008.0, "payload": {"status": "finished", "stopReason": null, "error": null, "reportPath": null, "reportStatus": "none", "cleanup": {"released": true, "failures": [], "external": {}}, "children": [], "durationSeconds": 7.5, "sessionId": "s-follow", "sessionFile": "session.jsonl"}}

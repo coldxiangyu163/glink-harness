@@ -1,0 +1,14 @@
+# stages —— run_stage 生命周期形态最小链：agent_start → compaction_start/end → agent_end。
+# 覆盖：run_started、run_stage（agent_start/compaction_start/compaction_end/agent_end）、
+# turn 边界、run_finished；compaction_start 带 reason。
+# 来源：按 fake pi 运行的阶段序列手工合成（无真实运行依赖）。
+{"type": "run_started", "v": 1, "runId": "fx-stages", "seq": 1, "ts": 1790002000.5, "payload": {"prompt": "阶段演练"}}
+{"type": "run_stage", "v": 1, "runId": "fx-stages", "seq": 2, "ts": 1790002001.0, "payload": {"stage": "agent_start"}}
+{"type": "turn_started", "v": 1, "runId": "fx-stages", "seq": 3, "ts": 1790002001.5, "payload": {}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-stages", "seq": 4, "ts": 1790002002.0, "payload": {"text": "收到。"}}
+{"type": "assistant_message", "v": 1, "runId": "fx-stages", "seq": 5, "ts": 1790002002.5, "payload": {"text": "收到。"}}
+{"type": "run_stage", "v": 1, "runId": "fx-stages", "seq": 6, "ts": 1790002003.0, "payload": {"stage": "compaction_start", "reason": "context_threshold"}}
+{"type": "run_stage", "v": 1, "runId": "fx-stages", "seq": 7, "ts": 1790002003.5, "payload": {"stage": "compaction_end"}}
+{"type": "turn_finished", "v": 1, "runId": "fx-stages", "seq": 8, "ts": 1790002004.0, "payload": {}}
+{"type": "run_stage", "v": 1, "runId": "fx-stages", "seq": 9, "ts": 1790002004.5, "payload": {"stage": "agent_end"}}
+{"type": "run_finished", "v": 1, "runId": "fx-stages", "seq": 10, "ts": 1790002005.0, "payload": {"status": "finished", "stopReason": null, "error": null, "reportPath": null, "reportStatus": "none", "cleanup": {"released": true, "failures": [], "external": {}}, "children": [], "durationSeconds": 4.5}}

@@ -1,0 +1,11 @@
+# redacted-terminal —— 脱敏标记：工具结果与正文中的凭据已被置换为 [REDACTED]，终帧
+# redacted=true 声明本 run 的展示产物经过脱敏。
+# 覆盖：REPLACEMENT 标记在工具卡与权威正文中原样留存、终帧 redacted 字段。
+# 来源：按脱敏边界（runs/channel.py、redaction.py REPLACEMENT）手工合成。
+{"type": "run_started", "v": 1, "runId": "fx-redacted", "seq": 1, "ts": 1790006000.5, "payload": {"prompt": "读取密钥配置"}}
+{"type": "turn_started", "v": 1, "runId": "fx-redacted", "seq": 2, "ts": 1790006001.0, "payload": {}}
+{"type": "tool_started", "v": 1, "runId": "fx-redacted", "seq": 3, "ts": 1790006001.5, "payload": {"toolCallId": "call_r", "toolName": "bash", "args": {"command": "grep token config"}}}
+{"type": "tool_finished", "v": 1, "runId": "fx-redacted", "seq": 4, "ts": 1790006002.0, "payload": {"toolCallId": "call_r", "toolName": "bash", "isError": false, "result": "token=[REDACTED]"}}
+{"type": "assistant_message", "v": 1, "runId": "fx-redacted", "seq": 5, "ts": 1790006002.5, "payload": {"text": "配置中的令牌为 [REDACTED]。"}}
+{"type": "turn_finished", "v": 1, "runId": "fx-redacted", "seq": 6, "ts": 1790006003.0, "payload": {}}
+{"type": "run_finished", "v": 1, "runId": "fx-redacted", "seq": 7, "ts": 1790006003.5, "payload": {"status": "finished", "stopReason": null, "error": null, "reportPath": "report.md", "reportStatus": "ok", "cleanup": {"released": true, "failures": [], "external": {}}, "children": [], "durationSeconds": 3.0, "redacted": true}}

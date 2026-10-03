@@ -1,0 +1,14 @@
+# rate-limit-retry —— 429 限流自动重试：auto_retry_start（attempt=1，errorMessage 带 429）
+# 后 auto_retry_end(success=true)，正文照常完成；usage_reported 与终帧 usage 一致。
+# 覆盖：run_stage（auto_retry_start/auto_retry_end）形态与「重试不重复正文」不变量。
+# 来源：按 fake pi 限流重试运行手工合成。
+{"type": "run_started", "v": 1, "runId": "fx-retry", "seq": 1, "ts": 1790003000.5, "payload": {"prompt": "限流重试"}}
+{"type": "turn_started", "v": 1, "runId": "fx-retry", "seq": 2, "ts": 1790003001.0, "payload": {}}
+{"type": "run_stage", "v": 1, "runId": "fx-retry", "seq": 3, "ts": 1790003001.5, "payload": {"stage": "auto_retry_start", "attempt": 1, "willRetry": true, "errorMessage": "HTTP 429 rate limit exceeded"}}
+{"type": "run_stage", "v": 1, "runId": "fx-retry", "seq": 4, "ts": 1790003002.0, "payload": {"stage": "auto_retry_end", "success": true, "attempt": 1}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-retry", "seq": 5, "ts": 1790003002.5, "payload": {"text": "重试后"}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-retry", "seq": 6, "ts": 1790003003.0, "payload": {"text": "完成。"}}
+{"type": "assistant_message", "v": 1, "runId": "fx-retry", "seq": 7, "ts": 1790003003.5, "payload": {"text": "重试后完成。"}}
+{"type": "usage_reported", "v": 1, "runId": "fx-retry", "seq": 8, "ts": 1790003004.0, "payload": {"usage": {"input": 20, "output": 22, "totalTokens": 42}}}
+{"type": "turn_finished", "v": 1, "runId": "fx-retry", "seq": 9, "ts": 1790003004.5, "payload": {}}
+{"type": "run_finished", "v": 1, "runId": "fx-retry", "seq": 10, "ts": 1790003005.0, "payload": {"status": "finished", "stopReason": null, "error": null, "reportPath": null, "reportStatus": "none", "cleanup": {"released": true, "failures": [], "external": {}}, "children": [], "durationSeconds": 4.5, "usage": {"input": 20, "output": 22, "totalTokens": 42}}}

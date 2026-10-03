@@ -446,8 +446,12 @@ child 在前端显示为普通「进行中」，不伪造进度。
 
 同一事件流有多个消费方 fold（本仓 `run-reducer.mjs` 块模型；ULegal trajectory 行投影），
 一致性不靠共享 fold 代码（两侧语言栈不同），靠 glink 维护的**权威事件样例库**
-（golden fixtures，覆盖事件词汇全形态；`tests/fixtures/events/*.jsonl` 为其雏形）与各消费
-方的**契约测试**：同一份样例喂两侧、fold 输出快照必须一致。演进护栏：新事件形态先入
+（golden fixtures，`tests/fixtures/events/`：每个事件形态至少一个手工可审的最小样例，
+`#` 注释头注明语义点与来源，`manifest.json` 登记形态对照与两侧期望输出）与各消费
+方的**契约测试**：同一份样例喂两侧、fold 输出快照必须一致（web reducer 侧
+`tests/web/fixture-contract.test.mjs`；trajectory 语义侧
+`tests/test_event_fixture_contract.py`，参考 fold 在 `tests/trajectory_reference.py`）。
+演进护栏：新事件形态先入
 样例库再进实现，消费方契约测试不过即红。ULegal 侧 trajectory 定位为业务里程碑 + 展示
 fold，delta/直播帧不落盘不投影；事件原文存档归 R3 存储边界重定义
 （[multi-harness-plan.md](multi-harness-plan.md) §6），本期不建。
