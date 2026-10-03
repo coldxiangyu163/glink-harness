@@ -1,5 +1,11 @@
 # glink-harness
 
+**长期定位：产品无关、API-first 的原生 harness 通用执行服务，便于复用与后续开源。**
+不同应用或脚本通过通用接口使用执行、会话、事件、产物与资源管理能力，服务不依赖某个产品或
+业务数据库。SQLite 继续承担服务执行持久化；具体应用负责其业务权限、成果流程和订阅计费。
+当前仍包含研究工作台与站内账号，服务和参考客户端的解耦尚未完成；下文描述当前实现，目标与
+边界见[架构](docs/architecture.md#产品方向与当前实现)和[后续计划](docs/multi-harness-plan.md#6-里程碑)。
+
 harness 无关的研究工作台宿主：dsh、codex、opencode（ACP 族）与 [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 等原生 harness 作为独立进程接入——**默认 harness 为 `dsh`**（2026-10-01 起；dsh 是当前主力接入方案，pi/codex/opencode 作为扩展包经显式 `GLINK_HARNESS` 选择保留），本机 / Docker / E2B 三种执行面共享同一套 run 生命周期。默认 `local` 模式仍是单用户、全局单 run；`GLINK_TENANCY=multitenant` 时启用**单宿主多租户**—— 身份入口二选一：本机认证网关注入短时效签名断言（`GLINK_AUTH_MODE=gateway`，默认），或站内邀请注册 + 登录 + 服务端会话（`GLINK_AUTH_MODE=accounts`）；两者都只在可信服务端生成租户上下文，Docker/E2B 可并发（默认全局 4 / 单租户 2）。模型凭据默认仍是每租户自备（`GLINK_MODEL_CREDENTIALS=tenant`）；SaaS 部署可显式选择 `shared`，由宿主冻结一套模型凭据统一提供，共享模式不读取任何租户配置（配置 `GLINK_TENANT_CONFIG_FILE` 即拒绝启动）；ACP 族的注入通道（`GLINK_ACP_ENV` / `GLINK_ACP_CREDENTIAL_FILES` / `GLINK_ACP_CREDENTIAL_ENV`）视同模型凭据服从同一政策——tenant 政策下拒绝、shared 下为 ACP 宿主的具名凭据源（[ADR 0015](docs/adr/0015-acp-credential-channels-under-model-credential-policy.md)、[ADR 0016](docs/adr/0016-acp-credential-env-single-source.md)）。多租户目前只经过**合成验证**（临时密钥文件、自签断言、fake 执行面、临时数据根），没有真实网关、Docker/E2B live 或生产数据验收，不能把“合成矩阵通过”当作多租户已经安全上线。方向、当前实现与尚未覆盖的边界见 [架构](docs/architecture.md) 与 [多租户方案](docs/multitenancy-plan.md)；前端沿用 Glink 工作台的布局与视觉，运行概览、执行流程事件与思考展示按所选 harness 族的原生事件语义投影（pi 族三个执行面均走 `--mode rpc`，ACP 族的 dsh/codex/opencode 经 stdio JSON-RPC 桥接）。
 
 **当前状态：本机 / Docker / E2B 三种执行面均已跑通真实 run**，验收记录见 [docs/acceptance.md](docs/acceptance.md)，证据在 `docs/evidence/`。除前端静态资源源自 Glink 工作台外，本仓库不引用 FrontierAgent 的任何运行模块。
