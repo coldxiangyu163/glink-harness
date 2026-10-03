@@ -282,7 +282,7 @@ ACP（Agent Client Protocol，Zed 主导的开放协议）关键能力（v1 sche
 |---|---|---|
 | `initialize` 响应（capabilities、agentInfo） | `session_ready` | 能力矩阵一并入 run 记录 |
 | `agent_message_chunk` | `assistant_delta` | 流式正文 |
-| 回合末（本轮 `agent_message_chunk` 的累计） | `assistant_message` | ACP 没有 `message_end` 一类的整帧：投影层把本轮已释放（流式脱敏后）的 delta 装配为权威正文帧，在 `turn_finished` 前落地；截断纪律与 pi 族相同（`truncated: true` 不覆盖更长的流式正文），空回合不发帧。帧覆盖整回合（正文段可能已被工具/plan 项夹断），带 `turnScoped: true`：前端据此合并替换本轮全部文本块而非 pi 族逐 message 的替换末块（契约 §2.5） |
+| 回合末（本轮 `agent_message_chunk` 的累计） | `assistant_message` | ACP 没有 `message_end` 一类的整帧：投影层把本轮已释放（流式脱敏后）的 delta 装配为权威正文帧，在 `turn_finished` 前落地；截断纪律与 pi 族相同（`truncated: true` 以权威副本为准并标记交付不完整，不保留更长的流式拼接），空回合不发帧。帧覆盖整回合（正文段可能已被工具/plan 项夹断），带 `turnScoped: true`：前端据此合并替换本轮全部文本块而非 pi 族逐 message 的替换末块（契约 §2.5） |
 | `agent_thought_chunk` | `thinking_delta` | 思考折叠块 |
 | `tool_call` / `tool_call_update`（status: pending→in_progress→completed/failed） | `tool_started` / `tool_updated` / `tool_finished` | kind/rawInput/rawOutput 入工具卡片 |
 | `plan` | `run_stage` | 计划条目作为阶段行呈现 |

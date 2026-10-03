@@ -192,7 +192,7 @@ class AcpProjector:
             message = self._assistant_message()
             if message is not None:
                 # 权威正文在 turn_finished 之前落地：前端在块还开着时用权威
-                # 文本替换流式块（truncated 且更短则保留流式正文），再闭块。
+                # 文本替换流式块（truncated 时同样以权威副本为准并标记不完整），再闭块。
                 produced.append(message)
             produced.append((events.TURN_FINISHED, {}))
             self._turn_text = []

@@ -1,0 +1,9 @@
+# subagent-failed —— subagent_finished 的失败形态：类型化终帧 status=failed（isError=true）
+# 就地收口对应子代理；run 本身仍 finished，终帧 children 摘要与之一致。
+# 来源：按 pi-subagents 失败派发运行裁剪合成。
+{"type": "run_started", "v": 1, "runId": "fx-safail", "seq": 1, "ts": 1790012000.5, "payload": {"prompt": "派发会失败的子代理"}}
+{"type": "turn_started", "v": 1, "runId": "fx-safail", "seq": 2, "ts": 1790012001.0, "payload": {}}
+{"type": "subagent_started", "v": 1, "runId": "fx-safail", "seq": 3, "ts": 1790012001.5, "payload": {"n": 0, "toolCallId": "call_sa", "agent": "researcher", "task": "调研丁"}}
+{"type": "subagent_finished", "v": 1, "runId": "fx-safail", "seq": 4, "ts": 1790012002.0, "payload": {"toolCallId": "call_sa", "ns": [0], "status": "failed", "isError": true, "resultPreview": "子代理异常退出"}}
+{"type": "turn_finished", "v": 1, "runId": "fx-safail", "seq": 5, "ts": 1790012002.5, "payload": {}}
+{"type": "run_finished", "v": 1, "runId": "fx-safail", "seq": 6, "ts": 1790012003.0, "payload": {"status": "finished", "stopReason": null, "error": null, "reportPath": null, "reportStatus": "none", "cleanup": {"released": true, "failures": [], "external": {}}, "children": [{"n": 0, "agent": "researcher", "task": "调研丁", "status": "failed"}]}}

@@ -1,10 +1,10 @@
 """trajectory 投影的参考 fold（ADR 0021 的语言中立语义规范）。
 
 ULegal trajectory 定位为「业务里程碑 + 展示 fold」：只投影里程碑行
-（run_started / session_ready / run_stage / deliverables_declared / 终帧）与
-终帧时刻的展示快照；delta、tool/subagent 直播帧不投影为行，只参与快照的
-推导（最终正文、工具卡数）。本模块是该语义的可执行参考，由
-tests/test_event_fixture_contract.py 用权威样例库（tests/fixtures/events/）
+（run_started / session_ready / run_stage / deliverables_declared / 终帧 /
+终帧 redacted 标记）与终帧时刻的展示快照；delta、tool/subagent 直播帧不投影
+为行，只参与快照的推导（最终正文、工具卡数）。本模块是该语义的可执行参考，
+由 tests/test_event_fixture_contract.py 用权威样例库（tests/fixtures/events/）
 钉住；ULegal 侧的契约测试应对同一样例产出相同的投影行。
 
 两条纪律与前端 reducer（web/modules/run-reducer.mjs）一致：
@@ -12,9 +12,10 @@ tests/test_event_fixture_contract.py 用权威样例库（tests/fixtures/events/
 * 版本：只折叠 ``v`` 等于 schema 当前版本的帧，其余计入 ``rejected``、不投影
   （旧日志没有 ``v``，整日志不可读，没有迁移）；
 * 权威正文：``assistant_message`` 逐 message 替换最后一个未闭文本块（无则追加）；
-  ``turnScoped`` 帧合并替换本回合全部文本块；``truncated`` 帧比已流式正文短
-  时保留流式拼接。快照的 ``texts`` 必须与 web reducer 的文本块一致——这是
-  两侧共享的核心不变量。
+  ``turnScoped`` 帧合并替换本回合全部文本块；``truncated`` 帧同样以权威截断副本
+  为准（不保留更长的流式拼接），块保留 ``truncated`` 不完整标记。快照的
+  ``texts``/``textTruncated`` 必须与 web reducer 的文本块一致——这是两侧共享的
+  核心不变量。
 """
 
 from __future__ import annotations
@@ -64,10 +65,8 @@ def _apply_message(blocks: list[dict[str, Any]], turn: int, payload: Mapping[str
         if not indexes:
             blocks.append({"text": text, "turn": turn, "closed": True, "truncated": truncated})
         else:
-            streamed = "".join(blocks[i]["text"] for i in indexes)
-            keep_streamed = truncated and len(streamed) > len(text)
             merged = {
-                "text": streamed if keep_streamed else text,
+                "text": text,
                 "turn": turn,
                 "closed": True,
                 "truncated": truncated,
@@ -82,9 +81,8 @@ def _apply_message(blocks: list[dict[str, Any]], turn: int, payload: Mapping[str
                 kept.append(block)
             blocks[:] = kept
     elif tail[0] == "text" and blocks and not blocks[-1]["closed"]:
-        keep_streamed = truncated and len(blocks[-1]["text"]) > len(text)
         blocks[-1] = {
-            "text": blocks[-1]["text"] if keep_streamed else text,
+            "text": text,
             "turn": blocks[-1]["turn"],
             "closed": True,
             "truncated": truncated,
@@ -137,6 +135,8 @@ def fold(frames: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
                 tool_ids.append(tool_call_id)
         elif event_type in _TERMINAL_TYPES:
             milestones.append(["terminal", payload.get("status")])
+            if payload.get("redacted") is True:
+                milestones.append(["redacted"])
             deliverables = payload.get("deliverables")
             snapshot = {
                 "status": payload.get("status"),
@@ -146,6 +146,7 @@ def fold(frames: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
                 "redacted": payload.get("redacted") is True,
                 "children": len(payload.get("children") or []),
                 "texts": [block["text"] for block in blocks],
+                "textTruncated": [block["truncated"] for block in blocks],
                 "toolCount": len(tool_ids),
                 "deliverables": {
                     item["path"]: item.get("status")

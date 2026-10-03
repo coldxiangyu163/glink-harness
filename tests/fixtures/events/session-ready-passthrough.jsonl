@@ -1,0 +1,10 @@
+# session-ready-passthrough —— session_ready 是开放 payload：内核自报的会话事实
+# （harness/protocolVersion/agentInfo/agentCapabilities/authMethods/modes/configOptions/
+# cwd 等）原样透传；fold 只取 sessionId/model/thinkingLevel。
+# 来源：按 ACP 协商结果透传（kernel/acp_execution.py session_info）手工合成。
+{"type": "run_started", "v": 1, "runId": "fx-spass", "seq": 1, "ts": 1790013000.5, "payload": {"prompt": "你好"}}
+{"type": "session_ready", "v": 1, "runId": "fx-spass", "seq": 2, "ts": 1790013001.0, "payload": {"sessionId": "s-acp", "sessionFile": null, "model": "acp/model", "thinkingLevel": "high", "harness": "acp", "protocolVersion": 1, "agentInfo": {"name": "fake-agent", "version": "0.1"}, "agentCapabilities": {"loadSession": true}, "authMethods": [{"id": "oauth", "name": "OAuth"}], "modes": {"currentModeId": "default"}, "configOptions": [{"id": "model", "type": "select"}], "cwd": "/workspace"}}
+{"type": "turn_started", "v": 1, "runId": "fx-spass", "seq": 3, "ts": 1790013001.5, "payload": {}}
+{"type": "assistant_message", "v": 1, "runId": "fx-spass", "seq": 4, "ts": 1790013002.0, "payload": {"text": "你好。"}}
+{"type": "turn_finished", "v": 1, "runId": "fx-spass", "seq": 5, "ts": 1790013002.5, "payload": {}}
+{"type": "run_finished", "v": 1, "runId": "fx-spass", "seq": 6, "ts": 1790013003.0, "payload": {"status": "finished", "stopReason": null, "error": null, "reportPath": null, "reportStatus": "none", "cleanup": {"released": true, "failures": [], "external": {}}, "children": []}}

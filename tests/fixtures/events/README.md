@@ -32,21 +32,26 @@
 | run_stage（auto_retry，含 429） | rate-limit-retry、failed-running-tool |
 | run_stage（plan，ACP） | acp-presentation |
 | session_ready | tool-snapshot、follow-up-turns |
+| session_ready（开放 payload 透传内核会话事实） | session-ready-passthrough |
 | turn_started / turn_finished | 全部含回合的样例 |
 | assistant_delta / thinking_delta | tool-snapshot、acp-presentation 等 |
 | assistant_message（pi 族逐 message） | tool-snapshot、follow-up-turns |
-| assistant_message（truncated 保留流式正文） | truncated-message |
+| assistant_message（truncated 以权威截断帧为准 + 交付不完整标记） | truncated-message |
+| assistant_message（stopReason/usage 可选字段） | assistant-message-meta |
 | assistant_message（turnScoped 回合合并，ACP） | acp-turn-scoped-message |
 | tool_started / tool_updated / tool_finished | tool-snapshot、failed-running-tool、redacted-terminal |
 | tool presentation 提示（ACP） | acp-presentation |
 | subagent_started / updated / finished + 终帧 children 摘要 | subagents、run-cancelled |
+| subagent_finished（failed 形态） | subagent-failed |
 | deliverables_declared + 终帧逐文件回收结果 | deliverables-declared |
 | usage_reported | tool-snapshot、rate-limit-retry、acp-presentation（ACP 计账） |
 | kernel_status | failed-running-tool |
+| kernel_status（info 会话事实 / warning 权限应答可选字段） | kernel-status-forms |
 | run_finished | tool-snapshot 等 |
 | run_failed | failed-running-tool |
 | run_cancelled | run-cancelled |
 | 终帧 redacted 脱敏标记 | redacted-terminal |
+| 终帧可选字段（modelStopReason/kernelUsage/artifactFailures/external） | terminal-optional-fields |
 | 多轮追问链（续接身份 + 多轮独立正文） | follow-up-turns |
 | 无 v 旧日志（负例） | legacy-unversioned |
 

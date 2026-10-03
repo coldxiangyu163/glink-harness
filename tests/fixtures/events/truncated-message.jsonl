@@ -1,5 +1,5 @@
 # truncated-message —— 宿主截断的权威帧（truncated=true，123 字）比已流式正文（300 字）短：
-# 保留流式正文，仅闭块并标记 truncated。
+# 仍以权威截断副本为准（不保留流式拼接），闭块并标记 truncated 交付不完整。
 # 来源：fake pi 长回答运行裁剪合成。
 {"type": "run_started", "v": 1, "runId": "fx-trunc", "seq": 1, "ts": 1790000000.5, "payload": {"prompt": "长回答"}}
 {"type": "turn_started", "v": 1, "runId": "fx-trunc", "seq": 2, "ts": 1790000001.0, "payload": {}}

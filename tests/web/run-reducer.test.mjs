@@ -133,11 +133,11 @@ test('a mid-run snapshot shows the latest accumulated output, not a concatenatio
   assert.equal(tool.output, 'line1\nline2\n');
 });
 
-test('a truncated authoritative frame keeps the longer streamed answer', () => {
+test('a truncated authoritative frame replaces the streamed answer and stays marked', () => {
   const { state } = replay('truncated-message');
   const text = state.items.filter((item) => item.kind === 'text');
   assert.equal(text.length, 1);
-  assert.equal(text[0].text, '答'.repeat(300));
+  assert.equal(text[0].text, `${'答'.repeat(100)}\n…[truncated 200 chars]`);
   assert.equal(text[0].truncated, true);
   assert.equal(text[0].closed, true);
 });
@@ -163,7 +163,7 @@ test('a turn-scoped authoritative frame merge-replaces every text block of its t
   assert.equal(state.items.filter((item) => item.kind === 'tool').length, 2);
 });
 
-test('a truncated turn-scoped frame keeps the turn\'s concatenated streamed body', () => {
+test('a truncated turn-scoped frame replaces the turn body with the authoritative copy', () => {
   const frame = (seq, type, payload) => ({ seq, type, payload, v: 1, ts: 20 + seq });
   const frames = [
     frame(1, 'turn_started', {}),
@@ -171,14 +171,14 @@ test('a truncated turn-scoped frame keeps the turn\'s concatenated streamed body
     frame(3, 'tool_started', { toolCallId: 't1', toolName: 'bash', args: {} }),
     frame(4, 'tool_finished', { toolCallId: 't1', toolName: 'bash', isError: false, result: 'ok' }),
     frame(5, 'assistant_delta', { text: '后半。' }),
-    // 宿主截断后的权威副本比已流式正文短：保留本轮流式拼接正文，仅闭块标记。
+    // 宿主截断后的权威副本比已流式正文短：仍以权威副本为准，仅闭块并标记不完整。
     frame(6, 'assistant_message', { text: '前半，', truncated: true, turnScoped: true }),
     frame(7, 'turn_finished', {}),
   ];
   const state = reduceAll(createRunState({ runId: 'fx-turn-trunc' }), frames);
   const text = state.items.filter((item) => item.kind === 'text');
   assert.equal(text.length, 1);
-  assert.equal(text[0].text, '前半，后半。');
+  assert.equal(text[0].text, '前半，');
   assert.equal(text[0].truncated, true);
   assert.equal(text[0].closed, true);
 });

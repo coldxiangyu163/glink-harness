@@ -22,7 +22,11 @@
  *   carry the value accumulated so far, not a delta: they replace.
  * * **Deltas** — `assistant_delta` / `thinking_delta` append to the open block.
  * * **Authoritative terminal frames** — `assistant_message` replaces the
- *   streamed text (unless it is `truncated` and shorter): pi-family frames
+ *   streamed text, and a host-clipped frame (`truncated: true`) is no
+ *   exception: the clipped authoritative copy wins and the block is marked
+ *   `truncated` (incomplete delivery) rather than keeping the longer streamed
+ *   body, so every consumer folds the same history into the same text
+ *   regardless of delta arrival timing: pi-family frames
  *   cover one message and replace the open tail block, while ACP-family frames
  *   carry `turnScoped: true` and merge-replace every text block of the turn
  *   (their text spans blocks already closed around tool/plan items);
@@ -250,13 +254,13 @@ function applyFinalMessage(model, payload) {
   if (last && last.kind === 'text' && !last.closed) {
     // The streamed text and pi's authoritative message agree in practice; use
     // pi's copy so a dropped delta cannot leave a truncated answer on screen.
-    // The exception is a frame the host itself clipped (`truncated: true`): it
-    // carries less than the stream already delivered, so the longer streamed
-    // body stays and the item is only closed.
-    const keepStreamed = truncated && last.text.length > text.length;
+    // A frame the host itself clipped (`truncated: true`) wins too: the
+    // authoritative record is the shared fact every consumer folds, so the
+    // clipped copy replaces the streamed text and the block is only marked
+    // incomplete — never silently lengthened back from the stream.
     return replaceLast(model, {
       ...last,
-      text: keepStreamed ? last.text : text,
+      text,
       closed: true,
       truncated,
     });
@@ -271,24 +275,21 @@ function applyFinalMessage(model, payload) {
 //: dsh 回合同样如此）。因此用权威文本合并替换本轮全部文本块：合并块落在
 //: 本轮最后一个文本块的原位——回合正文在它的流收尾处呈现（视图据此把它
 //: 提升为最终回答气泡），更早的文本块并入它。截断纪律与 pi 族相同：权威
-//: 副本更短时保留本轮已流式的拼接正文（两者同源，内容一致）。
+//: 副本一律为准，块只标记 truncated 不完整，不保留更长的流式拼接。
 function applyTurnScopedMessage(model, text, truncated) {
-  let streamed = '';
   let lastTextIndex = -1;
   model.items.forEach((item, index) => {
     if (item.kind === 'text' && item.turn === model.turn) {
-      streamed += item.text;
       lastTextIndex = index;
     }
   });
   if (lastTextIndex < 0) {
     return appendItem(model, { kind: 'text', turn: model.turn, text, closed: true, truncated });
   }
-  const keepStreamed = truncated && streamed.length > text.length;
   const merged = {
     kind: 'text',
     turn: model.turn,
-    text: keepStreamed ? streamed : text,
+    text,
     closed: true,
     truncated,
   };

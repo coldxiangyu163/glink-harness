@@ -12,23 +12,23 @@
     },
     "trajectory": {
       "milestones": [["started", "列出工作目录"], ["session", "s-1", "fake/model"], ["terminal", "finished"]],
-      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "ok", "redacted": false, "children": 0, "texts": ["目录里有两行输出。"], "toolCount": 1, "deliverables": {}},
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "ok", "redacted": false, "children": 0, "texts": ["目录里有两行输出。"], "textTruncated": [false], "toolCount": 1, "deliverables": {}},
       "rejected": 0
     }
   },
   "truncated-message": {
     "source": "fake pi 长回答运行裁剪合成",
-    "semantics": ["truncated 权威帧比已流式正文短时保留流式拼接", "闭块并保留 truncated 标记"],
+    "semantics": ["truncated 权威帧以权威截断副本为准（不保留更长的流式拼接）", "闭块并保留 truncated 交付不完整标记"],
     "forms": ["assistant_delta", "assistant_message", "run_finished", "run_started", "turn_finished", "turn_started"],
     "web": {
       "status": "finished",
-      "texts": ["答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答"],
+      "texts": ["答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答\n…[truncated 200 chars]"],
       "textTruncated": [true], "toolCount": 0, "turnCount": 1,
       "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0
     },
     "trajectory": {
       "milestones": [["started", "长回答"], ["terminal", "finished"]],
-      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答"], "toolCount": 0, "deliverables": {}},
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答答\n…[truncated 200 chars]"], "textTruncated": [true], "toolCount": 0, "deliverables": {}},
       "rejected": 0
     }
   },
@@ -46,7 +46,7 @@
     },
     "trajectory": {
       "milestones": [["started", "派发两个子代理"], ["terminal", "finished"]],
-      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 2, "texts": [], "toolCount": 0, "deliverables": {}},
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 2, "texts": [], "textTruncated": [], "toolCount": 0, "deliverables": {}},
       "rejected": 0
     }
   },
@@ -61,7 +61,7 @@
     },
     "trajectory": {
       "milestones": [["started", "会失败"], ["stage", "auto_retry_start", 1], ["terminal", "failed"]],
-      "snapshot": {"status": "failed", "stopReason": "kernel_exit", "error": "pi exited with code 1", "reportStatus": "none", "redacted": false, "children": 0, "texts": [], "toolCount": 1, "deliverables": {}},
+      "snapshot": {"status": "failed", "stopReason": "kernel_exit", "error": "pi exited with code 1", "reportStatus": "none", "redacted": false, "children": 0, "texts": [], "textTruncated": [], "toolCount": 1, "deliverables": {}},
       "rejected": 0
     }
   },
@@ -90,7 +90,7 @@
     },
     "trajectory": {
       "milestones": [["started", "调研两个来源"], ["terminal", "finished"]],
-      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["段一。", "前段，后段。"], "toolCount": 2, "deliverables": {}},
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["段一。", "前段，后段。"], "textTruncated": [false, false], "toolCount": 2, "deliverables": {}},
       "rejected": 0
     }
   },
@@ -118,7 +118,7 @@
     },
     "trajectory": {
       "milestones": [["started", "阶段演练"], ["stage", "agent_start", null], ["stage", "compaction_start", null], ["stage", "compaction_end", null], ["stage", "agent_end", null], ["terminal", "finished"]],
-      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["收到。"], "toolCount": 0, "deliverables": {}},
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["收到。"], "textTruncated": [false], "toolCount": 0, "deliverables": {}},
       "rejected": 0
     }
   },
@@ -133,7 +133,7 @@
     },
     "trajectory": {
       "milestones": [["started", "限流重试"], ["stage", "auto_retry_start", 1], ["stage", "auto_retry_end", 1], ["terminal", "finished"]],
-      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["重试后完成。"], "toolCount": 0, "deliverables": {}},
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["重试后完成。"], "textTruncated": [false], "toolCount": 0, "deliverables": {}},
       "rejected": 0
     }
   },
@@ -149,7 +149,7 @@
     },
     "trajectory": {
       "milestones": [["started", "长跑取消"], ["terminal", "cancelled"]],
-      "snapshot": {"status": "cancelled", "stopReason": "abort", "error": null, "reportStatus": "none", "redacted": false, "children": 1, "texts": [], "toolCount": 1, "deliverables": {}},
+      "snapshot": {"status": "cancelled", "stopReason": "abort", "error": null, "reportStatus": "none", "redacted": false, "children": 1, "texts": [], "textTruncated": [], "toolCount": 1, "deliverables": {}},
       "rejected": 0
     }
   },
@@ -167,7 +167,7 @@
     },
     "trajectory": {
       "milestones": [["started", "产出两份文件"], ["deliverables", ["out/brief.md", "out/data.csv"]], ["terminal", "finished"]],
-      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["已产出两份文件。"], "toolCount": 0, "deliverables": {"out/brief.md": "ok", "out/data.csv": "missing"}},
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["已产出两份文件。"], "textTruncated": [false], "toolCount": 0, "deliverables": {"out/brief.md": "ok", "out/data.csv": "missing"}},
       "rejected": 0
     }
   },
@@ -181,8 +181,8 @@
       "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0
     },
     "trajectory": {
-      "milestones": [["started", "读取密钥配置"], ["terminal", "finished"]],
-      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "ok", "redacted": true, "children": 0, "texts": ["配置中的令牌为 [REDACTED]。"], "toolCount": 1, "deliverables": {}},
+      "milestones": [["started", "读取密钥配置"], ["terminal", "finished"], ["redacted"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "ok", "redacted": true, "children": 0, "texts": ["配置中的令牌为 [REDACTED]。"], "textTruncated": [false], "toolCount": 1, "deliverables": {}},
       "rejected": 0
     }
   },
@@ -197,7 +197,84 @@
     },
     "trajectory": {
       "milestones": [["started", "接着上回：补充第二点"], ["session", "s-follow", "fake/model"], ["terminal", "finished"]],
-      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["第一点已确认。", "第二点补充如下。", "以上。"], "toolCount": 0, "deliverables": {}},
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["第一点已确认。", "第二点补充如下。", "以上。"], "textTruncated": [false, false, false], "toolCount": 0, "deliverables": {}},
+      "rejected": 0
+    }
+  },
+  "kernel-status-forms": {
+    "source": "按 ACP 投影 kernel_status 各形态（kernel/acp_projection.py）手工合成",
+    "semantics": ["kernel_status info 级会话事实（resumeMethod/sessionId/replayedUpdates 可选字段）", "kernel_status warning 级权限应答（decision/policy/toolKind/toolKindSource/optionId/optionKind 可选字段）", "notice 只进展示，不产生里程碑行"],
+    "forms": ["assistant_delta", "assistant_message", "kernel_status", "run_finished", "run_started", "turn_finished", "turn_started"],
+    "web": {
+      "status": "finished", "texts": ["已拒绝越权操作。"], "toolCount": 0, "turnCount": 1,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0,
+      "notices": [
+        {"level": "info", "message": "acp_session_resumed"},
+        {"level": "warning", "message": "acp_permission_denied"}
+      ]
+    },
+    "trajectory": {
+      "milestones": [["started", "追问并请求权限"], ["terminal", "finished"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["已拒绝越权操作。"], "textTruncated": [false], "toolCount": 0, "deliverables": {}},
+      "rejected": 0
+    }
+  },
+  "terminal-optional-fields": {
+    "source": "按终帧 schema 可选字段（event_schema._terminal）手工合成",
+    "semantics": ["终帧可选字段 modelStopReason/kernelUsage/artifactFailures/external 过 schema", "记账与外部资源事实不投影为行、不收进展示快照"],
+    "forms": ["assistant_delta", "assistant_message", "run_finished", "run_started", "turn_finished", "turn_started"],
+    "web": {
+      "status": "finished", "texts": ["完成。"], "toolCount": 0, "turnCount": 1,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0,
+      "usageTotalTokens": 30
+    },
+    "trajectory": {
+      "milestones": [["started", "记账字段"], ["terminal", "finished"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["完成。"], "textTruncated": [false], "toolCount": 0, "deliverables": {}},
+      "rejected": 0
+    }
+  },
+  "subagent-failed": {
+    "source": "按 pi-subagents 失败派发运行裁剪合成",
+    "semantics": ["subagent_finished 失败形态（status=failed、isError=true）就地收口子代理", "run 仍 finished，终帧 children 摘要与类型化终帧一致"],
+    "forms": ["run_finished", "run_started", "subagent_finished", "subagent_started", "turn_finished", "turn_started"],
+    "web": {
+      "status": "finished", "texts": [], "toolCount": 0, "turnCount": 1,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0,
+      "children": [{"n": 0, "agent": "researcher", "task": "调研丁", "status": "failed"}]
+    },
+    "trajectory": {
+      "milestones": [["started", "派发会失败的子代理"], ["terminal", "finished"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 1, "texts": [], "textTruncated": [], "toolCount": 0, "deliverables": {}},
+      "rejected": 0
+    }
+  },
+  "session-ready-passthrough": {
+    "source": "按 ACP 协商结果透传（kernel/acp_execution.py session_info）手工合成",
+    "semantics": ["session_ready 开放 payload：内核自报会话事实（agentInfo/agentCapabilities/authMethods/modes/configOptions/cwd 等）原样透传", "fold 只取 sessionId/model/thinkingLevel"],
+    "forms": ["assistant_message", "run_finished", "run_started", "session_ready", "turn_finished", "turn_started"],
+    "web": {
+      "status": "finished", "texts": ["你好。"], "toolCount": 0, "turnCount": 1,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0,
+      "sessionId": "s-acp", "model": "acp/model"
+    },
+    "trajectory": {
+      "milestones": [["started", "你好"], ["session", "s-acp", "acp/model"], ["terminal", "finished"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["你好。"], "textTruncated": [false], "toolCount": 0, "deliverables": {}},
+      "rejected": 0
+    }
+  },
+  "assistant-message-meta": {
+    "source": "按 pi 投影 message_end（kernel/projection.py）手工合成",
+    "semantics": ["assistant_message 可选字段 stopReason/usage 随权威正文携带", "fold 只取正文与 truncated 标记；用量计账走 usage_reported/终帧"],
+    "forms": ["assistant_delta", "assistant_message", "run_finished", "run_started", "turn_finished", "turn_started"],
+    "web": {
+      "status": "finished", "texts": ["完成。"], "toolCount": 0, "turnCount": 1,
+      "rejectedFrames": 0, "ignoredFrames": 0, "gaps": 0
+    },
+    "trajectory": {
+      "milestones": [["started", "带元数据的回答"], ["terminal", "finished"]],
+      "snapshot": {"status": "finished", "stopReason": null, "error": null, "reportStatus": "none", "redacted": false, "children": 0, "texts": ["完成。"], "textTruncated": [false], "toolCount": 0, "deliverables": {}},
       "rejected": 0
     }
   }

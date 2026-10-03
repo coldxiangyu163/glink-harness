@@ -1,0 +1,10 @@
+# assistant-message-meta —— assistant_message 的可选字段 stopReason/usage 随权威正文
+# 携带（pi message_end 事实）；fold 只取正文与 truncated 标记，用量计账走
+# usage_reported/终帧。
+# 来源：按 pi 投影 message_end（kernel/projection.py）手工合成。
+{"type": "run_started", "v": 1, "runId": "fx-ameta", "seq": 1, "ts": 1790014000.5, "payload": {"prompt": "带元数据的回答"}}
+{"type": "turn_started", "v": 1, "runId": "fx-ameta", "seq": 2, "ts": 1790014001.0, "payload": {}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-ameta", "seq": 3, "ts": 1790014001.5, "payload": {"text": "完成"}}
+{"type": "assistant_message", "v": 1, "runId": "fx-ameta", "seq": 4, "ts": 1790014002.0, "payload": {"text": "完成。", "stopReason": "end_turn", "usage": {"input": 10, "output": 5, "totalTokens": 15}}}
+{"type": "turn_finished", "v": 1, "runId": "fx-ameta", "seq": 5, "ts": 1790014002.5, "payload": {}}
+{"type": "run_finished", "v": 1, "runId": "fx-ameta", "seq": 6, "ts": 1790014003.0, "payload": {"status": "finished", "stopReason": null, "error": null, "reportPath": null, "reportStatus": "none", "cleanup": {"released": true, "failures": [], "external": {}}, "children": []}}

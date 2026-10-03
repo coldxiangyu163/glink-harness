@@ -37,6 +37,8 @@ const INVARIANTS = {
   toolCount: (state) => state.items.filter((item) => item.kind === 'tool').length,
   toolStatuses: (state) => state.items.filter((item) => item.kind === 'tool').map((item) => item.status),
   toolResults: (state) => state.items.filter((item) => item.kind === 'tool').map((item) => item.result),
+  notices: (state) =>
+    state.items.filter((item) => item.kind === 'notice').map((item) => ({ level: item.level, message: item.message })),
   turnCount: (state) => state.items.filter((item) => item.kind === 'turn').length,
   rejectedFrames: (state) => state.rejectedFrames,
   ignoredFrames: (state) => state.ignoredFrames,

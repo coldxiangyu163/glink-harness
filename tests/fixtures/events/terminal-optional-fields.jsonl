@@ -1,0 +1,9 @@
+# terminal-optional-fields —— 终帧可选字段：modelStopReason/kernelUsage/artifactFailures/
+# external 是终帧携带的记账与外部资源事实；fold 不投影为行、不收进展示快照。
+# 来源：按终帧 schema 可选字段（event_schema._terminal）手工合成。
+{"type": "run_started", "v": 1, "runId": "fx-topt", "seq": 1, "ts": 1790011000.5, "payload": {"prompt": "记账字段"}}
+{"type": "turn_started", "v": 1, "runId": "fx-topt", "seq": 2, "ts": 1790011001.0, "payload": {}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-topt", "seq": 3, "ts": 1790011001.5, "payload": {"text": "完成。"}}
+{"type": "assistant_message", "v": 1, "runId": "fx-topt", "seq": 4, "ts": 1790011002.0, "payload": {"text": "完成。"}}
+{"type": "turn_finished", "v": 1, "runId": "fx-topt", "seq": 5, "ts": 1790011002.5, "payload": {}}
+{"type": "run_finished", "v": 1, "runId": "fx-topt", "seq": 6, "ts": 1790011003.0, "payload": {"status": "finished", "stopReason": null, "error": null, "reportPath": null, "reportStatus": "none", "cleanup": {"released": true, "failures": [], "external": {}}, "children": [], "durationSeconds": 2.0, "modelStopReason": "end_turn", "usage": {"requests": 1, "input": 20, "output": 10, "totalTokens": 30}, "kernelUsage": {"requests": 1, "inputTokens": 20, "outputTokens": 10}, "artifactFailures": [{"path": "out/chart.png", "error": "沙箱读取超时"}], "external": {"sandboxId": "sb-1", "template": "tpl-research"}}}

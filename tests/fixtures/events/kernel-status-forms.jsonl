@@ -1,0 +1,12 @@
+# kernel-status-forms —— kernel_status 的多形态：info 级会话事实（resumeMethod/sessionId/
+# replayedUpdates，ACP 追问续接）与 warning 级权限应答（decision/policy/toolCallId/
+# toolTitle/toolKind/toolKindSource/optionId/optionKind）。notice 只进展示，不产生里程碑。
+# 来源：按 ACP 投影 kernel_status 各形态（kernel/acp_projection.py）手工合成。
+{"type": "run_started", "v": 1, "runId": "fx-kstatus", "seq": 1, "ts": 1790010000.5, "payload": {"prompt": "追问并请求权限"}}
+{"type": "kernel_status", "v": 1, "runId": "fx-kstatus", "seq": 2, "ts": 1790010001.0, "payload": {"level": "info", "message": "acp_session_resumed", "detail": "ACP 追问续接到已有会话（method=session/load）；session/load 回放了 12 条历史更新，它们属于父 run 已记录的历史，不重复投影", "resumeMethod": "session/load", "sessionId": "s-parent", "replayedUpdates": 12}}
+{"type": "turn_started", "v": 1, "runId": "fx-kstatus", "seq": 3, "ts": 1790010001.5, "payload": {}}
+{"type": "kernel_status", "v": 1, "runId": "fx-kstatus", "seq": 4, "ts": 1790010002.0, "payload": {"level": "warning", "message": "acp_permission_denied", "detail": "ACP 权限请求按 fail-closed 应答：decision=rejected；tool=bash；kind=execute；option=allow(allow_once)", "decision": "rejected", "policy": "fail_closed", "toolCallId": "call_1", "toolTitle": "bash", "toolKind": "execute", "toolKindSource": "request", "optionId": "allow", "optionKind": "allow_once"}}
+{"type": "assistant_delta", "v": 1, "runId": "fx-kstatus", "seq": 5, "ts": 1790010002.5, "payload": {"text": "已拒绝越权操作。"}}
+{"type": "assistant_message", "v": 1, "runId": "fx-kstatus", "seq": 6, "ts": 1790010003.0, "payload": {"text": "已拒绝越权操作。"}}
+{"type": "turn_finished", "v": 1, "runId": "fx-kstatus", "seq": 7, "ts": 1790010003.5, "payload": {}}
+{"type": "run_finished", "v": 1, "runId": "fx-kstatus", "seq": 8, "ts": 1790010004.0, "payload": {"status": "finished", "stopReason": null, "error": null, "reportPath": null, "reportStatus": "none", "cleanup": {"released": true, "failures": [], "external": {}}, "children": []}}

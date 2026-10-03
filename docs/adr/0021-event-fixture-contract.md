@@ -64,8 +64,14 @@ whole-value 约定 + ignorable 护栏」，但它运行在同一语言栈内，f
   补充的是 fold 语义层面的一致性，HTTP 面语义仍以 exec-contract 与其钉住测试为准。
 - 本 ADR 只固化方向，**不宣称实现已完成**：样例库的全形态覆盖盘点与两侧契约
   测试的落地是后续任务。
-- 跟进（2026-10-03）：落地完成——`tests/fixtures/events/` 13 个样例（含注释头与
+- 跟进（2026-10-03）：落地完成——`tests/fixtures/events/` 18 个样例（含注释头与
   `manifest.json` 形态对照/期望输出）、schema 逐帧校验与 trajectory 投影契约
   （`tests/test_event_fixture_contract.py`，参考 fold `tests/trajectory_reference.py`）、
   web reducer 契约（`tests/web/fixture-contract.test.mjs`）。ULegal 侧契约测试在
   ULegal 仓库自行落地，共享本样例库与 manifest。
+- 跟进（2026-10-03，对接评审裁决落地）：截断语义统一为**以权威截断帧为准 + 交付
+  不完整标记**（决定 2 的推论）——不再保留更长的流式拼接，否则折叠结果依赖 delta
+  到达时序、两侧无法折出同一份正文；trajectory 里程碑行补终帧 `redacted` 标记行，
+  快照补逐块 `textTruncated`；样例库补 kernel_status 多形态、终帧可选字段、
+  subagent_finished failed、session_ready 透传、assistant_message stopReason/usage
+  五个样例（13 → 18）。

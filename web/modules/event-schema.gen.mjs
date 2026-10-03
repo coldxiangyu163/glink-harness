@@ -107,7 +107,7 @@
  * @property {string} text
  */
 /**
- * assistant_message（v1）：权威正文；truncated 时不覆盖更长的流式正文
+ * assistant_message（v1）：权威正文；truncated 时同样以权威副本为准并标记交付不完整（不保留更长的流式拼接）
  * @typedef {object} AssistantMessagePayload
  * @property {string} text
  * @property {boolean} [truncated]
