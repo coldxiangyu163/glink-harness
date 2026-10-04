@@ -2,7 +2,10 @@
 
 本目录是产品事件流的**权威样例库**（golden fixtures）：每个事件形态至少一个样例，
 每个样例是**语义手工可审的最小序列**（从真实或 fake 运行裁剪合成，注释头注明来源）。
-样例是跨仓契约载体——**改样例 = 改契约**；演进护栏：新事件形态先入本库、再进实现。
+样例是跨仓契约载体——**改样例 = 改契约**；演进护栏：新事件形态先入本库、再进实现——
+已机械化：`tests/test_event_fixture_contract.py` 的
+`test_the_sample_library_covers_every_schema_event_type` 断言 schema 每个事件类型
+至少被一个样例覆盖，缺即红。
 
 ## 约定
 
@@ -60,3 +63,7 @@
 1. 先在本目录加样例（`.jsonl` + 注释头）并在 `manifest.json` 登记期望输出；
 2. 两侧契约测试同步更新到红（消费方 fold 尚未实现新形态）；
 3. 实现进 `event_schema.py`（必要时 bump 该类型的 `v`）与各消费方 fold，测试转绿。
+
+完备性由 `test_the_sample_library_covers_every_schema_event_type` 强制：样例 forms
+并集必须等于 `event_schema.EVENT_VERSIONS` 类型全集（负例 `legacy-unversioned`
+整日志拒收，不计入覆盖）；新事件类型进了 `event_schema.py` 而没有样例时即红。

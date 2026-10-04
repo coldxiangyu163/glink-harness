@@ -8,9 +8,11 @@
 
 * 每个样例逐帧过 ``event_schema`` 信封校验（词汇/版本/字段；legacy 样例逐帧报缺 ``v``）；
 * 清单与样例文件一一对应、``forms`` 与样例实际事件形态一致、每个样例带 ``#`` 注释头；
+* schema 的每个事件类型至少被一个样例覆盖（反向完备，与上面的正向校验合并后等价于
+  样例 forms 并集 == schema 类型全集；负例 ``legacy-unversioned`` 整日志拒收，不计入）；
 * 清单内两侧共享的核心不变量（status/texts/toolCount）一致。
 
-演进护栏：新事件形态先入样例库（加样例 + 清单条目）再进实现。
+演进护栏：新事件形态先入样例库（加样例 + 清单条目）再进实现——由完备性断言机械化。
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ def frames_of(name: str) -> list[dict[str, Any]]:
     ]
 
 
-# -- 样例库自身：schema 校验、清单对应、注释头 -------------------------------------
+# -- 样例库自身：schema 校验、清单对应、完备性、注释头 -----------------------------
 
 
 @pytest.mark.parametrize("name", sorted(SAMPLES))
@@ -60,6 +62,23 @@ def test_the_manifest_covers_every_fixture_and_forms_match() -> None:
         forms = sorted({frame["type"] for frame in frames_of(name)})
         assert sorted(entry["forms"]) == forms, name
         assert entry["source"] and entry["semantics"], name
+
+
+def test_the_sample_library_covers_every_schema_event_type() -> None:
+    """反向完备：schema 的每个事件类型至少一个样例，新类型忘加样例即红。
+
+    与 ``test_every_fixture_frame_passes_the_schema`` 的正向校验（样例帧类型
+    都在 schema 内）合并后，等价于 样例 forms 并集 == ``EVENT_VERSIONS`` 全集。
+    粒度是类型级（type→v 单值，``v`` 由 schema 单一来源决定，无需按版本展开）。
+    负例 ``legacy-unversioned`` 整日志拒收，不构成任何形态的正向覆盖，不计入。
+    """
+    covered: set[str] = set()
+    for name in SAMPLES:
+        if name == "legacy-unversioned":
+            continue
+        covered.update(frame["type"] for frame in frames_of(name))
+    missing = sorted(set(event_schema.EVENT_VERSIONS) - covered)
+    assert not missing, f"schema 事件类型缺样例（新形态先入样例库再进实现）：{missing}"
 
 
 def test_every_fixture_opens_with_a_comment_header() -> None:
