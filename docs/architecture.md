@@ -141,7 +141,9 @@ SessionSource 协议访问记录与会话来源，不直接持有具体 store；
 * **Harness**（`kernel/harness.py` 的 `HarnessFamily`，实现为 `harness_pi.py` /
   `harness_acp.py`）只负责 launch 描述（argv、环境、挂载、包守卫、镜像/模板名，路径一律经
   `sandbox.place` 得到）、协议驱动（pi：`execution.PiExecutionAdapter` + `rpc.py` /
-  `projection.py`；ACP：`acp_execution.AcpExecutionAdapter` + `acp_rpc.py` / `acp_projection.py`）、
+  `projection.py`；ACP：`acp_execution.AcpExecutionAdapter` + `acp_rpc.py` / `acp_projection.py`；
+  两族共用 `rpc_transport.py` 的 stdio 传输骨架——进程生命周期、reader 线程、LF 帧、
+  close 升级链、有界 stderr 尾部——协议帧分派与族错误词汇留在各自客户端）、
   终态词汇、续接、子代理增强与 usage。远程面的文件交付由族的 driver 经传输器完成
   （pi：`e2b_env.PiSandboxTransfer`；ACP：`acp_e2b_env.AcpSandboxTransfer`），只问 sandbox 的
   `remote` / `handle()` 事实，不按执行面名分支。
@@ -462,7 +464,9 @@ child 在前端显示为普通「进行中」，不伪造进度。
 `tests/web/fixture-contract.test.mjs`；trajectory 语义侧
 `tests/test_event_fixture_contract.py`，参考 fold 在 `tests/trajectory_reference.py`）。
 演进护栏：新事件形态先入
-样例库再进实现，消费方契约测试不过即红。ULegal 侧 trajectory 定位为业务里程碑 + 展示
+样例库再进实现，消费方契约测试不过即红；该前置已由
+`tests/test_event_fixture_contract.py` 的完备性断言强制（schema 每个事件类型至少一个
+样例，缺即红）。ULegal 侧 trajectory 定位为业务里程碑 + 展示
 fold，delta/直播帧不落盘不投影；事件原文存档归 R3 存储边界重定义
 （[multi-harness-plan.md](multi-harness-plan.md) §6），本期不建。
 
@@ -928,7 +932,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 | `host/glink_harness/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `redaction`（出站脱敏）/ `accounts`（站内账号）/ `auth`（身份断言与会话）/ `dotenv`（.env 解析）/ `blueprints`（蓝图目录推导与解析渲染）、`harnesses`（harness 包清单的目录推导、fail-closed 解析与选择）；组成根 `app`（服务器与 `create_server`） |
 | `host/glink_harness/web_*.py` | 宿主 HTTP 层 | `web_routes`（路由与 run/health/报告 API）/ `web_sse`（事件流与连接额度）/ `web_security`（身份、会话与请求防护）/ `web_http`（请求体、响应、静态资源、脱敏访问日志）；一个 `HostRequestHandler` 由它们组合而成 |
 | `host/glink_harness/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
-| `host/glink_harness/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env` / `subagent_artifacts`（pi-subagents 产物布局解析与关联，R2）；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；执行面：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手，含 resume/kill-by-id）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）；对话状态基础设施：`archive_channel`（0018 归档通道）/ `conversation_lease` + `acp_sandbox_park`（0020 对话租约事实与收尾泊车）；两族的 run 生命周期策略：`harness` / `harness_pi` / `harness_acp`。不导入 `runs/` 或宿主编排模块 |
+| `host/glink_harness/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env` / `subagent_artifacts`（pi-subagents 产物布局解析与关联，R2）；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；两族共享：`rpc_transport`（stdio 传输骨架——进程生命周期、reader 线程、LF 帧、close 升级链、有界 stderr 尾部；`rpc.py` 与 `acp_rpc.py` 继承它，协议帧分派与族错误词汇在子类）；执行面：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手，含 resume/kill-by-id）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）；对话状态基础设施：`archive_channel`（0018 归档通道）/ `conversation_lease` + `acp_sandbox_park`（0020 对话租约事实与收尾泊车）；两族的 run 生命周期策略：`harness` / `harness_pi` / `harness_acp`。不导入 `runs/` 或宿主编排模块 |
 | `host/glink_harness/runs/` | 编排层 | run 准入与执行骨架、收尾顺序、终态提交与资源台账：`runner`（RunManager 公共 API 与准入锁）/ `admission`（两段式准入）/ `pipeline` + `stages`（生命周期管线与各阶段）/ `state`（阶段事实类型）/ `channel`（事件提交路径）/ `secrets`（run 秘密边界）/ `plugins`（子代理文档/进度/增强插件）/ `errors` / `limits` / `resource_ledger`（外部资源台账、重启对账、人工裁决、在线身份探测扫描与对话租约对账/删除闭环，0020）/ `child_progress_observer`（R3a 每 run 进度观察者） |
 | `host/glink_harness/artifacts.py` | 宿主 | 内核可达文件的目录句柄锚定读写（逐级不跟随链接、打开后复核、限幅、目录内原子替换） |
 | `harnesses/<pack>/` | Harness 包 | `harness.toml`（`glink-harness/v2` 清单：`family`、`[entry].command`、`[capabilities]` 能力矩阵、`[image]` 镜像需求与上游包精确版本；Dockerfile ARG、`docker/e2b/templates.json` 与 pi 的 `settings.json` 包列表由 `scripts/generate-pack-artifacts.py` 从它生成）、可选 `capabilities.md`（能力提示，拼入系统提示）、ACP 包的 `home/`（每 run HOME 覆盖层，先于凭据注入）；pi 包另有 `settings.json`、`agents/researcher.md`（前台派发的取证子代理）、`extensions/subagent-foreground-guard.ts` 与 `extensions/subagent/config.json`（强制前台 + 最保守配置） |
@@ -1088,7 +1092,9 @@ paused 沙箱的云端保留期与计费模型在 SDK 内无文档），数量�
 64 MiB（`framing.MAX_RECORD_BYTES`）即中止读取并杀掉进程，run 以 `kernel_exit` 失败并注明协议违规；
 E2B 命令输出经有界队列（每路 256 块）交给宿主读取线程，读取落后时反压 SDK 迭代，kill 后不再阻塞；e2b SDK 的 `CommandHandle` 自身累计全部输出并在结束时拼接进结果，宿主只读退出码，因此每转交一块即清空 SDK 的累计缓存（仅当该内部字段存在且为 list）；
 Web 处理器每次 socket 读写有 60 秒期限（`REQUEST_SOCKET_TIMEOUT_SECONDS`），空闲 keep-alive、停滞的请求体与
-停止接收的 SSE 客户端都会释放线程（空闲的 SSE 不写数据，不受影响）。这是单次操作期限：持续滴流的慢速客户端
+停止接收的 SSE 客户端都会释放线程（空闲的 SSE 不写数据，不受影响）；出口代理入站同样有 60 秒 socket 期限
+（`egress.REQUEST_TIMEOUT_SECONDS`），停滞在请求行、头或体的连接——包括未完成认证的连接——会释放其
+handler 线程（归档路由认证后放宽为 300 秒接收期限）。这是单次操作期限：持续滴流的慢速客户端
 仍能占住连接，完整的 slowloris 防护需由反代的连接/读取期限提供。
 
 ### 10.5 行为迁移、回退与未覆盖范围
