@@ -136,7 +136,8 @@ class HostRequestHandler(
     #: Per-socket-operation deadline (``StreamRequestHandler.setup`` applies it):
     #: an idle keep-alive connection, a slow request line/headers/body, or a
     #: client that stopped reading an SSE stream releases its thread instead of
-    #: holding it forever. An idle SSE stream writes nothing, so it is not cut.
+    #: holding it forever. An idle SSE stream still writes heartbeat comments
+    #: (``web_sse.SSE_HEARTBEAT_SECONDS``), so it is not cut.
     timeout = REQUEST_SOCKET_TIMEOUT_SECONDS
 
     server: GlinkHarnessServer

@@ -204,6 +204,39 @@ def test_a_stream_that_ends_normally_releases_its_slot(tmp_path: Path, stream_se
     assert b"event: run_finished" in body
 
 
+def test_an_idle_live_stream_writes_heartbeat_comments(
+    stream_server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An otherwise-silent live tail still writes bytes (SSE comment frames).
+
+    A proxy or load balancer between the host and the client cuts a stream
+    that stays silent too long; the live tail therefore bounds its silence by
+    ``web_sse.SSE_HEARTBEAT_SECONDS`` with comment frames, which the
+    EventSource specification tells every client to ignore. Replay never
+    idles (each frame is data), so only the live tail carries them.
+    """
+    from glink_harness import web_sse
+
+    monkeypatch.setattr(web_sse, "SSE_HEARTBEAT_SECONDS", 0.5)
+    adapter = _Adapter(forever=True)
+    server, _thread = stream_server(adapter)
+    run_id = start_run(server)
+
+    connection, response = open_stream(server, run_id)
+    try:
+        assert response.status == 200
+        seen = b""
+        deadline = time.monotonic() + 5.0
+        while b": keepalive\n\n" not in seen and time.monotonic() < deadline:
+            chunk = response.read1(4096)
+            if not chunk:  # the stream ended — the heartbeat never came
+                break
+            seen += chunk
+        assert b": keepalive\n\n" in seen
+    finally:
+        connection.close()
+
+
 def test_stream_limits_account_per_tenant_and_globally() -> None:
     limits = StreamLimits(global_limit=2, tenant_limit=1)
     assert limits.acquire("tenant-a") is None

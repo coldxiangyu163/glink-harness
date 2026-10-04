@@ -6,6 +6,11 @@ bounds how many such connections the host — and, in multi-tenant mode, one
 tenant — may hold open at once, so a client cannot turn the bus fan-out into an
 unbounded number of threads and buffers. A refusal is answered *before* any
 stream header is written, as a plain JSON error.
+
+An idle live tail still writes :data:`SSE_HEARTBEAT_SECONDS`-bounded comment
+frames, so a proxy or load balancer between the host and the client does not
+cut an otherwise-silent stream; comments are ignored by every EventSource
+implementation.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from http import HTTPStatus
 from typing import Any, Mapping
 from urllib.parse import parse_qs
@@ -23,6 +29,12 @@ from .tenancy import TenantContext
 from .web_security import assertion_expired
 
 logger = logging.getLogger("glink_harness.host")
+
+#: Longest an otherwise-silent live tail may go without writing a byte. The
+#: subscription's idle wake-up (``IDLE_POLL``, ~0.2 s) checks this deadline and
+#: writes an SSE comment frame when it passes; replay never idles (every frame
+#: is data). 15 s sits well under the common 30–60 s proxy idle cutoffs.
+SSE_HEARTBEAT_SECONDS = 15.0
 
 
 def persisted_sse(event: Mapping[str, Any]) -> str:
@@ -203,6 +215,7 @@ class SseMixin:
                     last = seq
                 self._write_event(persisted_sse(event))
             if subscription is not None:
+                last_write = time.monotonic()
                 while True:
                     # A short-lived assertion must not outlive itself on a long
                     # stream: once it expires the stream is closed cleanly and
@@ -217,12 +230,19 @@ class SseMixin:
                     except StopIteration:
                         break
                     if item is IDLE_POLL:
+                        # The idle wake-up's own job is the expiry check above;
+                        # it also keeps the connection alive for whichever proxy
+                        # sits between the host and the client.
+                        if time.monotonic() - last_write >= SSE_HEARTBEAT_SECONDS:
+                            self._write_event(": keepalive\n\n")
+                            last_write = time.monotonic()
                         continue
                     event = item
                     if event.seq <= last:
                         continue
                     last = event.seq
                     self._write_event(event.to_sse())
+                    last_write = time.monotonic()
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
