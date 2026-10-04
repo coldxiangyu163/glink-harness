@@ -94,6 +94,37 @@ def test_update_validates_fields_and_refuses_terminal_fields(store: RunStore) ->
         store.update("missing", session_id="x")
 
 
+def test_concurrent_updates_never_lose_fields(store: RunStore) -> None:
+    """Concurrent ``update`` calls serialize; the final row keeps every change.
+
+    ``update`` is a read–modify–write of the whole row. Its contract (see the
+    docstring) is that the read and the write sit in one ``BEGIN IMMEDIATE``
+    transaction, so a writer that commits later always bases its row on the
+    latest committed one — a lost update would resurface a stale value of the
+    other writer's field, as a mid-sequence id instead of the final one.
+    """
+    store.create("q", run_id="racy", spec=SPEC)
+    updates = 60
+
+    def write(field: str, prefix: str) -> None:
+        for index in range(updates):
+            store.update("racy", **{field: f"{prefix}{index}"})
+
+    threads = [
+        threading.Thread(target=write, args=("session_id", "a")),
+        threading.Thread(target=write, args=("error", "b")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive(), "并发 update 不得死锁"
+
+    final = store.get("racy")
+    assert final.session_id == f"a{updates - 1}"
+    assert final.error == f"b{updates - 1}"
+
+
 def test_list_is_newest_first_and_tenant_scoped(store: RunStore) -> None:
     first = store.create("first", run_id="a", tenant_id="t1", spec=SPEC)
     second = store.create("second", run_id="b", tenant_id="t2", spec=SPEC)

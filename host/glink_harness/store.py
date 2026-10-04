@@ -599,8 +599,17 @@ class RunStore:
         """Change in-flight facts or the adjudication of one run.
 
         The terminal fields (``status``, ``finished_at``, ``cleanup``,
-        ``event_count``) are refused: a run becomes terminal only through
-        :meth:`commit_terminal`, together with its terminal frame.
+        ``event_count``, ``deliverables``) and ``run_id`` are refused: a run
+        becomes terminal only through :meth:`commit_terminal`, together with
+        its terminal frame, and its identity never changes.
+
+        Concurrency: the read–modify–write runs inside one ``BEGIN IMMEDIATE``
+        transaction under the store's own lock, so concurrent updates to one
+        run are serialized — in-process by the lock, cross-process by SQLite's
+        write lock. Neither update can lose the other's fields: every writer
+        reads the row inside the same transaction that writes it, so the
+        last-committed row carries all earlier committed changes. Pinned by
+        ``tests/test_store.py::test_concurrent_updates_never_lose_fields``.
         """
         allowed = {field.name for field in fields(RunRecord)}
         unknown = set(changes) - allowed
