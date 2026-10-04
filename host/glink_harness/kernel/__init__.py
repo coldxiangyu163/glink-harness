@@ -23,13 +23,14 @@ commit and the external-resource ledger live in :mod:`glink_harness.runs`, above
 this layer. The kernel package keeps harness-specific protocol clients plus
 event projection, and must not import the orchestration layer or host
 orchestration modules (store/tenancy/ownership/blueprints/web_*/app/cli;
-``store`` is whitelisted for the three harness-family modules only —
-``harness``/``harness_pi``/``harness_acp`` read ``RunRecord`` and resume seeds).
+``store`` is whitelisted for the family base and the session-source adapter
+only — ``harness`` and ``run_views`` read records and session seeds there;
+both families have gone through the ``SessionSource`` protocol since R1-2/R1-3
+and no longer import ``store``).
 """
 
 from __future__ import annotations
 
-from .acp_e2b_env import SANDBOX_ACP_HOME
 from .acp_env import AcpRuntime, prepare_acp_runtime
 from .acp_execution import AcpExecutionAdapter
 from .acp_projection import ACP_STOP_REASONS, AcpProjector
@@ -59,6 +60,7 @@ from .harness import HarnessFamily, PreparedRuntime, select_family
 from .harness_acp import AcpHarnessFamily
 from .harness_pi import PiHarnessFamily
 from .sandbox import (
+    SANDBOX_FAMILY_STATE_HOME,
     DockerSandbox,
     E2BSandbox,
     InprocSandbox,
@@ -110,7 +112,7 @@ __all__ = [
     "PiRpcTimeout",
     "PreparedRuntime",
     "RpcResponse",
-    "SANDBOX_ACP_HOME",
+    "SANDBOX_FAMILY_STATE_HOME",
     "Sandbox",
     "SessionInfo",
     "Spawn",

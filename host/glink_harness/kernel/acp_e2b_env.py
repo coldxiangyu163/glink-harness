@@ -52,7 +52,6 @@ from .archive_channel import (
 from ..redaction import credential_secrets_from_text
 from .e2b_env import (
     REPORT_FILENAME,
-    SANDBOX_HOME,
     SANDBOX_WORKSPACE,
     UPLOAD_MAX_BYTES,
     SandboxError,
@@ -60,14 +59,19 @@ from .e2b_env import (
     _read_file_bounded,
     _runtime_manifest,
 )
+from .sandbox import SANDBOX_FAMILY_STATE_HOME
 
 logger = logging.getLogger("glink_harness.kernel.acp_e2b_env")
 
-#: The ACP family's per-run state root inside the sandbox. The host renders the
+#: The ACP family's per-run state root inside the sandbox — this family is the
+#: current only placer of the face's family-state mount point, defined next to
+#: the other face paths on the generic face
+#: (:data:`glink_harness.kernel.sandbox.SANDBOX_FAMILY_STATE_HOME`; a sandbox
+#: never knows which harness it carries, so the path authority stays there,
+#: not in this family×face module). The host renders the
 #: run's own HOME (``runs/<id>/acp-agent/home``: credentials injected 0600) and
-#: uploads it here; the agent process gets ``HOME`` pointed at it, so ``~/.dsh``,
-#: ``~/.codex`` and every cache stay inside this run's sandbox.
-SANDBOX_ACP_HOME = f"{SANDBOX_HOME}/acp/home"
+#: uploads it there; the agent process gets ``HOME`` pointed at it, so
+#: ``~/.dsh``, ``~/.codex`` and every cache stay inside this run's sandbox.
 #: How deep the sandbox's ACP state root is walked when it is recovered to the
 #: host. The measured state roots (dsh / codex / opencode) are a handful
 #: of levels deep; a deeper tree is refused instead of walked without a bound.
@@ -216,7 +220,7 @@ class AcpSandboxTransfer:
     :class:`~glink_harness.kernel.sandbox.E2BSandbox`；本类只知道 ACP 的布局：
     ``runtime`` 是 run 的宿主渲染 ACP 状态根
     (:func:`~glink_harness.kernel.acp_env.prepare_acp_runtime`)，其中的凭据文件交到
-    :data:`SANDBOX_ACP_HOME` 并在沙箱内收紧为 0600，使 M2/M3a 边界（per-run
+    :data:`SANDBOX_FAMILY_STATE_HOME` 并在沙箱内收紧为 0600，使 M2/M3a 边界（per-run
     HOME、文件形凭据、值不进 argv 或环境）在本面同样成立。
 
     阶段 1（docs/adr/0018）起，宿主持有对话级权威状态，本类是三件事的
@@ -259,7 +263,7 @@ class AcpSandboxTransfer:
     def upload_home(self) -> None:
         """Deliver the run's rendered ACP HOME (credential files) to the sandbox.
 
-        The tree keeps its relative paths under :data:`SANDBOX_ACP_HOME`. The
+        The tree keeps its relative paths under :data:`SANDBOX_FAMILY_STATE_HOME`. The
         boundary is applied in the order the transport allows: the state root is
         made 0700 *before* any file is written (so nothing lands in a
         traversable directory), and after the upload every created directory is
@@ -279,8 +283,8 @@ class AcpSandboxTransfer:
         partial state root).
         """
         sandbox = self.handle
-        sandbox.files.make_dir(SANDBOX_ACP_HOME)
-        self._chmod(0o700, [SANDBOX_ACP_HOME], "先收紧状态根权限")
+        sandbox.files.make_dir(SANDBOX_FAMILY_STATE_HOME)
+        self._chmod(0o700, [SANDBOX_FAMILY_STATE_HOME], "先收紧状态根权限")
         manifest = _runtime_manifest(self.runtime.home)
         if not manifest:
             return
@@ -290,7 +294,7 @@ class AcpSandboxTransfer:
             raise SandboxError(f"ACP 凭据交付失败: {exc}") from exc
         with tree:
             for relative, is_dir in manifest:
-                sandbox_path = f"{SANDBOX_ACP_HOME}/{relative}"
+                sandbox_path = f"{SANDBOX_FAMILY_STATE_HOME}/{relative}"
                 if is_dir:
                     sandbox.files.make_dir(sandbox_path)
                     continue
@@ -311,9 +315,13 @@ class AcpSandboxTransfer:
         handful of files, so there is no argv-length concern.
         """
         directories = [
-            f"{SANDBOX_ACP_HOME}/{relative}" for relative, is_dir in manifest if is_dir
+            f"{SANDBOX_FAMILY_STATE_HOME}/{relative}"
+            for relative, is_dir in manifest
+            if is_dir
         ]
-        self._chmod(0o700, [SANDBOX_ACP_HOME, *directories], "收紧沙箱状态根权限")
+        self._chmod(
+            0o700, [SANDBOX_FAMILY_STATE_HOME, *directories], "收紧沙箱状态根权限"
+        )
         self._chmod(0o600, list(self.uploaded), "收紧沙箱凭据文件权限")
 
     def _chmod(self, mode: int, paths: list[str], what: str) -> None:
@@ -354,7 +362,7 @@ class AcpSandboxTransfer:
         The cold path's 灌回 step on the archive channel (docs/adr/0018): the
         sandbox curls ``GET /archive/state`` — the server derives the source
         directory from the grant, never from the client — and untars the stream
-        below :data:`SANDBOX_ACP_HOME`. The tar carries no credential
+        below :data:`SANDBOX_FAMILY_STATE_HOME`. The tar carries no credential
         destinations (they are skipped server-side) and no manifest, so the
         follow-up's own credential upload (:meth:`upload_home`, which runs
         after this) is the only writer of those paths. A failed backfill fails
@@ -367,7 +375,7 @@ class AcpSandboxTransfer:
         sandbox = self.handle
         try:
             sandbox.files.write(RECLAIM_TOKEN_PATH, self.archive.token)
-            sandbox.files.make_dir(SANDBOX_ACP_HOME)
+            sandbox.files.make_dir(SANDBOX_FAMILY_STATE_HOME)
             sandbox.commands.run(
                 _backfill_command(self.archive.url),
                 timeout=ARCHIVE_COMMAND_TIMEOUT_SECONDS,
@@ -500,7 +508,9 @@ class AcpSandboxTransfer:
         # root cannot carry over (docs/adr/0018).
         blocked = set(self.runtime.credential_dests)
         try:
-            entries = sandbox.files.list(SANDBOX_ACP_HOME, depth=ACP_STATE_MAX_DEPTH)
+            entries = sandbox.files.list(
+                SANDBOX_FAMILY_STATE_HOME, depth=ACP_STATE_MAX_DEPTH
+            )
         except Exception as exc:  # noqa: BLE001 - a failed recovery refuses the follow-up
             return AcpStateRecovery(
                 ok=False,
@@ -510,7 +520,7 @@ class AcpSandboxTransfer:
         total = 0
         for entry in entries:
             path = str(getattr(entry, "path", None) or "")
-            if path.rstrip("/") == SANDBOX_ACP_HOME:
+            if path.rstrip("/") == SANDBOX_FAMILY_STATE_HOME:
                 # A recursive listing that includes the root itself describes
                 # nothing to mirror (robustness against SDK payload shapes).
                 continue
@@ -656,7 +666,7 @@ def _reclaim_command(url: str, *, excludes: tuple[str, ...]) -> str:
         [
             "node",
             RECLAIM_SCRIPT_PATH,
-            SANDBOX_ACP_HOME,
+            SANDBOX_FAMILY_STATE_HOME,
             RECLAIM_BASE_PATH,
             RECLAIM_OUT_PATH,
             *excludes,
@@ -681,7 +691,7 @@ def _reclaim_command(url: str, *, excludes: tuple[str, ...]) -> str:
 def _backfill_command(url: str) -> str:
     """The one sandbox command that GETs the state archive and untars it.
 
-    ``tar -x`` below :data:`SANDBOX_ACP_HOME` with GNU/bsdtar's default
+    ``tar -x`` below :data:`SANDBOX_FAMILY_STATE_HOME` with GNU/bsdtar's default
     handling already strips absolute paths and refuses ``..`` members; the
     served container only ever contains host-validated relative names anyway
     (the packer and the server both whitelist them).
@@ -693,9 +703,9 @@ def _backfill_command(url: str) -> str:
     )
     untar = (
         f"COPYFILE_DISABLE=1 tar -xf {shlex.quote(BACKFILL_TAR_PATH)} "
-        f"-C {shlex.quote(SANDBOX_ACP_HOME)}"
+        f"-C {shlex.quote(SANDBOX_FAMILY_STATE_HOME)}"
     )
-    return f"mkdir -p {shlex.quote(SANDBOX_ACP_HOME)} && {curl} && {untar}"
+    return f"mkdir -p {shlex.quote(SANDBOX_FAMILY_STATE_HOME)} && {curl} && {untar}"
 
 
 def _scan_published_secrets(
@@ -750,7 +760,7 @@ def _state_relative(path: str) -> str | None:
     than being silently dropped from the mirror. Sandbox content is untrusted
     input; the same path discipline is what keeps the mirror inside the run.
     """
-    prefix = f"{SANDBOX_ACP_HOME}/"
+    prefix = f"{SANDBOX_FAMILY_STATE_HOME}/"
     if not path.startswith(prefix):
         return None
     relative = path[len(prefix) :]

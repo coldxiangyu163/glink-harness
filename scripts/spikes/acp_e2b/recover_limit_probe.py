@@ -55,11 +55,10 @@ from glink_harness.kernel.acp_env import (  # noqa: E402
 )
 from glink_harness.kernel.acp_e2b_env import (  # noqa: E402
     ACP_STATE_MAX_DEPTH,
-    SANDBOX_ACP_HOME,
     AcpSandboxTransfer,
 )
 from glink_harness.kernel.e2b_env import confirm_sandbox_absent  # noqa: E402
-from glink_harness.kernel.sandbox import E2BSandbox, Launch  # noqa: E402
+from glink_harness.kernel.sandbox import E2BSandbox, Launch, SANDBOX_FAMILY_STATE_HOME  # noqa: E402
 
 #: One synthetic state tree per axis. ``seed`` commands run inside the sandbox;
 #: ``files``/``bytes`` are the state facts the recovery has to judge.
@@ -67,9 +66,9 @@ AXES: dict[str, dict] = {
     "control": {
         "note": "对照组：两个小文件（普通状态形状）→ 期望整份发布成功",
         "seed": [
-            f"mkdir -p {SANDBOX_ACP_HOME}/sub",
-            f"printf '%s' '{{\"remembered\":\"ALFA-1000\"}}' > {SANDBOX_ACP_HOME}/state-a.json",
-            f"printf '%s' 'tiny' > {SANDBOX_ACP_HOME}/sub/state-b.txt",
+            f"mkdir -p {SANDBOX_FAMILY_STATE_HOME}/sub",
+            f"printf '%s' '{{\"remembered\":\"ALFA-1000\"}}' > {SANDBOX_FAMILY_STATE_HOME}/state-a.json",
+            f"printf '%s' 'tiny' > {SANDBOX_FAMILY_STATE_HOME}/sub/state-b.txt",
         ],
         "files": 2,
         "bytes": len('{"remembered":"ALFA-1000"}') + len("tiny"),
@@ -79,8 +78,8 @@ AXES: dict[str, dict] = {
     "single": {
         "note": "轴 1（单文件）：9 MiB 文件 > 8 MiB 单文件上限",
         "seed": [
-            f"printf '%s' '{{\"remembered\":\"BRAVO-2000\"}}' > {SANDBOX_ACP_HOME}/state.json",
-            f"head -c 9437184 /dev/zero > {SANDBOX_ACP_HOME}/bloat.bin",
+            f"printf '%s' '{{\"remembered\":\"BRAVO-2000\"}}' > {SANDBOX_FAMILY_STATE_HOME}/state.json",
+            f"head -c 9437184 /dev/zero > {SANDBOX_FAMILY_STATE_HOME}/bloat.bin",
         ],
         "files": 2,
         "bytes": len('{"remembered":"BRAVO-2000"}') + 9437184,
@@ -90,9 +89,9 @@ AXES: dict[str, dict] = {
     "total": {
         "note": "轴 2（总量）：9 × 8 MiB = 72 MiB > 64 MiB 总量上限（单文件都在上限内）",
         "seed": [
-            f"printf '%s' '{{\"remembered\":\"CHARLIE-3000\"}}' > {SANDBOX_ACP_HOME}/state.json",
+            f"printf '%s' '{{\"remembered\":\"CHARLIE-3000\"}}' > {SANDBOX_FAMILY_STATE_HOME}/state.json",
             "for i in $(seq 1 9); do "
-            f"head -c 8388608 /dev/zero > {SANDBOX_ACP_HOME}/part$i.bin; done",
+            f"head -c 8388608 /dev/zero > {SANDBOX_FAMILY_STATE_HOME}/part$i.bin; done",
         ],
         "files": 10,
         "bytes": len('{"remembered":"CHARLIE-3000"}') + 9 * 8388608,
@@ -102,9 +101,9 @@ AXES: dict[str, dict] = {
     "count": {
         "note": "轴 3（文件数）：4100 个空文件 > 4096 文件数上限",
         "seed": [
-            f"mkdir -p {SANDBOX_ACP_HOME}/many",
+            f"mkdir -p {SANDBOX_FAMILY_STATE_HOME}/many",
             "for i in $(seq 1 4100); do : > "
-            f"{SANDBOX_ACP_HOME}/many/f$i.dat; done",
+            f"{SANDBOX_FAMILY_STATE_HOME}/many/f$i.dat; done",
         ],
         "files": 4100,
         "bytes": 0,
@@ -141,7 +140,7 @@ def sandbox_file_facts(sandbox: object) -> tuple[int | None, int | None, str]:
         'const walk=(d)=>{for(const e of fs.readdirSync(d,{withFileTypes:true})){'
         'const f=p.join(d,e.name);'
         'if(e.isDirectory())walk(f);else if(e.isFile()){n++;b+=fs.statSync(f).size;}}};'
-        f'walk("{SANDBOX_ACP_HOME}");console.log(n);console.log(b);'
+        f'walk("{SANDBOX_FAMILY_STATE_HOME}");console.log(n);console.log(b);'
     )
     result = sandbox.commands.run(f"node -e '{script}'", timeout=300)
     stdout = str(getattr(result, "stdout", "") or "").strip()
@@ -159,7 +158,7 @@ def listing_shape(sandbox: object) -> str:
     the real SDK's payload shape, so the probe records it instead of assuming it.
     """
     try:
-        entries = sandbox.files.list(SANDBOX_ACP_HOME, depth=ACP_STATE_MAX_DEPTH)
+        entries = sandbox.files.list(SANDBOX_FAMILY_STATE_HOME, depth=ACP_STATE_MAX_DEPTH)
     except Exception as exc:  # noqa: BLE001 - recorded as a fact
         return f"listing 失败: {type(exc).__name__}: {exc}"
     for entry in entries:

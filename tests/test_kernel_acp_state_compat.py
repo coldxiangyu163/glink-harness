@@ -238,7 +238,7 @@ class CompatCommands:
 
 @pytest.mark.parametrize("path_kind", ["files", "archive", "hot"])
 def test_remote_repair_precedes_spawn_for_cold_and_reboot_paths(tmp_path, path_kind):
-    from glink_harness.kernel.acp_e2b_env import SANDBOX_ACP_HOME
+    from glink_harness.kernel.sandbox import SANDBOX_FAMILY_STATE_HOME
     from glink_harness.kernel.conversation_lease import read_lease
     from test_kernel_acp_hot_path import ParkableSandbox
 
@@ -313,7 +313,7 @@ def test_remote_repair_precedes_spawn_for_cold_and_reboot_paths(tmp_path, path_k
         else:
             assert len(sandboxes) == 2
             assert active.commands.backfills == (1 if path_kind == "archive" else 0)
-        assert SANDBOX_ACP_HOME in active.commands.repairs[0]
+        assert SANDBOX_FAMILY_STATE_HOME in active.commands.repairs[0]
     finally:
         for sandbox in sandboxes:
             sandbox.kill()
@@ -345,7 +345,7 @@ def test_other_packs_do_not_run_dsh_compatibility(tmp_path, monkeypatch, pack):
 
 
 def test_remote_failed_atomic_publish_leaves_original_and_cleans_only_scratch(tmp_path, monkeypatch):
-    from glink_harness.kernel.acp_e2b_env import SANDBOX_ACP_HOME
+    from glink_harness.kernel.sandbox import SANDBOX_FAMILY_STATE_HOME
     from glink_harness.kernel.acp_state_compat import AcpStateCompatError, repair_resume_home
     from test_kernel_acp_hot_path import ParkableSandbox
     from test_kernel_acp_e2b import _Result
@@ -355,7 +355,7 @@ def test_remote_failed_atomic_publish_leaves_original_and_cleans_only_scratch(tm
     monkeypatch.setattr(sandbox.commands, "run", lambda *_a, **_k: _Result(9))
     try:
         with pytest.raises(AcpStateCompatError, match="发布失败"):
-            repair_resume_home(SANDBOX_ACP_HOME, handle=sandbox)
+            repair_resume_home(SANDBOX_FAMILY_STATE_HOME, handle=sandbox)
         assert original.read_bytes() == data
         assert (original.parent / "session.lock").read_bytes() == b""
         assert not list(original.parent.glob("*.acp15-*"))

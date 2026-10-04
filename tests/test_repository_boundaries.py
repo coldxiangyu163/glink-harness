@@ -804,6 +804,93 @@ def test_runs_package_never_imports_harness_specific_modules():
         ))], violations
 
 
+#: runs/ 编排层对接入层的第二个维度：执行面与族×面交集模块。族关键词卡点
+#: （上方测试）管族模块；具体执行面（docker_env / e2b_env）、ACP×E2B 交集
+#: （acp_e2b_env）与执行面的伴生模块（conversation_lease / archive_channel）
+#: 在此列出，runs/ 任何模块（含函数内与 TYPE_CHECKING 内的导入）不得导入。
+_RUNS_EXECUTION_FACE_FORBIDDEN = frozenset({
+    "glink_harness.kernel.docker_env",
+    "glink_harness.kernel.e2b_env",
+    "glink_harness.kernel.acp_e2b_env",
+    "glink_harness.kernel.conversation_lease",
+    "glink_harness.kernel.archive_channel",
+})
+#: 已登记取舍的显式例外：runs/ 模块（相对仓库根的路径）-> 允许导入的执行面/
+#: 交集模块。新增条目必须先在文档登记取舍依据；不允许为了让测试变绿扩例外。
+_RUNS_EXECUTION_FACE_EXCEPTIONS: dict[str, frozenset[str]] = {
+    # architecture.md §4「在线自动对账」：台账、重启对账、人工裁决与在线扫描
+    # 的实现归属 runs/resource_ledger.py（探针组装——含 E2B 冻结凭据——也在该
+    # 模块内完成）；对话租约对账/删除闭环（ADR 0020）同样登记在该模块。
+    "host/glink_harness/runs/resource_ledger.py": frozenset({
+        "glink_harness.kernel.docker_env",
+        "glink_harness.kernel.e2b_env",
+        "glink_harness.kernel.conversation_lease",
+    }),
+    # ADR 0018（对话状态归档通道）的范围行登记 runs/secrets.py：归档回灌后的
+    # 状态树由本 run 的秘密边界做只读扫描吸收凭据形状值，ArchiveGrant 是该
+    # 契约的类型面（TYPE_CHECKING 导入）。
+    "host/glink_harness/runs/secrets.py": frozenset({
+        "glink_harness.kernel.archive_channel",
+    }),
+}
+
+
+def runs_execution_face_violations(root: Path) -> list[str]:
+    """执行面/交集模块导入超出该模块登记例外的清单。"""
+    violations = []
+    for path in sorted((root / "host/glink_harness/runs").rglob("*.py")):
+        relative = path.relative_to(root)
+        imported = host_module_imports(relative, path.read_text(encoding="utf-8"))
+        allowed = _RUNS_EXECUTION_FACE_EXCEPTIONS.get(relative.as_posix(), frozenset())
+        violations.extend(
+            f"{relative}: forbidden import {module}"
+            for module in imported
+            if module in _RUNS_EXECUTION_FACE_FORBIDDEN and module not in allowed
+        )
+    return violations
+
+
+def test_runs_package_never_imports_execution_face_or_intersection_modules():
+    """执行面维度：runs/ 不得导入执行面/族×面交集模块，已登记取舍除外。
+
+    既有族关键词卡点只过滤族名，执行面模块（kernel.docker_env 等）的违规
+    此前静默通过；这里让未登记的新违规变红。
+    """
+    assert runs_execution_face_violations(ROOT) == []
+
+
+def test_runs_execution_face_rule_rejects_undeclared_imports(tmp_path: Path) -> None:
+    """反例：未登记模块导入执行面/交集模块必须变红，例外不外溢到其他模块。"""
+    runs = tmp_path / "host/glink_harness/runs"
+    runs.mkdir(parents=True)
+    (runs / "new_module.py").write_text(
+        "from ..kernel.e2b_env import SANDBOX_WORKSPACE\n", encoding="utf-8"
+    )
+    assert runs_execution_face_violations(tmp_path) == [
+        "host/glink_harness/runs/new_module.py: forbidden import glink_harness.kernel.e2b_env"
+    ]
+    # 例外按模块路径 + 模块清单生效：登记名单之外的模块导入被豁免的模块同样红。
+    (runs / "other.py").write_text(
+        "from ..kernel.conversation_lease import read_lease\n", encoding="utf-8"
+    )
+    assert runs_execution_face_violations(tmp_path) == [
+        "host/glink_harness/runs/new_module.py: forbidden import glink_harness.kernel.e2b_env",
+        "host/glink_harness/runs/other.py: forbidden import glink_harness.kernel.conversation_lease",
+    ]
+
+
+def test_generic_sandbox_module_never_imports_family_modules() -> None:
+    """通用 Sandbox 层不得导入 acp_ 前缀的族/族×面交集模块。
+
+    ``a sandbox never knows which harness it carries``（sandbox.py 自述）：
+    族自有状态根的面路径（SANDBOX_FAMILY_STATE_HOME）权威已在本模块，任何
+    反向依赖族/交集模块的回归在此变红。
+    """
+    relative = Path("host/glink_harness/kernel/sandbox.py")
+    imported = host_module_imports(relative, (ROOT / relative).read_text(encoding="utf-8"))
+    assert not [m for m in imported if m.startswith("glink_harness.kernel.acp_")], imported
+
+
 @pytest.mark.parametrize("source", [
     "__import__('glink_harness.kernel.harness_acp')",
     "import importlib; importlib.import_module('glink_harness.kernel.harness_pi')",

@@ -138,10 +138,10 @@ def remove_sandbox_credential_copies(handle: Any, dests: tuple[str, ...]) -> Non
     paused sandbox would durably hold credential material the run's boundary
     was built to keep per-run.
     """
-    from .acp_e2b_env import SANDBOX_ACP_HOME
+    from .sandbox import SANDBOX_FAMILY_STATE_HOME
 
     for relative in dests:
-        path = f"{SANDBOX_ACP_HOME}/{relative}"
+        path = f"{SANDBOX_FAMILY_STATE_HOME}/{relative}"
         try:
             handle.files.remove(path)
         except Exception as exc:  # noqa: BLE001 - surfaced as a parking failure

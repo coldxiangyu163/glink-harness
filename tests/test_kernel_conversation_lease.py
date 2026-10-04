@@ -24,13 +24,13 @@ from pathlib import Path
 import pytest
 
 from glink_harness.config import ConfigError, build_config
-from glink_harness.kernel.acp_e2b_env import SANDBOX_ACP_HOME
 from glink_harness.kernel.acp_sandbox_park import (
     GENERATION_MARKER_PATH,
     park_sandbox,
     read_generation_marker,
     write_generation_marker,
 )
+from glink_harness.kernel.sandbox import SANDBOX_FAMILY_STATE_HOME
 from glink_harness.kernel.conversation_lease import (
     LeaseCorruptError,
     settle_lease_after_destroy,
@@ -177,7 +177,7 @@ def test_generation_marker_roundtrip(tmp_path: Path) -> None:
     write_generation_marker(sandbox, conversation_run="r1", generation=5)
     assert read_generation_marker(sandbox) == ("r1", 5)
     # 标记在 ACP 状态根之外（回收打包器与回灌都不会携带它）。
-    state_root = sandbox.root.joinpath(*SANDBOX_ACP_HOME.lstrip("/").split("/"))
+    state_root = sandbox.root.joinpath(*SANDBOX_FAMILY_STATE_HOME.lstrip("/").split("/"))
     assert not (state_root / Path(GENERATION_MARKER_PATH).name).exists()
 
 
@@ -238,8 +238,8 @@ def park(
 
 def test_park_success_writes_marker_lease_and_pauses(tmp_path: Path) -> None:
     sandbox = FakeSandbox(tmp_path, sandbox_id="sbx-park")
-    sandbox.files.make_dir(f"{SANDBOX_ACP_HOME}/.dsh")
-    sandbox.files.write(f"{SANDBOX_ACP_HOME}/.dsh/.credentials.yaml", b"version: 1\n")
+    sandbox.files.make_dir(f"{SANDBOX_FAMILY_STATE_HOME}/.dsh")
+    sandbox.files.write(f"{SANDBOX_FAMILY_STATE_HOME}/.dsh/.credentials.yaml", b"version: 1\n")
     now = time.time()
     outcome = park(sandbox, tmp_path, now=now)
     assert outcome.ok, outcome.reason
@@ -318,13 +318,13 @@ def test_park_with_ttl_zero_destroys(tmp_path: Path) -> None:
 
 def test_park_credential_removal_failure_destroys(tmp_path: Path) -> None:
     sandbox = FakeSandbox(tmp_path, sandbox_id="sbx-cred")
-    sandbox.files.make_dir(f"{SANDBOX_ACP_HOME}/.dsh")
+    sandbox.files.make_dir(f"{SANDBOX_FAMILY_STATE_HOME}/.dsh")
 
     def refuse(path: str, **_kwargs: object) -> None:
         raise OSError("transport broke")
 
     sandbox.files.remove = refuse  # type: ignore[method-assign]
-    sandbox.files.write(f"{SANDBOX_ACP_HOME}/.dsh/.credentials.yaml", b"secret")
+    sandbox.files.write(f"{SANDBOX_FAMILY_STATE_HOME}/.dsh/.credentials.yaml", b"secret")
     outcome = park(sandbox, tmp_path)
     assert not outcome.ok and "凭据" in outcome.reason
     assert sandbox.killed

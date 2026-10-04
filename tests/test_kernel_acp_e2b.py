@@ -41,12 +41,12 @@ from acp_pack import apply_acp_pack
 from glink_harness.events import EventBus
 from glink_harness.kernel.acp_env import prepare_acp_runtime
 from harness_helpers import compose_launch, family
-from glink_harness.kernel.acp_e2b_env import SANDBOX_ACP_HOME, AcpSandboxTransfer
+from glink_harness.kernel.acp_e2b_env import AcpSandboxTransfer
 from glink_harness.contracts import FollowupUnavailable
 from glink_harness.kernel.acp_execution import RESUME_METHOD, AcpExecutionAdapter
 from glink_harness.kernel.e2b_env import SANDBOX_WORKSPACE, SandboxCommandProcess
 from glink_harness.kernel.execution import ExecutionSpec
-from glink_harness.kernel.sandbox import E2BSandbox, open_sandbox
+from glink_harness.kernel.sandbox import E2BSandbox, SANDBOX_FAMILY_STATE_HOME, open_sandbox
 from glink_harness.runs.runner import RunManager
 from glink_harness.store import FAILED, FINISHED, RunStore
 from glink_harness.tenancy import TenantContext
@@ -139,7 +139,7 @@ class FakeFiles:
 
     def list(self, path: str, depth: int = 1, **_kwargs: Any) -> list[_Entry]:
         self._sandbox.listed.append(path)
-        if self._sandbox.list_failure is not None and path == SANDBOX_ACP_HOME:
+        if self._sandbox.list_failure is not None and path == SANDBOX_FAMILY_STATE_HOME:
             raise OSError(self._sandbox.list_failure)
         real = self._real(path)
         if not real.is_dir():
@@ -464,19 +464,19 @@ def test_credentials_are_uploaded_into_the_run_home_and_hardened(tmp_path: Path)
     client.open()
     client.transfer.upload_home()
 
-    target = f"{SANDBOX_ACP_HOME}/.dsh/.credentials.yaml"
+    target = f"{SANDBOX_FAMILY_STATE_HOME}/.dsh/.credentials.yaml"
     assert sandbox.written[target] == source.read_bytes()
     assert (".dsh/.credentials.yaml",) == tuple(rel for rel, _digest in client.transfer.upload_manifest)
     # The boundary is re-applied inside the sandbox: the state root is 0700
     # *before* the upload (nothing lands in a traversable directory), then the
     # directories 0700 and the files 0600 — and only this run's paths appear.
-    assert sandbox.harden_commands[0] == f"chmod 0700 {SANDBOX_ACP_HOME}"
+    assert sandbox.harden_commands[0] == f"chmod 0700 {SANDBOX_FAMILY_STATE_HOME}"
     assert sandbox.harden_commands[-1].startswith("chmod 0600 ")
     assert target in sandbox.harden_commands[-1]
     assert shlex.split(sandbox.harden_commands[1])[1:4] == [
         "0700",
-        SANDBOX_ACP_HOME,
-        f"{SANDBOX_ACP_HOME}/.dsh",
+        SANDBOX_FAMILY_STATE_HOME,
+        f"{SANDBOX_FAMILY_STATE_HOME}/.dsh",
     ]
     assert "sk-opaque-credential-1234567890" not in " ".join(sandbox.harden_commands)
     # The value stays in the file; the manifest makes delivery verifiable.
@@ -501,7 +501,7 @@ def test_the_agent_command_is_the_frozen_argv_in_the_sandbox_workspace(tmp_path:
     assert client.sandbox.command(client.launch) == f"cd {SANDBOX_WORKSPACE} && exec {shlex.join(argv)}"
     # HOME is the run's sandbox state root; extra entries are the explicit
     # process-environment channel (values never enter the command line).
-    assert client.command_env() == {"HOME": SANDBOX_ACP_HOME, "ACME_MODE": "sandbox-mode-value"}
+    assert client.command_env() == {"HOME": SANDBOX_FAMILY_STATE_HOME, "ACME_MODE": "sandbox-mode-value"}
     assert "sandbox-mode-value" not in client.sandbox.command(client.launch)
 
     client.spawn()
@@ -593,8 +593,8 @@ def test_the_agent_is_bridged_over_the_sandbox_handle(tmp_path: Path) -> None:
 
         # The agent's HOME is the sandbox state root: the fake writes its state
         # through the mapped path, proving the env plumbing reached the agent.
-        assert sandbox.agent_envs["HOME"] == SANDBOX_ACP_HOME
-        assert (translate(SANDBOX_ACP_HOME, sandbox.root) / "fake-acp-state.json").is_file()
+        assert sandbox.agent_envs["HOME"] == SANDBOX_FAMILY_STATE_HOME
+        assert (translate(SANDBOX_FAMILY_STATE_HOME, sandbox.root) / "fake-acp-state.json").is_file()
 
         artifacts = adapter.recover_artifacts(tmp_path / "host-ws")
         assert [path.name for path in artifacts.files] == ["report.md"]
@@ -743,7 +743,7 @@ def _sandbox_sequence(
 
 
 def _state_path(sandbox: FakeSandbox, relative: str) -> Path:
-    return translate(f"{SANDBOX_ACP_HOME}/{relative}", sandbox.root)
+    return translate(f"{SANDBOX_FAMILY_STATE_HOME}/{relative}", sandbox.root)
 
 
 def _payloads(store: RunStore, run_id: str, event_type: str) -> list[dict[str, Any]]:
@@ -847,19 +847,19 @@ def test_acp_followup_resumes_the_parent_session_across_sandboxes(tmp_path: Path
 
     # Restore order (M3b): the sandbox state root is made 0700 *before* the
     # inherited files are written, and the fresh 0600 harden covers them.
-    inherited_target = f"{SANDBOX_ACP_HOME}/fake-acp-state.json"
+    inherited_target = f"{SANDBOX_FAMILY_STATE_HOME}/fake-acp-state.json"
     operations = sandboxes[1].operations
-    assert f"make_dir {SANDBOX_ACP_HOME}" in operations
-    assert f"run chmod 0700 {SANDBOX_ACP_HOME}" in operations
+    assert f"make_dir {SANDBOX_FAMILY_STATE_HOME}" in operations
+    assert f"run chmod 0700 {SANDBOX_FAMILY_STATE_HOME}" in operations
     assert f"write {inherited_target}" in operations
-    assert operations.index(f"run chmod 0700 {SANDBOX_ACP_HOME}") < operations.index(
+    assert operations.index(f"run chmod 0700 {SANDBOX_FAMILY_STATE_HOME}") < operations.index(
         f"write {inherited_target}"
     )
     assert sandboxes[1].written[inherited_target] == (
         sandboxes[0].root / "home/user/acp/home/fake-acp-state.json"
     ).read_bytes()
     assert inherited_target in sandboxes[1].harden_commands[-1]
-    assert sandboxes[1].command_kwargs["envs"]["HOME"] == SANDBOX_ACP_HOME
+    assert sandboxes[1].command_kwargs["envs"]["HOME"] == SANDBOX_FAMILY_STATE_HOME
     # The conversation's workspace half travelled too: the prior deliverable is
     # in the new sandbox before the agent starts (the pi face does the same).
     parent_report = (store.run_dir(parent.run_id) / "artifacts" / "report.md").read_bytes()
@@ -978,7 +978,7 @@ def test_state_recovery_bounds_refuse_the_whole_mirror(
                     tmp_path, report=None, sandbox_id=f"fake-sandbox-{len(self._sandboxes) + 1}"
                 )
                 for name, data in self._seed.items():
-                    target = translate(f"{SANDBOX_ACP_HOME}/{name}", sandbox.root)
+                    target = translate(f"{SANDBOX_FAMILY_STATE_HOME}/{name}", sandbox.root)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(data)
                 self._sandboxes.append(sandbox)
@@ -1031,7 +1031,7 @@ def test_inherited_state_secrets_join_the_child_redaction_boundary(tmp_path: Pat
             sandbox = FakeSandbox(
                 tmp_path, report=None, sandbox_id=f"fake-sandbox-{len(sandboxes) + 1}"
             )
-            target = translate(f"{SANDBOX_ACP_HOME}/fake-acp-state.json", sandbox.root)
+            target = translate(f"{SANDBOX_FAMILY_STATE_HOME}/fake-acp-state.json", sandbox.root)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(json.dumps({"remembered": inherited_secret}), encoding="utf-8")
             sandboxes.append(sandbox)
@@ -1233,14 +1233,14 @@ def test_recovery_never_mirrors_a_path_outside_the_state_root() -> None:
     """
     from glink_harness.kernel.acp_e2b_env import _state_relative
 
-    assert _state_relative(f"{SANDBOX_ACP_HOME}/.dsh/sessions/a.json") == ".dsh/sessions/a.json"
+    assert _state_relative(f"{SANDBOX_FAMILY_STATE_HOME}/.dsh/sessions/a.json") == ".dsh/sessions/a.json"
     for hostile in (
         "/home/user/workspace/report.md",
-        f"{SANDBOX_ACP_HOME}/../escape",
-        f"{SANDBOX_ACP_HOME}/a/../../escape",
-        f"{SANDBOX_ACP_HOME}/a\\b",
-        f"{SANDBOX_ACP_HOME}/",
-        f"{SANDBOX_ACP_HOME}",
+        f"{SANDBOX_FAMILY_STATE_HOME}/../escape",
+        f"{SANDBOX_FAMILY_STATE_HOME}/a/../../escape",
+        f"{SANDBOX_FAMILY_STATE_HOME}/a\\b",
+        f"{SANDBOX_FAMILY_STATE_HOME}/",
+        f"{SANDBOX_FAMILY_STATE_HOME}",
         "",
     ):
         assert _state_relative(hostile) is None, hostile
@@ -1264,14 +1264,14 @@ def test_the_credential_value_stays_in_the_sandbox_file(tmp_path: Path) -> None:
     final = manager.wait(record.run_id, timeout=120)
     assert final is not None and final.status == FINISHED
 
-    target = f"{SANDBOX_ACP_HOME}/.codex/auth.json"
+    target = f"{SANDBOX_FAMILY_STATE_HOME}/.codex/auth.json"
     assert sandbox.written[target] == source.read_bytes(), "凭据以文件形态进入沙箱"
     assert secret not in sandbox.command, "凭据值不得进入沙箱命令"
     assert secret not in " ".join(sandbox.agent_envs.values()), "凭据值不得进入命令环境"
     stored_events = events_text(store, record.run_id)
     assert secret not in stored_events
     # The fake agent's HOME write lands inside the run's sandbox HOME.
-    assert (translate(SANDBOX_ACP_HOME, sandbox.root) / "fake-acp-state.json").is_file()
+    assert (translate(SANDBOX_FAMILY_STATE_HOME, sandbox.root) / "fake-acp-state.json").is_file()
 
 
 def test_a_failed_upload_still_persists_the_sandbox_identity(tmp_path: Path) -> None:

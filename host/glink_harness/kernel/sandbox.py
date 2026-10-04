@@ -35,7 +35,6 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from ..config import ConfigError, HostConfig
-from .acp_e2b_env import SANDBOX_ACP_HOME
 from .agent_env import passthrough_env
 from .docker_env import (
     CONTAINER_CONFIG,
@@ -52,6 +51,7 @@ from .docker_env import (
 )
 from .e2b_env import (
     SANDBOX_CONFIG,
+    SANDBOX_HOME,
     SANDBOX_SESSIONS,
     SANDBOX_WORKSPACE,
     SandboxCommandProcess,
@@ -64,8 +64,22 @@ from .e2b_env import (
 logger = logging.getLogger("glink_harness.kernel.sandbox")
 
 
+#: Where a family's own state root is mounted on the E2B face. The current
+#: only placer is the ACP family's ``home`` role — the host renders
+#: ``runs/<id>/acp-agent/home`` and uploads it here — which is why the path
+#: keeps its ``acp/home`` segments. The name and the definition stay
+#: face-neutral: like every other face path it belongs to this module (the
+#: face decides *where*), while the upload/recovery policy around it stays in
+#: the ACP-only modules (the family decides *what*). ``home`` is a
+#: family-specific role, not a generic one — see :data:`ROLES`.
+SANDBOX_FAMILY_STATE_HOME = f"{SANDBOX_HOME}/acp/home"
+
 #: Path roles a harness may place. ``workspace`` is the run workspace, the
 #: others are harness-owned state the sandbox only has to make reachable.
+#: ``workspace``/``config``/``sessions`` are generic (every family places
+#: them); ``home`` is family-specific — only the ACP family places it today,
+#: as the mount point of its own per-run state root
+#: (:data:`SANDBOX_FAMILY_STATE_HOME` on the E2B face).
 ROLES = ("workspace", "config", "sessions", "home")
 
 
@@ -377,7 +391,7 @@ class E2BSandbox(Sandbox):
         "workspace": SANDBOX_WORKSPACE,
         "config": SANDBOX_CONFIG,
         "sessions": SANDBOX_SESSIONS,
-        "home": SANDBOX_ACP_HOME,
+        "home": SANDBOX_FAMILY_STATE_HOME,
     }
 
     def __init__(self, **kwargs: Any) -> None:

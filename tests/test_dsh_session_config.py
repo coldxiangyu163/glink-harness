@@ -9,9 +9,9 @@ import pytest
 
 from glink_harness.config import ConfigError, build_config, load_config, validate_host_config
 from glink_harness.events import EventBus
-from glink_harness.kernel.acp_e2b_env import SANDBOX_ACP_HOME
 from glink_harness.kernel.acp_env import prepare_acp_runtime
 from glink_harness.kernel.docker_env import CONTAINER_HOME
+from glink_harness.kernel.sandbox import SANDBOX_FAMILY_STATE_HOME
 from glink_harness.runs.runner import RunManager
 from glink_harness.store import FAILED, FINISHED, RunStore
 from acp_pack import write_acp_pack
@@ -149,7 +149,7 @@ def test_repository_dsh_declares_sources_and_has_no_dead_model_default() -> None
 @pytest.mark.parametrize("executor, placed_home", [
     ("inproc", None),  # inproc：放置后的 HOME 就是宿主侧 run HOME 本身
     ("docker", CONTAINER_HOME),
-    ("e2b", SANDBOX_ACP_HOME),
+    ("e2b", SANDBOX_FAMILY_STATE_HOME),
 ])
 def test_patch_overlay_reaches_the_launch_argv_on_every_face(
     tmp_path: Path, executor: str, placed_home: str | None,

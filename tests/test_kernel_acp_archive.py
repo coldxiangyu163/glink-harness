@@ -32,11 +32,11 @@ from glink_harness.egress import EgressProxy
 from glink_harness.kernel.acp_e2b_env import (
     BACKFILL_TAR_PATH,
     RECLAIM_TAR_PATH,
-    SANDBOX_ACP_HOME,
     AcpSandboxTransfer,
 )
 from glink_harness.kernel.acp_env import AcpRuntime
 from glink_harness.kernel.archive_channel import ArchiveEndpoint
+from glink_harness.kernel.sandbox import SANDBOX_FAMILY_STATE_HOME
 
 pytestmark = pytest.mark.usefixtures("clean_reclaim_scratch")
 
@@ -154,7 +154,7 @@ class _Commands:
         # Map longest sandbox prefixes through placeholders, so replacing
         # /home later cannot rewrite an already translated host path.
         mapped = cmd
-        mappings = [(SANDBOX_ACP_HOME, self._sandbox.translate(SANDBOX_ACP_HOME)),
+        mappings = [(SANDBOX_FAMILY_STATE_HOME, self._sandbox.translate(SANDBOX_FAMILY_STATE_HOME)),
                     ("/home/user/acp", self._sandbox.root / "acp"),
                     ("/home/user", self._sandbox.root), ("/home", self._sandbox.root.parent)]
         for index, (prefix, _real) in enumerate(mappings):
@@ -260,10 +260,10 @@ def state_files(conversation: Path) -> dict[str, bytes]:
 
 
 def seed_state(sandbox: RealCommandFakeSandbox, session: bytes) -> None:
-    sandbox.files.make_dir(f"{SANDBOX_ACP_HOME}/.dsh/sessions")
-    sandbox.files.write(f"{SANDBOX_ACP_HOME}/.dsh/sessions/s.v4.jsonl.zstd", session)
+    sandbox.files.make_dir(f"{SANDBOX_FAMILY_STATE_HOME}/.dsh/sessions")
+    sandbox.files.write(f"{SANDBOX_FAMILY_STATE_HOME}/.dsh/sessions/s.v4.jsonl.zstd", session)
     # The credential copy the host uploaded: it must never enter an archive.
-    sandbox.files.write(f"{SANDBOX_ACP_HOME}/.dsh/.credentials.yaml", b"version: 1")
+    sandbox.files.write(f"{SANDBOX_FAMILY_STATE_HOME}/.dsh/.credentials.yaml", b"version: 1")
 
 
 # -- reclaim ---------------------------------------------------------------------
@@ -399,12 +399,12 @@ def test_backfill_pulls_the_published_state_into_the_sandbox(
     assert second.backfill_facts["files"] == 1
     assert second.backfill_facts["durationMs"] >= 0
     assert (
-        follow_up.translate(f"{SANDBOX_ACP_HOME}/.dsh/sessions/s.v4.jsonl.zstd")
+        follow_up.translate(f"{SANDBOX_FAMILY_STATE_HOME}/.dsh/sessions/s.v4.jsonl.zstd")
         .read_bytes()
         == b"authoritative-bytes"
     )
     # The manifest never travels to the sandbox (it is host bookkeeping).
-    assert not follow_up.translate(f"{SANDBOX_ACP_HOME}/manifest.json").exists()
+    assert not follow_up.translate(f"{SANDBOX_FAMILY_STATE_HOME}/manifest.json").exists()
 
 
 def test_real_archive_backfill_repairs_only_the_target_copy(tmp_path, conversation, proxy) -> None:
@@ -415,7 +415,7 @@ def test_real_archive_backfill_repairs_only_the_target_copy(tmp_path, conversati
     _need_host_tools()
     runtime = make_runtime(tmp_path)
     source = RealCommandFakeSandbox(tmp_path / "legacy")
-    source_home = source.translate(SANDBOX_ACP_HOME)
+    source_home = source.translate(SANDBOX_FAMILY_STATE_HOME)
     original, data = seed(source_home)
     first = make_transfer(source, runtime, proxy=proxy, conversation=conversation,
                           run_id="r1", workspace=tmp_path / "ws")
@@ -426,9 +426,9 @@ def test_real_archive_backfill_repairs_only_the_target_copy(tmp_path, conversati
     second = make_transfer(target, runtime, proxy=proxy, conversation=conversation,
                            run_id="r2", workspace=tmp_path / "ws")
     second.backfill_state()
-    copied = target.translate(SANDBOX_ACP_HOME) / original.relative_to(source_home)
+    copied = target.translate(SANDBOX_FAMILY_STATE_HOME) / original.relative_to(source_home)
     assert copied.read_bytes() == data
-    repair_resume_home(SANDBOX_ACP_HOME, handle=target)
+    repair_resume_home(SANDBOX_FAMILY_STATE_HOME, handle=target)
     expected = rows()
     expected[1]["ignorable"] = True
     assert decoded(copied.read_bytes()) == expected

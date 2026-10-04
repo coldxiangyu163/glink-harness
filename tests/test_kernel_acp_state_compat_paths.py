@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from glink_harness.events import EventBus
-from glink_harness.kernel.acp_e2b_env import SANDBOX_ACP_HOME
 from glink_harness.kernel.acp_state_compat import AcpStateCompatError, repair_resume_home
+from glink_harness.kernel.sandbox import SANDBOX_FAMILY_STATE_HOME
 from glink_harness.runs.runner import RunManager
 from glink_harness.store import FAILED, FINISHED, RunStore
 from test_dsh_session_config import MODEL_OPTIONS, REASONING_OPTION, wired_config
@@ -122,11 +122,11 @@ def test_hot_manager_rejects_linked_home_before_external_io_and_spawn(tmp_path, 
             sandbox.kill()
 
 
-@pytest.mark.parametrize("linked", ["/home", "/home/user", "/home/user/acp", SANDBOX_ACP_HOME])
+@pytest.mark.parametrize("linked", ["/home", "/home/user", "/home/user/acp", SANDBOX_FAMILY_STATE_HOME])
 def test_direct_remote_validation_stops_at_first_link(tmp_path, linked):
     # Thin SDK descriptor fixture: root is trusted, one directory entry is a
     # symlink. Accessing that entry as a directory, or payload I/O, is forbidden.
-    parents = ["/", "/home", "/home/user", "/home/user/acp", SANDBOX_ACP_HOME]
+    parents = ["/", "/home", "/home/user", "/home/user/acp", SANDBOX_FAMILY_STATE_HOME]
     calls = []
 
     def listing(path, **kwargs):
@@ -142,5 +142,5 @@ def test_direct_remote_validation_stops_at_first_link(tmp_path, linked):
 
     handle = SimpleNamespace(files=SimpleNamespace(list=listing, read=forbidden, write=forbidden))
     with pytest.raises(AcpStateCompatError):
-        repair_resume_home(SANDBOX_ACP_HOME, handle=handle)
+        repair_resume_home(SANDBOX_FAMILY_STATE_HOME, handle=handle)
     assert linked not in calls

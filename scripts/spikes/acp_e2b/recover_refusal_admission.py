@@ -40,7 +40,7 @@ sys.path.insert(0, str(REPO_ROOT / "host"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "spikes"))
 from acp_pack import PROBE_PACK_NAME, write_probe_pack  # noqa: E402
 
-from glink_harness.kernel.acp_e2b_env import SANDBOX_ACP_HOME  # noqa: E402
+from glink_harness.kernel.sandbox import SANDBOX_FAMILY_STATE_HOME  # noqa: E402
 from glink_harness.kernel.acp_env import INHERIT_MAX_FILE_BYTES  # noqa: E402
 from glink_harness.kernel.acp_execution import acp_resume_method  # noqa: E402
 from glink_harness.kernel.e2b_env import confirm_sandbox_absent  # noqa: E402
@@ -217,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"数据根: {sanitize(str(data_root), workdir)}")
     print(f"任务超时: {args.timeout}s")
     print(
-        f"合成超限文件: {SANDBOX_ACP_HOME}/bloat.bin = {args.bloat_bytes} B"
+        f"合成超限文件: {SANDBOX_FAMILY_STATE_HOME}/bloat.bin = {args.bloat_bytes} B"
         f"（单文件上限 {INHERIT_MAX_FILE_BYTES} B；在 run 回合内用 SDK 直连同一沙箱写入）"
     )
     print()
@@ -295,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     box = Sandbox.connect(sandbox_id, api_key=api_key)
                     command = (
-                        f"head -c {args.bloat_bytes} /dev/zero > {SANDBOX_ACP_HOME}/bloat.bin"
+                        f"head -c {args.bloat_bytes} /dev/zero > {SANDBOX_FAMILY_STATE_HOME}/bloat.bin"
                     )
                     started = time.monotonic()
                     result = box.commands.run(command, timeout=300)
@@ -303,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
                     injection["exitCode"] = getattr(result, "exit_code", None)
                     injection["seconds"] = round(time.monotonic() - started, 2)
                     check = box.commands.run(
-                        f"node -e \"console.log(require('fs').statSync('{SANDBOX_ACP_HOME}/bloat.bin').size)\"",
+                        f"node -e \"console.log(require('fs').statSync('{SANDBOX_FAMILY_STATE_HOME}/bloat.bin').size)\"",
                         timeout=60,
                     )
                     text = str(getattr(check, "stdout", "") or "").strip()
