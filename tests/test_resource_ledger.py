@@ -33,6 +33,7 @@ from glink_harness.kernel.execution import (
     SessionInfo,
 )
 from glink_harness.runs.runner import ResourcesUnreleased, RunManager, RunQuotaExceeded
+from glink_harness.runs.state import RunExecution
 from glink_harness.ownership import DataRootOwnership
 from glink_harness.store import FAILED, FINISHED, RUNNING, RunSpec, RunStore, StoreError
 from glink_harness.tenancy import TenantContext
@@ -677,3 +678,83 @@ def test_reconcile_closes_leftover_children_and_summarizes_them(tmp_path: Path) 
         {"n": 0, "agent": "researcher", "task": "调研甲", "status": "interrupted"},
         {"n": 1, "agent": "researcher", "task": "调研乙", "status": "finished"},
     ]
+
+
+def test_reconcile_does_not_close_an_admission_landing_inside_its_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An admission that lands inside reconcile's pass must survive it.
+
+    Red→green mechanism: admission (:meth:`RunManager.start`) inserts the
+    ``running`` row and registers the execution **together under the
+    admission lock**. If reconcile only snapshotted the in-flight table
+    under the lock and then walked ``running_ids()`` outside it, an
+    admission landing in that window is visible to the walk but absent
+    from the stale snapshot — and would be closed out as ``interrupted``
+    underneath its own execution (terminal row, live in-flight entry). The
+    racing thread below reproduces exactly that critical section (row
+    insert + in-flight entry under the same lock), injected between the
+    snapshot and the walk via ``running_ids``.
+    """
+    config = make_config(tmp_path)
+    store = RunStore(config.data_root / "runs")
+    store.create(
+        "遗留 run",
+        run_id="leftover-window",
+        spec=RunSpec(family="pi", pack="pi", executor="inproc"),
+    )
+    ownership = DataRootOwnership.acquire(config.data_root)
+    try:
+        manager = RunManager(config, EventBus(), store, ownership=ownership)
+        lock = manager._lock  # noqa: SLF001 - the lock start() admits under
+        settled = threading.Event()
+        admitted = threading.Event()
+
+        def do_admit() -> None:
+            record = store.create(
+                "窗口内准入的 run",
+                run_id="racing-admission",
+                spec=RunSpec(family="pi", pack="pi", executor="inproc"),
+            )
+            manager._executions[record.run_id] = RunExecution(  # noqa: SLF001
+                record=record, workspace=Path(record.workspace)
+            )
+
+        def racing_admission() -> None:
+            if lock.acquire(blocking=False):
+                # The pass walks outside the lock (the bug): a whole
+                # admission completes before the walk reads the rows.
+                try:
+                    do_admit()
+                finally:
+                    lock.release()
+                settled.set()
+                admitted.set()
+                return
+            # The pass holds the lock through the walk: the admission waits
+            # for it and lands only after the pass is done — never mid-walk.
+            settled.set()
+            lock.acquire()
+            try:
+                do_admit()
+            finally:
+                lock.release()
+            admitted.set()
+
+        def running_ids_with_racing_admission() -> list[str]:
+            threading.Thread(target=racing_admission, daemon=True).start()
+            assert settled.wait(10), "准入线程必须先完成一次 admission lock 探测"
+            return original_running_ids()
+
+        original_running_ids = store.running_ids
+        monkeypatch.setattr(store, "running_ids", running_ids_with_racing_admission)
+        assert manager.reconcile() == ["leftover-window"]
+        assert admitted.wait(10), "等锁的准入线程必须能在对账结束后完成"
+    finally:
+        ownership.release()
+
+    record = store.get("racing-admission")
+    assert record is not None, "准入线程应已写入 running 行"
+    assert record.status == RUNNING, "窗口内准入的 run 不得被误收口为 interrupted"
+    assert store.committed_terminal("racing-admission") is None
+    assert "racing-admission" in manager._executions  # noqa: SLF001 - 仍在执行表中

@@ -115,16 +115,30 @@ class ResourceLedger:
         ``released: null`` (unknown), so it keeps holding capacity until an
         operator adjudicates it. External resources are never touched.
         Returns the ids that were interrupted.
+
+        Calling contract: the whole pass — the in-flight snapshot, the
+        ``running_ids()`` traversal and every interrupted commit — runs under
+        the admission lock, mutually exclusive with ``RunManager.start``'s
+        admission critical section (the ``running`` row insert and the
+        in-flight table entry move together under that lock). Snapshotting
+        the table and only then walking the database outside the lock races
+        an admission landing in between: the fresh row is visible to the
+        walk while its id is absent from the stale snapshot, and the run is
+        closed out as ``interrupted`` underneath its own execution. Holding
+        the lock through the ``synchronous=FULL`` terminal commits therefore
+        blocks ``start()`` for their duration — an accepted cost, since
+        reconcile runs at host startup or offline (CLI/tests) before
+        concurrent admissions are expected, and correctness wins here.
         """
         self._require_ownership()
         with self._admission_lock:
             executing = self._execution_ids()
-        interrupted: list[str] = []
-        for run_id in self.store.running_ids():
-            if run_id in executing:
-                continue
-            if self._commit_interrupted(run_id):
-                interrupted.append(run_id)
+            interrupted: list[str] = []
+            for run_id in self.store.running_ids():
+                if run_id in executing:
+                    continue
+                if self._commit_interrupted(run_id):
+                    interrupted.append(run_id)
         if interrupted:
             logger.warning(
                 "识别到 %d 个上次进程遗留的 running run，已按中断收口: %s",

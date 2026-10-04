@@ -463,7 +463,13 @@ class RunManager:
     # forwards are the manager's surface for ``app.py`` and ``cli.py``.
 
     def reconcile(self) -> list[str]:
-        """Close out runs a previous host process left ``running``."""
+        """Close out runs a previous host process left ``running``.
+
+        Runs under the admission lock for the whole pass (snapshot,
+        traversal and commits), so it excludes :meth:`start` entirely and
+        blocks admissions for the duration of the durable terminal
+        commits — startup/offline callers only.
+        """
         return self._ledger.reconcile()
 
     def unreleased_resources(self) -> list[dict[str, Any]]:
