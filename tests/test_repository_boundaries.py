@@ -132,6 +132,7 @@ _KERNEL_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
     "outcome.py": frozenset(),
     "projection.py": frozenset({"glink_harness.event_schema", "glink_harness.events", "glink_harness.redaction"}),
     "rpc.py": frozenset(),
+    "rpc_transport.py": frozenset(),  # 两族共享的 stdio 传输骨架（进程/线程/帧/close 链）
     "run_views.py": frozenset({"glink_harness.artifacts", "glink_harness.store"}),  # R1-1 窄协议与宿主侧 RunStore 适配器
     "sandbox.py": frozenset({"glink_harness.config"}),
     "subagent_artifacts.py": frozenset(),
