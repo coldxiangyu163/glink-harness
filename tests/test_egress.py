@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from glink_harness import egress
 from glink_harness.config import ConfigError, build_config
 from glink_harness.egress import EgressProxy, EgressQuota, normalize_usage
 from glink_harness.events import EventBus
@@ -217,6 +218,30 @@ def test_a_missing_or_foreign_token_is_refused_before_the_upstream(
         assert status == 401, headers
         assert json.loads(raw)["error"]["code"] == "invalid_token"
     assert upstream.requests == []
+
+
+def test_a_stalled_connection_hits_the_request_timeout_and_releases_the_thread(
+    proxy: EgressProxy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The main routes must carry the same class of deadline the web face and
+    # the archive route already have: an unauthenticated client that never
+    # finishes its request line cannot pin the handler thread forever.
+    assert egress._EgressHandler.timeout == egress.REQUEST_TIMEOUT_SECONDS == 60.0
+    grant = proxy.issue(run_id="run-1", tenant=None, model_key=MODEL_KEY, model_id="m")
+    url = f"{base(proxy)}/model/chat/completions"
+    headers = {"Authorization": f"Bearer {grant.token}"}
+    assert post(url, headers=headers)[0] == 200
+    # Shrink only this probe's deadline (the 60s default stays asserted
+    # above): a raw socket that sends nothing must be closed by the server
+    # well inside the generous client-side cap, not held open.
+    assert proxy.port is not None
+    monkeypatch.setattr(egress._EgressHandler, "timeout", 0.5)
+    with socket.create_connection(("127.0.0.1", proxy.port), timeout=10) as stalled:
+        stalled.settimeout(10)
+        assert stalled.recv(1) == b""
+    monkeypatch.undo()
+    # The handler thread came back; the listener still forwards normally.
+    assert post(url, headers=headers)[0] == 200
 
 
 def test_a_revoked_token_is_refused_and_the_idle_listener_closes(

@@ -75,6 +75,10 @@ MAX_METER_BYTES = 8 * 1024 * 1024
 MAX_SSE_LINE_BYTES = 1024 * 1024
 #: Upstream socket timeout (seconds between bytes, not the whole response).
 UPSTREAM_TIMEOUT_SECONDS = 600
+#: Inbound socket deadline: a held-open request line, header or body must
+#: not pin a handler thread forever (same 60s deadline as the web face,
+#: ``app.REQUEST_SOCKET_TIMEOUT_SECONDS``).
+REQUEST_TIMEOUT_SECONDS = 60.0
 #: Headers never copied between the kernel and the upstream.
 _HOP_BY_HOP = {
     "connection",
@@ -370,6 +374,11 @@ class _EgressHandler(BaseHTTPRequestHandler):
     server: _EgressServer
     server_version = "glink-harness-egress"
     protocol_version = "HTTP/1.0"
+    # The standard setup() applies this to the socket, and handle_one_request
+    # turns the read timeout into a closed connection, so a stalled request
+    # releases this thread. The archive route raises it (to
+    # ARCHIVE_READ_TIMEOUT_SECONDS) only after its token is verified.
+    timeout = REQUEST_TIMEOUT_SECONDS
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         # Paths may carry query strings; tokens never travel in them, but the
