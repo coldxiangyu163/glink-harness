@@ -35,6 +35,7 @@ from glink_harness.config import build_config
 from glink_harness.events import RUN_STARTED, EventBus
 from glink_harness.kernel.rpc import PiRpcClient
 from glink_harness.runs.runner import RunManager
+from glink_harness.service import ExecutionService
 from glink_harness.static_files import WebAssets
 from glink_harness.store import FAILED, RUNNING, RunStore, RunSpec
 
@@ -74,7 +75,8 @@ def build_server(config, *, capacity: int | None = None) -> GlinkHarnessServer:
     bus = EventBus(capacity=capacity) if capacity is not None else EventBus()
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, bus, store, client_factory=fake_factory())
-    return GlinkHarnessServer(config, bus, store, manager, WebAssets(config.web_root))
+    service = ExecutionService(config, bus, store, manager)
+    return GlinkHarnessServer(service, WebAssets(config.web_root))
 
 
 def wait_for(predicate, *, timeout: float = 20.0) -> bool:
@@ -567,7 +569,7 @@ def test_a_terminal_frame_is_only_published_once_every_reader_sees_it(tmp_path: 
     bus = _ObservingBus()
     store = RunStore(config.data_root / "runs")
     manager = RunManager(config, bus, store, client_factory=fake_factory(write_report=True))
-    server = GlinkHarnessServer(config, bus, store, manager, WebAssets(config.web_root))
+    server = GlinkHarnessServer(ExecutionService(config, bus, store, manager), WebAssets(config.web_root))
     bus.port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

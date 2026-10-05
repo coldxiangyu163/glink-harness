@@ -26,6 +26,7 @@ from glink_harness.kernel.projection import project_event
 from glink_harness.kernel.rpc import PiRpcClient
 from glink_harness.runs.runner import RunManager
 from glink_harness.runs.secrets import RunSecretBoundary
+from glink_harness.service import ExecutionService
 from glink_harness.redaction import REPLACEMENT, SecretRedactor, redactor_from_config
 from glink_harness.store import RunStore, RunSpec
 from store_helpers import events_text, finish, stored_record, stored_text
@@ -852,7 +853,7 @@ def test_runner_never_emits_a_long_known_value(tmp_path: Path, length: int) -> N
         )
 
     manager = RunManager(config, bus, store, client_factory=factory)
-    server = GlinkHarnessServer(config, bus, store, manager, WebAssets(config.web_root))
+    server = GlinkHarnessServer(ExecutionService(config, bus, store, manager), WebAssets(config.web_root))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

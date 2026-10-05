@@ -455,7 +455,7 @@ def load_identity_material(config: HostConfig) -> Tenancy | None:
     store is opened by :func:`build_tenancy`, which must only run while this
     process owns ``config.data_root``: creating the file, running the schema
     migration and switching on WAL are data-root writes (see
-    :func:`glink_harness.app.create_server`).
+    :func:`glink_harness.service.build_execution_service`).
 
     Raises :class:`ConfigError` when the mode is enabled but any required file
     is missing, unreadable, over-permissive or inside the repository. The

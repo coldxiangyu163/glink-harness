@@ -190,7 +190,9 @@ def main(
         print("\n收到中断，正在退出 / interrupted, shutting down")
     finally:
         # Cancel and reap this process's runs before the HTTP server disappears;
-        # a run that does not release in time is reported, not hidden.
+        # a run that does not release in time is reported, not hidden. The
+        # explicit call keeps the exit code honest; close() then runs the same
+        # bounded shutdown again — idempotent, and the table is already empty.
         unreleased = server.manager.shutdown(timeout=15.0)
         server.server_close()
     if unreleased:
@@ -304,18 +306,23 @@ def resource_command(config: HostConfig, run_id: str | None, note: str | None) -
         print(f"{exc}；请先停止宿主再执行资源裁决", file=sys.stderr)
         return 2
     try:
-        manager = RunManager(
-            config, EventBus(), RunStore(config.data_root / "runs"), ownership=ownership
-        )
-        manager.reconcile()
-        if run_id:
-            try:
-                manager.adjudicate_release(run_id, note or "")
-            except (KeyError, ValueError, RunBusy) as exc:
-                print(f"裁决被拒绝: {exc}", file=sys.stderr)
-                return 1
-            print(f"已记录人工裁决：run {run_id} 的执行资源已释放")
-        print(json.dumps(manager.unreleased_resources(), ensure_ascii=False, indent=2))
-        return 0
+        store = RunStore(config.data_root / "runs")
+        manager = RunManager(config, EventBus(), store, ownership=ownership)
+        try:
+            manager.reconcile()
+            if run_id:
+                try:
+                    manager.adjudicate_release(run_id, note or "")
+                except (KeyError, ValueError, RunBusy) as exc:
+                    print(f"裁决被拒绝: {exc}", file=sys.stderr)
+                    return 1
+                print(f"已记录人工裁决：run {run_id} 的执行资源已释放")
+            print(json.dumps(manager.unreleased_resources(), ensure_ascii=False, indent=2))
+            return 0
+        finally:
+            # 与执行核心的拆除同序：出口代理（离线命令从未绑定监听，空态
+            # 关闭）、run 存储，然后才是下面的所有权释放。
+            manager.egress.close()
+            store.close()
     finally:
         ownership.release()

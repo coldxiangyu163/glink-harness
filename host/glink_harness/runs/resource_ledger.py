@@ -537,7 +537,17 @@ class ResourceLedger:
             )
             self._resource_watch = thread
             self._resource_watch_stop = stop
-        thread.start()
+        try:
+            thread.start()
+        except BaseException:
+            # A thread that never started must not stay registered: the
+            # stopper would join an unstarted thread and that RuntimeError
+            # would mask the original startup failure.
+            with self._admission_lock:
+                if self._resource_watch is thread:
+                    self._resource_watch = None
+                    self._resource_watch_stop = None
+            raise
         return thread
 
     def _resource_watch_loop(self, stop: threading.Event, interval: int) -> None:
@@ -558,7 +568,13 @@ class ResourceLedger:
             self._resource_watch_stop = None
         if stop is not None:
             stop.set()
-        if thread is not None and thread is not threading.current_thread():
+        # ``ident`` is None until the thread has actually started: joining an
+        # unstarted thread would raise and mask whatever is being torn down.
+        if (
+            thread is not None
+            and thread is not threading.current_thread()
+            and thread.ident is not None
+        ):
             thread.join(timeout)
 
     def resource_holds(self) -> list[str]:

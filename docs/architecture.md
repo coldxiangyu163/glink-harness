@@ -57,7 +57,7 @@
 - 不删除旧数据库、会话和报告，不按邮箱猜测历史归属。真实数据迁移、公开发布及回退窗口另行
   授权；后续开源需核对本仓库许可、上游归属、依赖许可和公开材料范围，本次不执行发布或改变许可。
 
-### 当前实现（解耦前）
+### 当前实现（解耦进行中）
 
 当前宿主仍提供研究工作台、HTTP/SSE、站内账号和 SQLite 存储，通过 Docker / E2B 为 run 提供
 独立执行环境，本地 `inproc` 保留为单 Agent 开发与调试入口。默认 `GLINK_TENANCY=local`
@@ -72,6 +72,8 @@ Docker/E2B 可并发；多租户实现目前只有合成验证，真实网关、
 未覆盖，不能由单 run smoke 或已有执行面实测替代。
 
 多租户实现已覆盖服务端可信身份、run/事件/报告/取消的归属过滤、每 run 凭据交付与脱敏边界、显式并发准入与 fail-closed 资源台账（未确认释放的持有计入 owner 租户与全局槽位，可由在线自动对账或离线人工裁决释放）；仍未覆盖多宿主租约、共享存储、真实网关与云环境的资源上限执行。单独容器/沙箱提供执行隔离，但不自动解决宿主 API 授权、存储隔离或凭据访问，也不构成本仓库对容器/沙箱实际隔离强度的保证。
+
+**服务化拆分 R2 已落地**（[多 Harness 计划 §6](multi-harness-plan.md#6-里程碑)）：执行核心与 HTTP 面分两层组装。`glink_harness.service.build_execution_service` 按顺序契约（数据根所有权最先 → 身份材料 → 存储 → 启动对账，失败回滚）产出可独立执行与重放的执行核心，不导入任何 HTTP/UI 模块（`tests/test_repository_boundaries.py` 的导入方向规则与 `tests/test_execution_service.py` 的无 HTTP 直驱回归钉住）；`app.create_server` 只在其上加 HTTP 面——绑端口最后发生，资源扫描在面就绪后启动——拆毁路径唯一（`ExecutionService.close`，`server_close` 委托它）：按组装逆序六步拆除（资源扫描 → 取消并等待在途 run 终态提交 → 出口代理 → run 存储 → 身份材料 → 数据根锁），任一步失败仍走完剩余步骤并重抛首异常；在途 run 的真实裁决先于锁释放提交，不被下一个宿主的启动对账改写。`scripts/glink-api-client.py` 是纯标准库参考客户端：经 HTTP/SSE 接口完成创建、直播到终帧、终态查询与历史重放，不导入产品代码（`tests/test_reference_client.py` 同步钉住）。产品账号、邀请入口与固定报告格式的解耦仍待按消费者核对后推进；调用方授权、产物访问与数据根安全义务不变，事件历史不因拆分移除。
 
 **旧数据不可读**：本次架构重设计（2026-09-28）起不再为旧 run 记录保留兼容分支。run 记录、事件与资源台账迁入 `runs/runs.db`（SQLite，[ADR 0009](adr/0009-sqlite-run-store.md)）后，此前的 `runs/<id>/meta.json` / `events.jsonl` 文件与 `<数据根>/sessions/<id>/` 会话目录**一律不再被读取**：旧 run 不出现在列表、详情、重放与资源台账中，也不能被追问；`runs.db` 的 schema 版本不符时宿主拒绝打开。不提供迁移，需要旧历史的操作员自行保留旧数据根。决策史统一记在 [`docs/adr/`](adr/)。
 
@@ -932,7 +934,7 @@ PATH / HOME / 代理 / 证书等运行必需项，再注入指向运行期配置
 
 | 路径 | 属于 | 说明 |
 |---|---|---|
-| `host/glink_harness/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `redaction`（出站脱敏）/ `accounts`（站内账号）/ `auth`（身份断言与会话）/ `dotenv`（.env 解析）/ `blueprints`（蓝图目录推导与解析渲染）、`harnesses`（harness 包清单的目录推导、fail-closed 解析与选择）；组成根 `app`（服务器与 `create_server`） |
+| `host/glink_harness/` | 宿主 | `config` / `events` / `store` / `tenancy` / `ownership` / `static_files` / `redaction`（出站脱敏）/ `accounts`（站内账号）/ `auth`（身份断言与会话）/ `dotenv`（.env 解析）/ `blueprints`（蓝图目录推导与解析渲染）、`harnesses`（harness 包清单的目录推导、fail-closed 解析与选择）；执行核心组装 `service`（`build_execution_service`：所有权→身份→存储→启动对账，R2）；HTTP 组成根 `app`（服务器与 `create_server`，只加面） |
 | `host/glink_harness/web_*.py` | 宿主 HTTP 层 | `web_routes`（路由与 run/health/报告 API）/ `web_sse`（事件流与连接额度）/ `web_security`（身份、会话与请求防护）/ `web_http`（请求体、响应、静态资源、脱敏访问日志）；一个 `HostRequestHandler` 由它们组合而成 |
 | `host/glink_harness/cli.py` | 宿主 CLI | 参数与 `main`、离线运维子命令（`--unreleased` / `--mark-released` / `--create-invite`） |
 | `host/glink_harness/kernel/` | 接入层 | pi 族：`rpc` / `framing` / `projection` / `agent_env` / `subagent_artifacts`（pi-subagents 产物布局解析与关联，R2）；ACP 族：`acp_rpc` / `acp_projection` / `acp_env` / `acp_execution`；两族共享：`rpc_transport`（stdio 传输骨架——进程生命周期、reader 线程、LF 帧、close 升级链、有界 stderr 尾部；`rpc.py` 与 `acp_rpc.py` 继承它，协议帧分派与族错误词汇在子类）；执行面：`execution` / `outcome`（执行 outcome 类型与 driver 线程适配器的封存基类）/ `docker_env` / `e2b_env`（pi 面 E2B 沙箱与共享的沙箱读写助手，含 resume/kill-by-id）/ `acp_e2b_env`（ACP 面 E2B 沙箱与后台命令的 stdio 桥接）；对话状态基础设施：`archive_channel`（0018 归档通道）/ `conversation_lease` + `acp_sandbox_park`（0020 对话租约事实与收尾泊车）；两族的 run 生命周期策略：`harness` / `harness_pi` / `harness_acp`。不导入 `runs/` 或宿主编排模块 |
@@ -961,9 +963,11 @@ manifest 记 `sourceRunId`；历史 run 的 `acp-agent/recovered` 保留为兼�
 
 宿主 HTTP 层的职责边界：路由只决定请求含义（`web_routes`），身份与请求防护集中在
 `web_security`，事件流与连接额度在 `web_sse`，字节读写与静态资源在 `web_http`；`app.py` 只做
-组合与生命周期（数据目录锁、租户材料、run 对账、绑定端口、资源台账扫描线程），CLI 入口与
+组合与生命周期（绑定端口、资源台账扫描线程的启动、服务器关闭），CLI 入口与
 离线运维子命令在 `cli.py`。拆分是纯结构调整：路由、状态码、载荷与既有导入路径（含
-`glink_harness.app.main` / `load_config` / `_resource_command` 再导出）保持不变。
+`glink_harness.app.main` / `load_config` / `_resource_command` 再导出）保持不变。R2 起这层
+组合再退一步：数据目录锁、租户材料与 run 对账属于执行核心（`service.py` 的
+`build_execution_service`），`app.py` 只在其上加 HTTP 面。
 
 `/` 命令门禁本身在**准入层**（`runs/runner.py::RunManager.start`，斜杠命令与蓝图名从
 `config.blueprints_dir` 推导，harness 无关），路由只负责把

@@ -1,9 +1,11 @@
 """Composition root of the glink-harness HTTP host.
 
 ``python -m glink_harness.app`` (and the ``glink-harness`` console script) start here:
-this module builds the server object, wires its ownership/identity/storage
-dependencies and owns the data-root lifecycle. The HTTP surface is split by
-responsibility and composed into one request handler:
+this module puts the HTTP face on top of the execution core that
+:mod:`glink_harness.service` assembles (ownership, identity material, bus,
+store, manager and the startup reconciliation — usable without any HTTP face,
+multi-harness-plan §6 R2) and owns nothing beyond that face. The HTTP surface
+is split by responsibility and composed into one request handler:
 
 * :mod:`glink_harness.web_routes` — routing and the run/health API,
 * :mod:`glink_harness.web_sse` — the bounded event-stream surface,
@@ -25,14 +27,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
 from .accounts import AccountsStore
-from .auth import AccountsAuth
-from .config import ConfigError, HostConfig
-from .events import EventBus
-from .runs import RunManager
-from .ownership import DataRootOwnership
+from .config import HostConfig
+from .service import ExecutionService, build_execution_service
 from .static_files import WebAssets
-from .store import RunStore
-from .tenancy import Tenancy, build_tenancy
 from .web_http import HttpPlumbingMixin
 from .web_routes import RoutesMixin
 from .web_security import RequestSecurityMixin
@@ -55,10 +52,13 @@ REQUEST_SOCKET_TIMEOUT_SECONDS = 60.0
 
 
 class GlinkHarnessServer(ThreadingHTTPServer):
-    """Threaded HTTP server carrying the frozen config, bus, store and manager.
+    """Threaded HTTP server: the HTTP face over one :class:`ExecutionService`.
 
-    When built by :func:`create_server` it also carries the data-root
-    ownership, released by :meth:`server_close`.
+    The handler mixins read the frozen config, bus, store and manager through
+    this server's flat attributes, re-exposed from the service it carries, so
+    the mixins stay as they were. Teardown is delegated to
+    :meth:`ExecutionService.close`: the core shuts down through one path
+    whether or not an HTTP face was ever built on top of it.
     """
 
     daemon_threads = True
@@ -68,54 +68,39 @@ class GlinkHarnessServer(ThreadingHTTPServer):
     #: connection reset instead of an explainable 429.
     request_queue_size = 64
 
-    def __init__(
-        self,
-        config: HostConfig,
-        bus: EventBus,
-        store: RunStore,
-        manager: RunManager,
-        assets: WebAssets,
-        *,
-        ownership: DataRootOwnership | None = None,
-        tenancy: Tenancy | None = None,
-        auth: AccountsAuth | None = None,
-    ) -> None:
-        self.config = config
-        self.bus = bus
-        self.store = store
-        self.manager = manager
+    def __init__(self, service: ExecutionService, assets: WebAssets) -> None:
+        self.service = service
+        self.config = service.config
+        self.bus = service.bus
+        self.store = service.store
+        self.manager = service.manager
         self.assets = assets
-        self.ownership = ownership
+        self.ownership = service.ownership
         #: Frozen multi-tenant trust material; ``None`` in local mode.
-        self.tenancy = tenancy
+        self.tenancy = service.tenancy
         #: Identity backend for accounts mode; ``None`` in gateway and local mode.
-        self.auth = auth
+        self.auth = service.auth
         #: The account store, when accounts mode is active (tests and operator
         #: tooling read it through the server that owns it).
-        self.accounts: AccountsStore | None = auth.store if auth is not None else None
+        self.accounts: AccountsStore | None = service.accounts
         self.stopping = threading.Event()
         #: The bounded SSE budget (global, plus per tenant when in multi-tenant
         #: mode); the stream handler releases its slot on every exit path.
         self.streams = StreamLimits(
-            global_limit=config.max_global_streams,
-            tenant_limit=config.max_tenant_streams,
+            global_limit=service.config.max_global_streams,
+            tenant_limit=service.config.max_tenant_streams,
         )
-        super().__init__((config.host, config.port), HostRequestHandler)
+        super().__init__((service.config.host, service.config.port), HostRequestHandler)
 
     def server_close(self) -> None:
         try:
             super().server_close()
         finally:
-            # The ledger sweep is host lifecycle: stop it before the manager and
-            # the data-root lock go away, so no probe runs against a closed host.
-            self.manager.stop_resource_watch()
-            # The egress listener only exists for live grants; close it with
-            # the host so no forwarder outlives the web surface.
-            self.manager.egress.close()
-            if self.tenancy is not None:
-                self.tenancy.close()
-            if self.ownership is not None:
-                self.ownership.release()
+            # One teardown path for the execution core: in-flight runs are
+            # cancelled and awaited first (manager.shutdown), then the ledger
+            # sweep, the egress listener, the run store, the identity material
+            # and the data-root lock come down — in that order.
+            self.service.close()
 
 
 class HostRequestHandler(
@@ -152,77 +137,34 @@ def create_server(
 ) -> GlinkHarnessServer:
     """Build a ready-to-serve host (used by tests and by ``main``).
 
+    The execution core — ownership, identity material, bus, store, manager and
+    the startup reconciliation — is assembled by
+    :func:`glink_harness.service.build_execution_service` under its own
+    ordering contract (acquire the data-root lock first, load identity next,
+    reconcile before returning). This function only puts the HTTP face on top
+    of that core: the port is bound last, and only then does the periodic
+    resource sweep start.
+
     ``client_factory`` and the two identity probes exist for tests: production
     always talks to the real ``pi`` binary, the real Docker CLI and the real E2B
     SDK. The probes are what the online resource-ledger sweep calls; they never
     run inside the admission lock.
-
-    Ordering is part of the safety contract:
-
-    1. the data-root lock is acquired **first**, before any read or write under
-       the data root — including account-database creation and migration;
-    2. identity material is loaded (a missing or over-permissive key file
-       refuses to start instead of falling back to the unauthenticated local
-       surface);
-    3. the run store is reconciled and the port is bound last;
-    4. only then does the periodic resource sweep start.
     """
-    # Ownership comes first: only a process that holds the data root may
-    # conclude that a ``running`` record has no live owner, or create/rewrite
-    # the account database. A second host on the same data root (same or
-    # another port) stops here, before touching any record.
-    ownership = DataRootOwnership.acquire(config.data_root)
-    tenancy: Tenancy | None = None
+    service = build_execution_service(
+        config,
+        client_factory=client_factory,
+        docker_probe=docker_probe,
+        sandbox_probe=sandbox_probe,
+    )
     try:
-        # Accounts mode opens/creates/migrates the SQLite database here, under
-        # the lock; gateway mode only reads files.
-        tenancy = build_tenancy(config)
-        if config.accounts_enabled and (tenancy is None or tenancy.accounts is None):
-            # Defensive: never serve accounts mode without its store.
-            raise ConfigError("GLINK_AUTH_MODE=accounts 账号库初始化失败")
-        # Accounts mode gets its session backend here; gateway and local mode
-        # have no in-app login at all.
-        accounts_store = tenancy.accounts if tenancy is not None else None
-        auth = None
-        if config.accounts_enabled:
-            assert accounts_store is not None  # 上面的守卫已挡住缺库的情形
-            auth = AccountsAuth(config, accounts_store)
-        bus = EventBus()
-        store = RunStore(config.data_root / "runs")
-        manager = RunManager(
-            config,
-            bus,
-            store,
-            client_factory=client_factory,
-            ownership=ownership,
-            credential_store=tenancy.credentials if tenancy is not None else None,
-            docker_probe=docker_probe,
-            sandbox_probe=sandbox_probe,
-        )
-        # Runs left ``running`` by a previous process cannot continue; close
-        # them out honestly before the host serves history. External leftovers
-        # are not touched here — their identity is recorded for the operator,
-        # and the periodic sweep below is the only thing that may confirm one.
-        manager.reconcile()
-        server = GlinkHarnessServer(
-            config,
-            bus,
-            store,
-            manager,
-            WebAssets(config.web_root),
-            ownership=ownership,
-            tenancy=tenancy,
-            auth=auth,
-        )
+        server = GlinkHarnessServer(service, WebAssets(config.web_root))
         # After startup reconciliation: one sweep immediately, then every
         # configured interval (0 disables it). Background, daemon, never inside
         # the admission lock.
-        manager.start_resource_watch()
+        service.manager.start_resource_watch()
         return server
     except BaseException:
-        if tenancy is not None:
-            tenancy.close()
-        ownership.release()
+        service.close()
         raise
 
 

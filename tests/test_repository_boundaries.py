@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -496,6 +497,53 @@ def host_module_imports(relative: Path, text: str) -> list[str]:
     return modules
 
 
+#: R2 服务化拆分（multi-harness-plan §6）：``service.py`` 是执行核心的组装模块，
+#: 必须可脱离 HTTP/UI 面运行，因此不得导入 HTTP 面（web_*）、组合根（app）、
+#: CLI 入口与静态资源。新增 HTTP 面模块时须在此显式登记，才能保持方向卡住。
+_SERVICE_FORBIDDEN_IMPORTS = frozenset({
+    "glink_harness.app",
+    "glink_harness.cli",
+    "glink_harness.static_files",
+    "glink_harness.web_http",
+    "glink_harness.web_routes",
+    "glink_harness.web_security",
+    "glink_harness.web_sse",
+})
+_SERVICE = Path("host/glink_harness/service.py")
+
+
+def service_forbidden_imports(text: str) -> list[str]:
+    """The HTTP/UI imports of the execution-core module, however written."""
+    package = ["glink_harness"]
+    modules: list[str] = []
+    for node in ast.walk(ast.parse(text, filename=str(_SERVICE))):
+        if isinstance(node, ast.Import):
+            modules.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = package[: len(package) - node.level + 1]
+                module = ".".join([*base, node.module] if node.module else base)
+            else:
+                module = node.module or ""
+            # `from glink_harness import app` targets glink_harness.app, not the root.
+            if module == "glink_harness":
+                modules.extend(f"glink_harness.{alias.name}" for alias in node.names)
+            else:
+                modules.append(module)
+        elif isinstance(node, ast.Call) and node.args:
+            function = node.func
+            dynamic = isinstance(function, ast.Name) and function.id == "__import__"
+            dynamic |= (
+                isinstance(function, ast.Attribute)
+                and isinstance(function.value, ast.Name)
+                and function.value.id == "importlib"
+                and function.attr == "import_module"
+            )
+            if dynamic and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                modules.append(node.args[0].value)
+    return sorted({module for module in modules if module in _SERVICE_FORBIDDEN_IMPORTS})
+
+
 def test_contract_vocabulary_module_stays_a_leaf() -> None:
     """契约词汇模块是两层共享的叶子，不得反向导入 kernel 或编排层。
 
@@ -918,3 +966,81 @@ def test_orchestration_dynamic_import_aliases_and_relative_names_cannot_bypass_g
 def test_dynamic_relative_host_imports_are_not_mistaken_for_kernel_dependencies():
     assert runner_kernel_imports(Path("host/glink_harness/runs/stages.py"),
                                  "import importlib as il; il.import_module('.plugins', __package__)") == []
+
+
+def test_execution_service_module_does_not_import_the_http_face() -> None:
+    """R2：执行核心组装模块不得导入 HTTP/UI 面（真实源码的绿断言）。"""
+    assert service_forbidden_imports((ROOT / _SERVICE).read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "name"),
+    [
+        ("from .app import create_server\n", "glink_harness.app"),
+        ("from . import cli\n", "glink_harness.cli"),
+        ("from glink_harness import app\n", "glink_harness.app"),
+        ("import glink_harness.web_routes\n", "glink_harness.web_routes"),
+        ("from .web_sse import SseMixin\n", "glink_harness.web_sse"),
+        ("__import__('glink_harness.static_files')\n", "glink_harness.static_files"),
+        ("import importlib; importlib.import_module('glink_harness.web_http')\n", "glink_harness.web_http"),
+    ],
+)
+def test_service_rule_rejects_http_face_imports_in_every_shape(text: str, name: str) -> None:
+    """反例：相对导入、根包别名、绝对导入与字面量动态导入都必须报出对应模块名。"""
+    assert service_forbidden_imports(text) == [name]
+
+
+def test_service_forbidden_imports_stay_aligned_with_the_actual_modules() -> None:
+    """清单与磁盘对齐：新增 ``web_*.py`` 忘登记、或登记幽灵模块，都变红。
+
+    与 kernel 白名单的 glob 对齐同款（防止方向卡点无声退化为白名单外的
+    空集）。
+    """
+    actual = {
+        f"glink_harness.{path.stem}" for path in (ROOT / "host" / "glink_harness").glob("web_*.py")
+    }
+    actual |= {"glink_harness.app", "glink_harness.cli", "glink_harness.static_files"}
+    assert actual == set(_SERVICE_FORBIDDEN_IMPORTS)
+
+
+def _closure_probe(extra_import: str) -> str:
+    """在干净子进程里 import service（可先注入一个 HTTP 面导入），报告泄漏。"""
+    forbidden = repr(set(_SERVICE_FORBIDDEN_IMPORTS))
+    prefix = f"{extra_import}; " if extra_import else ""
+    code = (
+        f"import sys; {prefix}import glink_harness.service; "
+        f"leaked = [m for m in sys.modules if m in {forbidden}]; "
+        "print(','.join(sorted(leaked)))"
+    )
+    env = dict(os.environ)
+    host_root = str(ROOT / "host")
+    env["PYTHONPATH"] = host_root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(ROOT),
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_the_execution_core_import_closure_stays_off_the_http_face() -> None:
+    """R2：``import glink_harness.service`` 的传递闭包不得拖入 HTTP/UI 面。
+
+    静态规则只解析 service.py 单文件的直接导入；中间模块（runs/*、
+    tenancy 等）引入 HTTP 面导入时全部静态规则仍绿，这里以运行时闭包
+    兜住。子进程运行，防本测试会话已导入的模块污染。
+    """
+    assert _closure_probe("") == ""
+
+
+@pytest.mark.parametrize(
+    "extra_import",
+    ["import glink_harness.web_routes", "from glink_harness import app"],
+)
+def test_the_closure_probe_detects_http_face_leaks(extra_import: str) -> None:
+    """反例：任一 HTTP 面模块真的进入闭包时，探针必须报告非空（非恒真空转）。"""
+    assert _closure_probe(extra_import) != ""
