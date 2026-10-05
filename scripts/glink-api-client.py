@@ -46,14 +46,22 @@ def connect(base_url: str) -> tuple[str, int]:
     return parsed.hostname, parsed.port or 80
 
 
-def create_run(host: str, port: int, prompt: str) -> str:
-    """POST /api/runs → the admitted run id (the JSON media type is required)."""
+def create_run(
+    host: str, port: int, prompt: str, *, idempotency_key: str | None = None
+) -> str:
+    """POST /api/runs → the admitted run id (the JSON media type is required).
+
+    ``idempotency_key`` rides the ``Idempotency-Key`` header (R3): a retry of
+    the same key replays the original admission — same 201, same run id — so a
+    lost creation response never turns into a second execution.
+    """
     connection = http.client.HTTPConnection(host, port, timeout=SOCKET_TIMEOUT_SECONDS)
     try:
         body = json.dumps({"prompt": prompt}).encode("utf-8")
-        connection.request(
-            "POST", "/api/runs", body=body, headers={"Content-Type": "application/json"}
-        )
+        headers = {"Content-Type": "application/json"}
+        if idempotency_key is not None:
+            headers["Idempotency-Key"] = idempotency_key
+        connection.request("POST", "/api/runs", body=body, headers=headers)
         response = connection.getresponse()
         if response.status != 201:
             # 错误体可能是反代的 HTML 页：先保住状态码，再按 replace 解码。
@@ -160,13 +168,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="通过 API 完成 glink-harness 执行与重放的参考客户端")
     parser.add_argument("--base-url", default="http://127.0.0.1:7860", help="宿主地址（http://host:port）")
     parser.add_argument("--prompt", required=True, help="要执行的提示")
+    parser.add_argument("--idempotency-key", default=None, help="创建幂等键（同键同请求重放原 run；缺省不启用）")
     parser.add_argument("--timeout", type=float, default=300.0, help="总截止时间（秒）")
     arguments = parser.parse_args(argv)
 
     host, port = connect(arguments.base_url)
     deadline = time.monotonic() + arguments.timeout
     try:
-        run_id = create_run(host, port, arguments.prompt)
+        run_id = create_run(host, port, arguments.prompt, idempotency_key=arguments.idempotency_key)
         print(f"run: {run_id}")
 
         live = stream_events(host, port, run_id, stop_at_terminal=True, deadline=deadline)

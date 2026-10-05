@@ -127,6 +127,43 @@ def test_the_reference_client_executes_streams_and_replays(host: GlinkHarnessSer
     assert "sequences match: True" in result.stdout
 
 
+def test_the_reference_client_replays_with_an_idempotency_key(
+    host: GlinkHarnessServer,
+) -> None:
+    """R3 冒烟：--idempotency-key 透传到头，同键两次执行是同一个 run。"""
+    base = [
+        "--base-url",
+        f"http://127.0.0.1:{host.server_address[1]}",
+        "--timeout",
+        "60",
+        "--idempotency-key",
+        "ref-1",
+    ]
+    runs: list[str] = []
+    for _attempt in range(2):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(CLIENT),
+                *base,
+                "--prompt",
+                "参考客户端的幂等创建",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=REPO_ROOT,
+            env=_product_free_env(),
+        )
+        assert result.returncode == 0, result.stderr
+        (run_line,) = [
+            line for line in result.stdout.splitlines() if line.startswith("run: ")
+        ]
+        runs.append(run_line.removeprefix("run: "))
+    assert runs[0] == runs[1], "同键两次执行必须重放同一个 run"
+    assert [record.run_id for record in host.store.list(limit=None)] == [runs[0]]
+
+
 def test_the_reference_client_imports_no_product_code() -> None:
     """机械门禁：脚本只消费接口——导入面 ⊆ 标准库，源码不出现 glink_harness。
 

@@ -27,11 +27,15 @@ from glink_harness.store import (
     FINISHED,
     RUNNING,
     SCHEMA_VERSION,
+    IdempotencyClaim,
+    IdempotencyConflict,
     RunAlreadyTerminal,
+    RunRecord,
     RunSpec,
     RunStore,
     StoreError,
     StoreWriteError,
+    request_digest,
 )
 
 from store_helpers import finish, stored_record
@@ -517,3 +521,133 @@ def test_write_child_validates_the_sequence_number(store: RunStore) -> None:
         with pytest.raises(ValueError, match="n"):
             store.write_child("r1", {"n": bad})
     assert store.read_children("r1").documents == ()
+
+
+# -- idempotent creation (R3) -----------------------------------------------------------
+
+
+def _claim(
+    key: str = "order-1",
+    *,
+    prompt: str = "同一个请求",
+    tenant_id: str | None = None,
+    user_id: str | None = None,
+) -> IdempotencyClaim:
+    return IdempotencyClaim(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        key=key,
+        request_digest=request_digest(prompt, None, None),
+    )
+
+
+def test_request_digest_covers_the_raw_semantic_fields() -> None:
+    """digest 只看语义字段：缺省与空串同请求；任一字段不同即不同请求。"""
+    assert request_digest("q", None, None) == request_digest("q", "", "")
+    assert request_digest("q", None, None) != request_digest("q2", None, None)
+    assert request_digest("q", None, None) != request_digest("q", "p1", None)
+    assert request_digest("q", None, None) != request_digest("q", None, "bp")
+
+
+def test_an_idempotent_create_reserves_and_replays_the_same_run(store: RunStore) -> None:
+    claim = _claim()
+    assert store.idempotent_lookup(claim) is None, "未用过的键必须查无"
+    landed = store.create("同一个请求", run_id="r1", spec=SPEC, idempotency=claim)
+    assert store.idempotent_lookup(claim) == landed
+    # 同键异 digest 是冲突，不是回退成重放。
+    with pytest.raises(IdempotencyConflict):
+        store.idempotent_lookup(_claim(prompt="另一个请求"))
+    # 异 owner 的同键等于键不存在（作用域是 (tenant, user)）。
+    assert store.idempotent_lookup(_claim(tenant_id="t2")) is None
+    assert store.idempotent_lookup(_claim(user_id="u2")) is None
+
+
+def test_a_failed_create_leaves_no_key_behind(store: RunStore) -> None:
+    """键行与 run 行同事务：run 行落库失败时键不留存，重试不是伪重放。
+
+    Red→green mechanism：键行若在 run 行之外单独提交，失败后的重试会撞上
+    一个不指向任何 run 的键（伪冲突或伪重放）。
+    """
+    claim = _claim()
+    with raw(store) as connection:
+        connection.execute(
+            "CREATE TRIGGER refuse_run_row BEFORE INSERT ON runs "
+            "BEGIN SELECT RAISE(ABORT, 'synthetic run insert failure'); END"
+        )
+    with pytest.raises(StoreWriteError):
+        store.create("同一个请求", run_id="r1", spec=SPEC, idempotency=claim)
+    assert store.idempotent_lookup(claim) is None, "回滚后键必须查无"
+    with raw(store) as connection:
+        connection.execute("DROP TRIGGER refuse_run_row")
+    landed = store.create("同一个请求", run_id="r1", spec=SPEC, idempotency=claim)
+    assert store.idempotent_lookup(claim) == landed
+
+
+def test_concurrent_same_key_creates_exactly_one_run(store: RunStore) -> None:
+    """跨写者最后防线：同键并发 create 恰一个成功，其余 StoreWriteError。"""
+    claim = _claim()
+    writers = 4
+    barrier = threading.Barrier(writers)
+    results: list[RunRecord | None] = [None] * writers
+    errors: list[BaseException] = []
+
+    def worker(index: int) -> None:
+        try:
+            barrier.wait(10)
+            results[index] = store.create(f"并发 {index}", spec=SPEC, idempotency=claim)
+        except BaseException as exc:  # noqa: BLE001 - reported through the assertions
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(index,)) for index in range(writers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    landed = [record for record in results if record is not None]
+    assert len(landed) == 1
+    assert len(errors) == writers - 1
+    assert all(isinstance(exc, StoreWriteError) for exc in errors)
+    assert [record.run_id for record in store.list(limit=None)] == [landed[0].run_id]
+    assert store.idempotent_lookup(claim) == landed[0]
+    # 失败的写者回滚后不得留下 run 目录。
+    leftovers = sorted(path.name for path in store.root.iterdir() if path.is_dir())
+    assert leftovers == [landed[0].run_id]
+
+
+def test_a_key_pointing_at_an_unreadable_run_fails_closed(store: RunStore) -> None:
+    claim = _claim()
+    store.create("同一个请求", run_id="r1", spec=SPEC, idempotency=claim)
+    # 合成腐坏：runs 行被外部删除而键行残留（raw 连接不受外键约束）。
+    with raw(store) as connection:
+        connection.execute("DELETE FROM runs WHERE run_id = 'r1'")
+    with pytest.raises(StoreError, match="不可读"):
+        store.idempotent_lookup(claim)
+
+
+def test_an_existing_database_gains_the_idempotency_table_on_open(tmp_path: Path) -> None:
+    """同版本旧库（加表前创建）打开即补齐新表，不 bump 版本也不拒开。"""
+    root = tmp_path / "runs"
+    first = RunStore(root)
+    first.close()
+    # 合成一个「加表之前」的库：删掉新表（索引随表删除），版本号保持 1。
+    legacy = sqlite3.connect(first.database_path, isolation_level=None)
+    try:
+        legacy.execute("DROP TABLE idempotency_keys")
+        legacy.execute("PRAGMA user_version=1")
+    finally:
+        legacy.close()
+    reopened = RunStore(root)
+    try:
+        with raw(reopened) as connection:
+            names = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')"
+                )
+            }
+        assert "idempotency_keys" in names and "idempotency_by_owner" in names
+        claim = _claim()
+        landed = reopened.create("同一个请求", run_id="r1", spec=SPEC, idempotency=claim)
+        assert reopened.idempotent_lookup(claim) == landed
+    finally:
+        reopened.close()

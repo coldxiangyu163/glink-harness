@@ -64,6 +64,7 @@ run 视图不含任何宿主路径与凭据。
 | 409 | `stale_run` | 父轮已有后续追问（追问只允许接在最新一轮后） |
 | 409 | `session_unavailable` | 跨族/跨包、能力缺失、会话或状态根不可用（fail-closed） |
 | 409 | `resources_unreleased` | 历史 run 持有未确认释放的执行资源 |
+| 409 | `idempotency_key_conflict` | 同一 `Idempotency-Key` 被用于不同请求（体不携带占用 run 事实，见 §1.4） |
 | 415 | `unsupported_media_type` | 非 JSON 媒体类型 |
 | 429 | `quota_exceeded` | 并发配额（体含 `scope`/`limit`，不含他人 run id） |
 
@@ -74,6 +75,29 @@ run 视图不含任何宿主路径与凭据。
 
 追问门禁次序固定：**owner（unknown_run）→ spec.family → spec.pack → capabilities.resume
 → terminal（run_busy）→ stale（stale_run）**，族追加门禁在其后。
+
+### 1.4 创建幂等：`Idempotency-Key` 头
+
+受理面接受可选 `Idempotency-Key` 请求头，让「创建响应丢失后的重试」不变成第二次执行：
+
+- **形状**：`^[A-Za-z0-9._:@-]{1,128}$`。缺头是历史的非幂等创建（行为不变）；空头或畸形头是
+  `400 invalid_request`，不静默忽略——自以为请求了幂等的客户端不得默默拿到非幂等创建。
+- **作用域**：键属于已验证身份 `(tenant_id, user_id)`（local 模式为单 owner）。异租户或同租户
+  异 user 的同键等价于键不存在：各自创建自己的 run，键不可用于探测他人是否用过。
+- **请求同一性**：digest 盖三个原始请求字段 `prompt` + `parentRunId` + `blueprint`
+  （`/` 命令重写之前；缺省与空串视为同一请求）。`/蓝图名 题目` 命令形式与等价的
+  `blueprint`+`prompt` 字段形式虽受理为同一语义（§1.1 的确定性重写），对幂等是
+  **不同请求**——digest 盖重写前的原始字段，同键互换得 409 而非重放。
+- **重放**：同键同请求同样得到 **`201` + §1.2 的 run 视图、同一 `runId`**——不二次执行、
+  不重新判定准入（当下的蓝图/凭据/配额状态不改变已受理事实）。重放响应是**该 run 当前
+  状态的视图，不是首次响应的快照**：重放时 run 可能仍在运行也可能已终态，
+  `status`/`eventCount`/`finishedAt` 等字段反映重放时刻的持久事实。因此运行中的同键
+  重试不是 `409 run_busy`；宿主重启后同键同请求仍重放原 run（键是持久事实，不随进程消失）。
+- **冲突**：同键异请求是 `409 {"error": "idempotency_key_conflict"}`，响应体不携带占用 run 的
+  id、题面或状态。
+- **持久性与原子性**：键行与 run 行在受理事务内原子写入——受理失败不留键；并发同键由 owner
+  作用域唯一索引兜底：同进程内 prepare 窗口（准入锁外的文件 IO）竞速的孪生请求，败者的
+  admit 失败被收口为对胜者的重放；跨写者的第二个 create 撞索引失败，宁拒不双执行。
 
 ## 2. 事件通道：`GET /api/runs/{id}/events`
 
@@ -168,6 +192,7 @@ ACP `present` 声明的交付物，**至多 8 件**，`index` 取值 `0-7`（越
 | 1.3 蓝图两码 | `test_blueprints.py:681`（unknown_blueprint）、`test_blueprints.py:689`（invalid_blueprint） |
 | 1.3 not_configured / unsupported_command / 415 / resources_unreleased | `test_runs_api.py` 既有用例；resources_unreleased 另见 `test_event_replay.py:237` |
 | 1.3 quota_exceeded | `test_multitenant_api.py:1063/1098`；429 的 tenant 维度见 `:1330` |
+| 1.4 幂等键 | `test_exec_contract.py`（契约 1.4 区：同键重放同 run 且重放视图反映当前状态、同键异请求 409、运行中重放赢过 run_busy、畸形键 400、重启后重放、命令形式与字段形式是不同请求、prepare 窗口并发孪生败者收口为重放）、`test_multitenant_api.py::test_idempotency_keys_are_scoped_to_the_verified_owner` 与 `::test_idempotency_conflict_body_discloses_no_run` 与 `::test_concurrent_same_key_twins_replay_instead_of_500`（owner 作用域、冲突体不泄漏、多租户并发孪生不 500）、`test_store.py`（idempotent creation 区：键行与 run 行同事务、并发同键恰一个成功、旧库补表、digest 语义、指向不可读 run 时 fail-closed）、`test_reference_client.py::test_the_reference_client_replays_with_an_idempotency_key`（--idempotency-key 端到端） |
 | 1.3 追问门禁 owner 优先 | `test_runner.py::test_foreign_parent_state_is_not_probed`；family→pack→capabilities→terminal→stale 的相互优先级**暂无专测**（诚实缺口，次序语义由 `runs/admission.py` 门禁代码钉住） |
 | 2.1 合并次序 | `test_event_replay.py:315/360` |
 | 2.2 续传 | `test_exec_contract.py::test_after_resumes_precisely_and_last_event_id_wins` |

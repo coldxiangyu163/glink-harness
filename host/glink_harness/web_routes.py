@@ -29,7 +29,7 @@ from .runs import (
     UnsupportedCommand,
     read_model,
 )
-from .store import RunRecord
+from .store import IdempotencyConflict, RunRecord
 from .tenancy import TenantContext, TenantNotConfigured
 from .web_security import AUTH_POST_PATHS
 
@@ -47,6 +47,13 @@ _RUN_CHILD_FILE_RE = re.compile(
     r"/(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,63})$"
 )
 _RUN_RE = re.compile(r"^/api/runs/(?P<run_id>[A-Za-z0-9_-]{1,64})$")
+
+#: ``Idempotency-Key`` shape (R3): opaque to the host, bounded, and free of the
+#: characters that could smuggle it into a header line or a log field. An
+#: absent header is the historical non-idempotent creation; an empty or
+#: malformed one is refused outright rather than silently ignored — a client
+#: that thinks it asked for idempotency must not silently get none.
+_IDEMPOTENCY_KEY_RE = re.compile(r"[A-Za-z0-9._:@-]{1,128}")
 
 #: ``GET /api/runs`` page size (M9). The default is the window the endpoint
 #: always returned, so an old client sees no change; the ceiling bounds one
@@ -434,9 +441,24 @@ class RoutesMixin:
                 head_only=False,
             )
             return
+        idempotency_key = self.headers.get("Idempotency-Key")
+        if idempotency_key is not None and not _IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "error": "invalid_request",
+                    "message": "Idempotency-Key 必须是 1-128 个 [A-Za-z0-9._:@-] 字符",
+                },
+                head_only=False,
+            )
+            return
         try:
             record = self.server.manager.start(
-                prompt, context, parent_run_id=parent_run_id, blueprint=blueprint
+                prompt,
+                context,
+                parent_run_id=parent_run_id,
+                blueprint=blueprint,
+                idempotency_key=idempotency_key,
             )
         except UnsupportedCommand as exc:
             # ``/``-prefix input is how pi reaches extension commands, including
@@ -481,6 +503,20 @@ class RoutesMixin:
             self._send_json(
                 HTTPStatus.CONFLICT if exc.code != "unknown_run" else HTTPStatus.NOT_FOUND,
                 {"error": exc.code},
+                head_only=False,
+            )
+            return
+        except IdempotencyConflict:
+            # The key belongs to this owner (the scope is the verified
+            # identity), so the conflict itself discloses nothing — but the
+            # refusal still carries no fact about the run the key admits:
+            # neither its id, prompt nor status.
+            self._send_json(
+                HTTPStatus.CONFLICT,
+                {
+                    "error": "idempotency_key_conflict",
+                    "message": "this Idempotency-Key was already used for a different request",
+                },
                 head_only=False,
             )
             return

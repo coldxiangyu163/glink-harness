@@ -565,6 +565,130 @@ def test_client_supplied_owner_fields_are_ignored(server: GlinkHarnessServer) ->
     assert record.creator_user_id == "user-a"
 
 
+def test_idempotency_keys_are_scoped_to_the_verified_owner(
+    server: GlinkHarnessServer, adapters
+) -> None:
+    """R3 幂等键作用域是 (tenant, user)：异租户/同租户异 user 的同键各自独立。"""
+    alpha_a = assertion("tenant-alpha", "user-a")
+    beta_b = assertion("tenant-beta", "user-b")
+    alpha_z = assertion("tenant-alpha", "user-z")
+
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST", body={"prompt": "幂等作用域"},
+        token=alpha_a, headers={"Idempotency-Key": "scope-1"},
+    )
+    assert status == 201
+    first = json.loads(raw)["run"]
+    assert wait_for_terminal(server, first["runId"], alpha_a)["status"] == "finished"
+
+    # 异租户同键：等价于键不存在，是 beta 自己的新 run。
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST", body={"prompt": "幂等作用域"},
+        token=beta_b, headers={"Idempotency-Key": "scope-1"},
+    )
+    assert status == 201
+    beta_run = json.loads(raw)["run"]
+    assert wait_for_terminal(server, beta_run["runId"], beta_b)["status"] == "finished"
+
+    # 同租户异 user 同键：user 维度也在作用域里。
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST", body={"prompt": "幂等作用域"},
+        token=alpha_z, headers={"Idempotency-Key": "scope-1"},
+    )
+    assert status == 201
+    zeta_run = json.loads(raw)["run"]
+    assert wait_for_terminal(server, zeta_run["runId"], alpha_z)["status"] == "finished"
+
+    assert len({first["runId"], beta_run["runId"], zeta_run["runId"]}) == 3
+
+    # 原 owner 的同键同请求仍是重放。
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST", body={"prompt": "幂等作用域"},
+        token=alpha_a, headers={"Idempotency-Key": "scope-1"},
+    )
+    assert status == 201
+    assert json.loads(raw)["run"]["runId"] == first["runId"]
+
+
+def test_idempotency_conflict_body_discloses_no_run(
+    server: GlinkHarnessServer, adapters
+) -> None:
+    """R3 同键异请求的 409 不携带占用 run 的 id 或题面。"""
+    token = assertion("tenant-alpha", "user-a")
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST", body={"prompt": "原始请求"},
+        token=token, headers={"Idempotency-Key": "scope-2"},
+    )
+    assert status == 201
+    run_id = json.loads(raw)["run"]["runId"]
+
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST", body={"prompt": "另一个请求"},
+        token=token, headers={"Idempotency-Key": "scope-2"},
+    )
+    assert status == 409
+    text = raw.decode("utf-8")
+    assert json.loads(text)["error"] == "idempotency_key_conflict"
+    assert run_id not in text and "原始请求" not in text
+    assert wait_for_terminal(server, run_id, token)["status"] == "finished"
+
+
+def test_concurrent_same_key_twins_replay_instead_of_500(
+    server: GlinkHarnessServer, adapters, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3 并发同键孪生请求：多租户路径的败者撞唯一索引后必须重放，不是 500。
+
+    prepare 在准入锁外（Barrier 会合注入）：两个同键请求都 lookup 未命中
+    后竞速 admit。多租户配额（tenant 2）放行第二个 create，败者撞
+    idempotency_by_owner 唯一索引得到 StoreWriteError——web 层没有该异常
+    的映射分支，未收口时是防御 handler 的 500 internal_error。
+    """
+    token = assertion("tenant-alpha", "user-a")
+    barrier = threading.Barrier(2)
+    original_prepare = server.manager._admission.prepare
+
+    def rendezvous_prepare(*args, **kwargs):
+        result = original_prepare(*args, **kwargs)
+        barrier.wait(timeout=15)
+        return result
+
+    monkeypatch.setattr(server.manager._admission, "prepare", rendezvous_prepare)
+
+    outcomes: list[tuple[int, str]] = []
+    failures: list[BaseException] = []
+
+    def post() -> None:
+        try:
+            status, _headers, raw = request(
+                server, "/api/runs", method="POST", body={"prompt": "并发孪生"},
+                token=token, headers={"Idempotency-Key": "race-mt-1"},
+            )
+            outcomes.append((status, json.loads(raw)["run"]["runId"]))
+        except BaseException as exc:  # noqa: BLE001 - 线程内失败也要让用例变红
+            failures.append(exc)
+
+    threads = [threading.Thread(target=post) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert failures == []
+    assert len(outcomes) == 2
+    assert [status for status, _run in outcomes] == [201, 201], (
+        "唯一索引竞态败者必须拿到重放，而不是 500 internal_error"
+    )
+    winner = outcomes[0][1]
+    assert outcomes[1][1] == winner
+    assert wait_for_terminal(server, winner, token)["status"] == "finished"
+    # 只落一个 run 行：另一个孪生没有第二个执行。
+    records = [
+        record
+        for record in server.store.list(limit=None)
+        if record.tenant_id == "tenant-alpha"
+    ]
+    assert [record.run_id for record in records] == [winner]
+
+
 # -- cross-tenant read/cancel matrix ------------------------------------------
 
 

@@ -332,6 +332,203 @@ def test_followup_with_unreadable_seed_report_fails_closed(tmp_path: Path) -> No
         close()
 
 
+# -- 契约 1.4：幂等键 ------------------------------------------------------
+
+
+def test_the_same_idempotency_key_replays_the_admitted_run(
+    server: GlinkHarnessServer,
+) -> None:
+    """契约 1.4：同键同请求重放原受理（201 同 runId），不二次执行。
+
+    重放响应是该 run 当前状态的视图，不是首次响应的快照：终态后的重放
+    直接看到终态视图（status/eventCount 都已前进）。
+    """
+    body = {"prompt": "幂等创建的第一回"}
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST", body=body, headers={"Idempotency-Key": "order-1"}
+    )
+    assert status == 201
+    first = json.loads(raw)["run"]
+    assert first["status"] == "running", "首次响应是运行中视图"
+    assert wait_for_terminal(server, first["runId"])["status"] == "finished"
+    after_first = _run_dirs(server)
+
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST", body=body, headers={"Idempotency-Key": "order-1"}
+    )
+    assert status == 201
+    replayed = json.loads(raw)["run"]
+    assert replayed["runId"] == first["runId"]
+    assert replayed["status"] == "finished", "重放反映重放时刻的状态，不是首次快照"
+    assert replayed["eventCount"] > 0
+    assert _run_dirs(server) == after_first, "重放不得创建第二个 run 目录"
+
+
+def test_the_same_key_with_a_different_request_is_a_conflict(
+    server: GlinkHarnessServer,
+) -> None:
+    """契约 1.4：同键异请求 409 idempotency_key_conflict，体不泄漏原 run 事实。"""
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST",
+        body={"prompt": "原始请求"}, headers={"Idempotency-Key": "order-2"},
+    )
+    assert status == 201
+    run_id = json.loads(raw)["run"]["runId"]
+
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST",
+        body={"prompt": "另一个请求"}, headers={"Idempotency-Key": "order-2"},
+    )
+    assert status == 409
+    text = raw.decode("utf-8")
+    payload = json.loads(text)
+    assert payload["error"] == "idempotency_key_conflict"
+    assert run_id not in text and "原始请求" not in text, "冲突体不得携带占用者事实"
+
+    assert wait_for_terminal(server, run_id)["status"] == "finished"
+
+
+def test_a_replay_while_running_wins_over_run_busy(server: GlinkHarnessServer) -> None:
+    """契约 1.4：运行中的同键重试是重放（201 同 run），不是 409 run_busy。"""
+    body = {"prompt": "这一轮不要结束 NOSETTLE"}
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST", body=body, headers={"Idempotency-Key": "busy-1"}
+    )
+    assert status == 201
+    run_id = json.loads(raw)["run"]["runId"]
+
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST", body=body, headers={"Idempotency-Key": "busy-1"}
+    )
+    assert status == 201
+    assert json.loads(raw)["run"]["runId"] == run_id
+
+    # 收尾：停掉挂起的 run，避免把执行线程留给后续用例。
+    status, _headers, raw = request(server, f"/api/runs/{run_id}/stop", method="POST")
+    assert status == 200
+    assert wait_for_terminal(server, run_id)["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("key", ["", "a" * 129, "bad key", "order/1"])
+def test_malformed_idempotency_keys_are_refused(
+    server: GlinkHarnessServer, key: str
+) -> None:
+    """契约 1.4：空/畸形 Idempotency-Key 是 400 invalid_request，不静默忽略。"""
+    before = _run_dirs(server)
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST",
+        body={"prompt": "合成题面"}, headers={"Idempotency-Key": key},
+    )
+    assert status == 400
+    assert json.loads(raw)["error"] == "invalid_request"
+    assert _run_dirs(server) == before
+
+
+def test_a_replay_survives_a_host_restart(tmp_path: Path) -> None:
+    """契约 1.4：键是持久事实——重启后同键同请求仍重放原 run。"""
+    body = {"prompt": "重启前受理"}
+    instance = create_server(make_config(tmp_path), client_factory=fake_factory())
+    close = serve(instance)
+    try:
+        status, _headers, raw = request(
+            instance, "/api/runs", method="POST", body=body,
+            headers={"Idempotency-Key": "restart-1"},
+        )
+        assert status == 201
+        first = json.loads(raw)["run"]
+        assert wait_for_terminal(instance, first["runId"])["status"] == "finished"
+    finally:
+        close()
+
+    relaunched = create_server(make_config(tmp_path), client_factory=fake_factory())
+    close = serve(relaunched)
+    try:
+        status, _headers, raw = request(
+            relaunched, "/api/runs", method="POST", body=body,
+            headers={"Idempotency-Key": "restart-1"},
+        )
+        assert status == 201
+        assert json.loads(raw)["run"]["runId"] == first["runId"]
+    finally:
+        close()
+
+
+def test_concurrent_twin_requests_with_one_key_both_replay_the_winner(
+    server: GlinkHarnessServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """契约 1.4：prepare 窗口内并发的同键孪生请求，败者也重放，不是 run_busy/500。
+
+    prepare（蓝图解析、凭据、文件 IO）在准入锁外运行：两个同键请求都
+    lookup 未命中后会合在 prepare 之后（Barrier 注入），再竞速 admit。
+    本地模式下败者的 admit 抛 RunBusy——必须被收口成对胜者的重放。
+    """
+    barrier = threading.Barrier(2)
+    original_prepare = server.manager._admission.prepare
+
+    def rendezvous_prepare(*args, **kwargs):
+        result = original_prepare(*args, **kwargs)
+        barrier.wait(timeout=15)
+        return result
+
+    monkeypatch.setattr(server.manager._admission, "prepare", rendezvous_prepare)
+
+    body = {"prompt": "并发孪生请求"}
+    outcomes: list[tuple[int, str]] = []
+    failures: list[BaseException] = []
+
+    def post() -> None:
+        try:
+            status, _headers, raw = request(
+                server, "/api/runs", method="POST", body=body,
+                headers={"Idempotency-Key": "race-1"},
+            )
+            outcomes.append((status, json.loads(raw)["run"]["runId"]))
+        except BaseException as exc:  # noqa: BLE001 - 线程内失败也要让用例变红
+            failures.append(exc)
+
+    threads = [threading.Thread(target=post) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert failures == []
+    assert len(outcomes) == 2
+    assert [status for status, _run in outcomes] == [201, 201], (
+        "竞态败者必须拿到重放，而不是 409 run_busy 或 500"
+    )
+    winner = outcomes[0][1]
+    assert outcomes[1][1] == winner
+    run_dirs = [name for name in _run_dirs(server) if not name.startswith("runs.db")]
+    assert run_dirs == [winner], "孪生请求只能落一个 run 目录"
+    assert wait_for_terminal(server, winner)["status"] == "finished"
+
+
+def test_the_command_form_and_the_field_form_are_distinct_requests(
+    server: GlinkHarnessServer,
+) -> None:
+    """契约 1.4：`/蓝图名 题目` 命令形式与 blueprint+prompt 字段形式是不同请求。
+
+    两种形式受理后语义等价（§1.1 的确定性重写），但 digest 盖重写前的
+    原始字段——同键互换得 409 冲突（宁拒不双执行），不是重放。
+    """
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST",
+        body={"prompt": "/deepresearch 合成题目"}, headers={"Idempotency-Key": "form-1"},
+    )
+    assert status == 201
+    run_id = json.loads(raw)["run"]["runId"]
+
+    status, _headers, raw = request(
+        server, "/api/runs", method="POST",
+        body={"prompt": "合成题目", "blueprint": "deepresearch"},
+        headers={"Idempotency-Key": "form-1"},
+    )
+    assert status == 409
+    assert json.loads(raw)["error"] == "idempotency_key_conflict"
+
+    assert wait_for_terminal(server, run_id)["status"] == "finished"
+
+
 # -- 契约 2：事件通道 -------------------------------------------------------
 
 

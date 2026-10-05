@@ -75,6 +75,8 @@ Docker/E2B 可并发；多租户实现目前只有合成验证，真实网关、
 
 **服务化拆分 R2 已落地**（[多 Harness 计划 §6](multi-harness-plan.md#6-里程碑)）：执行核心与 HTTP 面分两层组装。`glink_harness.service.build_execution_service` 按顺序契约（数据根所有权最先 → 身份材料 → 存储 → 启动对账，失败回滚）产出可独立执行与重放的执行核心，不导入任何 HTTP/UI 模块（`tests/test_repository_boundaries.py` 的导入方向规则与 `tests/test_execution_service.py` 的无 HTTP 直驱回归钉住）；`app.create_server` 只在其上加 HTTP 面——绑端口最后发生，资源扫描在面就绪后启动——拆毁路径唯一（`ExecutionService.close`，`server_close` 委托它）：按组装逆序六步拆除（资源扫描 → 取消并等待在途 run 终态提交 → 出口代理 → run 存储 → 身份材料 → 数据根锁），任一步失败仍走完剩余步骤并重抛首异常；在途 run 的真实裁决先于锁释放提交，不被下一个宿主的启动对账改写。`scripts/glink-api-client.py` 是纯标准库参考客户端：经 HTTP/SSE 接口完成创建、直播到终帧、终态查询与历史重放，不导入产品代码（`tests/test_reference_client.py` 同步钉住）。产品账号、邀请入口与固定报告格式的解耦仍待按消费者核对后推进；调用方授权、产物访问与数据根安全义务不变，事件历史不因拆分移除。
 
+**创建幂等 R3 已落地**（[多 Harness 计划 §6](multi-harness-plan.md#6-里程碑)）：`POST /api/runs` 接受可选 `Idempotency-Key` 头（`^[A-Za-z0-9._:@-]{1,128}$`；缺头是历史非幂等创建，空/畸形是 400 拒绝）。键的作用域是已验证身份 `(tenant_id, user_id)`（local 模式为单 owner）；digest 盖原始请求字段（`prompt`/`parentRunId`/`blueprint`，`/` 命令重写之前——命令形式与字段形式是不同请求）。同键同请求的重放**先于一切准入语义**短路：manager 在准入锁内查 `idempotency_keys`，命中即返回原受理记录（201 + run 当前视图、同 `runId`、不重执行、不被当下的蓝图/凭据/配额状态重判、不起线程；重放视图反映重放时刻的 run 状态，不是首次响应的快照），因此「运行中同键重试」赢过 `run_busy`，重启后重放仍成立（键是持久事实）。同键异 digest 是 409 `idempotency_key_conflict`，体不携带占用 run 的任何事实；异 owner 的同键等价于键不存在。键行与 run 行在受理事务内原子写入（写库失败不留键，键指向不可读 run 时 fail-closed 拒绝重受理）；prepare 在准入锁外运行，同键孪生请求可在窗口内竞速——败者的 admit 失败（本地 `RunBusy`、多租户的唯一索引 `StoreWriteError`）在锁内重查键后收口为对胜者的重放；跨写者并发的第二个 create 撞 owner 作用域唯一索引失败（宁拒不双执行）。契约见 [exec-contract.md](exec-contract.md) §1.4，由 `tests/test_exec_contract.py`（契约 1.4）、`tests/test_store.py`、`tests/test_multitenant_api.py` 与 `tests/test_reference_client.py` 钉住。
+
 **旧数据不可读**：本次架构重设计（2026-09-28）起不再为旧 run 记录保留兼容分支。run 记录、事件与资源台账迁入 `runs/runs.db`（SQLite，[ADR 0009](adr/0009-sqlite-run-store.md)）后，此前的 `runs/<id>/meta.json` / `events.jsonl` 文件与 `<数据根>/sessions/<id>/` 会话目录**一律不再被读取**：旧 run 不出现在列表、详情、重放与资源台账中，也不能被追问；`runs.db` 的 schema 版本不符时宿主拒绝打开。不提供迁移，需要旧历史的操作员自行保留旧数据根。决策史统一记在 [`docs/adr/`](adr/)。
 
 具体接口与数据迁移在对应实施设计中决定，不预建无消费者的租户抽象；修改当前承诺遵循
@@ -210,8 +212,12 @@ pi 的事件词汇只出现在 `kernel/projection.py`；下游（总线、SSE、
   浏览器看到一条日志里没有的帧。
 * **存储是一个 SQLite 数据库**（`store.py`，标准库 `sqlite3`）：`<data_root>/runs/runs.db`，
   WAL 模式、`synchronous=NORMAL`，由宿主以 0600 普通文件打开（拒绝符号链接），`user_version`
-  不符即拒绝打开（不迁移）。两张表：`runs(run_id 主键, created_at, tenant_id, status, holds, record)`
-  保存完整 `RunRecord`（JSON）与查询要过滤的列；`events` 以 **`(run_id, seq)` 为主键**保存每个已提交帧。
+  不符即拒绝打开（不迁移；同版本旧库在打开时补齐新增的加表/加索引 DDL——schema 只允许向前
+  兼容地增长，破坏性变更必须 bump 版本）。三张表：`runs(run_id 主键, created_at, tenant_id,
+  status, holds, record)` 保存完整 `RunRecord`（JSON）与查询要过滤的列；`events` 以
+  **`(run_id, seq)` 为主键**保存每个已提交帧；`idempotency_keys`（R3）按 owner 作用域
+  `(COALESCE(tenant_id,''), COALESCE(user_id,''), key)` 唯一保存创建幂等键到 run 的指认，
+  键行与 run 行同事务写入（见 §4 受理）。
   读者看见一帧当且仅当它的插入事务已提交：没有半行、没有提交水位、没有截尾修复，也没有进程内
   索引或模块级缓存——列表、按租户列表、资源台账与准入都直接查询同一个库。报告、子代理产物与
   会话文件仍是 `runs/<id>/` 下的文件（§5.2）。
@@ -490,7 +496,7 @@ fold，delta/直播帧不落盘不投影；事件原文存档归 R3 存储边界
    `/run --bg`、`/subagents-detach` 这类客户端可控输入能绕过 `tool_call` 守卫发起不随本 run
    收口的后台进程（见 pi-integration-notes.md §10.4）；命令集合现在来自宿主自己的蓝图目录，
    不再依赖 pi 的模板展开。
-   `parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。追问门禁的同族判定比 run 记录自身的事实：准入时 run 行在同一事务内写入本 run 的 `RunSpec`（`"spec"` 对象，见 §2：`family`、`pack`、`executor`、`blueprint`、`credential_origin`，来自冻结配置，与 run id/owner 同一次写入），session_ready 提交时写回 `agent`（ACP 为协商到的 agentInfo.name；pi 协议不报 agent 身份，不伪造）；`spec.family` 不同的跨族追问一律 `session_unavailable`（fail-closed），同族但 `spec.pack` 与本包不同同样 `session_unavailable`；缺 `"spec"` 或缺必填字段的行按不可解析处理（fail-closed），不会进入追问门禁；旧 `meta.json` 记录根本不被读取（[ADR 0001](adr/0001-required-run-admission-facts.md)、[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)）。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮；
+   `parentRunId` 只接受已有会话的最新已结束轮次：从父 run 专属目录安全读取脱敏后的会话文件，复制到新 run 专属目录，用 pi 官方 `--session` 续接；会话不可用或已存在后续轮次时拒绝，不冒充追问。追问门禁的同族判定比 run 记录自身的事实：准入时 run 行在同一事务内写入本 run 的 `RunSpec`（`"spec"` 对象，见 §2：`family`、`pack`、`executor`、`blueprint`、`credential_origin`，来自冻结配置，与 run id/owner 同一次写入），session_ready 提交时写回 `agent`（ACP 为协商到的 agentInfo.name；pi 协议不报 agent 身份，不伪造）；`spec.family` 不同的跨族追问一律 `session_unavailable`（fail-closed），同族但 `spec.pack` 与本包不同同样 `session_unavailable`；缺 `"spec"` 或缺必填字段的行按不可解析处理（fail-closed），不会进入追问门禁；旧 `meta.json` 记录根本不被读取（[ADR 0001](adr/0001-required-run-admission-facts.md)、[ADR 0002](adr/0002-follow-up-judged-by-parent-record.md)）。**多租户模式下父 run 还必须属于调用者自己的租户**：未知/异租户/无 owner 的父 run 在读取它的会话、报告、状态或子 run 计数之前就按未知 run 拒绝（404）。前端按父链展示连续对话，侧栏只列最新一轮。受理还接受可选 `Idempotency-Key` 头（R3，见 §3.1 与 [exec-contract.md](exec-contract.md) §1.4）：同键同请求的重放在一切准入语义之前短路返回原受理记录（201 + run 当前视图、同 `runId`），键行与 run 行同事务写入；
 2. 渲染**本 run 的**运行期配置目录与 session 目录（`runs/<id>/pi-agent`、`runs/<id>/sessions/`），
    按 `LOCAL_WEB_EXECUTOR` 选择执行面（见 §5）；
 3. 事件投影 → `EventBus.commit`：先插入 `events` 表，再实时给 SSE（见 §3.1）；

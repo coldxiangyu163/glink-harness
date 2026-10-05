@@ -45,9 +45,16 @@ from ..egress import EgressProxy
 from ..kernel.execution import ExecutionAdapter
 from ..ownership import DataRootOwnership
 from ..redaction import SecretRedactor, redactor_from_config
-from ..store import REPORT_FILENAME, RUNNING, RunRecord, RunStore
+from ..store import (
+    REPORT_FILENAME,
+    RUNNING,
+    IdempotencyClaim,
+    RunRecord,
+    RunStore,
+    request_digest,
+)
 from ..tenancy import TenantContext, TenantCredentialStore
-from .admission import RunAdmission, parse_blueprint_command
+from .admission import RunAdmission, owner_ref_of, parse_blueprint_command
 from .errors import (
     BlueprintUnavailable,
     EventLogError,
@@ -202,6 +209,7 @@ class RunManager:
         *,
         parent_run_id: str | None = None,
         blueprint: str | None = None,
+        idempotency_key: str | None = None,
     ) -> RunRecord:
         """Admit a run and execute it in the background.
 
@@ -225,12 +233,47 @@ class RunManager:
         template raises :class:`BlueprintUnavailable`. The rule is
         harness-independent.
 
+        ``idempotency_key`` (R3) makes creation idempotent per owner: a key
+        the same ``(tenant, user)`` already used for the same request (same
+        prompt, parent and blueprint) replays the admitted run — no second
+        execution, no thread, no re-judged admission — while the same key with
+        a different request raises :class:`IdempotencyConflict`. A foreign
+        owner's identical key is simply unused. The digest is taken over the
+        raw fields, before the deterministic ``/``-command rewrite. The
+        prepare window is racy by design (its file IO stays outside the
+        admission lock): when two twins carrying one key race, the loser's
+        admit failure (``RunBusy`` locally, the unique-index
+        ``StoreWriteError`` in multi-tenant mode) is reconciled into a replay
+        instead of being surfaced to the client.
+
         Admission is two halves around the admission lock
         (:mod:`glink_harness.runs.admission`): everything that reads files (the
         follow-up's session snapshot) happens before the lock, so one tenant's
         follow-up does not serialize every other tenant's admission; the
         parent's authoritative state is rechecked inside it.
         """
+        claim: IdempotencyClaim | None = None
+        if idempotency_key is not None:
+            claim = IdempotencyClaim(
+                tenant_id=owner_ref_of(context).owner_id,
+                user_id=context.user_id if context is not None else None,
+                key=idempotency_key,
+                request_digest=request_digest(prompt, parent_run_id, blueprint),
+            )
+            # The replay is decided before any admission semantics run — the
+            # stored admission already judged this request's blueprint,
+            # credentials, parent and quotas, and a retry must not be
+            # re-judged by the state of the moment (nor pay for prepare's
+            # file IO). prepare runs outside the lock, so lookup → create is
+            # NOT one critical section: a twin request carrying the same key
+            # can commit while this one is still preparing. The loser of that
+            # race is reconciled after its own admit fails (below); the
+            # owner-scoped unique index is the cross-writer backstop (a
+            # racing insert fails rather than admitting twice).
+            with self._lock:
+                replayed = self.store.idempotent_lookup(claim)
+                if replayed is not None:
+                    return replayed
         request = self._admission.prepare(
             prompt, context, parent_run_id=parent_run_id, blueprint=blueprint
         )
@@ -238,9 +281,29 @@ class RunManager:
         # global admission lock so unrelated tenants can still start runs.
         with self._admission.continuation_guard(request):
             with self._lock:
-                admitted = self._admission.admit(
-                    request, lambda holding: self._check_admission(context, holding)
-                )
+                try:
+                    admitted = self._admission.admit(
+                        request,
+                        lambda holding: self._check_admission(context, holding),
+                        idempotency=claim,
+                    )
+                except Exception:
+                    # The race loser's exit. A keyed request whose admit fails
+                    # but whose key now resolves to a run with the same digest
+                    # lost the prepare-window race to its twin: the twin's
+                    # committed key row is the proof (an older replay would
+                    # have short-circuited before prepare). Replay the stored
+                    # admission instead of surfacing the loser's failure —
+                    # locally that failure is run_busy, in multi-tenant mode
+                    # the unique-index StoreWriteError. Any other outcome
+                    # (key still unclaimed) re-raises untouched, and a
+                    # different-digest key raises IdempotencyConflict here.
+                    if claim is None:
+                        raise
+                    replayed = self.store.idempotent_lookup(claim)
+                    if replayed is None:
+                        raise
+                    return replayed
                 execution = RunExecution.from_admitted(admitted)
                 run_id = admitted.record.run_id
                 self._executions[run_id] = execution

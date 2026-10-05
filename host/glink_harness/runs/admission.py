@@ -40,7 +40,7 @@ from ..contracts import FollowupUnavailable
 from ..kernel.agent_env import RunCredentials
 from ..kernel.harness import HarnessFamily, OwnerRef, select_family
 from ..redaction import SecretRedactor
-from ..store import AdmissionCheck, RunRecord, RunSpec, RunStore
+from ..store import AdmissionCheck, IdempotencyClaim, RunRecord, RunSpec, RunStore
 from ..tenancy import TenantContext, TenantCredentialStore, TenantNotConfigured
 from .errors import BlueprintUnavailable, UnsupportedCommand
 from .secrets import RunSecretBoundary
@@ -424,13 +424,19 @@ class RunAdmission:
         return self.family_for(request.spec.family).continuation_guard(parent)
 
     def admit(
-        self, request: AdmissionRequest, admission_check: AdmissionCheck | None = None
+        self,
+        request: AdmissionRequest,
+        admission_check: AdmissionCheck | None = None,
+        idempotency: IdempotencyClaim | None = None,
     ) -> AdmittedRun:
         """Create the record (caller holds the admission lock).
 
         ``admission_check`` is the concurrency/ledger gate: the store runs it
         inside the same database transaction that inserts the record, so the
         holds it counts and the insert cannot interleave with another writer.
+        ``idempotency`` (R3) is the owner's key claim, reserved in that same
+        transaction (see :meth:`RunStore.create`); the lookup half runs in the
+        manager before ``prepare``, so a replay never reaches this method.
         """
         context = request.context
         parent_run_id = request.parent_run_id
@@ -473,6 +479,7 @@ class RunAdmission:
             # （docs/adr/0002）。
             spec=request.spec,
             admission_check=admission_check,
+            idempotency=idempotency,
         )
         request.secrets.run_id = record.run_id
         return AdmittedRun(

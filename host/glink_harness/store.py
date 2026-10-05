@@ -50,6 +50,7 @@ from __future__ import annotations
 # 注解会被类型检查器解析成那个方法而不是内置类型，并连带污染调用方的类型。
 # 这里显式用 ``builtins.list`` 写这些注解，行为不变，只把注解指向内置类型。
 import builtins
+import hashlib
 import json
 import logging
 import os
@@ -149,6 +150,16 @@ CREATE TABLE IF NOT EXISTS events (
   body   TEXT NOT NULL,
   PRIMARY KEY (run_id, seq)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  tenant_id      TEXT,
+  user_id        TEXT,
+  key            TEXT NOT NULL,
+  run_id         TEXT NOT NULL REFERENCES runs(run_id),
+  request_digest TEXT NOT NULL,
+  created_at     REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idempotency_by_owner
+  ON idempotency_keys(COALESCE(tenant_id, ''), COALESCE(user_id, ''), key);
 """
 
 
@@ -301,6 +312,15 @@ class StoreError(RuntimeError):
     """The run database cannot be opened or holds a row that is not a record."""
 
 
+class IdempotencyConflict(StoreError):
+    """The owner's idempotency key exists with a different request digest.
+
+    Raised by :meth:`RunStore.idempotent_lookup`. Deliberately carries nothing
+    about the stored run: the refusal must not confirm what request the key
+    actually admits, only that it is not this one.
+    """
+
+
 class StoreWriteError(OSError):
     """A write to the run database failed; nothing of it is visible.
 
@@ -339,6 +359,43 @@ class ChildDocuments:
 #: Called inside the admission transaction with the holding records (newest
 #: first); raising refuses the admission and rolls the transaction back.
 AdmissionCheck = Callable[[Sequence["RunRecord"]], None]
+
+
+@dataclass(frozen=True, slots=True)
+class IdempotencyClaim:
+    """One owner's idempotent-create claim (multi-harness-plan §6, R3).
+
+    The key is scoped to ``(tenant_id, user_id)`` — local mode is the all-``None``
+    owner — and the digest is taken over the *semantic* request fields, so a
+    retry of the same creation hits the same row while the same key with a
+    different request is an :class:`IdempotencyConflict`, never a silent second
+    run. A foreign owner's identical key is a different row entirely: the
+    scoping index keys on ``COALESCE(…, '')`` because SQL ``UNIQUE`` treats
+    ``NULL``s as distinct.
+    """
+
+    tenant_id: str | None
+    user_id: str | None
+    key: str
+    request_digest: str
+
+
+def request_digest(
+    prompt: str, parent_run_id: str | None, blueprint: str | None
+) -> str:
+    """Digest the semantic request a key must always name the same way.
+
+    The inputs are the raw creation fields (before the ``/``-command rewrite —
+    that rewrite is deterministic, so identical raw input means identical
+    admitted semantics). ``None`` and ``""`` normalize to the same digest on
+    purpose: a missing optional field is not a different request.
+    """
+    canonical = json.dumps(
+        [prompt, parent_run_id or "", blueprint or ""],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class RunStore:
@@ -515,6 +572,7 @@ class RunStore:
         parent_run_id: str | None = None,
         blueprint_stages: Sequence[Mapping[str, Any]] = (),
         admission_check: AdmissionCheck | None = None,
+        idempotency: IdempotencyClaim | None = None,
     ) -> RunRecord:
         """Admit a run: one transaction checks the ledger and inserts the row.
 
@@ -534,6 +592,15 @@ class RunStore:
         are facts decided before admission and land in this same insert, so no
         reader can observe an ownerless or spec-less run. ``agent`` is written
         back at the session_ready commit (it is only known after the start).
+
+        ``idempotency`` (R3) reserves the owner's key for this run inside the
+        **same** transaction: the claim becomes visible exactly when the run
+        row does, so a crash between the two cannot strand a key that admits
+        nothing. The lookup half lives in :meth:`idempotent_lookup` (the
+        manager runs it under its admission lock, before ``prepare``); the
+        unique owner-scoped index is the last line of defence — a concurrent
+        second create with the same key fails its insert rather than admitting
+        twice, surfacing as :class:`StoreWriteError`.
         """
         with self._transaction() as connection:
             if admission_check is not None:
@@ -570,9 +637,56 @@ class RunStore:
                         _encode(record),
                     ),
                 )
+                if idempotency is not None:
+                    connection.execute(
+                        "INSERT INTO idempotency_keys"
+                        "(tenant_id, user_id, key, run_id, request_digest, created_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            idempotency.tenant_id,
+                            idempotency.user_id,
+                            idempotency.key,
+                            record.run_id,
+                            idempotency.request_digest,
+                            record.created_at,
+                        ),
+                    )
             except BaseException:
                 _remove_empty(directory)
                 raise
+        return record
+
+    def idempotent_lookup(self, claim: IdempotencyClaim) -> RunRecord | None:
+        """The run an owner's idempotency key already admits, if any (R3).
+
+        The read half of idempotent creation; :meth:`create` is the write half.
+        The manager runs this under its admission lock **before** preparing the
+        request, so a replay short-circuits ahead of every admission gate — a
+        retry must not be re-judged by the blueprint, credential or quota state
+        of the moment, it replays the admission that already happened.
+
+        Raises :class:`IdempotencyConflict` when the key exists with a
+        different request digest (the client reused a key for another request);
+        returns ``None`` when this owner never used the key. A key row whose
+        run record cannot be read back is refused (:class:`StoreError`)
+        rather than treated as absent — silently re-admitting under a key that
+        already names a run is exactly the duplicate execution R3 exists to
+        prevent.
+        """
+        rows = self._query(
+            "SELECT run_id, request_digest FROM idempotency_keys"
+            " WHERE COALESCE(tenant_id, '') = COALESCE(?, '')"
+            " AND COALESCE(user_id, '') = COALESCE(?, '') AND key = ?",
+            (claim.tenant_id, claim.user_id, claim.key),
+        )
+        if not rows:
+            return None
+        run_id, digest = rows[0]
+        if digest != claim.request_digest:
+            raise IdempotencyConflict("幂等键已用于不同的请求")
+        record = self.get(run_id)
+        if record is None:
+            raise StoreError(f"幂等键指向的 run 记录不可读: {run_id}")
         return record
 
     def _allocate(self, connection: sqlite3.Connection, run_id: str | None) -> tuple[str, Path]:
@@ -1013,6 +1127,20 @@ def _open_database(path: Path) -> sqlite3.Connection:
                 if statement.strip():
                     connection.execute(statement)
             connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            connection.execute("COMMIT")
+        elif version == SCHEMA_VERSION:
+            # An existing same-version database still runs the schema: every
+            # statement is additive (``CREATE … IF NOT EXISTS``), so rows and
+            # columns are never rewritten — this is how a database created
+            # before a table was added gains it without a version bump. The
+            # discipline that keeps this safe: _SCHEMA may only grow by
+            # additive table/index DDL without bumping SCHEMA_VERSION; a
+            # breaking change must bump it (older databases are refused at
+            # open, never migrated in place).
+            connection.execute("BEGIN IMMEDIATE")
+            for statement in _SCHEMA.split(";"):
+                if statement.strip():
+                    connection.execute(statement)
             connection.execute("COMMIT")
     except sqlite3.Error as exc:
         connection.close()
