@@ -543,6 +543,11 @@ def config_values(mode: str, state_dir: Path, tenants_file: Path, gateway_secret
         # execution face; a synthetic placeholder keeps that contract intact
         # without any network call (the adapter is replaced below).
         "OPENAI_BASE_URL": "https://example.invalid/v1",
+        # Pin the pack explicitly: the execution face below is substituted with
+        # the pi-family fake adapter, and the repo default pack has been dsh
+        # since 2026-10-01 (whose session_config validation would fail-closed
+        # on the missing OPENAI_REASONING_EFFORT this fixture never provides).
+        "GLINK_HARNESS": "pi",
         "PI_CODING_AGENT_DIR": str(REPO_ROOT / "harnesses" / "pi"),
         "LOCAL_WEB_DATA_ROOT": str(state_dir / "data"),
         "LOCAL_WEB_PORT": "0",

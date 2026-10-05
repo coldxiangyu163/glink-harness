@@ -1,0 +1,110 @@
+glink-harness 浏览器验收 · mode=accounts
+baseUrl: http://127.0.0.1:53049
+命令: node tests/browser/acceptance.mjs --mode accounts
+时间: 2026-10-05T03:23:22.559Z → 2026-10-05T03:24:41.244Z
+
+[ok]   identity · 未登录入口：单卡登录面、工作台外壳不揭示、也无历史闪现 · {"authVisible":true,"shellHidden":true,"title":"登录研究工作台","loginVisible":true,"registerHidden":true,"gitwayNoteHidden":true,"bodyText":"跳到主要内容 | 登录研究工作台 | 邮箱 | 密码 | 登录 | 收到邀请？创建账号","shellLeak":false}
+[ok]   identity · 未登录 API：/api/runs 401 且带 mode=accounts · {"status":401,"mode":"accounts","error":"unauthenticated"}
+[ok]   identity · 登录失败：字段旁给出同形错误、不进入工作台 · {"error":"邮箱或密码不正确，请重试。","errorHidden":false,"shellHidden":true,"passwordValue":"definitely-wrong"}
+[ok]   identity · 登录成功：账号区显示组织与姓名（首字母头像） · {"accountVisible":true,"org":"组织甲","name":"管理员甲","avatar":"管","view":"home"}
+[ok]   identity · 会话 Cookie：HttpOnly 且非 Secure 的 loopback 会话（口令不进 localStorage） · {"name":"glink_harness_session","httpOnly":true,"sameSite":"Lax"}
+[ok]   identity · 浏览器存储：没有会话/凭据类键 · {"keys":[]}
+[ok]   identity · 账号菜单：管理员可见组织/邮箱/角色 + 邀请成员 + 退出登录 · {"hidden":false,"expanded":"true","org":"组织：组织甲","email":"邮箱：admin-alpha@example.test","role":"角色：管理员","inviteVisible":true,"logoutVisible":true}
+[ok]   identity · 邀请对话框：标题、角色选项（成员/管理员） · {"open":"true","title":"邀请成员","roles":["成员","管理员"]}
+[ok]   identity · 邀请结果：只显示一次的链接（token 在 URL hash，不进请求行） · {"note":"邀请已生成：browser-member@example.test（成员）。邀请码只显示这一次。","link":"http://127.0.0.1:53049/register#invite=…"}
+[ok]   identity · 邀请对话框：Esc 关闭并把焦点还给入口按钮 · {"open":"false","hidden":true,"focus":"account-invite","focusTag":"BUTTON","inviteVisible":true,"accountButtonVisible":true}
+[ok]   identity · 服务端请求日志不含邀请 token（hash 只留在浏览器） · {"logBytes":6246}
+[ok]   identity · 注册校验：过短密码与两次不一致都在字段旁拒绝、不提交 · {"short":{"error":"密码至少需要 10 个字符。","errorHidden":false,"stillOnForm":true},"mismatch":{"error":"两次输入的密码不一致。","stillOnForm":true}}
+[ok]   identity · 邀请链接 → 注册表单：组织与受邀邮箱只读预填 · {"authVisible":true,"registerVisible":true,"loginHidden":true,"org":"组织甲","email":"browser-member@example.test","emailReadonly":true,"missingHidden":true}
+[ok]   identity · 注册成功：回到登录面并提示用新账号登录（不自动登录） · {"notice":"账号已创建，请用刚才的邮箱登录。","loginVisible":true,"shellHidden":true}
+[ok]   identity · 普通成员：菜单无「邀请成员」、有退出；历史隔离为空 · {"name":"浏览器成员","role":"角色：成员","inviteHidden":true,"logoutVisible":true,"rows":0,"emptyTitle":"还没有研究记录"}
+[ok]   identity · 邀请码一次性：再次打开提示无效/已使用且不出注册表单 · {"notice":"这个邀请无效或已经使用，请向管理员索取新的邀请码。","registerHidden":true,"body":"跳到主要内容 | 登录研究工作台 | 这个邀请无效或已经使用，请向管理员索取新的邀请码。 | 邮箱 | 密码 | 登录 | 收到邀请？创建账号"}
+[ok]   identity · 注销：回到登录面、账号与历史内容不闪现 · {"authVisible":true,"shellHidden":true,"historyLeak":false}
+[ok]   identity · 注销后 API：会话立即失效（401） · 401
+[ok]   identity · 注销后刷新：仍是登录面（服务端会话已废止） · {"authVisible":true,"shellHidden":true}
+[ok]   shell · 外壳几何：8px 沟槽 + 240 导航 + 52 栏头，品牌取标准库资产 · {"sidebar":{"w":240,"h":884,"x":8},"header":{"w":1248,"h":52,"x":256},"gap":"8px","padding":"8px","brand":"/logo-icon.svg","alertHidden":true,"font":"\"Noto Sans SC\", \"PingFang SC\", \"SF Pro Text\", \"Helvetica Neue\", \"Hiragino Sans GB\", \"Microsoft YaHei\", \"Noto Sans SC\", sans-serif","title":"研究工作台"}
+[ok]   shell · 字体：页面作用域与标准库 Demo 同族（Noto Sans SC 优先） · "Noto Sans SC", "PingFang SC", "SF Pro Text", "Helvetica Neue", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif
+[ok]   shell · 服务正常时侧栏页脚不出现状态牌 · true
+[ok]   shell · 首页：标题 + 双卡 + 无选中、栏头右簇为空 · {"title":"今天要研究什么？","cards":2,"path":"新研究","current":0,"headerActions":0,"emptyStates":[{"where":"run-list","title":"还没有研究记录","role":"status","variant":"no-data"},{"where":"home-run-list","title":"还没有研究","role":"status","variant":"no-data"},{"where":"home-report-list","title":"还没有报告","role":"status","variant":"no-data"}],"rows":0}
+[ok]   shell · 空态：侧栏 + 两张首页卡都画 EmptyState（role=status / no-data） · [{"where":"run-list","title":"还没有研究记录","role":"status","variant":"no-data"},{"where":"home-run-list","title":"还没有研究","role":"status","variant":"no-data"},{"where":"home-report-list","title":"还没有报告","role":"status","variant":"no-data"}]
+[ok]   shell · 侧栏收起：64 图标条 + aria 两态 + 「新建」去描边 · {"width":64,"expanded":"false","label":"展开侧栏","newBorder":"rgba(0, 0, 0, 0)","itemW":40}
+[ok]   shell · 侧栏收起态悬停：Tooltip 圆角 8 / 12px / 近黑 · {"text":"新建研究","radius":"8px","size":"12px","bg":"rgb(23, 23, 23)"}
+[ok]   shell · 侧栏折叠状态刷新后保持 · {"width":64,"expanded":"false"}
+[ok]   shell · 侧栏可再展开（回到 240） · 240
+[ok]   shell · 断点：侧栏 240/212/64 与标准库同为 width<N 边界 · 1512:240 1250:240 1050:240 1049:212 900:212 721:212 720:64 600:64
+[ok]   shell · 断点：各档均无横向溢出 · []
+[ok]   shell · 断点：首页双列 → 单列（1050 边界） · 1512:2 1250:2 1050:2 1049:1 900:1 721:1 720:1 600:1
+[ok]   shell · 断点：账号区 <721 只留 28px 头像 · 1512:flex/28 1250:flex/28 1050:flex/28 1049:flex/28 900:flex/28 721:flex/28 720:none/28 600:none/28
+[ok]   shell · 跳转链接：Tab 首个焦点且滑入可见 · {"active":"skip-link","visible":true}
+[ok]   shell · 键盘焦点可见：普通控件画 2px --ring · [{"id":"brand-home","managed":false,"outline":"solid 2px rgb(104, 104, 104)","composerFocusWithin":false,"composerBorder":"rgb(225, 225, 225)"},{"id":"sidebar-toggle","managed":false,"outline":"solid 2px rgb(104, 104, 104)","composerFocusWithin":false,"composerBorder":"rgb(225, 225, 225)"},{"id":"new-research","managed":false,"outline":"solid 2px rgb(104, 104, 104)","composerFocusWithin":false,"composerBorder":"rgb(225, 225, 225)"},{"id":"account-button","managed":false,"outline":"solid 2px rgb(104, 104, 104)","composerFocusWithin":false,"composerBorder":"rgb(225, 225, 225)"},{"id":"pane-home","managed":false,"outline":"solid 2px rgb(104, 104, 104)","composerFocusWithin":false,"composerBorder":"rgb(225, 225, 225)"}]
+[ok]   shell · 键盘焦点可见：受管输入由容器给出激活态（1px 近黑描边 + focus-within） · [{"id":"prompt-input","managed":true,"outline":"solid 2px rgba(0, 0, 0, 0)","composerFocusWithin":true,"composerBorder":"rgb(23, 23, 23)"}]
+[ok]   composer · 输入器：空输入发送键禁用、不显示计数 · {"sendDisabled":true,"countHidden":true}
+[ok]   composer · 输入器：普通长度 120 高、发送键启用、计数隐藏 · {"composerH":120,"sendDisabled":false,"countHidden":true}
+[ok]   composer · 输入器：多行自增到 240 上限并滚动 · {"inputH":240,"overflow":"auto"}
+[ok]   composer · 输入器：接近上限才显示计数 · {"hidden":false,"text":"30010 / 32000"}
+[ok]   composer · 输入器：清空后回落并禁用发送 · {"sendDisabled":true,"inputH":68}
+[ok]   composer · 输入器：激活态 1px 近黑描边 + 内层认领焦点 · {"border":"rgb(23, 23, 23)","managed":true}
+[ok]   composer · 输入器：输入法组字中的回车不提交 · {"value":"组字保护","view":"home"}
+[ok]   composer · 输入器：Shift+Enter 换行不提交 · {"value":"换行\n","view":"home"}
+[ok]   lifecycle · 运行中：停止键原位替换发送键、输入只读、侧栏只标记当前研究 · {"status":"running","stopVisible":true,"sendHidden":true,"readOnly":true,"placeholder":"研究进行中，完成或停止后可以继续追问","foldExpanded":"true","processLabel":"正在撰写回答","marked":1,"dock":"132px"}
+[ok]   lifecycle · 运行中：过程折叠展开并写动作（不写内核生命周期） · 正在撰写回答
+[ok]   lifecycle · 运行中：输入器实测高度写回留白变量 · 132px
+[ok]   lifecycle · 运行中刷新：服务端记录让页面恢复运行中（可继续停止），运行中没有报告入口 · {"status":"running","stopVisible":true,"reportEntry":false}
+[ok]   lifecycle · 停止：中性终态（虚线圆、说明「这不是错误」）、输入恢复 · {"status":"cancelled","tone":"stopped","text":"已停止研究 | 这不是错误。已完成的步骤和内容都保留在上面，可以用同一个问题重新开始。 | 重新开始","icon":"dashed-circle","stopHidden":true,"sendVisible":true,"editable":true}
+[ok]   lifecycle · 默认场景：问题进入气泡、回答带待核验草稿、成功不画终态卡 · {"status":"finished","question":"[scenario:default] 浏览器验收 · 默认场景","outcomeHidden":true,"answer":"这是一份浏览器验收用的合成回答，不包含真实模型输出。","draft":"待核验草稿","actions":["复制回答","下载报告","用同一个问题重新研究"],"reportButton":true}
+[ok]   lifecycle · 回答动作条：复制 / 下载报告 / 重新研究 · ["复制回答","下载报告","用同一个问题重新研究"]
+[ok]   lifecycle · 工具卡：三条工具行按动作命名（执行/读取/检索），失败行写状态字 · [{"label":"执行","state":"","hasDetail":"true"},{"label":"读取","state":"失败","hasDetail":"true"},{"label":"检索","state":"","hasDetail":"true"}]
+[ok]   lifecycle · 过程折叠：完成后写「已完成 · N 个步骤」并自动收起 · 已完成 · 4 个步骤
+[ok]   lifecycle · 工具行可展开看细节（高度张开 > 收起）、不露宿主绝对路径 · {"open":true,"closedHeight":28,"openedHeight":104,"closedAgain":28,"detailChars":8,"hostPath":false}
+[ok]   lifecycle · 失败场景：失败卡 + 已交付内容保留 + 重试/查看详情 · {"status":"failed","tone":"failed","title":"这次研究没有完成","actions":["重试","查看详情"],"answerKept":true}
+[ok]   lifecycle · 失败详情：展开后能看到原始错误 · {"visible":true,"text":"upstream 500: synthetic model failure"}
+[ok]   lifecycle · 截断场景：finished + stopReason=length 显示「交付不完整」 · {"status":"finished","tone":"slow","text":"交付不完整 | 模型在输出长度上限处被截断，上面的回答和报告可能不完整。可以继续追问补齐，或重新开始。 | 重新开始"}
+[ok]   lifecycle · 历史列表：一次停止 + 四个已结束研究，按会话合并列出 · {"rows":5}
+[ok]   lifecycle · 历史重放：时间线完整、贴底、过程收起、文件卡给出报告 · {"status":"finished","thinking":1,"answer":1,"answerText":"这是一份浏览器验收用的合成回答，不包含真实模型输出。","outputHidden":false,"foldExpanded":"false","distance":0,"composerPlaceholder":"继续追问或提出修改要求…"}
+[ok]   lifecycle · 历史重放的追问入口：输入器写「继续追问」 · 继续追问或提出修改要求…
+[ok]   lifecycle · 追问：父轮折叠进「之前的研究」、当前轮独立、列表行数不变 · {"status":"finished","earlierCount":1,"earlierText":"[scenario:default] 浏览器验收 · 默认场景 | 已完成 · 1 个步骤 | 研究助理 | 待核验草稿 | AI 生成，未经人工核验：可作为起草参考，不能直接对外发送或据此下判断。 | 这是一份浏览器验收用的合成回答，不包含真实模型输出。 | 已生成 1 个文件 | report.md | Markdown 文档 · 待核验草稿","rows":5,"url":"/"}
+[ok]   lifecycle · 刷新后历史仍在：侧栏条目与首页最近研究都非空 · {"rows":5,"homeCards":2,"homeRecent":5}
+[ok]   lifecycle · 命令门禁：`/run …` 被拒（不创建研究、不进入运行态） · {"beforeRows":5,"rows":5,"status":null,"toast":"研究没能开始，请稍后重试。","toastVisible":true}
+[ok]   lifecycle · 追问门禁：父会话文件不可用时拒绝续接（不静默新起会话） · {"status":409,"body":{"error":"session_unavailable"}}
+[ok]   lifecycle · 重新研究：同一问题开启新一轮，列表新增一条 · {"rowsBefore":5,"rerunQuestion":"[scenario:tools] 浏览器验收 · 追问续接","rows":6,"question":"[scenario:tools] 浏览器验收 · 追问续接","status":"finished"}
+[ok]   subagent · 派发卡片：一次派发两个任务 → 两张卡片（不是通用工具行） · ["派发子代理 · researcher | 核查跨境资金监管的两个口径 | 1 步 · 最近检索 跨境资金监管 口径","派发子代理 · researcher | 比对两地来源的时间线"]
+[ok]   subagent · 运行中进度（R3a）：卡片写「N 步 · 最近<动作> <对象>」 · ["派发子代理 · researcher | 核查跨境资金监管的两个口径 | 1 步 · 最近检索 跨境资金监管 口径","派发子代理 · researcher | 比对两地来源的时间线"]
+[ok]   subagent · 子代理面板（运行中）：标题「派发了 2 个子代理」、两行写「进行中」 · {"title":"派发了 2 个子代理","rows":[{"text":"researcher：核查跨境资金监管的两个口径 | 进行中","status":"running"},{"text":"researcher：比对两地来源的时间线 | 进行中","status":"running"}]}
+[ok]   subagent · 子代理收口：两行转「已完成」并带时长与工具次数 · ["researcher：核查跨境资金监管的两个口径 | 已完成 | 4 秒 · 3 次工具调用 | input.mdmeta.jsonoutput.mdtranscript.jsonl","researcher：比对两地来源的时间线 | 已完成 | 4 秒 · 3 次工具调用 | input.mdmeta.jsonoutput.mdtranscript.jsonl"]
+[ok]   subagent · 子代理产物（R2）：每个子代理列出 input/output/meta/transcript 四个可下载链接 · [["input.md","meta.json","output.md","transcript.jsonl"],["input.md","meta.json","output.md","transcript.jsonl"]]
+[ok]   subagent · 子代理产物可下载（宿主代理同一道路径校验，正文来自 children/<n>/） · {"href":"/api/runs/73f0acb21430/children/0/input.md","status":200,"bytes":19}
+[ok]   subagent · children API 与面板一致：两个 child、meta 增强、各 4 个产物 · {"count":2,"n":[0,1],"statuses":["finished","finished"],"enrichment":["meta","meta"],"artifacts":[4,4]}
+[ok]   subagent · 子代理历史重放：卡片、面板、产物链接都从落盘记录重建 · {"cards":2,"panelTitle":"派发了 2 个子代理","rows":["finished","finished"],"artifacts":8}
+[ok]   report · 报告右槽：两栏一线、默认对半、名字档写文件名与待核验草稿 · {"open":true,"columns":3,"paneW":624,"drawerW":624,"title":"report.md","titleColor":"rgb(23, 23, 23)","badge":"待核验草稿","h1":"合成报告","h1Size":"28px","paragraph":"这是浏览器验收生成的合成报告，不来自真实模型。","bodyScrollable":true,"duplicates":[],"overflow":false,"collapseVisible":true,"closeIcon":"chevrons-left"}
+[ok]   report · 报告正文：Markdown 渲染（H1 + 段落），无横向溢出、无重名控件 · {"h1":"合成报告","h1Size":"28px","duplicates":[]}
+[ok]   report · 报告开合键：双箭头收起、对话收起键让位 · {"closeIcon":"chevrons-left","collapseVisible":true}
+[ok]   report · 分割线：可拖改宽并记住（localStorage） · {"before":624,"after":744,"stored":"744"}
+[ok]   report · 分割线：对话列不窄于 560、报告不窄于 360 · {"paneW":560,"drawerW":687}
+[ok]   report · 分割线：双击复位 · {"paneW":624,"stored":null}
+[ok]   report · 报告下载：文件名可读（研究报告-…）、内容非空 · {"filename":"研究报告-[scenario subagent] 浏览器验.md","bytes":151}
+[ok]   report · 窄主区（1000px）：报告改覆盖浮层、竖线隐藏、不溢出 · {"overlay":true,"surfaceW":764,"drawerInside":true,"handleHidden":true,"overflow":false}
+[ok]   progress · 单一槽位：打开进度面板时报告让位（不叠两个槽位） · {"reportOpen":false,"drawerHidden":true,"panelOpen":"true"}
+[ok]   progress · 进度与上下文：340 浮层、开关两态、时间轴有步骤、运行信息齐全 · {"width":340,"steps":3,"text":"进度 | 共 3 步 | 思考 | ，已完成 | 派发子代理 · researcher · 核查跨境资金监管的两个口径 | ，已完成 | 派发子代理 · researcher · 比对两地来源的时间线 | ，已完成 | 上下文 | 输出 | 来源 | 1 个文件 | report.md | Markdown 文档 · 待核验草稿 | 状态 | 已完成 | 用时 | 6 秒 | 用量 | 1,000 token | 模型 | browse"}
+[ok]   progress · 进度面板：模型名去掉路由前缀（browser-model） · 进度 | 共 3 步 | 思考 | ，已完成 | 派发子代理 · researcher · 核查跨境资金监管的两个口径 | ，已完成 | 派发子代理 · researcher · 比对两地来源的时间线 | ，已完成 | 上下文 | 输出 | 来源 | 1 个文件 | report.md | Markdown 文档 · 待核验草稿 | 状态 | 已完成 | 用时 | 6 秒 | 用量 | 1,000 token | 模型 | browse
+[ok]   progress · 进度面板：来源页签可切换、列出检索词 · 进度 | 共 3 步 | 思考 | ，已完成 | 派发子代理 · researcher · 核查跨境资金监管的两个口径 | ，已完成 | 派发子代理 · researcher · 比对两地来源的时间线 | ，已完成 | 上下文 | 输出 | 来源 | 没有网络来源 | 这项研究没有检索网络或读取网页。 | 状态 | 已完成 | 用时 | 6 秒 | 用量 | 1,000 token | 模型 | browser-model
+[ok]   progress · 进度面板：Esc 收起并把焦点还给开关 · {"open":"false","focus":"progress-toggle","reportStillOpen":false}
+[ok]   progress · 单一槽位：Esc 收起后两个槽位都关闭（报告不自动恢复） · {"open":"false","focus":"progress-toggle","reportStillOpen":false}
+[ok]   progress · 报告收起：开关回到左栏栏头并接住焦点 · {"open":false,"toggleVisible":true,"expanded":"false","focus":"pane-preview-toggle"}
+[ok]   tenancy · 异租户列表：看不到组织甲的任何研究（UI 空态 + API 也不含） · {"ui":{"rows":0,"emptyTitle":"还没有研究记录"},"api":{"status":200,"ids":[]}}
+[ok]   tenancy · 异租户读面：详情 / SSE / 报告 / 子代理一律 404（同一 unknown_run 口径） · {"detail":404,"events":404,"report":404,"children":404}
+[ok]   tenancy · 异租户写面：取消与追问都不泄露该 run 存在 · {"stop":404,"stopBody":{"error":"unknown_run","requested":false,"runId":"73f0acb21430"},"followup":404,"followupError":"unknown_run"}
+[ok]   tenancy · 跨站来源的 POST：被拒绝（Origin 校验先于身份） · {"status":403,"body":{"error":"csrf_invalid"}}
+[ok]   tenancy · 同租户成员：可读他人研究但不能取消（403 forbidden） · {"detail":200,"stop":403,"stopBody":{"error":"forbidden","requested":false}}
+[ok]   tenancy · 同租户管理员：自己的研究仍可读（拒绝是租户/角色范围而非全面封锁） · {"status":200,"runId":"73f0acb21430"}
+[ok]   resilience · 流断开后前端有界重连：研究仍以 finished 收口且正文完整 · {"intercepted":1,"status":"finished","answer":"这是一份浏览器验收用的合成回答，不包含真实模型输出。"}
+[ok]   resilience · 过程记录读不到：给出说明与下一步（重试 / 打开报告），不无限「重连中」 · {"shown":true,"title":"过程记录暂时读不到","actions":["重试","打开报告"]}
+[ok]   resilience · 模块图失败：恢复面（role=alert）+ 近黑胶囊重试键 · {"role":"alert","title":"页面没有加载完整","buttonH":"40px","buttonBg":"rgb(23, 23, 23)","buttonText":"重试"}
+[ok]   resilience · 重试后工作台完整恢复（历史仍在） · {"shellVisible":true,"rows":8,"bootFailureHidden":true}
+[ok]   resilience · 页面（HTML/可见文字/存储/URL）不含任何合成凭据 · []
+[ok]   resilience · 界面文字不暴露仓库名 / 执行面 / 内核 / 会话 id / 模型全名 · []
+[ok]   resilience · 研究详情 API：不吐宿主绝对路径（会话 id 属产品字段，界面不显示） · {"status":200,"hasAbsPath":false,"hasSessionId":true}
+[ok]   resilience · 界面（HTML/可见文字）不显示会话 id · []
+[ok]   resilience · 浏览器控制台：除套件注入的失败（401/403/404/409、断流、模块图）外没有其他错误 · []
+
+结果: 102 通过 / 0 失败 / 0 跳过（共 102）
+console 错误: 27

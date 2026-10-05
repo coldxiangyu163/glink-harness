@@ -2,6 +2,26 @@
 
 > **改名说明（2026-10-01）**：本仓库由 `pi-glink` 更名为 `glink-harness`（Python 包 `pi_glink`→`glink_harness`、环境变量 `PI_GLINK_*`→`GLINK_*`、镜像/模板/数据根同步更名）。本文改名前的实测记录保留当时旧名——它们是同一工程的历史标识，与 `docs/evidence/` 原始日志一致；现行命令、路径与变量名以当前源码为准。
 
+## 2026-10-05：R3 之后三面全绿复验（`6bb3e2d`）
+
+任务背景：R1–R3 服务化里程碑（R2 执行核心拆分 `a1b87dd`、R3 创建幂等 `6bb3e2d`）落地后的浏览器面回归验收。被测基线为 `fix/arch-review-p1` 的 `6bb3e2d`（工作区干净）；环境 Node 24.16.0、project-local Playwright 1.58.2 / Chromium。证据：`docs/evidence/browser-acceptance-2026-10-05/`。
+
+| 层 | 结果 | 退出码 |
+|---|---|---:|
+| acceptance accounts | **102 通过 / 0 失败 / 0 跳过** | 0 |
+| acceptance local | **78 通过 / 0 失败 / 3 跳过**（81，账号/租户维度按设计跳过） | 0 |
+| acceptance gateway | **7 / 7 通过** | 0 |
+
+三面合计 **187 通过 / 0 失败 / 3 跳过（190 项）**，与 2026-09-28 晚间 B2 轮持平为全绿；对比 2026-09-28 重构线复验的 5 项失败（accounts 3、local 2），本轮全部通过。
+
+本轮唯一的设施改动：`tests/fixtures/accounts_server.py` 显式设置 `GLINK_HARNESS=pi`。2026-10-01 起仓库默认包改为 dsh，其清单 `session_config` 校验要求 `OPENAI_REASONING_EFFORT` 环境值，fixture 在默认包下启动即 fail-closed（首个症状即本轮 accounts 首跑的 `HarnessPackError`）；而 fixture 的执行面替身本就是 pi 族的 `harness_pi.PiExecutionAdapter`，钉回 pi 包恢复其设计支撑的面，未放宽任何断言。此改动随本轮验收一并提交。
+
+资源与清理：三面 fixture（PID 37176 / 39464 / 41362）均由 acceptance 按记录 PID 结束、退出码 0；数据根、账号库与 HOME/XDG 均为运行专属临时目录，随系统临时目录丢弃；未触碰任何既有服务、真实模型、Docker/E2B 或模板。归档按 2026-09-28 确立的约束执行：仓库外临时 `--out` 运行，仅复制验收 JSON/TXT/PNG/host-exit/requests 回仓库，排除 `state/` 与含合成密码的 `fixture.log`；归档前凭据扫描（fixture 全部合成凭据字面量 + `invite=` 请求行计数）产物零命中（`credential-scan.txt`）。
+
+本轮不包含：ui-parity / ui-features 历史脚本（需标准库参考站与真实宿主，另行授权）、真实 pi/Docker/E2B live、真实网关注入。
+
+---
+
 ## 2026-09-28 晚间：B2 浏览器行为闭环与全层复验（`6c73023`）
 
 任务 `GLINK-ARCH-BROWSERWIN-20260928`。被测源码为主 checkout `6c73023`；验证 worktree 同 commit，未改产品或测试源码。Node 24.16.0、Python 3.12.10、project-local Playwright 1.58.2 / Chromium；真实宿主为主 checkout 的 local / inproc + 真实模型，参考站为已有 `dist/` 静态产物。隔离 acceptance 使用脚本化执行面。证据与可复现脚本均在 [`docs/evidence/browser-window-2026-09-28/`](evidence/browser-window-2026-09-28/)；各命令退出码留在对应 `*-command.txt`、`tokens.txt` 与 `acceptance-lifecycle.txt`。
