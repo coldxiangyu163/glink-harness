@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
+import subprocess
 import threading
 import time
 from dataclasses import replace
@@ -50,6 +51,14 @@ from glink_harness.kernel.e2b_env import (
     PiSandboxTransfer,
     SandboxCommandProcess,
     _read_file_bounded,
+)
+from glink_harness.kernel.acp_e2b_env import (
+    RECLAIM_BASE_PATH,
+    RECLAIM_CLEANUP_COMMAND,
+    RECLAIM_OUT_PATH,
+    RECLAIM_SCRIPT_PATH,
+    RECLAIM_TAR_PATH,
+    RECLAIM_TOKEN_PATH,
 )
 from glink_harness.kernel.execution import ExecutionAdapter, ExecutionSpec
 from glink_harness.kernel.sandbox import E2BSandbox, open_sandbox
@@ -1495,3 +1504,31 @@ def test_returncode_mirrors_the_popen_shape(tmp_path: Path) -> None:
     assert broken.poll() == -1, "断流不得伪装成活进程或真实退出码"
     assert broken.returncode == -1
     assert broken.stream_error is not None
+
+
+def test_park_sweep_removes_every_scratch_including_the_directory(
+    tmp_path: Path,
+) -> None:
+    """泊车清扫必须递归删净 scratch（dsh+e2b 自测实测回归）。
+
+    reclaim 的输出路径是目录（打包器的 out_dir，tar -C 的源），清扫命令
+    若不带 ``-r``，每次泊车都对它抛 CommandExitException（rm: Is a
+    directory），既刷 Traceback 又让 scratch 残留进被泊车的沙箱。这里在
+    隔离目录按同名布局重建全部 scratch（目录 + 文件）后原样执行清扫命令
+    （仅机械改写 /tmp 前缀），断言目录被清空。
+    """
+    out_dir = tmp_path / Path(RECLAIM_OUT_PATH).name
+    out_dir.mkdir()
+    (out_dir / "state.json").write_text("{}", encoding="utf-8")
+    for path in (
+        RECLAIM_SCRIPT_PATH,
+        RECLAIM_BASE_PATH,
+        RECLAIM_TAR_PATH,
+        RECLAIM_TOKEN_PATH,
+    ):
+        (tmp_path / Path(path).name).write_text("x", encoding="utf-8")
+    command = RECLAIM_CLEANUP_COMMAND.replace("/tmp/", f"{tmp_path}/")
+    subprocess.run(["/bin/sh", "-c", command], check=True)
+    assert not any(
+        tmp_path.iterdir()
+    ), "泊车清扫必须清空全部 scratch（含目录形态的 reclaim 输出）"

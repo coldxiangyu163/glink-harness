@@ -90,9 +90,11 @@ RECLAIM_TOKEN_PATH = "/tmp/glink-harness-archive-token"
 #: transport's other scratch files carry no grant and stay until the park-time
 #: sweep below, so a transfer's own artifacts remain inspectable.
 RECLAIM_TOKEN_CLEANUP_COMMAND = "rm -f /tmp/glink-harness-archive-token"
-#: The park-time sweep (before pause): clears every scratch file the archive
-#: paths ever left — nothing run-scoped may survive into a parked sandbox.
-RECLAIM_CLEANUP_COMMAND = "rm -f /tmp/glink-harness-archive-token /tmp/glink-harness-reclaim.mjs /tmp/glink-harness-reclaim-base.json /tmp/glink-harness-reclaim-base.json.tmp /tmp/glink-harness-reclaim-out /tmp/glink-harness-archive.tar /tmp/glink-harness-archive.tar.zst"
+#: The park-time sweep (before pause): clears every scratch file and directory
+#: the archive paths ever left — nothing run-scoped may survive into a parked
+#: sandbox. ``-rf`` because the reclaim output is a directory (the packer's
+#: ``out_dir``); plain ``-f`` fails on it every sweep.
+RECLAIM_CLEANUP_COMMAND = "rm -rf /tmp/glink-harness-archive-token /tmp/glink-harness-reclaim.mjs /tmp/glink-harness-reclaim-base.json /tmp/glink-harness-reclaim-base.json.tmp /tmp/glink-harness-reclaim-out /tmp/glink-harness-archive.tar /tmp/glink-harness-archive.tar.zst"
 BACKFILL_TAR_PATH = "/tmp/glink-harness-backfill.tar"
 #: One reclaim/backfill command's ceiling (the curl inside gets slightly less,
 #: so the command — not the transport — owns the deadline).
