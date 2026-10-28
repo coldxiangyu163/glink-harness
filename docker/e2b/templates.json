@@ -30,7 +30,7 @@
       ],
       "build_args": {
         "CODEX_ACP_VERSION": "1.13.1",
-        "DSH_VERSION": "0.1.5-rc.3",
+        "DSH_VERSION": "0.2.1-rc.2",
         "OPENCODE_AI_VERSION": "1.18.32"
       },
       "builder": "cli",

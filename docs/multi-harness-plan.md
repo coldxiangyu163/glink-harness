@@ -192,16 +192,16 @@ v1 时期的顶层 `command`/`package`/`version`/`session_config`/`permission_al
 * `capabilities.md` 只写**已知成立**的事实（例如 pi 包的子代理工具面）；不确定的 agent 可以
   不提供该文件，宁缺不臆造工具名。解析时读入 `HarnessPack.prompt`，宿主生命周期内字节稳定。
 * `home/` 覆盖层是仓库内容：渲染每 run HOME 时**先铺覆盖层、再按现有规则注入凭据**
-  （凭据目标优先、不被覆盖层覆盖）。dsh 的覆盖层自 GLINK-DSH-02 起承载每 run 的 ACP
-  profile 清单（把 `web.fetchProvider` 指向 out-of-tree 的 Jina fetch bundle；bundle 代码
-  在镜像/模板构建期装进 dsh 安装，覆盖层只带清单），见
-  [ACP 集成笔记](acp-integration-notes.md) §19。dsh 的 ACP profile 用户层还负责产品身份：
-  `system-prompt.includeHarnessIdentity = false`，`personaPrefix` 为 Glink 的研究、分析与文档
-  助手定位，保留 `personaSuffix` 的工作目录提示及上游工具指导/runtime context；方法论仍只
-  由 `methodology/` 提供。显式禁用 `session-telemetry-otel`（不上送会话历史到上游 collector）
-  与 `skill-badge`（不注入官方 badge）。这些配置随新 run HOME 渲染，不修改 dsh 源码、模型/
-  检索路由或请求归属头，也不改写既有会话状态/热沙箱；追问继承旧状态时可能仍沿用旧 profile。
-  回归见 `tests/test_dsh_jina_bundle.py`（文本配置与宿主渲染，不代表真实 dsh/E2B 已验收）。
+  （凭据目标优先、不被覆盖层覆盖）。dsh 使用产品独立的 `glink-acp` profile，组合原生
+  `dsh-base` 与 `dsh-acp-app`，显式选择 `deepseek-search-api` / `deepseek-fetch-api`。
+  两者复用 `DEEPSEEK_API_KEY`，不再安装自建 Jina bundle；旧 `deepseek-official` 搜索与
+  本地 HTTP fetch 均禁用。`sendOriginalQuestion: false` 保持只发送查询词，两个工具预算
+  均为 60 秒。配置与迁移边界见 [ACP 集成笔记](acp-integration-notes.md) §22。
+  profile 保留 `system-prompt.includeHarnessIdentity = false` 与 Glink 的 `personaPrefix`，
+  工作目录由新版原生必需上下文提供，不再引用已退役的 `{{cwd}}` 变量。仍禁用
+  `session-telemetry-otel`，且不挂载 badge bundle；方法论仍只由 `methodology/` 提供。
+  独立 profile 名避免旧会话继承的 `acp` 配置再次载入 Jina，不改父会话或旧 profile 文件。
+  回归见 `tests/test_dsh_web_profile.py`，覆盖配置和新建/继承 HOME，不代表真实云端验收。
   codex/opencode 覆盖层仍为空，机制由回归证明。
 * 包目录与清单在启动时读取并冻结（`GLINK_HARNESSES_DIR` 可覆盖，默认 `<repo>/harnesses`）；
   目录缺失、选中包不存在或清单不合契约都拒绝启动——这是运营方的部署选择，不是按 run 的请求参数。

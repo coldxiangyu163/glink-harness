@@ -36,6 +36,7 @@ from typing import Any
 import pytest
 
 from glink_harness.config import ConfigError, build_config
+from glink_harness.harnesses import load_pack
 
 from acp_pack import apply_acp_pack
 from glink_harness.events import EventBus
@@ -55,7 +56,6 @@ from store_helpers import events_text, stored_record
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FAKE_ACP = Path(__file__).resolve().parent / "fixtures" / "fake_acp.py"
 DOCKERFILE = REPO_ROOT / "docker" / "e2b" / "Dockerfile.acp-e2b"
-NOTES = REPO_ROOT / "docs" / "acp-integration-notes.md"
 #: Multi-tenant fixture constants (same shape the inproc continuation tests use).
 AUDIENCE = "glink-harness-test"
 SECRET = b"0123456789abcdef0123456789abcdef"
@@ -1352,13 +1352,11 @@ def test_the_runner_wires_the_acp_e2b_plan_from_the_frozen_configuration(tmp_pat
 # -- image pin boundary -------------------------------------------------------
 
 
-def test_the_e2b_acp_dockerfile_pins_what_the_notes_measured() -> None:
-    """The template's ARGs must equal the versions the notes record as measured."""
+def test_the_e2b_acp_dockerfile_pins_current_manifests() -> None:
+    """Template ARGs match the current manifests, not historical measurements."""
     import re
 
     text = DOCKERFILE.read_text(encoding="utf-8")
-    notes = NOTES.read_text(encoding="utf-8")
-
     def arg(name: str) -> str:
         match = re.search(rf"^ARG\s+{name}=(\S+)\s*$", text, re.MULTILINE)
         assert match is not None, f"missing ARG {name}"
@@ -1366,19 +1364,13 @@ def test_the_e2b_acp_dockerfile_pins_what_the_notes_measured() -> None:
         assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[\w.]+)?", value), value
         return value
 
-    def notes_pin(package: str) -> str:
-        found = set(re.findall(rf"{re.escape(package)}@(\d+\.\d+\.\d+(?:-[\w.]+)?)", notes))
-        assert len(found) == 1, f"{package} versions in the notes are inconsistent: {sorted(found)}"
-        return next(iter(found))
-
-    assert arg("DSH_VERSION") == notes_pin("@deepseek-ai/dsh")
-    assert arg("CODEX_ACP_VERSION") == notes_pin("@agentclientprotocol/codex-acp")
+    for name in ("dsh", "codex", "opencode"):
+        for item in load_pack(REPO_ROOT / "harnesses", name).image.packages:
+            assert arg(item.arg) == item.version
     # The M4/M6 claude pair was removed from the product (GLINK-ARCH-6); the
     # template must not carry it any more, and the absence assertion keeps the
     # removal from silently regressing.
     assert "claude" not in text.lower(), "claude 层已随 GLINK-ARCH-6 移除，不得重新出现在模板里"
-    # M5: opencode, pinned to the same version as the docker image.
-    assert arg("OPENCODE_AI_VERSION") == notes_pin("opencode-ai")
     assert '"@deepseek-ai/dsh@${DSH_VERSION}"' in text
     assert '"@agentclientprotocol/codex-acp@${CODEX_ACP_VERSION}"' in text
     assert '"opencode-ai@${OPENCODE_AI_VERSION}"' in text

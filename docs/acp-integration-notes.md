@@ -2060,3 +2060,109 @@ ULegal 对接 B2（dsh+E2B）验收中发现（完整证据在 ULegal 仓 `.loca
   对话链事实被污染（磁盘终态只剩覆盖后的 manifest，正面实证只能以日志为据）。
 * **修复方向**：发布状态根/manifest 前核验本 run 达到 session_ready（或状态根非空），
   未达则拒发空状态；登记议题后另行修复与验收。
+
+## 22. DeepSeek 官方 Search/Fetch 迁移（2026-10-19）
+
+用户确认以官方直接 API 替代 Jina 与辅助模型搜索。dsh 钉版从 `0.1.5-rc.3` 升至
+`0.2.1-rc.2`，其原生 `@deepseek-ai/dsh-web-deepseek-api` 同时提供
+`deepseek-search-api` 与 `deepseek-fetch-api`。依据为
+[官方 API 指南](https://api-docs.deepseek.com/guides/search/)和
+[对应版本的上游实现](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.1-rc.2/packages/web/web-deepseek-api)。
+
+### 配置与消费者
+
+* `harnesses/dsh/harness.toml` 是版本唯一来源，镜像 ARG 与模板参数由生成脚本同步。
+  入口为 `dsh --profile glink-acp`；产品 profile 只组合原生 base 与 ACP app。
+* `web` 显式选择上述两个 provider，禁用旧 Messages 搜索与本地 HTTP fetch，不静默回退。
+  `web-deepseek-api` 指向 `https://api.deepseek.com/v1/tools`，凭据引用为
+  `DEEPSEEK_API_KEY`，`sendOriginalQuestion: false`，两个工具超时均为 60 秒。
+* 上游搜索当前发送 `need_content: false`，只映射标题、URL、摘要和可用日期；引用前仍须
+  `web_fetch` 打开原文。抓取返回网页 Markdown，API 不提供目标状态码或重定向后的最终 URL。
+  provider 的成功状态 `200` 不等于独立观察到了目标站的 HTTP 200。
+* 目标 URL 与查询改发 DeepSeek，不再发 Jina；原生凭据仍由每 run ACP 文件注入并在收尾删除，
+  不写进镜像。主模型和推理档位仍由宿主按原 ACP 契约应用，不随检索 provider 改变。
+* 删除自建 Jina bundle、专属单测、镜像 COPY 和旧 profile 清单；保留 Jina 密钥形状脱敏与
+  §19.6 的历史审计事件兼容，因为旧会话仍是它们的消费者。不改写历史证据或报告。
+
+### 升级与回退边界
+
+独立的 `glink-acp` 名称防止继承旧 `.dsh/profiles/acp` 时重新载入已删除的 bundle。
+旧 profile 与会话字节不删不改，当前选中的新 profile 随 run HOME 交付；宿主公共继承语义不变。
+新版不注册 `{{cwd}}` 提示词变量，因此去掉旧 personaSuffix，目录提示由原生
+`working-directory` 必需上下文提供。Glink 身份、遥测禁用、原生 present 与引用核实约定保留。
+新版 base 不再挂载 skill-badge，产品也不加入 badge bundle。
+
+官方文档当前规定每账号 Search、Fetch 各 5 QPS；shared 部署的用户和子代理共享额度，多个 key
+不会增加额度。上游 provider 不自动重试，限流以工具错误返回。本迁移不预建宿主调度器。
+PDF、Office、JS 页面覆盖不假定与 Jina 等价；Fetch 的不可用内容、站点限制等会失败。
+原 Jina bundle 的本地 IP/DNS 拒绝、5 MB 响应体与 10 万字符截断属于已删除的实现；
+新 provider 的 URL 策略由官方服务执行，工具输出仍受 dsh 原生预算约束，不声明旧上限继续成立。
+
+升级时还发现进度观察者只解出 v4 日志的第一个 zstd 帧。新版独立首帧仅含会话头，后续工具
+帧因此不可见。观察者改为跨帧读取并维持 64 MiB 解压总量上限；回归覆盖有/无帧长度声明、
+跨帧关联与进度、总量恰好到限及超限。它仍是只读观察，不承担执行终态判定。
+
+只在独立候选 E2B 模板验收，不移动现用模板 default、不重启共享服务。切换时使用新模板标识，
+避免旧暂停沙箱因同名模板而继续运行旧内核。旧会话首次由新 dsh 恢复时可能在本轮副本中生成
+新版会话文件；因此回退不能假定旧内核能读取升级后的状态。发布前应保留升级前配置、模板与
+状态备份，并单独决定实际服务切换。不得离线修改真实历史来掩盖续接失败。
+
+### 验证范围
+
+`tests/test_dsh_web_profile.py` 覆盖配置、版本、旧 profile 续接与父状态不变；镜像自检确认
+原生 provider 入口存在。`scripts/check.sh` 继续运行静态检查、类型检查、Python、覆盖率与
+Node 门禁，已退役 bundle 的单测不再构成义务。隔离回归不能证明官方 API 可达或模板已经生效。
+本次云端构建和实测的退出码、模板身份及资源清理以交付报告为准，未实测的覆盖不得声明通过。
+
+已授权的候选模板可用以下入口复验。它先在无凭据沙箱解析原生 profile，再启动临时宿主，经
+HTTP/SSE 验证 Search、Fetch、报告下载、跨沙箱续接、旧报告不变与取消；仅按自己记录的沙箱
+标识清理。输出目录必须为空且在仓库外，不读取本机 `.dsh` 或使用现有服务。
+
+```bash
+.venv/bin/python scripts/spikes/acp_e2b/deepseek_web_smoke.py \
+  --template <候选模板标识> --env-file .env --out /tmp/glink-dsweb-acceptance
+```
+
+入口的合成回归 `tests/test_dsh_web_smoke.py` 只验证隔离配置、错误不回显凭据与清理顺序，
+不冒充真实运行证据。
+
+首阶段验收：独立候选 `glink-acp-dsweb-2zs7sk`，build
+`5249eb74-3adc-4cc5-b251-bfefd2d113a4`，原 `glink-acp-worker` 标签读回未变。
+原生配置解析确认两个 direct provider、旧后端禁用与原问题外发关闭；首轮 Search/Fetch 均成功，
+报告经 HTTP 下载，跨沙箱 `session/resume` 保持同一 sessionId 并恢复未写文件的代号，旧报告
+哈希不变，取消轮终态为 cancelled。三个 run 的 `cleanup.released=true` 且 failures 为空，
+三只执行沙箱与配置探针沙箱均确认不存在。模型为 OpenRouter 的 `openai/gpt-5.6-sol` / xhigh。
+
+首次尝试在发 prompt 前因部署模型未广告而失败，未计为成功验收：任务期间真实 `.env` 被外部
+改为 `deepseek/deepseek-v4.1-flash-1017`，与当时只声明 GPT 的 OpenRouter 路由不符。
+首阶段成功轮使用 0600 临时配置固定开工时的模型，结束后删除该文件；该阶段保留真实 `.env`
+及旧 Jina 注入名单。后续用户另行批准新模型适配与服务切换，结果见下节。
+浏览器 UI、并行子代理、旧真实会话升级及 PDF/Office 覆盖未做 live 验收。
+
+默认门禁 exit 0：Python 1834 通过、1 项外部标准库检查未选，Node 225 通过，覆盖率 92.8%
+高于 92.2% 基线；静态与类型检查通过。自建 Jina 测试退役由当前 profile 与继承回归替代，
+旧版本、旧 profile 和多帧解压的失败均已保留红测证据。两个 live 目录的精确凭据扫描覆盖
+82 个文件、57 条 SQLite 值及 5 个 zstd 文件，未发现三种本轮凭据值或残留注入文件。
+原始日志与范围清单在仓库外交付目录，不把候选模板成功等同当前服务已经生效。
+
+### 新主模型与服务切换
+
+用户继续授权后，OpenRouter 目录显式加入 `deepseek/deepseek-v4.1-flash-1017`，保留 GPT
+回退条目，并显式声明 Chat Completions 协议与 OpenRouter 端点。依据
+[OpenRouter 模型目录](https://openrouter.ai/api/v1/models) 2026-10-19 的返回，该模型上下文
+为 1048576，推理档位为 none/low/high/max，不含 xhigh；部署档位改为 `max`，未做静默降级。
+输出配置沿用 32768，不把供应方更大的输出能力作为本次扩容。
+
+同一候选模板的 DeepSeek/max 真实验收 exit 0：原生 request/context、响应 replay 元数据
+及 request/header 的 model/provider/reasoningEffort 与声明一致；官方搜索抓取、报告下载、
+跨沙箱续接、旧报告不变和取消均通过。四只本次沙箱已确认清理，临时验收配置删除。
+这只证明该路由的请求、响应元数据和有界任务结果，不是对底层权重身份的独立鉴定或通用能力评测。
+隔离门禁更新为 Python 1835 项通过、1 项未选，Node 225 项通过，覆盖率仍为 92.8%。
+
+实际部署配置已移除 `JINA_API_KEY` 及其注入名单项，只保留 OpenRouter 与 DeepSeek 的具名
+注入；E2B 模板选择改为独立的 `glink-acp-dsweb-2zs7sk`，不移动旧模板标签。切换前核对
+目标 PID、工作目录、端口、数据根及无在途 run，备份配置与完整数据根，按精确 PID 优雅停止
+原实例后才启动替代实例。7861 的 E2B/dsh/shared/accounts 服务健康检查、启动模型日志和
+匿名请求的 401 鉴权边界通过；7862 的其他项目未动。配置保持 0600，回退目录为 0700。
+新服务没有绕过账号鉴权提交测试 run；真实模型验证来自同配置的隔离 E2B 服务。
+浏览器、多租户压力、旧真实会话升级及并行子代理仍不在本轮 live 覆盖内。

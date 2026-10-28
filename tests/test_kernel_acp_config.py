@@ -40,7 +40,7 @@ def test_the_default_harness_is_the_dsh_pack() -> None:
     """默认包为 dsh（GLINK-HARNESS-DEFAULT-20261001）；pi 包显式选择后行为不变。"""
     default = config({})
     assert default.harness == "acp" and default.harness_pack == "dsh"
-    assert default.pack.command == ("dsh", "--profile", "acp")
+    assert default.pack.command == ("dsh", "--profile", "glink-acp")
     assert default.pi_bin == "dsh"  # pi_bin 缺省跟随包 entry argv[0]
 
     pi = config({"GLINK_HARNESS": "pi"})
@@ -53,7 +53,7 @@ def test_the_default_harness_is_the_dsh_pack() -> None:
 def test_an_acp_pack_derives_the_family_command_and_options() -> None:
     dsh = config({"GLINK_HARNESS": "dsh"})
     assert dsh.harness == "acp" and dsh.harness_pack == "dsh"
-    assert dsh.pack.command == ("dsh", "--profile", "acp")
+    assert dsh.pack.command == ("dsh", "--profile", "glink-acp")
     assert dsh.session_config == (
         ("model", "test/model", "dsh-model"), ("reasoning_effort", "high", "value"),
     )
@@ -105,7 +105,7 @@ def test_retired_acp_knobs_are_not_read() -> None:
             "GLINK_ACP_PERMISSION_ALLOW": "allow_once",
         }
     )
-    assert selected.pack.command == ("dsh", "--profile", "acp")
+    assert selected.pack.command == ("dsh", "--profile", "glink-acp")
     assert selected.session_config == (
         ("model", "test/model", "dsh-model"), ("reasoning_effort", "high", "value"),
     )

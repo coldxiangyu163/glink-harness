@@ -132,14 +132,8 @@ if [[ ${#node_tests[@]} -eq 0 ]]; then
   echo '[FAIL] 没有发现 tests/web/*.test.mjs 或 tests/extensions/*.test.mjs；不把空测试集当通过。' >&2
   exit 2
 fi
-# dsh 的 out-of-tree bundle 单测（GLINK-DSH-02）：用 --import 注册 dsh seam 替身
-# （WebError/deadline/credentials/launch-environment/schemastery），不打网络。
-node_fetch_tests=(harnesses/dsh/bundles/*/tests/*.test.mjs)
-node_fetch_stubs=harnesses/dsh/bundles/dsh-web-fetch-jina/tests/support/register-stubs.mjs
-if [[ ${#node_fetch_tests[@]} -eq 0 || ! -f "$node_fetch_stubs" ]]; then
-  echo '[FAIL] 没有发现 harnesses/dsh/bundles/*/tests/*.test.mjs 或 dsh seam 替身注册文件；不把空测试集当通过。' >&2
-  exit 2
-fi
+# dsh Search/Fetch 已归原生 provider；交付配置由 Python 的 test_dsh_web_profile
+# 覆盖，不再运行已删除的自建 fetch bundle 或模拟上游实现。
 
 run_check() {
   local name="$1" status
@@ -175,5 +169,4 @@ run_check 'Python（含仓库边界和检查入口回归）' \
 # 升基线流程（重测后提交新值）见 scripts/check-coverage.py 的模块说明。
 run_check '覆盖率 ratchet（不低于基线）' "$python" scripts/check-coverage.py
 run_check 'Node（前端回归 + 扩展单元测试）' "$node" --test "${node_tests[@]}"
-run_check 'Node（dsh fetch bundle 单元测试）' "$node" --import "./$node_fetch_stubs" --test "${node_fetch_tests[@]}"
 printf '\n[PASS] 无模型必需检查完成；不包含浏览器、UI 对齐、真实 pi、Docker/E2B 或多租户验收。\n'

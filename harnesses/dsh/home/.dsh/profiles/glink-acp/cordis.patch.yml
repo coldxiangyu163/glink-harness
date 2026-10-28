@@ -1,0 +1,48 @@
+# Product-owned ACP profile, composed over the pinned native dsh bundles.
+# Its distinct name leaves inherited legacy acp profiles unselected on resume.
+- id: system-prompt
+  config:
+    includeHarnessIdentity: false
+    personaPrefix: >-
+      You are Glink, an AI assistant for research, analysis,
+      and document creation.
+# dsh 0.2.1 supplies the required working directory through native user context;
+# the retired cwd prompt variable must not be interpolated in personaSuffix.
+
+# Glink feedback must not authorize session uploads to the upstream collector.
+- id: session-telemetry-otel
+  disabled: true
+
+# Both operations use the official direct API, not an auxiliary model turn.
+# Select explicitly and disable old backends: missing providers fail closed.
+- id: web
+  config:
+    searchProvider: deepseek-search-api
+    fetchProvider: deepseek-fetch-api
+
+- id: web-deepseek-api
+  config:
+    apiKeyEnv: DEEPSEEK_API_KEY
+    baseURL: https://api.deepseek.com/v1/tools
+    count: 10
+    # Preserve the prior query-only disclosure, not the triggering user prompt.
+    sendOriginalQuestion: false
+
+- id: web-search-deepseek
+  disabled: true
+
+- id: web-fetch-http
+  disabled: true
+
+- id: tool-web
+  config:
+    fetch: true
+    searchTimeoutMs: 60000
+    fetchTimeoutMs: 60000
+
+# Native base ships present without mounting it. Preserve the host's 8-file cap.
+- insert:
+    - id: tool-present
+      name: '@deepseek-ai/dsh-tool-present'
+      config:
+        maxFiles: 8

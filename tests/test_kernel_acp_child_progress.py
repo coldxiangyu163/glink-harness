@@ -86,6 +86,43 @@ def test_available_when_zstandard_installed() -> None:
     assert available() is True
 
 
+@pytest.mark.parametrize("write_content_size", [True, False])
+def test_native_v4_concatenated_frames_preserve_links_and_child_progress(
+    tmp_path: Path, write_content_size: bool,
+) -> None:
+    """0.2.1 的首帧只有头，后续 batch 独立压缩追加，不能只解第一帧。"""
+    compressor = zstandard.ZstdCompressor(write_content_size=write_content_size)
+    main = _write_session(tmp_path / MAIN_ID, [])
+    main.write_bytes(b"".join(compressor.compress((json.dumps(frame) + "\n").encode()) for frame in [
+        {"type": "session", "version": 4, "id": MAIN_ID},
+        _subagent_call(1, CALL_ID), _catalog(2, CHILD_ID),
+    ]))
+    child = _write_session(tmp_path / CHILD_ID, [])
+    child.write_bytes(b"".join(compressor.compress((json.dumps(frame) + "\n").encode()) for frame in [
+        {"type": "session", "version": 4, "id": CHILD_ID, "origin": "subagent"},
+        {"type": "tool/call", "data": {"name": "web_fetch", "arguments": {"url": "https://example.com"}}},
+    ]))
+    facts = AcpChildProgressSource(tmp_path).poll()
+    assert len(facts) == 1
+    assert (facts[0].call_id, facts[0].child_id, facts[0].steps) == (CALL_ID, CHILD_ID, 1)
+    assert facts[0].last_tool_name == "web_fetch"
+    assert facts[0].last_tool_target == "https://example.com"
+
+
+def test_decoded_limit_applies_across_all_native_frames(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    compressor = zstandard.ZstdCompressor()
+    header = (json.dumps({"type": "session", "id": CHILD_ID, "origin": "subagent"}) + "\n").encode()
+    extra = (json.dumps({"type": "tool/call", "data": {"name": "read", "arguments": "x" * 300}}) + "\n").encode()
+    path = _write_session(tmp_path / CHILD_ID, [])
+    path.write_bytes(compressor.compress(header) + compressor.compress(extra))
+    size = len(header) + len(extra)
+    monkeypatch.setattr(progress, "_MAX_DECOMPRESSED_BYTES", size)
+    fact = parse_child_session(path, call_id=CALL_ID, child_id=CHILD_ID)
+    assert fact is not None and fact.steps == 1
+    monkeypatch.setattr(progress, "_MAX_DECOMPRESSED_BYTES", size - 1)
+    assert parse_child_session(path, call_id=CALL_ID, child_id=CHILD_ID) is None
+
+
 # -- 主会话关联解析 ---------------------------------------------------------------
 
 

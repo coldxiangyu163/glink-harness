@@ -21,7 +21,6 @@ def check_fixture(tmp_path: Path, *, python_status: int = 0, node_status: int = 
         ".venv/bin",
         "tests/web",
         "tests/extensions",
-        "harnesses/dsh/bundles/dsh-web-fetch-jina/tests/support",
         "host",
         "tools",
     ):
@@ -29,12 +28,6 @@ def check_fixture(tmp_path: Path, *, python_status: int = 0, node_status: int = 
     shutil.copyfile(SCRIPT, repo / "scripts/check.sh")
     (repo / "tests/web/example.test.mjs").write_text("// discovered but not executed by the stub\n")
     (repo / "tests/extensions/example.test.mjs").write_text(
-        "// discovered but not executed by the stub\n"
-    )
-    (repo / "harnesses/dsh/bundles/dsh-web-fetch-jina/tests/example.test.mjs").write_text(
-        "// discovered but not executed by the stub\n"
-    )
-    (repo / "harnesses/dsh/bundles/dsh-web-fetch-jina/tests/support/register-stubs.mjs").write_text(
         "// discovered but not executed by the stub\n"
     )
     python = repo / ".venv/bin/python"
@@ -164,17 +157,12 @@ def test_checks_use_disposable_environment_and_report_optional_scope(tmp_path: P
     assert "--cov-report=" in pytest_args
     assert "--deselect=tests/test_ui_tokens.py::test_ui_tokens_match_standard_library" in pytest_args
     assert "no:cacheprovider" in pytest_args
-    # 两个 node 收集/执行范围：前端事件模型（tests/web）与 agent 扩展单元测试
-    # （tests/extensions，GLINK-SUB-02 强制前台守卫），再加 dsh bundle 单测
-    # （GLINK-DSH-02，--import 注册 dsh seam 替身）；stub 以追加方式记录两次调用。
+    # 两个 Node 收集范围保留；dsh 原生 Search/Fetch 的配置回归随 Python 执行，
+    # 不再要求已经移除的自建 bundle 测试或其 seam 替身。
     assert (repo / "node-args.txt").read_text().splitlines() == [
         "--test",
         "tests/web/example.test.mjs",
         "tests/extensions/example.test.mjs",
-        "--import",
-        "./harnesses/dsh/bundles/dsh-web-fetch-jina/tests/support/register-stubs.mjs",
-        "--test",
-        "harnesses/dsh/bundles/dsh-web-fetch-jina/tests/example.test.mjs",
     ]
     assert list(temp.iterdir()) == []
 
@@ -233,26 +221,6 @@ def test_missing_node_tests_is_a_failure_not_a_green_empty_run(tmp_path: Path) -
     repo, env, temp = check_fixture(tmp_path)
     (repo / "tests/web/example.test.mjs").unlink()
     (repo / "tests/extensions/example.test.mjs").unlink()
-    result = invoke(repo, env)
-    assert result.returncode == 2
-    assert "空测试集" in result.stderr
-    assert not (repo / "python-env.txt").exists()
-    assert list(temp.iterdir()) == []
-
-
-def test_missing_bundle_tests_is_a_failure_not_a_green_empty_run(tmp_path: Path) -> None:
-    repo, env, temp = check_fixture(tmp_path)
-    (repo / "harnesses/dsh/bundles/dsh-web-fetch-jina/tests/example.test.mjs").unlink()
-    result = invoke(repo, env)
-    assert result.returncode == 2
-    assert "空测试集" in result.stderr
-    assert not (repo / "python-env.txt").exists()
-    assert list(temp.iterdir()) == []
-
-
-def test_missing_bundle_stub_registration_is_a_failure_not_a_green_empty_run(tmp_path: Path) -> None:
-    repo, env, temp = check_fixture(tmp_path)
-    (repo / "harnesses/dsh/bundles/dsh-web-fetch-jina/tests/support/register-stubs.mjs").unlink()
     result = invoke(repo, env)
     assert result.returncode == 2
     assert "空测试集" in result.stderr

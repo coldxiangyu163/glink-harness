@@ -1,8 +1,9 @@
 # dsh 包（deepseek-harness，原生 ACP server）。
 #
-# 版本与入口来自 M2 实测（docs/acp-integration-notes.md §4.1）：0.1.5-rc.3 的 dsh CLI
-# 没有 `acp` 子命令，入口是 `dsh --profile acp`。镜像 ARG `DSH_VERSION` 与 E2B 模板参数
-# 由 scripts/generate-pack-artifacts.py 从下方 [[image.packages]] 生成。
+# 0.2.1-rc.2 原生提供 DeepSeek Search/Fetch API。使用独立 glink-acp profile，
+# 避免旧会话继承的 acp profile 继续引用已删除的 Jina bundle；不改历史会话。
+# 镜像 ARG `DSH_VERSION` 与 E2B 模板参数由 scripts/generate-pack-artifacts.py
+# 从下方 [[image.packages]] 生成。
 #
 # 权限保持 fail-closed；主模型与 effort 经 ACP session_config 应用并核验，值只来自 .env。
 format = "glink-harness/v2"
@@ -10,7 +11,7 @@ name = "dsh"
 family = "acp"
 
 [entry]
-command = ["dsh", "--profile", "acp"]
+command = ["dsh", "--profile", "glink-acp"]
 
 [capabilities]
 # 包层允许续接；运行期仍以 ACP 协商的 sessionCapabilities.resume / loadSession 为准。
@@ -41,5 +42,5 @@ memory_mb = 4096
 [[image.packages]]
 arg = "DSH_VERSION"
 package = "@deepseek-ai/dsh"
-version = "0.1.5-rc.3"
+version = "0.2.1-rc.2"
 role = "agent"

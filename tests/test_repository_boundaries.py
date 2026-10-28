@@ -707,7 +707,7 @@ def test_generator_detects_a_hand_edited_build_argument(tmp_path: Path) -> None:
     assert module.drift(root, module.render_all(root)) == []
     dockerfile = root / "docker/e2b/Dockerfile.acp-e2b"
     dockerfile.write_text(
-        dockerfile.read_text(encoding="utf-8").replace("ARG DSH_VERSION=0.1.5-rc.3", "ARG DSH_VERSION=9.9.9"),
+        re.sub(r"(?m)^ARG DSH_VERSION=.+$", "ARG DSH_VERSION=9.9.9", dockerfile.read_text(encoding="utf-8")),
         encoding="utf-8",
     )
     assert module.drift(root, module.render_all(root)) == ["docker/e2b/Dockerfile.acp-e2b"]

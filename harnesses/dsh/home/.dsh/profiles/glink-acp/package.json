@@ -1,13 +1,12 @@
 {
-  "name": "dsh-profile-acp",
+  "name": "dsh-profile-glink-acp",
   "private": true,
   "dependencies": {},
   "dsh": {
     "profile": {
       "bundles": [
         "@deepseek-ai/dsh-base",
-        "@deepseek-ai/dsh-acp-app",
-        "@glink-harness/dsh-web-fetch-jina"
+        "@deepseek-ai/dsh-acp-app"
       ],
       "patchReload": "startup"
     }

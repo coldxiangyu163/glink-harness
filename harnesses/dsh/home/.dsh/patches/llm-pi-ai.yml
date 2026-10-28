@@ -26,6 +26,9 @@
     providers:
       openrouter:
         apiKeyEnv: OPENROUTER_API_KEY
+        # Explicit transport also covers models newer than the installed catalog.
+        api: openai-completions
+        baseURL: https://openrouter.ai/api/v1
         models:
           - id: openai/gpt-5.6-sol
             name: GPT-5.6 Sol (OpenRouter)
@@ -34,3 +37,15 @@
             reasoningEfforts:
               high: high
               xhigh: xhigh
+          # OpenRouter /api/v1/models, verified 2026-10-19: 1 Mi context and
+          # none/low/high/max efforts. Keep the existing 32K deployment output
+          # budget rather than advertising the provider's larger maximum.
+          - id: deepseek/deepseek-v4.1-flash-1017
+            name: DeepSeek V4.1 Flash 1017 (OpenRouter)
+            contextWindow: 1048576
+            maxTokens: 32768
+            reasoningEfforts:
+              off: none
+              low: low
+              high: high
+              max: max

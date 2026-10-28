@@ -120,9 +120,9 @@ def test_the_repository_packs_declare_the_expected_families_and_commands() -> No
     assert pi.prebaked_pi_packages() == ("pi-web-access", "pi-subagents")
 
     dsh = load_pack(REPO_PACKS, "dsh")
-    assert dsh.family == "acp" and dsh.command == ("dsh", "--profile", "acp")
+    assert dsh.family == "acp" and dsh.command == ("dsh", "--profile", "glink-acp")
     assert [(i.package, i.version, i.role) for i in dsh.image.packages] == [
-        ("@deepseek-ai/dsh", "0.1.5-rc.3", "agent")
+        ("@deepseek-ai/dsh", "0.2.1-rc.2", "agent")
     ]
     assert dsh.image.target == "acp-worker"
     caps = dsh.capabilities

@@ -292,7 +292,9 @@ scripts/run-local-web.sh &                                  # 启动宿主（默
 
 ## 搜索
 
-dsh 族不经 pi-web-access：检索由包内 provider 提供（内置 `web_search` 用 DeepSeek 官方 key、`dsh-web-fetch-jina` bundle 用 Jina key，见 [.env.example](.env.example)），凭据经 ACP 注入通道投递；本节的出口代理只覆盖 pi 族。pi 族的检索能力全部来自 [pi-web-access](https://github.com/nicobailon/pi-web-access) 扩展，声明在 `harnesses/pi/settings.json` 的 `packages` 里（`npm:pi-web-access@0.31.0`，精确 pin）。本机 inproc 面 pi 启动时把它安装到本 run 的运行期配置目录；Docker / E2B 面宿主把该声明改写成镜像内本地包 `/opt/pi-packages/node_modules/pi-web-access`（pi 官方 local package，"Loaded from the resolved path without copying"），run 内不再访问 registry、不再每 run 生成 `npm/`；镜像守卫在包缺失时明确失败（exit 78），不让 `web_search` 静默消失。实测对照与发布/回滚见 [docs/evidence/prebaked-packages.txt](docs/evidence/prebaked-packages.txt)。
+dsh 族不经 pi-web-access：`glink-acp` profile 显式选择钉版 dsh 原生的 `deepseek-search-api` 和 `deepseek-fetch-api`，搜索与网页 Markdown 抓取共用 `DEEPSEEK_API_KEY`，不再需要 Jina 或辅助模型搜索轮次。凭据仍经 ACP 运行时注入，见 [.env.example](.env.example)；官方接口的结果、限流和迁移边界见 [ACP 集成笔记 §22](docs/acp-integration-notes.md#22-deepseek-官方-searchfetch-迁移2026-10-19)。本节的出口代理只覆盖 pi 族。
+
+pi 族的检索能力全部来自 [pi-web-access](https://github.com/nicobailon/pi-web-access) 扩展，声明在 `harnesses/pi/settings.json` 的 `packages` 里（`npm:pi-web-access@0.31.0`，精确 pin）。本机 inproc 面 pi 启动时把它安装到本 run 的运行期配置目录；Docker / E2B 面宿主把该声明改写成镜像内本地包 `/opt/pi-packages/node_modules/pi-web-access`（pi 官方 local package，"Loaded from the resolved path without copying"），run 内不再访问 registry、不再每 run 生成 `npm/`；镜像守卫在包缺失时明确失败（exit 78），不让 `web_search` 静默消失。实测对照与发布/回滚见 [docs/evidence/prebaked-packages.txt](docs/evidence/prebaked-packages.txt)。
 
 真实检索 key 只在宿主凭据出口代理里（[ADR 0008](docs/adr/0008-egress-proxy.md)）：
 

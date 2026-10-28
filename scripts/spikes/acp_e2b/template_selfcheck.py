@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 PROBE = r"""
@@ -33,15 +34,24 @@ echo "codex_acp=$(codex-acp --version 2>&1)"
 echo "opencode=$(opencode --version 2>&1)"
 echo "acp_dir_writable=$(test -w /home/user/acp && echo yes || echo no)"
 echo "workspace_writable=$(test -w /home/user/workspace && echo yes || echo no)"
-echo "self_check=$(acp-self-check 2>&1 | tr '\n' ';')"
-echo "jina_bundle=$(test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@glink-harness/dsh-web-fetch-jina/package.json && echo present || echo missing)"
-echo "jina_bundle_lib=$(test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@glink-harness/dsh-web-fetch-jina/lib/index.js && echo present || echo missing)"
-echo "jina_bundle_patch=$(test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@glink-harness/dsh-web-fetch-jina/cordis.patch.yml && echo present || echo missing)"
+self_check=$(acp-self-check 2>&1)
+echo "self_check_exit=$?"
+echo "self_check=$self_check"
+echo "deepseek_web_api=$(test -f /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-deepseek-api/lib/index.js && echo present || echo missing)"
 mkdir -p /home/user/acp/home && echo "per_run_home_mkdir=ok" || echo "per_run_home_mkdir=fail"
 printf 'credential-probe' > /home/user/acp/home/probe.txt \
   && echo "per_run_home_write=ok" || echo "per_run_home_write=fail"
 echo "probe_read=$(cat /home/user/acp/home/probe.txt)"
 """
+
+
+def expected_versions() -> dict[str, str]:
+    """Read the same pins that generate the images; never maintain another version list."""
+    root = Path(__file__).resolve().parents[3] / "harnesses"
+    return {
+        pack: tomllib.loads((root / pack / "harness.toml").read_text())["image"]["packages"][0]["version"]
+        for pack in ("dsh", "codex", "opencode")
+    }
 
 
 def resolve_api_key(args: argparse.Namespace) -> str:
@@ -73,9 +83,10 @@ def main(argv: list[str] | None = None) -> int:
         "date": time.strftime("%Y-%m-%d %H:%M:%S"),
         "template": args.template,
     }
+    versions = expected_versions()
     sandbox = None
     try:
-        sandbox = Sandbox.create(template=args.template, timeout=args.sandbox_timeout, api_key=api_key)
+        sandbox = Sandbox.create(template=args.template, timeout=args.sandbox_timeout, api_key=api_key, request_timeout=60)
         out["sandbox_id"] = sandbox.sandbox_id
         out["envd_version"] = str(getattr(sandbox, "_envd_version", ""))
         result = sandbox.commands.run(PROBE, timeout=120)
@@ -93,9 +104,11 @@ def main(argv: list[str] | None = None) -> int:
         out.get("exit_code") == 0
         and out.get("killed") is True
         and "per_run_home_write=ok" in out.get("stdout", "")
-        and "dsh=0.1.5-rc.3" in out.get("stdout", "")
-        and "codex_acp=@agentclientprotocol/codex-acp 1.13.1" in out.get("stdout", "")
-        and "opencode=1.18.32" in out.get("stdout", "")
+        and f"dsh={versions['dsh']}" in out.get("stdout", "").splitlines()
+        and f"codex_acp=@agentclientprotocol/codex-acp {versions['codex']}" in out.get("stdout", "").splitlines()
+        and f"opencode={versions['opencode']}" in out.get("stdout", "").splitlines()
+        and "self_check_exit=0" in out.get("stdout", "").splitlines()
+        and "deepseek_web_api=present" in out.get("stdout", "").splitlines()
     )
     print(f"[{'PASS' if ok else 'FAIL'}] 模板自检")
     return 0 if ok else 1

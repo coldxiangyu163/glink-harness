@@ -165,7 +165,7 @@ def test_patch_overlay_reaches_the_launch_argv_on_every_face(
     spec = execution_spec(config, runtime, workspace=tmp_path / "workspace")
     launch, _sandbox = compose_launch("acp", executor, spec, store_root=tmp_path / "runs")
     assert list(launch.argv) == [
-        "dsh", "--profile", "acp",
+        "dsh", "--profile", "glink-acp",
         "--patch", f"{home}/.dsh/patches/llm-pi-ai.yml",
     ]
 

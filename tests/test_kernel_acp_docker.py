@@ -8,9 +8,9 @@ Two obligations are pinned here, both without a Docker daemon:
   identity helpers, and keeps the pi face's resource ceilings and privilege
   drop. The image and the command come from the frozen configuration.
 * **Image pin boundary** — ``docker/Dockerfile.acp-worker`` declares exact
-  versions that must equal every version the integration notes record as
-  measured (the notes are the repository's record of what was actually
-  verified); a floating or missing declaration fails the test, not a warning.
+  versions that must equal the current harness manifests (the version owner).
+  Historical integration evidence is not a current pin; floating, missing or
+  drifted declarations fail the test, not a warning.
 
 A real container run is covered separately by the task's live evidence.
 """
@@ -25,6 +25,7 @@ from types import SimpleNamespace
 import pytest
 
 from glink_harness.config import build_config
+from glink_harness.harnesses import load_pack
 
 from acp_pack import apply_acp_pack
 from glink_harness.events import EventBus
@@ -39,7 +40,6 @@ from glink_harness.store import FAILED, FINISHED, RunStore, RunSpec
 from store_helpers import finish
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-NOTES = REPO_ROOT / "docs" / "acp-integration-notes.md"
 ACP_DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile.acp-worker"
 PI_DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile.worker"
 
@@ -275,35 +275,16 @@ def acp_worker_version(text: str, name: str) -> str:
     return value
 
 
-def notes_package_pin(text: str, package: str) -> str:
-    """Every version the integration notes record for one package.
-
-    The notes are the repository's record of the versions that were actually
-    measured; all mentions must agree so a half-done version bump is caught.
-    """
-    found = set(re.findall(rf"{re.escape(package)}@(\d+\.\d+\.\d+(?:-[\w.]+)?)", text))
-    if not found:
-        raise ValueError(f"集成笔记没有记录 {package} 的实测版本")
-    if len(found) != 1:
-        raise ValueError(f"{package} 的实测版本在集成笔记中不一致：{sorted(found)}")
-    return next(iter(found))
+def assert_manifest_pins(text: str) -> None:
+    """Current manifests own pins; keep old measurements intact in historical notes."""
+    for name in ("dsh", "codex", "opencode"):
+        for item in load_pack(REPO_ROOT / "harnesses", name).image.packages:
+            assert acp_worker_version(text, item.arg) == item.version
 
 
-def test_the_acp_worker_dockerfile_pins_exactly_what_the_notes_measured() -> None:
+def test_the_acp_worker_dockerfile_pins_current_manifests() -> None:
     text = ACP_DOCKERFILE.read_text(encoding="utf-8")
-    notes = NOTES.read_text(encoding="utf-8")
-
-    assert acp_worker_version(text, "DSH_VERSION") == notes_package_pin(
-        notes, "@deepseek-ai/dsh"
-    )
-    assert acp_worker_version(text, "CODEX_ACP_VERSION") == notes_package_pin(
-        notes, "@agentclientprotocol/codex-acp"
-    )
-    # M5 adds opencode; its notes entry is the single measured version the
-    # in-process handshake, the image and the e2b template all agree on.
-    assert acp_worker_version(text, "OPENCODE_AI_VERSION") == notes_package_pin(
-        notes, "opencode-ai"
-    )
+    assert_manifest_pins(text)
     # The M4/M6 claude pair was removed from the product (GLINK-ARCH-6): the
     # image must not carry that closed-source adapter or the CLI it drove. The
     # absence assertion below keeps the removal from silently regressing.
@@ -370,11 +351,14 @@ def test_a_floating_or_missing_acp_version_fails(text: str) -> None:
 
 
 def test_the_package_pin_boundary_detects_drift() -> None:
-    notes = "pin: @deepseek-ai/dsh@0.1.5-rc.3 and @deepseek-ai/dsh@0.1.6"
-    with pytest.raises(ValueError, match="不一致"):
-        notes_package_pin(notes, "@deepseek-ai/dsh")
-    with pytest.raises(ValueError, match="没有记录"):
-        notes_package_pin(notes, "@agentclientprotocol/codex-acp")
+    text = ACP_DOCKERFILE.read_text(encoding="utf-8")
+    assert_manifest_pins(text)
+    drifted = re.sub(r"(?m)^ARG DSH_VERSION=.+$", "ARG DSH_VERSION=9.9.9", text)
+    with pytest.raises(AssertionError):
+        assert_manifest_pins(drifted)
+    missing = re.sub(r"(?m)^ARG DSH_VERSION=.+$", "", text)
+    with pytest.raises(ValueError, match="exact"):
+        assert_manifest_pins(missing)
 
 
 # -- runner wiring ------------------------------------------------------------

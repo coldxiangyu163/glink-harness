@@ -1,12 +1,12 @@
 """ACP 族（dsh）子代理运行中进度源（R3a，docs/architecture.md §3.5「运行中进度（R3a）」）。
 
 格式事实钉自 docs/evidence/acp-subagent-zstd-spike.txt（dsh 0.1.7 实测，私有
-session v4 格式）：
+session v4 格式）；0.2.1-rc.2 仍为 v4，补充其独立首帧 + 追加批次的多 zstd 帧回归：
 
 * 会话文件为 zstd 压缩 JSONL，主/子会话并列于
   ``<状态根>/.dsh/sessions/--<workspace>--/<sessionId>/session.v4.jsonl.zstd``；
-  帧结构 ``{type, seq, time, data}``。文件持续重写（有 session.lock），增量
-  读取不可行，只能**整份重读**，因此单文件有大小上限。
+  帧结构 ``{type, seq, time, data}``。0.2.1 首个 zstd 帧只含会话头，后续批次
+  独立压缩追加；轮询仍**整份重读**，压缩体与跨帧解压总量各有上限。
 * 关联链在主会话内：``tool/call``（``data.callId``/``name``/``arguments``）
   与**相邻**的 ``subagent/catalog``（``data.childId``/``label``/``mode``）给出
   callId↔childId；catalog.data 内无 callId，关联只靠帧相邻位置。catalog 出现在
@@ -114,9 +114,13 @@ def _iter_frames(path: Path, max_file_bytes: int) -> Iterator[dict[str, Any]]:
     except OSError:
         return
     try:
-        text = _zstd.ZstdDecompressor().decompress(
-            raw, max_output_size=_MAX_DECOMPRESSED_BYTES
-        ).decode("utf-8")
+        # Native persistence appends independent Zstandard frames. decompress()
+        # stops at the header frame; stream across all frames with one total cap.
+        with _zstd.ZstdDecompressor().stream_reader(raw, read_across_frames=True) as reader:
+            decoded = reader.read(_MAX_DECOMPRESSED_BYTES + 1)
+        if len(decoded) > _MAX_DECOMPRESSED_BYTES:
+            return
+        text = decoded.decode("utf-8")
     except Exception:  # zstd 错误、Unicode 错误：损坏或伪造文件，按无进度处理
         log.debug("acp 子会话解压失败，本轮跳过: %s", path)
         return
